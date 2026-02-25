@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# ralph — Issue-driven TDD agent
+# Usage: ralph <issue-number>
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+info() { echo -e "${GREEN}ralph:${NC} $1"; }
+warn() { echo -e "${YELLOW}warn:${NC} $1"; }
+
+# --- Args ---
+[[ $# -lt 1 ]] && die "usage: ralph <issue-number>"
+ISSUE="$1"
+
+# --- Preconditions ---
+
+# Must be on main
+BRANCH=$(git branch --show-current)
+[[ "$BRANCH" != "main" ]] && die "must be on main branch (currently on '$BRANCH')"
+
+# Working tree must be clean
+[[ -n "$(git status --porcelain)" ]] && die "working tree is dirty — commit or stash first"
+
+# Sync with remote
+info "fetching origin/main..."
+git fetch origin main --quiet
+LOCAL=$(git rev-parse main)
+REMOTE=$(git rev-parse origin/main)
+[[ "$LOCAL" != "$REMOTE" ]] && die "main is not synced with origin (local: ${LOCAL:0:7}, remote: ${REMOTE:0:7})"
+
+info "main is clean and synced"
+
+# --- Fetch issue ---
+info "fetching issue #${ISSUE}..."
+ISSUE_JSON=$(gh issue view "$ISSUE" --json title,body,number,state 2>/dev/null) \
+  || die "issue #${ISSUE} not found"
+
+ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
+ISSUE_BODY=$(echo "$ISSUE_JSON" | jq -r '.body')
+ISSUE_STATE=$(echo "$ISSUE_JSON" | jq -r '.state')
+
+[[ "$ISSUE_STATE" == "CLOSED" ]] && die "issue #${ISSUE} is already closed"
+
+info "issue: ${ISSUE_TITLE}"
+
+# --- Check blocked-by ---
+BLOCKED_NUMS=$(echo "$ISSUE_BODY" | grep -oE '#[0-9]+' | grep -oE '[0-9]+' | sort -u || true)
+
+for DEP in $BLOCKED_NUMS; do
+  [[ "$DEP" == "$ISSUE" || "$DEP" == "1" ]] && continue
+  DEP_STATE=$(gh issue view "$DEP" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+  if [[ "$DEP_STATE" == "OPEN" ]]; then
+    warn "blocked by #${DEP} (still open) — verify this is resolved before proceeding"
+  fi
+done
+
+# --- Create branch ---
+VS_ID=$(echo "$ISSUE_TITLE" | grep -oE '^vs-[0-9]+[a-z]?' || echo "issue-${ISSUE}")
+SLUG=$(echo "$ISSUE_TITLE" \
+  | sed 's/^vs-[0-9]*[a-z]*:[[:space:]]*//' \
+  | tr '[:upper:]' '[:lower:]' \
+  | tr -cs '[:alnum:]' '-' \
+  | sed 's/^-//;s/-$//' \
+  | cut -c1-50)
+
+BRANCH_NAME="${VS_ID}/${SLUG}"
+info "creating branch: ${BRANCH_NAME}"
+git checkout -b "$BRANCH_NAME"
+
+# --- Fetch PRD ---
+info "fetching parent PRD #1..."
+PRD_BODY=$(gh issue view 1 --json body --jq '.body')
+
+# --- Build prompt ---
+read -r -d '' PROMPT << PROMPT_END || true
+Background PRD (reference only — DO NOT implement, just understand the project):
+${PRD_BODY}
+
+---
+
+IMPLEMENT issue #${ISSUE}:
+${ISSUE_TITLE}
+
+${ISSUE_BODY}
+
+---
+
+Rules:
+- TDD: plan first → failing test (Red) → minimal code to pass (Green) → refactor (Refactor)
+- ATOMIC COMMITS: commit after every meaningful change. Each commit = one logical unit. Never batch unrelated changes. Commit message format: "type(scope): description" (conventional commits)
+- Run cargo clippy + cargo test after each TDD cycle. Do not proceed if checks fail
+- After ALL acceptance criteria are met and all checks pass:
+  1. Push branch to origin
+  2. Create PR via \`gh pr create\` with the structure below
+  3. Print a "## Manual Testing Checklist" to stdout listing concrete steps I should test manually
+  4. Then stop — you are done
+
+PR description MUST follow this exact structure:
+
+\`\`\`
+Closes #${ISSUE}
+
+## Summary
+<1-3 sentence summary of what was implemented>
+
+## User Stories Addressed
+<list the user story numbers from the issue, e.g. "- US-1: Create a worktree with one command">
+
+## Automated Testing
+- Total tests added: <count>
+- Tests passing: <count>
+- Tests failing: <count>
+- \`cargo clippy\`: <pass/fail>
+- \`cargo test\`: <pass/fail>
+
+## Manual Testing Checklist
+<numbered steps the reviewer should follow to verify this works end-to-end, e.g.:
+1. cd into a git repo
+2. Run \`trench create my-feature\`
+3. Verify worktree exists at ~/.worktrees/repo/my-feature
+...>
+
+## Known Issues
+<if any tests fail, any acceptance criteria unmet, any shortcuts taken — be honest and list them here. If none, write "None">
+\`\`\`
+
+IMPORTANT: Be honest in the PR. If tests fail, if you had to skip something, if an acceptance criterion is partially met — say so in Known Issues. Do not hide failures.
+PROMPT_END
+
+# --- Run Claude ---
+info "launching claude on issue #${ISSUE}..."
+echo ""
+
+claude --dangerously-skip-permissions \
+  --model opus \
+  -p "/tdd ${PROMPT}" \
+  --verbose \
+  --output-format stream-json | cclean
+
+info "done with issue #${ISSUE}"
