@@ -100,4 +100,19 @@ mod tests {
         let expected_name = tmp.path().file_name().unwrap().to_str().unwrap();
         assert_eq!(info.name, expected_name);
     }
+
+    #[test]
+    fn discover_repo_fails_for_non_git_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No git init — just a plain directory
+
+        let result = discover_repo(tmp.path());
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, GitError::NotAGitRepo { .. }),
+            "expected NotAGitRepo, got: {err:?}"
+        );
+    }
 }
