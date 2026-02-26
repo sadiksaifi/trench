@@ -161,52 +161,69 @@ impl Default for ResolvedWorktreesConfig {
 /// Non-hook fields merge per-field: first non-None value wins.
 pub fn resolve_config(
     _cli: Option<&CliConfigOverrides>,
-    _project: Option<&ProjectConfig>,
+    project: Option<&ProjectConfig>,
     global: &GlobalConfig,
 ) -> ResolvedConfig {
     let defaults_ui = ResolvedUiConfig::default();
     let defaults_git = ResolvedGitConfig::default();
     let defaults_wt = ResolvedWorktreesConfig::default();
 
+    let p_ui = project.and_then(|p| p.ui.as_ref());
+    let p_git = project.and_then(|p| p.git.as_ref());
+    let p_wt = project.and_then(|p| p.worktrees.as_ref());
+
     let g_ui = global.ui.as_ref();
     let g_git = global.git.as_ref();
     let g_wt = global.worktrees.as_ref();
 
+    // Hooks: project replaces global entirely (FR-2)
+    let p_hooks = project.and_then(|p| p.hooks.as_ref());
+    let hooks = p_hooks.or(global.hooks.as_ref()).cloned();
+
     ResolvedConfig {
         ui: ResolvedUiConfig {
-            theme: g_ui
+            theme: p_ui
                 .and_then(|u| u.theme.clone())
+                .or_else(|| g_ui.and_then(|u| u.theme.clone()))
                 .unwrap_or(defaults_ui.theme),
-            date_format: g_ui
+            date_format: p_ui
                 .and_then(|u| u.date_format.clone())
+                .or_else(|| g_ui.and_then(|u| u.date_format.clone()))
                 .unwrap_or(defaults_ui.date_format),
-            show_ahead_behind: g_ui
+            show_ahead_behind: p_ui
                 .and_then(|u| u.show_ahead_behind)
+                .or_else(|| g_ui.and_then(|u| u.show_ahead_behind))
                 .unwrap_or(defaults_ui.show_ahead_behind),
-            show_dirty_count: g_ui
+            show_dirty_count: p_ui
                 .and_then(|u| u.show_dirty_count)
+                .or_else(|| g_ui.and_then(|u| u.show_dirty_count))
                 .unwrap_or(defaults_ui.show_dirty_count),
         },
         git: ResolvedGitConfig {
-            default_base: g_git
+            default_base: p_git
                 .and_then(|g| g.default_base.clone())
+                .or_else(|| g_git.and_then(|g| g.default_base.clone()))
                 .unwrap_or(defaults_git.default_base),
-            auto_prune: g_git
+            auto_prune: p_git
                 .and_then(|g| g.auto_prune)
+                .or_else(|| g_git.and_then(|g| g.auto_prune))
                 .unwrap_or(defaults_git.auto_prune),
-            fetch_on_open: g_git
+            fetch_on_open: p_git
                 .and_then(|g| g.fetch_on_open)
+                .or_else(|| g_git.and_then(|g| g.fetch_on_open))
                 .unwrap_or(defaults_git.fetch_on_open),
         },
         worktrees: ResolvedWorktreesConfig {
-            root: g_wt
+            root: p_wt
                 .and_then(|w| w.root.clone())
+                .or_else(|| g_wt.and_then(|w| w.root.clone()))
                 .unwrap_or(defaults_wt.root),
-            scan: g_wt
+            scan: p_wt
                 .and_then(|w| w.scan.clone())
+                .or_else(|| g_wt.and_then(|w| w.scan.clone()))
                 .unwrap_or(defaults_wt.scan),
         },
-        hooks: global.hooks.clone(),
+        hooks,
     }
 }
 
@@ -646,6 +663,61 @@ run = ["bun install"]
         assert_eq!(resolved.ui.date_format, "%Y-%m-%d %H:%M");
         assert!(resolved.ui.show_dirty_count);
         assert!(resolved.git.fetch_on_open);
+    }
+
+    #[test]
+    fn resolve_project_overrides_global_non_hook_fields() {
+        let global = GlobalConfig {
+            ui: Some(UiConfig {
+                theme: Some("dark".to_string()),
+                date_format: Some("%d/%m/%Y".to_string()),
+                show_ahead_behind: None,
+                show_dirty_count: None,
+            }),
+            git: Some(GitConfig {
+                default_base: Some("develop".to_string()),
+                auto_prune: Some(true),
+                fetch_on_open: None,
+            }),
+            worktrees: None,
+            hooks: None,
+        };
+
+        let project = ProjectConfig {
+            ui: Some(UiConfig {
+                theme: Some("nord".to_string()),
+                date_format: None, // not overridden — should fall through to global
+                show_ahead_behind: Some(false),
+                show_dirty_count: None,
+            }),
+            git: Some(GitConfig {
+                default_base: Some("staging".to_string()),
+                auto_prune: None, // fall through to global
+                fetch_on_open: Some(false),
+            }),
+            worktrees: Some(WorktreesConfig {
+                root: Some("proj/{{ repo }}/{{ branch }}".to_string()),
+                scan: None,
+            }),
+            hooks: None,
+        };
+
+        let resolved = resolve_config(None, Some(&project), &global);
+
+        // Project wins over global
+        assert_eq!(resolved.ui.theme, "nord");
+        assert!(!resolved.ui.show_ahead_behind);
+        assert_eq!(resolved.git.default_base, "staging");
+        assert!(!resolved.git.fetch_on_open);
+        assert_eq!(resolved.worktrees.root, "proj/{{ repo }}/{{ branch }}");
+
+        // Global fills in where project is None
+        assert_eq!(resolved.ui.date_format, "%d/%m/%Y");
+        assert!(resolved.git.auto_prune);
+
+        // Default fills in where both are None
+        assert!(resolved.ui.show_dirty_count);
+        assert!(resolved.worktrees.scan.is_empty());
     }
 
     #[test]
