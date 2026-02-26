@@ -67,6 +67,48 @@ pub fn discover_repo(path: &Path) -> Result<RepoInfo, GitError> {
     })
 }
 
+/// Create a new git worktree at `target_path` for the given branch.
+///
+/// Opens the repository at `repo_path`, creates the branch from `base` if it
+/// doesn't exist locally, and adds a worktree at `target_path`.
+///
+/// Returns `GitError::BranchAlreadyExists` if the branch already exists.
+pub fn create_worktree(
+    repo_path: &Path,
+    branch: &str,
+    base: &str,
+    target_path: &Path,
+) -> Result<(), GitError> {
+    let repo = git2::Repository::open(repo_path).map_err(|_| GitError::NotAGitRepo {
+        path: repo_path.to_path_buf(),
+    })?;
+
+    // Check if branch already exists locally
+    if repo
+        .find_branch(branch, git2::BranchType::Local)
+        .is_ok()
+    {
+        return Err(GitError::BranchAlreadyExists {
+            branch: branch.to_string(),
+        });
+    }
+
+    // Resolve base branch to a commit
+    let base_ref = repo.find_branch(base, git2::BranchType::Local)?;
+    let base_commit = base_ref.get().peel_to_commit()?;
+
+    // Create the new branch from base
+    repo.branch(branch, &base_commit, false)?;
+
+    // Create the worktree
+    let branch_ref = repo.find_branch(branch, git2::BranchType::Local)?;
+    let mut opts = git2::WorktreeAddOptions::new();
+    opts.reference(Some(branch_ref.get()));
+    repo.worktree(branch, target_path, Some(&opts))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +209,28 @@ mod tests {
             matches!(err, GitError::NotAGitRepo { .. }),
             "expected NotAGitRepo, got: {err:?}"
         );
+    }
+
+    /// Helper: get the default branch name from HEAD.
+    fn head_branch(repo: &git2::Repository) -> String {
+        repo.head()
+            .unwrap()
+            .shorthand()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn create_worktree_creates_directory_on_disk() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = head_branch(&repo);
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("my-feature");
+
+        create_worktree(repo_dir.path(), "my-feature", &base, &target)
+            .expect("should create worktree");
+
+        assert!(target.exists(), "worktree directory should exist on disk");
     }
 }
