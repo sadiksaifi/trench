@@ -187,4 +187,40 @@ scan = ["/opt/trees"]
         let config = load_global_config_from(&path).unwrap();
         assert_eq!(config, GlobalConfig::default());
     }
+
+    #[test]
+    fn invalid_toml_returns_error_with_path() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "this is not [valid toml");
+
+        let err = load_global_config_from(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid TOML"),
+            "expected 'invalid TOML' in error: {msg}"
+        );
+        assert!(
+            msg.contains("config.toml"),
+            "expected file path in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wrong_type_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            r#"
+[ui]
+show_ahead_behind = "yes"
+"#,
+        );
+
+        let err = load_global_config_from(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid TOML"),
+            "expected 'invalid TOML' in error: {msg}"
+        );
+    }
 }
