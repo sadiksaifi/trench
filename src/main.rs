@@ -1,3 +1,12 @@
+mod cli;
+mod config;
+mod git;
+mod hooks;
+mod output;
+mod paths;
+mod state;
+mod tui;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
