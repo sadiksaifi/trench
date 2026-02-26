@@ -862,6 +862,108 @@ run = ["bun install"]
     }
 
     #[test]
+    fn integration_temp_repo_with_trench_toml_full_chain() {
+        // Set up a temp git repo with .trench.toml
+        let repo_dir = TempDir::new().unwrap();
+        let repo = git2::Repository::init(repo_dir.path()).unwrap();
+        {
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let tree_id = repo.index().unwrap().write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+
+        // Write .trench.toml at repo root
+        std::fs::write(
+            repo_dir.path().join(".trench.toml"),
+            r#"
+[git]
+default_base = "develop"
+
+[worktrees]
+root = "project/{{ repo }}/{{ branch | sanitize }}"
+
+[hooks.post_create]
+copy = [".env"]
+run = ["bun install"]
+"#,
+        )
+        .unwrap();
+
+        // Write a "global" config file
+        let global_dir = TempDir::new().unwrap();
+        let global_path = global_dir.path().join("config.toml");
+        std::fs::write(
+            &global_path,
+            r#"
+[ui]
+theme = "solarized"
+show_ahead_behind = false
+
+[git]
+default_base = "main"
+auto_prune = true
+
+[hooks.post_create]
+run = ["npm install"]
+
+[hooks.pre_remove]
+shell = "echo global-cleanup"
+"#,
+        )
+        .unwrap();
+
+        // Load both configs
+        let project = load_project_config(repo_dir.path())
+            .expect("should load project config")
+            .expect("project config should exist");
+
+        let global = load_global_config_from(&global_path)
+            .expect("should load global config");
+
+        // Discover repo to verify git wiring
+        let repo_info = crate::git::discover_repo(repo_dir.path())
+            .expect("should discover repo");
+        assert_eq!(repo_info.path, repo_dir.path().canonicalize().unwrap());
+
+        // Resolve the full chain
+        let resolved = resolve_config(None, Some(&project), &global);
+
+        // Project git.default_base overrides global
+        assert_eq!(resolved.git.default_base, "develop");
+
+        // Global auto_prune fills in (project didn't set it)
+        assert!(resolved.git.auto_prune);
+
+        // Global UI fills in (project has no UI section)
+        assert_eq!(resolved.ui.theme, "solarized");
+        assert!(!resolved.ui.show_ahead_behind);
+
+        // Defaults fill in for unset fields
+        assert!(resolved.ui.show_dirty_count);
+        assert!(resolved.git.fetch_on_open);
+
+        // Project worktrees override global
+        assert_eq!(
+            resolved.worktrees.root,
+            "project/{{ repo }}/{{ branch | sanitize }}"
+        );
+
+        // Project hooks REPLACE global hooks entirely (FR-2)
+        let hooks = resolved.hooks.expect("hooks should be present");
+        let post_create = hooks.post_create.expect("post_create should exist");
+        assert_eq!(post_create.run, Some(vec!["bun install".to_string()]));
+        assert_eq!(post_create.copy, Some(vec![".env".to_string()]));
+
+        // Global pre_remove NOT present — project hooks replace entirely
+        assert!(
+            hooks.pre_remove.is_none(),
+            "global pre_remove should not bleed through"
+        );
+    }
+
+    #[test]
     fn global_config_with_hooks_deserializes() {
         let dir = TempDir::new().unwrap();
         let path = write_config(
