@@ -1,3 +1,54 @@
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+
+const APP_NAME: &str = "trench";
+const DEFAULT_WORKTREE_DIR: &str = ".worktrees";
+
+/// Ensure a directory exists, creating it (and parents) if needed.
+fn ensure_dir(path: &PathBuf) -> Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("failed to create directory: {}", path.display()))?;
+    Ok(())
+}
+
+/// Return the trench config directory (`~/.config/trench/`), creating it if needed.
+pub fn config_dir() -> Result<PathBuf> {
+    let path = dirs::config_dir()
+        .context("could not determine config directory")?
+        .join(APP_NAME);
+    ensure_dir(&path)?;
+    Ok(path)
+}
+
+/// Return the trench data directory (`~/.local/share/trench/`), creating it if needed.
+pub fn data_dir() -> Result<PathBuf> {
+    let path = dirs::data_dir()
+        .context("could not determine data directory")?
+        .join(APP_NAME);
+    ensure_dir(&path)?;
+    Ok(path)
+}
+
+/// Return the trench state directory (`~/.local/state/trench/`), creating it if needed.
+pub fn state_dir() -> Result<PathBuf> {
+    let base = dirs::home_dir()
+        .context("could not determine home directory")?
+        .join(".local")
+        .join("state");
+    let path = base.join(APP_NAME);
+    ensure_dir(&path)?;
+    Ok(path)
+}
+
+/// Return the worktree root directory (`~/.worktrees/`), creating it if needed.
+pub fn worktree_root() -> Result<PathBuf> {
+    let path = dirs::home_dir()
+        .context("could not determine home directory")?
+        .join(DEFAULT_WORKTREE_DIR);
+    ensure_dir(&path)?;
+    Ok(path)
+}
+
 /// Sanitize a branch name for use as a filesystem directory name.
 ///
 /// Rules (FR-15, FR-16):
@@ -36,6 +87,39 @@ pub fn sanitize_branch(branch: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_dir_ends_with_trench() {
+        let path = config_dir().unwrap();
+        assert!(path.ends_with("trench"));
+        assert!(path.starts_with(dirs::config_dir().unwrap()));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn data_dir_ends_with_trench() {
+        let path = data_dir().unwrap();
+        assert!(path.ends_with("trench"));
+        assert!(path.starts_with(dirs::data_dir().unwrap()));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn state_dir_ends_with_trench() {
+        let path = state_dir().unwrap();
+        assert!(path.ends_with("trench"));
+        let home = dirs::home_dir().unwrap();
+        assert!(path.starts_with(home.join(".local").join("state")));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn worktree_root_is_dot_worktrees() {
+        let path = worktree_root().unwrap();
+        assert!(path.ends_with(".worktrees"));
+        assert!(path.starts_with(dirs::home_dir().unwrap()));
+        assert!(path.exists());
+    }
 
     #[test]
     fn sanitize_slash_to_dash() {
