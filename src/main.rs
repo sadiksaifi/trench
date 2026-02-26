@@ -1,8 +1,11 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(name = "trench", version, about = "A fast, ergonomic, headless-first Git worktree manager")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Output as JSON
     #[arg(long, global = true)]
     json: bool,
@@ -26,6 +29,28 @@ struct Cli {
     /// Preview without executing
     #[arg(long, global = true)]
     dry_run: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Create a new worktree
+    Create,
+    /// Remove a worktree
+    Remove,
+    /// Switch to a worktree
+    Switch,
+    /// Open a worktree in $EDITOR
+    Open,
+    /// List all worktrees
+    List,
+    /// Show worktree status
+    Status,
+    /// Sync worktree with base branch
+    Sync,
+    /// View event log
+    Log,
+    /// Initialize .trench.toml in current directory
+    Init,
 }
 
 fn main() {
@@ -84,5 +109,48 @@ mod tests {
         assert!(!cli.quiet);
         assert!(!cli.verbose);
         assert!(!cli.dry_run);
+    }
+
+    #[test]
+    fn all_subcommands_are_accepted() {
+        let subcommands = [
+            "create", "remove", "switch", "open", "list", "status", "sync", "log", "init",
+        ];
+        for sub in subcommands {
+            let result = Cli::try_parse_from(["trench", sub]);
+            assert!(
+                result.is_ok(),
+                "subcommand '{}' should be accepted, got: {:?}",
+                sub,
+                result.unwrap_err()
+            );
+        }
+    }
+
+    #[test]
+    fn no_subcommand_is_valid() {
+        // No subcommand = TUI mode, so it should parse successfully
+        let cli = Cli::try_parse_from(["trench"]).expect("no subcommand should be valid");
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn help_flag_shows_usage() {
+        let result = Cli::try_parse_from(["trench", "--help"]);
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let output = err.to_string();
+        // Help should mention key subcommands
+        assert!(output.contains("create"), "help should mention 'create'");
+        assert!(output.contains("list"), "help should mention 'list'");
+        assert!(output.contains("sync"), "help should mention 'sync'");
+    }
+
+    #[test]
+    fn global_flags_work_with_subcommands() {
+        let cli = Cli::try_parse_from(["trench", "--json", "list"])
+            .expect("global flags should work with subcommands");
+        assert!(cli.json);
+        assert!(cli.command.is_some());
     }
 }
