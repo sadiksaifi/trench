@@ -48,15 +48,15 @@ pub fn load_global_config_from(path: &Path) -> Result<GlobalConfig> {
     Ok(config)
 }
 
-/// Load global config from the XDG config directory.
-///
-/// Reads `~/.config/trench/config.toml` (or platform equivalent).
-/// Returns defaults if the file does not exist.
 /// Return the path to the global config file (`~/.config/trench/config.toml`).
 pub fn global_config_path() -> Result<PathBuf> {
     Ok(paths::config_dir()?.join("config.toml"))
 }
 
+/// Load global config from the XDG config directory.
+///
+/// Reads `~/.config/trench/config.toml` (or platform equivalent).
+/// Returns defaults if the file does not exist.
 pub fn load_global_config() -> Result<GlobalConfig> {
     let path = global_config_path()?;
     load_global_config_from(&path)
