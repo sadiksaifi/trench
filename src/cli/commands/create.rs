@@ -126,4 +126,35 @@ mod tests {
             .unwrap();
         assert_eq!(event_count, 1, "exactly one 'created' event should exist");
     }
+
+    #[test]
+    fn create_errors_when_branch_already_exists() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Pre-create a branch so it already exists
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("existing-branch", &head_commit, false).unwrap();
+
+        let result = execute(
+            "existing-branch",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        );
+
+        let err = result.expect_err("should fail when branch exists");
+        let git_err = err
+            .downcast_ref::<git::GitError>()
+            .expect("error should be GitError");
+        assert!(
+            matches!(git_err, git::GitError::BranchAlreadyExists { ref branch } if branch == "existing-branch"),
+            "expected BranchAlreadyExists, got: {git_err:?}"
+        );
+    }
 }
