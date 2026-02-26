@@ -404,6 +404,72 @@ mod tests {
     }
 
     #[test]
+    fn open_recovers_when_db_version_ahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("trench.db");
+
+        // Create a valid DB, then artificially bump user_version far ahead
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", 99).unwrap();
+        }
+
+        let result = Database::open(&db_path);
+        assert!(
+            result.is_ok(),
+            "open should recover from DatabaseTooFarAhead, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn open_recovered_db_is_functional() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("trench.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", 99).unwrap();
+        }
+
+        let db = Database::open(&db_path).unwrap();
+        let repo = db.insert_repo("test", "/test", Some("main"));
+        assert!(repo.is_ok(), "recovered DB should accept inserts");
+
+        let fetched = db.get_repo_by_path("/test").unwrap();
+        assert!(fetched.is_some(), "recovered DB should return inserted data");
+    }
+
+    #[test]
+    fn open_creates_backup_when_db_ahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("trench.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", 99).unwrap();
+        }
+
+        Database::open(&db_path).unwrap();
+
+        // A backup file should exist
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with("trench.db.backup-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "exactly one backup file should be created, found: {entries:?}"
+        );
+    }
+
+    #[test]
     fn get_repo_by_path_returns_existing_repo() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("my-project", "/home/user/my-project", Some("main")).unwrap();
