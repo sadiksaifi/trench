@@ -307,6 +307,23 @@ mod tests {
     }
 
     #[test]
+    fn event_rejects_mismatched_repo_worktree() {
+        let db = Database::open_in_memory().unwrap();
+        let repo_a = db.insert_repo("repo-a", "/a", None).unwrap();
+        let repo_b = db.insert_repo("repo-b", "/b", None).unwrap();
+        let wt_b = db
+            .insert_worktree(repo_b.id, "wt", "branch", "/b/wt", None)
+            .unwrap();
+
+        // worktree belongs to repo_b, but event says repo_a — should fail
+        let result = db.insert_event(repo_a.id, Some(wt_b.id), "sync", None);
+        assert!(
+            result.is_err(),
+            "should reject event with mismatched repo_id and worktree_id"
+        );
+    }
+
+    #[test]
     fn foreign_key_prevents_orphan_worktree() {
         let db = Database::open_in_memory().unwrap();
         let result = db.insert_worktree(9999, "wt", "b", "/wt", None);

@@ -31,6 +31,14 @@ CREATE TABLE events (
     created_at   INTEGER NOT NULL
 );
 
+CREATE TRIGGER events_check_worktree_repo_consistency
+BEFORE INSERT ON events
+WHEN NEW.worktree_id IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'events.repo_id does not match worktree.repo_id')
+    WHERE NEW.repo_id != (SELECT repo_id FROM worktrees WHERE id = NEW.worktree_id);
+END;
+
 CREATE TABLE logs (
     id          INTEGER PRIMARY KEY,
     event_id    INTEGER NOT NULL REFERENCES events(id),
