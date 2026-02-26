@@ -233,4 +233,36 @@ mod tests {
 
         assert!(target.exists(), "worktree directory should exist on disk");
     }
+
+    #[test]
+    fn create_worktree_creates_branch_from_base() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = head_branch(&repo);
+        let base_oid = repo
+            .find_branch(&base, git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("new-branch");
+
+        create_worktree(repo_dir.path(), "new-branch", &base, &target)
+            .expect("should create worktree");
+
+        // The new branch should exist in the repo and point to the same commit as base
+        let new_branch = repo
+            .find_branch("new-branch", git2::BranchType::Local)
+            .expect("branch should exist");
+        let new_oid = new_branch.get().peel_to_commit().unwrap().id();
+        assert_eq!(new_oid, base_oid, "new branch should point to base commit");
+
+        // The worktree should have a .git file (worktrees use a .git file, not directory)
+        assert!(
+            target.join(".git").exists(),
+            "worktree should have .git entry"
+        );
+    }
 }
