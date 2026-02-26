@@ -54,6 +54,7 @@ impl OutputConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn no_color_flag_disables_color() {
@@ -67,6 +68,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn no_color_env_var_disables_color() {
         // NO_COLOR convention: any value (even empty) disables color
         std::env::set_var("NO_COLOR", "1");
@@ -81,6 +83,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn defaults_enable_color_when_tty() {
         std::env::remove_var("NO_COLOR");
         let config = OutputConfig::from_env(false, false, false, /* is_tty */ true);
@@ -88,6 +91,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn non_tty_auto_disables_color() {
         std::env::remove_var("NO_COLOR");
         let config = OutputConfig::from_env(false, false, false, /* is_tty */ false);

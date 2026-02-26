@@ -47,4 +47,5 @@ dirs = "6"
 notify = "7"
 
 [dev-dependencies]
+serial_test = "3"
 tempfile = "3.26.0"
