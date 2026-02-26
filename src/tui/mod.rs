@@ -24,7 +24,12 @@ pub fn run() -> Result<()> {
     })();
 
     ratatui::restore();
+    restore_panic_hook();
     result
+}
+
+fn restore_panic_hook() {
+    let _ = std::panic::take_hook();
 }
 
 fn install_panic_hook() {
@@ -67,6 +72,7 @@ impl App {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use serial_test::serial;
 
     #[test]
     fn app_starts_in_running_state() {
@@ -95,6 +101,33 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.is_running(), "non-quit keys should not stop the app");
+    }
+
+    #[test]
+    #[serial]
+    fn restore_panic_hook_removes_tui_hook() {
+        use std::panic::{self, catch_unwind};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        install_panic_hook();
+        restore_panic_hook();
+
+        let marker_ran = Arc::new(AtomicBool::new(false));
+        let marker = marker_ran.clone();
+        panic::set_hook(Box::new(move |_| {
+            marker.store(true, Ordering::SeqCst);
+        }));
+
+        let _ = catch_unwind(|| panic!("test panic"));
+
+        // Restore the default hook so we don't affect other tests
+        let _ = panic::take_hook();
+
+        assert!(
+            marker_ran.load(Ordering::SeqCst),
+            "marker hook should have run, proving TUI hook was removed"
+        );
     }
 
     #[test]
