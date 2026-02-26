@@ -86,6 +86,17 @@ pub fn load_project_config_from(path: &Path) -> Result<Option<ProjectConfig>> {
     Ok(Some(config))
 }
 
+const PROJECT_CONFIG_FILENAME: &str = ".trench.toml";
+
+/// Load project config from the repo root directory.
+///
+/// Looks for `.trench.toml` at the given repo root path.
+/// Returns `Ok(None)` if the file does not exist.
+pub fn load_project_config(repo_root: &Path) -> Result<Option<ProjectConfig>> {
+    let path = repo_root.join(PROJECT_CONFIG_FILENAME);
+    load_project_config_from(&path)
+}
+
 /// Load global config from a specific file path.
 ///
 /// Returns `GlobalConfig::default()` if the file does not exist.
@@ -410,6 +421,45 @@ run = ["bun install"]
 
         let result = load_project_config_from(&path).expect("should not error");
         assert!(result.is_none(), "missing file should return None");
+    }
+
+    #[test]
+    fn load_project_config_finds_trench_toml_at_repo_root() {
+        let dir = TempDir::new().unwrap();
+        // Init a git repo
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        {
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let tree_id = repo.index().unwrap().write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+
+        // Write .trench.toml at repo root
+        std::fs::write(
+            dir.path().join(".trench.toml"),
+            "[git]\ndefault_base = \"develop\"\n",
+        )
+        .unwrap();
+
+        let config = load_project_config(dir.path())
+            .expect("should not error")
+            .expect("should find .trench.toml");
+
+        assert_eq!(
+            config.git.unwrap().default_base.as_deref(),
+            Some("develop")
+        );
+    }
+
+    #[test]
+    fn load_project_config_returns_none_when_no_trench_toml() {
+        let dir = TempDir::new().unwrap();
+        let _repo = git2::Repository::init(dir.path()).unwrap();
+
+        let result = load_project_config(dir.path()).expect("should not error");
+        assert!(result.is_none());
     }
 
     #[test]
