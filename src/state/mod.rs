@@ -41,6 +41,7 @@ pub struct WorktreeUpdate {
 }
 
 /// Core database handle wrapping a SQLite connection with migrations applied.
+#[derive(Debug)]
 pub struct Database {
     conn: Connection,
 }
@@ -50,6 +51,11 @@ impl Database {
     ///
     /// Applies pragmas (WAL, FK, synchronous NORMAL) and runs all pending migrations.
     pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create parent directories for {}", path.display())
+            })?;
+        }
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
         Self::init(conn)
@@ -265,6 +271,21 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(stored_payload.as_deref().unwrap()).unwrap();
         assert_eq!(parsed["strategy"], "rebase");
+    }
+
+    #[test]
+    fn open_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep_path = dir.path().join("a").join("b").join("c").join("trench.db");
+        assert!(!deep_path.parent().unwrap().exists());
+
+        let db = Database::open(&deep_path);
+        assert!(db.is_ok(), "open should create parent dirs, got: {db:?}");
+
+        // Verify it actually works
+        let db = db.unwrap();
+        db.insert_repo("test", "/test", None)
+            .expect("should be able to use db");
     }
 
     #[test]
