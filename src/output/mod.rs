@@ -46,4 +46,18 @@ mod tests {
         std::env::remove_var("NO_COLOR");
         assert!(!config.should_color());
     }
+
+    #[test]
+    fn defaults_enable_color_when_tty() {
+        std::env::remove_var("NO_COLOR");
+        let config = OutputConfig::from_env(false, false, false, /* is_tty */ true);
+        assert!(config.should_color());
+    }
+
+    #[test]
+    fn non_tty_auto_disables_color() {
+        std::env::remove_var("NO_COLOR");
+        let config = OutputConfig::from_env(false, false, false, /* is_tty */ false);
+        assert!(!config.should_color());
+    }
 }
