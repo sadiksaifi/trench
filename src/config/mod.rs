@@ -38,11 +38,18 @@ pub struct WorktreesConfig {
 /// Returns `GlobalConfig::default()` if the file does not exist.
 /// Returns an error if the file exists but contains invalid TOML.
 pub fn load_global_config_from(path: &Path) -> Result<GlobalConfig> {
-    if !path.exists() {
-        return Ok(GlobalConfig::default());
-    }
-    let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read config file: {}", path.display()))?;
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(GlobalConfig::default());
+        }
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e)
+                    .context(format!("failed to read config file: {}", path.display())),
+            );
+        }
+    };
     let config: GlobalConfig = toml::from_str(&contents)
         .with_context(|| format!("invalid TOML in config file: {}", path.display()))?;
     Ok(config)
@@ -229,6 +236,32 @@ show_ahead_behind = "yes"
         assert!(
             msg.contains("invalid TOML"),
             "expected 'invalid TOML' in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn non_notfound_io_error_propagates() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let restricted = dir.path().join("restricted");
+        std::fs::create_dir(&restricted).unwrap();
+        let path = restricted.join("config.toml");
+        std::fs::write(&path, "[ui]\ntheme = \"dark\"\n").unwrap();
+
+        // Remove all permissions from parent → metadata/read on child fails with PermissionDenied.
+        std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = load_global_config_from(&path);
+
+        // Restore permissions so TempDir cleanup succeeds.
+        std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to read config file"),
+            "expected 'failed to read config file' in error: {msg}"
         );
     }
 
