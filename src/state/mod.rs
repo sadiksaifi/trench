@@ -1,6 +1,7 @@
 pub mod queries;
 
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -67,7 +68,11 @@ impl Database {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
-        Self::init(conn)
+        match Self::init(conn) {
+            Ok(db) => Ok(db),
+            Err(e) if Self::is_db_too_far_ahead(&e) => Self::backup_and_recreate(path),
+            Err(e) => Err(e),
+        }
     }
 
     /// Open an in-memory database (for testing).
@@ -93,6 +98,44 @@ impl Database {
 
     fn migrations() -> Migrations<'static> {
         Migrations::new(vec![M::up(include_str!("sql/001_initial_schema.sql"))])
+    }
+
+    fn is_db_too_far_ahead(err: &anyhow::Error) -> bool {
+        use rusqlite_migration::MigrationDefinitionError;
+        for cause in err.chain() {
+            if let Some(rusqlite_migration::Error::MigrationDefinition(
+                MigrationDefinitionError::DatabaseTooFarAhead,
+            )) = cause.downcast_ref::<rusqlite_migration::Error>()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn backup_and_recreate(path: &Path) -> Result<Self> {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_secs();
+        let backup = path.with_file_name(format!(
+            "{}.backup-{ts}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        std::fs::rename(path, &backup).with_context(|| {
+            format!(
+                "failed to back up database from {} to {}",
+                path.display(),
+                backup.display()
+            )
+        })?;
+        eprintln!(
+            "warning: database was ahead of migrations; backed up to {}",
+            backup.display()
+        );
+        let conn = Connection::open(path)
+            .with_context(|| format!("failed to open fresh database at {}", path.display()))?;
+        Self::init(conn)
     }
 }
 
