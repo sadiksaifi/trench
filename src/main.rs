@@ -8,6 +8,9 @@ mod state;
 mod tui;
 
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
+
+use output::OutputConfig;
 
 #[derive(Parser, Debug)]
 #[command(name = "trench", version, about = "A fast, ergonomic, headless-first Git worktree manager")]
@@ -62,8 +65,16 @@ enum Commands {
     Init,
 }
 
+impl Cli {
+    fn output_config(&self) -> OutputConfig {
+        let is_tty = std::io::stdout().is_terminal();
+        OutputConfig::from_env(self.no_color, self.quiet, self.verbose, is_tty)
+    }
+}
+
 fn main() {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+    let _output = cli.output_config();
 }
 
 #[cfg(test)]
@@ -161,5 +172,15 @@ mod tests {
             .expect("global flags should work with subcommands");
         assert!(cli.json);
         assert!(cli.command.is_some());
+    }
+
+    #[test]
+    fn cli_produces_output_config() {
+        let cli = Cli::try_parse_from(["trench", "--no-color", "--quiet"])
+            .expect("flags should parse");
+        let config = cli.output_config();
+        assert!(!config.should_color());
+        assert!(config.is_quiet());
+        assert!(!config.is_verbose());
     }
 }
