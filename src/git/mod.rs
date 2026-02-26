@@ -97,13 +97,10 @@ pub fn create_worktree(
     let base_ref = repo.find_branch(base, git2::BranchType::Local)?;
     let base_commit = base_ref.get().peel_to_commit()?;
 
-    // Create the new branch from base
-    repo.branch(branch, &base_commit, false)?;
-
-    // Create the worktree
-    let branch_ref = repo.find_branch(branch, git2::BranchType::Local)?;
+    // Create the new branch from base and add the worktree
+    let new_branch = repo.branch(branch, &base_commit, false)?;
     let mut opts = git2::WorktreeAddOptions::new();
-    opts.reference(Some(branch_ref.get()));
+    opts.reference(Some(new_branch.get()));
     repo.worktree(branch, target_path, Some(&opts))?;
 
     Ok(())
@@ -116,7 +113,6 @@ mod tests {
     /// Helper: create a temp git repo with an initial commit.
     fn init_repo_with_commit(dir: &Path) -> git2::Repository {
         let repo = git2::Repository::init(dir).expect("failed to init repo");
-        // Create an initial commit so HEAD is valid
         {
             let sig = git2::Signature::now("Test", "test@test.com").unwrap();
             let tree_id = repo.index().unwrap().write_tree().unwrap();
@@ -125,6 +121,11 @@ mod tests {
                 .unwrap();
         }
         repo
+    }
+
+    /// Helper: get the default branch name from HEAD.
+    fn head_branch(repo: &git2::Repository) -> String {
+        repo.head().unwrap().shorthand().unwrap().to_string()
     }
 
     #[test]
@@ -209,15 +210,6 @@ mod tests {
             matches!(err, GitError::NotAGitRepo { .. }),
             "expected NotAGitRepo, got: {err:?}"
         );
-    }
-
-    /// Helper: get the default branch name from HEAD.
-    fn head_branch(repo: &git2::Repository) -> String {
-        repo.head()
-            .unwrap()
-            .shorthand()
-            .unwrap()
-            .to_string()
     }
 
     #[test]
