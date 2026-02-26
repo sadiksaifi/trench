@@ -162,13 +162,51 @@ impl Default for ResolvedWorktreesConfig {
 pub fn resolve_config(
     _cli: Option<&CliConfigOverrides>,
     _project: Option<&ProjectConfig>,
-    _global: &GlobalConfig,
+    global: &GlobalConfig,
 ) -> ResolvedConfig {
+    let defaults_ui = ResolvedUiConfig::default();
+    let defaults_git = ResolvedGitConfig::default();
+    let defaults_wt = ResolvedWorktreesConfig::default();
+
+    let g_ui = global.ui.as_ref();
+    let g_git = global.git.as_ref();
+    let g_wt = global.worktrees.as_ref();
+
     ResolvedConfig {
-        ui: ResolvedUiConfig::default(),
-        git: ResolvedGitConfig::default(),
-        worktrees: ResolvedWorktreesConfig::default(),
-        hooks: None,
+        ui: ResolvedUiConfig {
+            theme: g_ui
+                .and_then(|u| u.theme.clone())
+                .unwrap_or(defaults_ui.theme),
+            date_format: g_ui
+                .and_then(|u| u.date_format.clone())
+                .unwrap_or(defaults_ui.date_format),
+            show_ahead_behind: g_ui
+                .and_then(|u| u.show_ahead_behind)
+                .unwrap_or(defaults_ui.show_ahead_behind),
+            show_dirty_count: g_ui
+                .and_then(|u| u.show_dirty_count)
+                .unwrap_or(defaults_ui.show_dirty_count),
+        },
+        git: ResolvedGitConfig {
+            default_base: g_git
+                .and_then(|g| g.default_base.clone())
+                .unwrap_or(defaults_git.default_base),
+            auto_prune: g_git
+                .and_then(|g| g.auto_prune)
+                .unwrap_or(defaults_git.auto_prune),
+            fetch_on_open: g_git
+                .and_then(|g| g.fetch_on_open)
+                .unwrap_or(defaults_git.fetch_on_open),
+        },
+        worktrees: ResolvedWorktreesConfig {
+            root: g_wt
+                .and_then(|w| w.root.clone())
+                .unwrap_or(defaults_wt.root),
+            scan: g_wt
+                .and_then(|w| w.scan.clone())
+                .unwrap_or(defaults_wt.scan),
+        },
+        hooks: global.hooks.clone(),
     }
 }
 
@@ -568,6 +606,46 @@ run = ["bun install"]
         assert!(resolved.worktrees.scan.is_empty());
 
         assert!(resolved.hooks.is_none());
+    }
+
+    #[test]
+    fn resolve_global_overrides_defaults() {
+        let global = GlobalConfig {
+            ui: Some(UiConfig {
+                theme: Some("nord".to_string()),
+                date_format: None,
+                show_ahead_behind: Some(false),
+                show_dirty_count: None,
+            }),
+            git: Some(GitConfig {
+                default_base: Some("develop".to_string()),
+                auto_prune: Some(true),
+                fetch_on_open: None,
+            }),
+            worktrees: Some(WorktreesConfig {
+                root: Some("custom/{{ repo }}/{{ branch }}".to_string()),
+                scan: Some(vec!["/extra".to_string()]),
+            }),
+            hooks: None,
+        };
+
+        let resolved = resolve_config(None, None, &global);
+
+        // Overridden fields
+        assert_eq!(resolved.ui.theme, "nord");
+        assert!(!resolved.ui.show_ahead_behind);
+        assert_eq!(resolved.git.default_base, "develop");
+        assert!(resolved.git.auto_prune);
+        assert_eq!(
+            resolved.worktrees.root,
+            "custom/{{ repo }}/{{ branch }}"
+        );
+        assert_eq!(resolved.worktrees.scan, vec!["/extra".to_string()]);
+
+        // Fallback to defaults
+        assert_eq!(resolved.ui.date_format, "%Y-%m-%d %H:%M");
+        assert!(resolved.ui.show_dirty_count);
+        assert!(resolved.git.fetch_on_open);
     }
 
     #[test]
