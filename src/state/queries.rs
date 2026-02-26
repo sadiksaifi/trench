@@ -191,4 +191,25 @@ impl Database {
 
         Ok(())
     }
+
+    /// Insert an event and return its id.
+    pub fn insert_event(
+        &self,
+        repo_id: i64,
+        worktree_id: Option<i64>,
+        event_type: &str,
+        payload: Option<&serde_json::Value>,
+    ) -> Result<i64> {
+        let created_at = now();
+        let payload_str = payload.map(|v| v.to_string());
+        self.conn
+            .execute(
+                "INSERT INTO events (repo_id, worktree_id, event_type, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![repo_id, worktree_id, event_type, payload_str, created_at],
+            )
+            .context("failed to insert event")?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
 }

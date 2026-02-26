@@ -235,4 +235,42 @@ mod tests {
         assert_eq!(fetched.name, "wt");
         assert!(fetched.managed);
     }
+
+    #[test]
+    fn insert_event_stores_json_payload() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "b", "/wt", None)
+            .unwrap();
+
+        let payload = serde_json::json!({"from": "main", "strategy": "rebase"});
+        let event_id = db
+            .insert_event(repo.id, Some(wt.id), "sync", Some(&payload))
+            .expect("insert_event should succeed");
+
+        assert!(event_id > 0);
+
+        // Verify via raw query
+        let (stored_type, stored_payload): (String, Option<String>) = db
+            .conn
+            .query_row(
+                "SELECT event_type, payload FROM events WHERE id = ?1",
+                rusqlite::params![event_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(stored_type, "sync");
+        let parsed: serde_json::Value =
+            serde_json::from_str(stored_payload.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed["strategy"], "rebase");
+    }
+
+    #[test]
+    fn foreign_key_prevents_orphan_worktree() {
+        let db = Database::open_in_memory().unwrap();
+        let result = db.insert_worktree(9999, "wt", "b", "/wt", None);
+        assert!(result.is_err(), "FK should reject non-existent repo_id");
+    }
 }
