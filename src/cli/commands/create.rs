@@ -49,6 +49,29 @@ pub fn execute(
 mod tests {
     use super::*;
 
+    #[test]
+    fn path_to_utf8_succeeds_for_valid_utf8() {
+        let p = Path::new("/tmp/some/valid/path");
+        let result = path_to_utf8(p);
+        assert_eq!(result.unwrap(), "/tmp/some/valid/path");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_to_utf8_errors_on_non_utf8() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let bad = OsStr::from_bytes(&[0xff, 0xfe]);
+        let p = Path::new(bad);
+        let err = path_to_utf8(p).expect_err("should reject non-UTF8 path");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not valid UTF-8"),
+            "error should mention 'not valid UTF-8', got: {msg}"
+        );
+    }
+
     /// Helper: create a temp git repo with an initial commit.
     fn init_repo_with_commit(dir: &Path) -> git2::Repository {
         let repo = git2::Repository::init(dir).expect("failed to init repo");
