@@ -107,10 +107,13 @@ impl App {
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
             (KeyCode::Char('?'), _) => self.push_screen(Screen::Help),
-            (KeyCode::Esc, _) => self.pop_screen(),
-            (KeyCode::Char('q'), _) => self.running = false,
-            _ => {}
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => self.pop_screen(),
+            _ => self.handle_screen_key(key),
         }
+    }
+
+    fn handle_screen_key(&mut self, _key: KeyEvent) {
+        // Screen-specific key dispatch — will be implemented per-screen
     }
 }
 
@@ -185,10 +188,41 @@ mod tests {
     }
 
     #[test]
-    fn app_exits_on_q_key() {
+    fn esc_on_root_screen_quits_app() {
+        let mut app = App::new();
+        assert_eq!(app.active_screen(), Screen::List);
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            !app.is_running(),
+            "Esc on root screen (List) should quit the app"
+        );
+    }
+
+    #[test]
+    fn q_on_root_screen_quits_app() {
         let mut app = App::new();
         app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(!app.is_running(), "app should stop after pressing 'q'");
+        assert!(!app.is_running(), "q on root screen should quit the app");
+    }
+
+    #[test]
+    fn q_on_non_root_screen_pops_back() {
+        let mut app = App::new();
+        // Push Help
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Help);
+
+        // q should pop back, not quit
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "q on non-root should pop back to List"
+        );
+        assert!(
+            app.is_running(),
+            "q on non-root should not quit the app"
+        );
     }
 
     #[test]
