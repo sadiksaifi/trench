@@ -36,10 +36,16 @@ pub fn data_dir() -> Result<PathBuf> {
 /// Uses `dirs::state_dir()` when available (Linux), falls back to
 /// `~/.local/state` on platforms that return `None` (macOS/Windows).
 pub fn state_dir() -> Result<PathBuf> {
-    let base = dirs::state_dir().unwrap_or_else(|| {
-        let home = dirs::home_dir().expect("could not determine home directory");
-        STATE_DIR_FALLBACK_SEGMENTS.iter().fold(home, |p, s| p.join(s))
-    });
+    let base = match dirs::state_dir() {
+        Some(path) => path,
+        None => {
+            let home = dirs::home_dir()
+                .context("could not determine home directory for state directory fallback")?;
+            STATE_DIR_FALLBACK_SEGMENTS
+                .iter()
+                .fold(home, |p, s| p.join(s))
+        }
+    };
     let path = base.join(APP_NAME);
     ensure_dir(&path)?;
     Ok(path)
