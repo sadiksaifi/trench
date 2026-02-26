@@ -7,6 +7,7 @@ mod paths;
 mod state;
 mod tui;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
 
@@ -46,7 +47,14 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Create a new worktree
-    Create,
+    Create {
+        /// Branch name for the new worktree
+        branch: String,
+
+        /// Base branch to create from (defaults to repo's HEAD branch)
+        #[arg(long)]
+        from: Option<String>,
+    },
     /// Remove a worktree
     Remove,
     /// Switch to a worktree
@@ -87,11 +95,48 @@ fn main() -> anyhow::Result<()> {
         return tui::run();
     }
 
-    if cli.command.is_none() {
-        anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
+    match cli.command {
+        Some(Commands::Create { branch, from }) => {
+            run_create(&branch, from.as_deref())
+        }
+        Some(_) => {
+            // Other commands not yet implemented
+            Ok(())
+        }
+        None => {
+            anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
+        }
     }
+}
 
-    Ok(())
+fn run_create(branch: &str, from: Option<&str>) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let worktree_root = paths::worktree_root()?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    match cli::commands::create::execute(
+        branch,
+        from,
+        &cwd,
+        &worktree_root,
+        paths::DEFAULT_WORKTREE_TEMPLATE,
+        &db,
+    ) {
+        Ok(path) => {
+            println!("{}", path.display());
+            Ok(())
+        }
+        Err(e) => {
+            if e.downcast_ref::<git::GitError>().is_some_and(|g| {
+                matches!(g, git::GitError::BranchAlreadyExists { .. })
+            }) {
+                eprintln!("error: {e}");
+                std::process::exit(3);
+            }
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -151,7 +196,7 @@ mod tests {
     #[test]
     fn all_subcommands_are_accepted() {
         let subcommands = [
-            "create", "remove", "switch", "open", "list", "status", "sync", "log", "init",
+            "remove", "switch", "open", "list", "status", "sync", "log", "init",
         ];
         for sub in subcommands {
             let result = Cli::try_parse_from(["trench", sub]);
@@ -161,6 +206,38 @@ mod tests {
                 sub,
                 result.unwrap_err()
             );
+        }
+    }
+
+    #[test]
+    fn create_subcommand_requires_branch() {
+        let result = Cli::try_parse_from(["trench", "create"]);
+        assert!(result.is_err(), "create without branch should fail");
+    }
+
+    #[test]
+    fn create_subcommand_accepts_branch() {
+        let cli = Cli::try_parse_from(["trench", "create", "my-feature"])
+            .expect("create with branch should succeed");
+        match cli.command {
+            Some(Commands::Create { branch, from }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(from.is_none());
+            }
+            _ => panic!("expected Commands::Create"),
+        }
+    }
+
+    #[test]
+    fn create_subcommand_accepts_from_flag() {
+        let cli = Cli::try_parse_from(["trench", "create", "my-feature", "--from", "develop"])
+            .expect("create with --from should succeed");
+        match cli.command {
+            Some(Commands::Create { branch, from }) => {
+                assert_eq!(branch, "my-feature");
+                assert_eq!(from.as_deref(), Some("develop"));
+            }
+            _ => panic!("expected Commands::Create"),
         }
     }
 

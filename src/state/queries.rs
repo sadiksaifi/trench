@@ -1,15 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use anyhow::{bail, Context, Result};
 use rusqlite::OptionalExtension;
 
-use super::{Database, Repo, Worktree, WorktreeUpdate};
+use super::{unix_epoch_secs, Database, Repo, Worktree, WorktreeUpdate};
 
 fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_secs() as i64
+    unix_epoch_secs() as i64
 }
 
 impl Database {
@@ -57,6 +52,29 @@ impl Database {
             })
             .optional()
             .context("failed to get repo")?;
+
+        Ok(repo)
+    }
+
+    /// Get a repo by its filesystem path. Returns `None` if not found.
+    pub fn get_repo_by_path(&self, path: &str) -> Result<Option<Repo>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, path, default_base, created_at FROM repos WHERE path = ?1")
+            .context("failed to prepare get_repo_by_path query")?;
+
+        let repo = stmt
+            .query_row(rusqlite::params![path], |row| {
+                Ok(Repo {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    path: row.get(2)?,
+                    default_base: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .optional()
+            .context("failed to get repo by path")?;
 
         Ok(repo)
     }
@@ -216,5 +234,30 @@ impl Database {
             .context("failed to insert event")?;
 
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Count events for a worktree, optionally filtered by event type.
+    pub fn count_events(
+        &self,
+        worktree_id: i64,
+        event_type: Option<&str>,
+    ) -> Result<i64> {
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match event_type {
+            Some(et) => (
+                "SELECT COUNT(*) FROM events WHERE worktree_id = ?1 AND event_type = ?2",
+                vec![Box::new(worktree_id), Box::new(et.to_string())],
+            ),
+            None => (
+                "SELECT COUNT(*) FROM events WHERE worktree_id = ?1",
+                vec![Box::new(worktree_id)],
+            ),
+        };
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let count: i64 = self
+            .conn
+            .query_row(sql, param_refs.as_slice(), |row| row.get(0))
+            .context("failed to count events")?;
+        Ok(count)
     }
 }

@@ -1,10 +1,19 @@
 pub mod queries;
 
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
+
+/// Return the current time as seconds since the UNIX epoch.
+pub(crate) fn unix_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs()
+}
 
 /// A repository tracked by trench.
 #[derive(Debug, Clone)]
@@ -67,7 +76,11 @@ impl Database {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
-        Self::init(conn)
+        match Self::init(conn) {
+            Ok(db) => Ok(db),
+            Err(e) if Self::is_db_too_far_ahead(&e) => Self::backup_and_recreate(path),
+            Err(e) => Err(e),
+        }
     }
 
     /// Open an in-memory database (for testing).
@@ -93,6 +106,41 @@ impl Database {
 
     fn migrations() -> Migrations<'static> {
         Migrations::new(vec![M::up(include_str!("sql/001_initial_schema.sql"))])
+    }
+
+    fn is_db_too_far_ahead(err: &anyhow::Error) -> bool {
+        use rusqlite_migration::MigrationDefinitionError;
+        for cause in err.chain() {
+            if let Some(rusqlite_migration::Error::MigrationDefinition(
+                MigrationDefinitionError::DatabaseTooFarAhead,
+            )) = cause.downcast_ref::<rusqlite_migration::Error>()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn backup_and_recreate(path: &Path) -> Result<Self> {
+        let ts = unix_epoch_secs();
+        let backup = path.with_file_name(format!(
+            "{}.backup-{ts}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        std::fs::rename(path, &backup).with_context(|| {
+            format!(
+                "failed to back up database from {} to {}",
+                path.display(),
+                backup.display()
+            )
+        })?;
+        eprintln!(
+            "warning: database was ahead of migrations; backed up to {}",
+            backup.display()
+        );
+        let conn = Connection::open(path)
+            .with_context(|| format!("failed to open fresh database at {}", path.display()))?;
+        Self::init(conn)
     }
 }
 
@@ -394,5 +442,100 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let result = db.insert_worktree(9999, "wt", "b", "/wt", None);
         assert!(result.is_err(), "FK should reject non-existent repo_id");
+    }
+
+    #[test]
+    fn get_repo_by_path_returns_none_for_missing() {
+        let db = Database::open_in_memory().unwrap();
+        let result = db.get_repo_by_path("/nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn open_recovers_when_db_version_ahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("trench.db");
+
+        // Create a valid DB, then artificially bump user_version far ahead
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", 99).unwrap();
+        }
+
+        let result = Database::open(&db_path);
+        assert!(
+            result.is_ok(),
+            "open should recover from DatabaseTooFarAhead, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn open_recovered_db_is_functional() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("trench.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", 99).unwrap();
+        }
+
+        let db = Database::open(&db_path).unwrap();
+        let repo = db.insert_repo("test", "/test", Some("main"));
+        assert!(repo.is_ok(), "recovered DB should accept inserts");
+
+        let fetched = db.get_repo_by_path("/test").unwrap();
+        assert!(fetched.is_some(), "recovered DB should return inserted data");
+    }
+
+    #[test]
+    fn open_creates_backup_when_db_ahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("trench.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", 99).unwrap();
+        }
+
+        Database::open(&db_path).unwrap();
+
+        // A backup file should exist
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with("trench.db.backup-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "exactly one backup file should be created, found: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn unix_epoch_secs_returns_reasonable_value() {
+        let ts = unix_epoch_secs();
+        // After 2023-11-14 and before 2100
+        assert!(ts > 1_700_000_000, "timestamp too old: {ts}");
+        assert!(ts < 4_102_444_800, "timestamp too far in the future: {ts}");
+    }
+
+    #[test]
+    fn get_repo_by_path_returns_existing_repo() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("my-project", "/home/user/my-project", Some("main")).unwrap();
+
+        let found = db.get_repo_by_path("/home/user/my-project").unwrap()
+            .expect("should find repo by path");
+
+        assert_eq!(found.id, repo.id);
+        assert_eq!(found.name, "my-project");
+        assert_eq!(found.path, "/home/user/my-project");
+        assert_eq!(found.default_base.as_deref(), Some("main"));
     }
 }
