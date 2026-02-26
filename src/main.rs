@@ -74,7 +74,7 @@ impl Cli {
 
 fn main() {
     let cli = Cli::parse();
-    let _output = cli.output_config();
+    let output_config = cli.output_config();
 }
 
 #[cfg(test)]
