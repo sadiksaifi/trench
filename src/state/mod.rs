@@ -174,4 +174,26 @@ mod tests {
         assert_eq!(fetched.base_branch, wt.base_branch);
         assert_eq!(fetched.managed, wt.managed);
     }
+
+    #[test]
+    fn list_worktrees_scoped_to_repo() {
+        let db = Database::open_in_memory().unwrap();
+        let repo_a = db.insert_repo("repo-a", "/a", None).unwrap();
+        let repo_b = db.insert_repo("repo-b", "/b", None).unwrap();
+
+        db.insert_worktree(repo_a.id, "wt-1", "branch-1", "/a/wt-1", None)
+            .unwrap();
+        db.insert_worktree(repo_a.id, "wt-2", "branch-2", "/a/wt-2", None)
+            .unwrap();
+        db.insert_worktree(repo_b.id, "wt-3", "branch-3", "/b/wt-3", None)
+            .unwrap();
+
+        let list_a = db.list_worktrees(repo_a.id).expect("list should succeed");
+        assert_eq!(list_a.len(), 2);
+        assert!(list_a.iter().all(|w| w.repo_id == repo_a.id));
+
+        let list_b = db.list_worktrees(repo_b.id).unwrap();
+        assert_eq!(list_b.len(), 1);
+        assert_eq!(list_b[0].name, "wt-3");
+    }
 }
