@@ -233,4 +233,48 @@ mod tests {
         assert_eq!(worktrees[0].branch, "feature-a");
         assert_eq!(worktrees[1].branch, "feature-b");
     }
+
+    #[test]
+    fn create_with_from_stores_default_branch_not_from_override() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Determine HEAD branch name (the repo's true default)
+        let head_branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a second branch "develop" to use as --from
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("develop", &head_commit, false).unwrap();
+
+        let _path = execute(
+            "my-feature",
+            Some("develop"),
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create with --from should succeed");
+
+        let repo_path_str = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let db_repo = db
+            .get_repo_by_path(&repo_path_str)
+            .unwrap()
+            .expect("repo should be in DB");
+
+        assert_eq!(
+            db_repo.default_base.as_deref(),
+            Some(head_branch.as_str()),
+            "repos.default_base should be the HEAD branch, not the --from override"
+        );
+    }
 }
