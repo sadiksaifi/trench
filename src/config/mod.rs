@@ -721,6 +721,85 @@ run = ["bun install"]
     }
 
     #[test]
+    fn resolve_project_hooks_replace_global_hooks_entirely() {
+        let global = GlobalConfig {
+            hooks: Some(HooksConfig {
+                post_create: Some(HookDef {
+                    run: Some(vec!["npm install".to_string()]),
+                    ..HookDef::default()
+                }),
+                pre_remove: Some(HookDef {
+                    shell: Some("echo global-cleanup".to_string()),
+                    ..HookDef::default()
+                }),
+                ..HooksConfig::default()
+            }),
+            ..GlobalConfig::default()
+        };
+
+        let project = ProjectConfig {
+            hooks: Some(HooksConfig {
+                post_create: Some(HookDef {
+                    run: Some(vec!["bun install".to_string()]),
+                    ..HookDef::default()
+                }),
+                // pre_remove intentionally missing in project
+                ..HooksConfig::default()
+            }),
+            ..ProjectConfig::default()
+        };
+
+        let resolved = resolve_config(None, Some(&project), &global);
+
+        let hooks = resolved.hooks.expect("hooks should be present");
+        // Project's post_create wins
+        let post_create = hooks.post_create.expect("post_create should exist");
+        assert_eq!(post_create.run, Some(vec!["bun install".to_string()]));
+
+        // Global's pre_remove is NOT carried over — project hooks replace entirely
+        assert!(
+            hooks.pre_remove.is_none(),
+            "global pre_remove should not be merged into project hooks"
+        );
+    }
+
+    #[test]
+    fn resolve_global_hooks_used_when_project_has_no_hooks() {
+        let global = GlobalConfig {
+            hooks: Some(HooksConfig {
+                post_create: Some(HookDef {
+                    run: Some(vec!["npm install".to_string()]),
+                    ..HookDef::default()
+                }),
+                ..HooksConfig::default()
+            }),
+            ..GlobalConfig::default()
+        };
+
+        let project = ProjectConfig {
+            git: Some(GitConfig {
+                default_base: Some("staging".to_string()),
+                ..GitConfig::default()
+            }),
+            hooks: None, // no hooks in project
+            ..ProjectConfig::default()
+        };
+
+        let resolved = resolve_config(None, Some(&project), &global);
+
+        // Global hooks used because project has no hooks section
+        let hooks = resolved.hooks.expect("global hooks should be used");
+        assert!(hooks.post_create.is_some());
+        assert_eq!(resolved.git.default_base, "staging");
+    }
+
+    #[test]
+    fn resolve_no_hooks_anywhere() {
+        let resolved = resolve_config(None, None, &GlobalConfig::default());
+        assert!(resolved.hooks.is_none());
+    }
+
+    #[test]
     fn global_config_with_hooks_deserializes() {
         let dir = TempDir::new().unwrap();
         let path = write_config(
