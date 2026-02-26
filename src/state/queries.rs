@@ -1,15 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use anyhow::{bail, Context, Result};
 use rusqlite::OptionalExtension;
 
-use super::{Database, Repo, Worktree, WorktreeUpdate};
+use super::{unix_epoch_secs, Database, Repo, Worktree, WorktreeUpdate};
 
 fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_secs() as i64
+    unix_epoch_secs() as i64
 }
 
 impl Database {

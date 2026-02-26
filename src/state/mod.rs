@@ -7,6 +7,14 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
 
+/// Return the current time as seconds since the UNIX epoch.
+pub(crate) fn unix_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs()
+}
+
 /// A repository tracked by trench.
 #[derive(Debug, Clone)]
 pub struct Repo {
@@ -114,10 +122,7 @@ impl Database {
     }
 
     fn backup_and_recreate(path: &Path) -> Result<Self> {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_secs();
+        let ts = unix_epoch_secs();
         let backup = path.with_file_name(format!(
             "{}.backup-{ts}",
             path.file_name().unwrap_or_default().to_string_lossy()
@@ -510,6 +515,14 @@ mod tests {
             1,
             "exactly one backup file should be created, found: {entries:?}"
         );
+    }
+
+    #[test]
+    fn unix_epoch_secs_returns_reasonable_value() {
+        let ts = unix_epoch_secs();
+        // After 2023-11-14 and before 2100
+        assert!(ts > 1_700_000_000, "timestamp too old: {ts}");
+        assert!(ts < 4_102_444_800, "timestamp too far in the future: {ts}");
     }
 
     #[test]
