@@ -160,7 +160,7 @@ impl Default for ResolvedWorktreesConfig {
 /// Project hooks completely replace global hooks when present (FR-2).
 /// Non-hook fields merge per-field: first non-None value wins.
 pub fn resolve_config(
-    _cli: Option<&CliConfigOverrides>,
+    cli: Option<&CliConfigOverrides>,
     project: Option<&ProjectConfig>,
     global: &GlobalConfig,
 ) -> ResolvedConfig {
@@ -200,8 +200,9 @@ pub fn resolve_config(
                 .unwrap_or(defaults_ui.show_dirty_count),
         },
         git: ResolvedGitConfig {
-            default_base: p_git
-                .and_then(|g| g.default_base.clone())
+            default_base: cli
+                .and_then(|c| c.default_base.clone())
+                .or_else(|| p_git.and_then(|g| g.default_base.clone()))
                 .or_else(|| g_git.and_then(|g| g.default_base.clone()))
                 .unwrap_or(defaults_git.default_base),
             auto_prune: p_git
@@ -214,8 +215,9 @@ pub fn resolve_config(
                 .unwrap_or(defaults_git.fetch_on_open),
         },
         worktrees: ResolvedWorktreesConfig {
-            root: p_wt
-                .and_then(|w| w.root.clone())
+            root: cli
+                .and_then(|c| c.worktree_root.clone())
+                .or_else(|| p_wt.and_then(|w| w.root.clone()))
                 .or_else(|| g_wt.and_then(|w| w.root.clone()))
                 .unwrap_or(defaults_wt.root),
             scan: p_wt
@@ -791,6 +793,66 @@ run = ["bun install"]
         let hooks = resolved.hooks.expect("global hooks should be used");
         assert!(hooks.post_create.is_some());
         assert_eq!(resolved.git.default_base, "staging");
+    }
+
+    #[test]
+    fn resolve_cli_overrides_trump_everything() {
+        let global = GlobalConfig {
+            git: Some(GitConfig {
+                default_base: Some("develop".to_string()),
+                ..GitConfig::default()
+            }),
+            worktrees: Some(WorktreesConfig {
+                root: Some("global/{{ repo }}".to_string()),
+                scan: None,
+            }),
+            ..GlobalConfig::default()
+        };
+
+        let project = ProjectConfig {
+            git: Some(GitConfig {
+                default_base: Some("staging".to_string()),
+                ..GitConfig::default()
+            }),
+            worktrees: Some(WorktreesConfig {
+                root: Some("project/{{ repo }}".to_string()),
+                scan: None,
+            }),
+            ..ProjectConfig::default()
+        };
+
+        let cli = CliConfigOverrides {
+            default_base: Some("cli-branch".to_string()),
+            worktree_root: Some("cli/{{ repo }}".to_string()),
+        };
+
+        let resolved = resolve_config(Some(&cli), Some(&project), &global);
+
+        assert_eq!(resolved.git.default_base, "cli-branch");
+        assert_eq!(resolved.worktrees.root, "cli/{{ repo }}");
+    }
+
+    #[test]
+    fn resolve_cli_partial_overrides_fall_through() {
+        let global = GlobalConfig {
+            git: Some(GitConfig {
+                default_base: Some("develop".to_string()),
+                ..GitConfig::default()
+            }),
+            ..GlobalConfig::default()
+        };
+
+        let cli = CliConfigOverrides {
+            default_base: None,
+            worktree_root: Some("cli-root/{{ repo }}".to_string()),
+        };
+
+        let resolved = resolve_config(Some(&cli), None, &global);
+
+        // CLI worktree_root wins
+        assert_eq!(resolved.worktrees.root, "cli-root/{{ repo }}");
+        // No CLI default_base → falls through to global
+        assert_eq!(resolved.git.default_base, "develop");
     }
 
     #[test]
