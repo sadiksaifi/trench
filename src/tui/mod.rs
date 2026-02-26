@@ -289,6 +289,47 @@ mod tests {
     }
 
     #[test]
+    fn deep_stack_navigation_push_pop_sequence() {
+        let mut app = App::new();
+        // List → Detail → Help → pop → pop → List
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Detail);
+        assert_eq!(app.nav_stack_depth(), 2);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Help);
+        assert_eq!(app.nav_stack_depth(), 3);
+
+        // Pop Help → Detail
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Detail);
+        assert_eq!(app.nav_stack_depth(), 2);
+
+        // Pop Detail → List
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert_eq!(app.nav_stack_depth(), 1);
+        assert!(app.is_running());
+
+        // Pop List → quit
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.is_running());
+    }
+
+    #[test]
+    fn question_mark_opens_help_from_detail_screen() {
+        let mut app = App::new();
+        // Navigate to Detail first
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Detail);
+
+        // ? should still open Help from Detail
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Help);
+        assert_eq!(app.nav_stack_depth(), 3);
+    }
+
+    #[test]
     fn app_ignores_unbound_keys() {
         let mut app = App::new();
         app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
