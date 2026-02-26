@@ -210,6 +210,22 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_empty_branch() {
+        assert_eq!(sanitize_branch(""), "");
+    }
+
+    #[test]
+    fn sanitize_single_dot() {
+        assert_eq!(sanitize_branch("."), ".");
+    }
+
+    #[test]
+    fn sanitize_triple_dots() {
+        // "..." → ".." replaced with "-" → "-." → trim leading dash → "."
+        assert_eq!(sanitize_branch("..."), ".");
+    }
+
+    #[test]
     fn sanitize_combined_edge_cases() {
         // Multiple replaceable chars in a row collapse to single dash
         assert_eq!(sanitize_branch("a/@b"), "a-b");
