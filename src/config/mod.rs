@@ -1,7 +1,9 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+
+use crate::paths;
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
 pub struct GlobalConfig {
@@ -50,8 +52,14 @@ pub fn load_global_config_from(path: &Path) -> Result<GlobalConfig> {
 ///
 /// Reads `~/.config/trench/config.toml` (or platform equivalent).
 /// Returns defaults if the file does not exist.
+/// Return the path to the global config file (`~/.config/trench/config.toml`).
+pub fn global_config_path() -> Result<PathBuf> {
+    Ok(paths::config_dir()?.join("config.toml"))
+}
+
 pub fn load_global_config() -> Result<GlobalConfig> {
-    todo!()
+    let path = global_config_path()?;
+    load_global_config_from(&path)
 }
 
 #[cfg(test)]
@@ -222,5 +230,21 @@ show_ahead_behind = "yes"
             msg.contains("invalid TOML"),
             "expected 'invalid TOML' in error: {msg}"
         );
+    }
+
+    #[test]
+    fn global_config_path_points_to_xdg_config() {
+        let path = global_config_path().unwrap();
+        assert!(path.ends_with("trench/config.toml"));
+        assert!(path.starts_with(dirs::config_dir().unwrap()));
+    }
+
+    #[test]
+    fn load_global_config_returns_valid_result() {
+        // On the test runner, the file likely doesn't exist — should return defaults.
+        // If it does exist, should parse successfully.
+        let config = load_global_config().unwrap();
+        // Regardless of file state, this should not error
+        let _ = config;
     }
 }
