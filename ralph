@@ -137,7 +137,7 @@ info "launching claude on issue #${ISSUE}..."
 echo ""
 
 claude --dangerously-skip-permissions \
-  --model "opus[1m]" \
+  --model "opus" \
   -p "/tdd ${PROMPT}" \
   --verbose \
   --output-format stream-json | cclean
