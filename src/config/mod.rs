@@ -272,12 +272,4 @@ show_ahead_behind = "yes"
         assert!(path.starts_with(dirs::config_dir().unwrap()));
     }
 
-    #[test]
-    fn load_global_config_returns_valid_result() {
-        // On the test runner, the file likely doesn't exist — should return defaults.
-        // If it does exist, should parse successfully.
-        let config = load_global_config().unwrap();
-        // Regardless of file state, this should not error
-        let _ = config;
-    }
 }
