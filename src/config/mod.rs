@@ -5,11 +5,42 @@ use serde::Deserialize;
 
 use crate::paths;
 
+// --- Hook types (FR-18, FR-19) ---
+
+#[derive(Debug, Default, Deserialize, PartialEq, Clone)]
+pub struct HookDef {
+    pub copy: Option<Vec<String>>,
+    pub run: Option<Vec<String>>,
+    pub shell: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Clone)]
+pub struct HooksConfig {
+    pub pre_create: Option<HookDef>,
+    pub post_create: Option<HookDef>,
+    pub pre_sync: Option<HookDef>,
+    pub post_sync: Option<HookDef>,
+    pub pre_remove: Option<HookDef>,
+    pub post_remove: Option<HookDef>,
+}
+
+// --- Config structs ---
+
 #[derive(Debug, Default, Deserialize, PartialEq)]
 pub struct GlobalConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
     pub worktrees: Option<WorktreesConfig>,
+}
+
+/// Project-level config parsed from `.trench.toml` at repo root.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+pub struct ProjectConfig {
+    pub ui: Option<UiConfig>,
+    pub git: Option<GitConfig>,
+    pub worktrees: Option<WorktreesConfig>,
+    pub hooks: Option<HooksConfig>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -270,6 +301,86 @@ show_ahead_behind = "yes"
         let path = global_config_path().unwrap();
         assert!(path.ends_with("trench/config.toml"));
         assert!(path.starts_with(dirs::config_dir().unwrap()));
+    }
+
+    #[test]
+    fn project_config_deserializes_with_hooks() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".trench.toml");
+        std::fs::write(
+            &path,
+            r#"
+[hooks.post_create]
+copy = [".env*", "!.env.example"]
+run = ["bun install", "bunx prisma generate"]
+timeout_secs = 300
+
+[hooks.pre_remove]
+shell = "pkill -f 'next dev' || true"
+"#,
+        )
+        .unwrap();
+
+        let config: ProjectConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        let hooks = config.hooks.expect("hooks should be present");
+        let post_create = hooks.post_create.expect("post_create should be present");
+        assert_eq!(
+            post_create.copy,
+            Some(vec![".env*".to_string(), "!.env.example".to_string()])
+        );
+        assert_eq!(
+            post_create.run,
+            Some(vec![
+                "bun install".to_string(),
+                "bunx prisma generate".to_string()
+            ])
+        );
+        assert_eq!(post_create.timeout_secs, Some(300));
+        assert!(post_create.shell.is_none());
+
+        let pre_remove = hooks.pre_remove.expect("pre_remove should be present");
+        assert_eq!(
+            pre_remove.shell.as_deref(),
+            Some("pkill -f 'next dev' || true")
+        );
+        assert!(pre_remove.copy.is_none());
+        assert!(pre_remove.run.is_none());
+
+        assert!(hooks.pre_create.is_none());
+        assert!(hooks.pre_sync.is_none());
+        assert!(hooks.post_sync.is_none());
+        assert!(hooks.post_remove.is_none());
+    }
+
+    #[test]
+    fn project_config_deserializes_all_sections() {
+        let toml_str = r#"
+[ui]
+theme = "nord"
+
+[git]
+default_base = "develop"
+
+[worktrees]
+root = "custom/{{ repo }}/{{ branch | sanitize }}"
+
+[hooks.post_create]
+run = ["make setup"]
+"#;
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(config.ui.unwrap().theme.as_deref(), Some("nord"));
+        assert_eq!(
+            config.git.unwrap().default_base.as_deref(),
+            Some("develop")
+        );
+        assert_eq!(
+            config.worktrees.unwrap().root.as_deref(),
+            Some("custom/{{ repo }}/{{ branch | sanitize }}")
+        );
+        assert!(config.hooks.unwrap().post_create.is_some());
     }
 
 }
