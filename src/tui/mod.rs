@@ -115,7 +115,9 @@ impl App {
     fn handle_screen_key(&mut self, key: KeyEvent) {
         match self.active_screen() {
             Screen::List => self.handle_list_key(key),
-            Screen::Detail | Screen::Create | Screen::Help => {}
+            Screen::Detail => {}
+            Screen::Create => {}
+            Screen::Help => {}
         }
     }
 
