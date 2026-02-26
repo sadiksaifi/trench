@@ -94,11 +94,20 @@ impl App {
         frame.render_widget(placeholder, frame.area());
     }
 
+    pub fn pop_screen(&mut self) {
+        if self.nav_stack.len() > 1 {
+            self.nav_stack.pop();
+        } else {
+            self.running = false;
+        }
+    }
+
     pub fn handle_key_event(&mut self, key: KeyEvent) {
         // Global keys handled at app level
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
             (KeyCode::Char('?'), _) => self.push_screen(Screen::Help),
+            (KeyCode::Esc, _) => self.pop_screen(),
             (KeyCode::Char('q'), _) => self.running = false,
             _ => {}
         }
@@ -157,6 +166,25 @@ mod tests {
     }
 
     #[test]
+    fn esc_pops_back_to_previous_screen() {
+        let mut app = App::new();
+        // Push Help from List
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Help);
+        assert_eq!(app.nav_stack_depth(), 2);
+
+        // Esc should pop back to List
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Esc should pop back to List"
+        );
+        assert_eq!(app.nav_stack_depth(), 1);
+        assert!(app.is_running(), "app should still be running after popping");
+    }
+
+    #[test]
     fn app_exits_on_q_key() {
         let mut app = App::new();
         app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
@@ -171,12 +199,12 @@ mod tests {
     }
 
     #[test]
-    fn app_ignores_other_keys() {
+    fn app_ignores_unbound_keys() {
         let mut app = App::new();
         app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.is_running(), "non-quit keys should not stop the app");
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert!(app.is_running(), "unbound keys should not stop the app");
     }
 
     #[test]
