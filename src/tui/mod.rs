@@ -48,4 +48,13 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(!app.is_running(), "app should stop after Ctrl+C");
     }
+
+    #[test]
+    fn app_ignores_other_keys() {
+        let mut app = App::new();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.is_running(), "non-quit keys should not stop the app");
+    }
 }
