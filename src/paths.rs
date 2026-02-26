@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 
 const APP_NAME: &str = "trench";
 const DEFAULT_WORKTREE_DIR: &str = ".worktrees";
+/// Fallback path segments for platforms where `dirs::state_dir()` returns `None` (macOS/Windows).
+const STATE_DIR_FALLBACK_SEGMENTS: &[&str] = &[".local", "state"];
 
 /// Ensure a directory exists, creating it (and parents) if needed.
 fn ensure_dir(path: &Path) -> Result<()> {
@@ -30,11 +32,14 @@ pub fn data_dir() -> Result<PathBuf> {
 }
 
 /// Return the trench state directory (`~/.local/state/trench/`), creating it if needed.
+///
+/// Uses `dirs::state_dir()` when available (Linux), falls back to
+/// `~/.local/state` on platforms that return `None` (macOS/Windows).
 pub fn state_dir() -> Result<PathBuf> {
-    let base = dirs::home_dir()
-        .context("could not determine home directory")?
-        .join(".local")
-        .join("state");
+    let base = dirs::state_dir().unwrap_or_else(|| {
+        let home = dirs::home_dir().expect("could not determine home directory");
+        STATE_DIR_FALLBACK_SEGMENTS.iter().fold(home, |p, s| p.join(s))
+    });
     let path = base.join(APP_NAME);
     ensure_dir(&path)?;
     Ok(path)
@@ -129,8 +134,13 @@ mod tests {
     fn state_dir_ends_with_trench() {
         let path = state_dir().unwrap();
         assert!(path.ends_with("trench"));
-        let home = dirs::home_dir().unwrap();
-        assert!(path.starts_with(home.join(".local").join("state")));
+        let expected_base = dirs::state_dir().unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap()
+                .join(".local")
+                .join("state")
+        });
+        assert!(path.starts_with(expected_base));
         assert!(path.exists());
     }
 
