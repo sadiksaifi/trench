@@ -98,6 +98,32 @@ mod tests {
     fn quiet_flag_suppresses_info() {
         let config = OutputConfig::from_env(false, /* quiet */ true, false, true);
         assert!(config.is_quiet());
+        assert!(!config.is_verbose());
         assert_eq!(config.verbosity(), Verbosity::Quiet);
+    }
+
+    #[test]
+    fn verbose_flag_enables_debug() {
+        let config = OutputConfig::from_env(false, false, /* verbose */ true, true);
+        assert!(config.is_verbose());
+        assert!(!config.is_quiet());
+        assert_eq!(config.verbosity(), Verbosity::Verbose);
+    }
+
+    #[test]
+    fn quiet_wins_over_verbose() {
+        // When both --quiet and --verbose are passed, quiet takes precedence
+        let config = OutputConfig::from_env(false, /* quiet */ true, /* verbose */ true, true);
+        assert!(config.is_quiet());
+        assert!(!config.is_verbose());
+        assert_eq!(config.verbosity(), Verbosity::Quiet);
+    }
+
+    #[test]
+    fn default_verbosity_is_normal() {
+        let config = OutputConfig::from_env(false, false, false, true);
+        assert!(!config.is_quiet());
+        assert!(!config.is_verbose());
+        assert_eq!(config.verbosity(), Verbosity::Normal);
     }
 }
