@@ -1,8 +1,15 @@
 pub mod screens;
 
+use std::sync::{Arc, Mutex};
+
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{layout::Alignment, widgets::Paragraph, Frame};
+
+type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
+
+/// Stores the pre-TUI panic hook so `restore_panic_hook` can put it back.
+static PREV_PANIC_HOOK: Mutex<Option<Arc<PanicHook>>> = Mutex::new(None);
 
 /// Launch the TUI. This is the single public entry point.
 pub fn run() -> Result<()> {
@@ -28,16 +35,20 @@ pub fn run() -> Result<()> {
     result
 }
 
-fn restore_panic_hook() {
-    let _ = std::panic::take_hook();
-}
-
 fn install_panic_hook() {
-    let original_hook = std::panic::take_hook();
+    let original: Arc<PanicHook> = Arc::from(std::panic::take_hook());
+    PREV_PANIC_HOOK.lock().unwrap().replace(Arc::clone(&original));
     std::panic::set_hook(Box::new(move |info| {
         ratatui::restore();
-        original_hook(info);
+        original(info);
     }));
+}
+
+fn restore_panic_hook() {
+    let _ = std::panic::take_hook();
+    if let Some(hook) = PREV_PANIC_HOOK.lock().unwrap().take() {
+        std::panic::set_hook(Box::new(move |info| hook(info)));
+    }
 }
 
 pub struct App {
@@ -105,28 +116,29 @@ mod tests {
 
     #[test]
     #[serial]
-    fn restore_panic_hook_removes_tui_hook() {
+    fn restore_panic_hook_restores_prior_hook() {
         use std::panic::{self, catch_unwind};
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
-        install_panic_hook();
-        restore_panic_hook();
-
+        // Install marker as the pre-existing hook BEFORE TUI touches anything
         let marker_ran = Arc::new(AtomicBool::new(false));
         let marker = marker_ran.clone();
         panic::set_hook(Box::new(move |_| {
             marker.store(true, Ordering::SeqCst);
         }));
 
+        install_panic_hook(); // wraps marker in TUI hook
+        restore_panic_hook(); // must restore marker, not default
+
         let _ = catch_unwind(|| panic!("test panic"));
 
-        // Restore the default hook so we don't affect other tests
+        // Clean up so we don't affect other tests
         let _ = panic::take_hook();
 
         assert!(
             marker_ran.load(Ordering::SeqCst),
-            "marker hook should have run, proving TUI hook was removed"
+            "prior hook should run after restore, proving TUI hook was removed and original restored"
         );
     }
 
