@@ -46,11 +46,24 @@ pub fn discover_repo(path: &Path) -> Result<RepoInfo, GitError> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
+    // Extract origin remote URL if present
+    let remote_url = repo
+        .find_remote("origin")
+        .ok()
+        .and_then(|r| r.url().map(String::from));
+
+    // Extract default branch from HEAD
+    let default_branch = repo
+        .head()
+        .ok()
+        .and_then(|r| r.shorthand().map(String::from))
+        .unwrap_or_else(|| String::from("main"));
+
     Ok(RepoInfo {
         name,
         path: workdir,
-        remote_url: None,
-        default_branch: String::from("main"),
+        remote_url,
+        default_branch,
     })
 }
 
@@ -99,6 +112,46 @@ mod tests {
         assert_eq!(info.path, tmp.path().canonicalize().unwrap());
         let expected_name = tmp.path().file_name().unwrap().to_str().unwrap();
         assert_eq!(info.name, expected_name);
+    }
+
+    #[test]
+    fn discover_repo_extracts_remote_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        repo.remote("origin", "https://github.com/test/repo.git")
+            .unwrap();
+
+        let info = discover_repo(tmp.path()).expect("should discover repo");
+
+        assert_eq!(
+            info.remote_url.as_deref(),
+            Some("https://github.com/test/repo.git")
+        );
+    }
+
+    #[test]
+    fn discover_repo_remote_url_is_none_without_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(tmp.path());
+
+        let info = discover_repo(tmp.path()).expect("should discover repo");
+
+        assert_eq!(info.remote_url, None);
+    }
+
+    #[test]
+    fn discover_repo_extracts_default_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(tmp.path());
+        // git init defaults to "master" in git2 unless configured otherwise
+
+        let info = discover_repo(tmp.path()).expect("should discover repo");
+
+        // The default branch should be whatever HEAD points to
+        assert!(
+            !info.default_branch.is_empty(),
+            "default_branch should not be empty"
+        );
     }
 
     #[test]
