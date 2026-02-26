@@ -1,6 +1,6 @@
 pub mod screens;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub struct App {
     running: bool,
@@ -16,8 +16,10 @@ impl App {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Char('q') {
-            self.running = false;
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), _) => self.running = false,
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
+            _ => {}
         }
     }
 }
@@ -38,5 +40,12 @@ mod tests {
         let mut app = App::new();
         app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(!app.is_running(), "app should stop after pressing 'q'");
+    }
+
+    #[test]
+    fn app_exits_on_ctrl_c() {
+        let mut app = App::new();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.is_running(), "app should stop after Ctrl+C");
     }
 }
