@@ -70,14 +70,25 @@ impl Cli {
         let is_tty = std::io::stdout().is_terminal();
         OutputConfig::from_env(self.no_color, self.quiet, self.verbose, is_tty)
     }
+
+    fn should_launch_tui(&self, stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
+        self.command.is_none() && stdin_is_tty && stdout_is_tty
+    }
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let _output_config = cli.output_config();
 
-    if cli.command.is_none() {
+    if cli.should_launch_tui(
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    ) {
         return tui::run();
+    }
+
+    if cli.command.is_none() {
+        anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
     }
 
     Ok(())
@@ -178,6 +189,30 @@ mod tests {
             .expect("global flags should work with subcommands");
         assert!(cli.json);
         assert!(cli.command.is_some());
+    }
+
+    #[test]
+    fn should_launch_tui_when_interactive() {
+        let cli = Cli::try_parse_from(["trench"]).unwrap();
+        assert!(cli.should_launch_tui(true, true));
+    }
+
+    #[test]
+    fn should_not_launch_tui_with_subcommand() {
+        let cli = Cli::try_parse_from(["trench", "list"]).unwrap();
+        assert!(!cli.should_launch_tui(true, true));
+    }
+
+    #[test]
+    fn should_not_launch_tui_when_stdin_not_tty() {
+        let cli = Cli::try_parse_from(["trench"]).unwrap();
+        assert!(!cli.should_launch_tui(false, true));
+    }
+
+    #[test]
+    fn should_not_launch_tui_when_stdout_not_tty() {
+        let cli = Cli::try_parse_from(["trench"]).unwrap();
+        assert!(!cli.should_launch_tui(true, false));
     }
 
     #[test]
