@@ -127,4 +127,64 @@ scan = ["/home/user/projects", "/tmp/worktrees"]
             ])
         );
     }
+
+    #[test]
+    fn partial_toml_only_ui_section() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            r#"
+[ui]
+theme = "solarized"
+"#,
+        );
+
+        let config = load_global_config_from(&path).unwrap();
+
+        let ui = config.ui.unwrap();
+        assert_eq!(ui.theme.as_deref(), Some("solarized"));
+        assert!(ui.date_format.is_none());
+        assert!(ui.show_ahead_behind.is_none());
+        assert!(ui.show_dirty_count.is_none());
+
+        assert!(config.git.is_none());
+        assert!(config.worktrees.is_none());
+    }
+
+    #[test]
+    fn partial_toml_mixed_sections_and_fields() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            r#"
+[git]
+default_base = "develop"
+
+[worktrees]
+scan = ["/opt/trees"]
+"#,
+        );
+
+        let config = load_global_config_from(&path).unwrap();
+
+        assert!(config.ui.is_none());
+
+        let git = config.git.unwrap();
+        assert_eq!(git.default_base.as_deref(), Some("develop"));
+        assert!(git.auto_prune.is_none());
+        assert!(git.fetch_on_open.is_none());
+
+        let wt = config.worktrees.unwrap();
+        assert!(wt.root.is_none());
+        assert_eq!(wt.scan, Some(vec!["/opt/trees".to_string()]));
+    }
+
+    #[test]
+    fn empty_file_returns_defaults() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "");
+
+        let config = load_global_config_from(&path).unwrap();
+        assert_eq!(config, GlobalConfig::default());
+    }
 }
