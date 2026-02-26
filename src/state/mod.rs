@@ -1,10 +1,20 @@
-mod queries;
+pub mod queries;
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
+
+/// A repository tracked by trench.
+#[derive(Debug, Clone)]
+pub struct Repo {
+    pub id: i64,
+    pub name: String,
+    pub path: String,
+    pub default_base: Option<String>,
+    pub created_at: i64,
+}
 
 /// Core database handle wrapping a SQLite connection with migrations applied.
 pub struct Database {
@@ -83,5 +93,31 @@ mod tests {
                 .unwrap();
             assert!(exists, "table '{}' should exist", table);
         }
+    }
+
+    #[test]
+    fn insert_and_get_repo_round_trip() {
+        let db = Database::open_in_memory().unwrap();
+
+        let repo = db
+            .insert_repo("my-project", "/home/user/my-project", Some("main"))
+            .expect("insert_repo should succeed");
+
+        assert_eq!(repo.name, "my-project");
+        assert_eq!(repo.path, "/home/user/my-project");
+        assert_eq!(repo.default_base.as_deref(), Some("main"));
+        assert!(repo.id > 0);
+        assert!(repo.created_at > 0);
+
+        let fetched = db
+            .get_repo(repo.id)
+            .expect("get_repo should succeed")
+            .expect("repo should exist");
+
+        assert_eq!(fetched.id, repo.id);
+        assert_eq!(fetched.name, repo.name);
+        assert_eq!(fetched.path, repo.path);
+        assert_eq!(fetched.default_base, repo.default_base);
+        assert_eq!(fetched.created_at, repo.created_at);
     }
 }
