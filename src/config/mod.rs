@@ -64,6 +64,28 @@ pub struct WorktreesConfig {
     pub scan: Option<Vec<String>>,
 }
 
+/// Load project config from a specific file path.
+///
+/// Returns `Ok(None)` if the file does not exist.
+/// Returns an error if the file exists but contains invalid TOML.
+pub fn load_project_config_from(path: &Path) -> Result<Option<ProjectConfig>> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e)
+                    .context(format!("failed to read config file: {}", path.display())),
+            );
+        }
+    };
+    let config: ProjectConfig = toml::from_str(&contents)
+        .with_context(|| format!("invalid TOML in config file: {}", path.display()))?;
+    Ok(Some(config))
+}
+
 /// Load global config from a specific file path.
 ///
 /// Returns `GlobalConfig::default()` if the file does not exist.
@@ -352,6 +374,53 @@ shell = "pkill -f 'next dev' || true"
         assert!(hooks.pre_sync.is_none());
         assert!(hooks.post_sync.is_none());
         assert!(hooks.post_remove.is_none());
+    }
+
+    #[test]
+    fn load_project_config_from_valid_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".trench.toml");
+        std::fs::write(
+            &path,
+            r#"
+[git]
+default_base = "develop"
+
+[hooks.post_create]
+run = ["bun install"]
+"#,
+        )
+        .unwrap();
+
+        let config = load_project_config_from(&path)
+            .expect("should not error")
+            .expect("should return Some for existing file");
+
+        assert_eq!(
+            config.git.unwrap().default_base.as_deref(),
+            Some("develop")
+        );
+        assert!(config.hooks.unwrap().post_create.is_some());
+    }
+
+    #[test]
+    fn load_project_config_from_missing_file_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent.toml");
+
+        let result = load_project_config_from(&path).expect("should not error");
+        assert!(result.is_none(), "missing file should return None");
+    }
+
+    #[test]
+    fn load_project_config_from_invalid_toml_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".trench.toml");
+        std::fs::write(&path, "not valid [toml").unwrap();
+
+        let err = load_project_config_from(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid TOML"), "error should mention 'invalid TOML': {msg}");
     }
 
     #[test]
