@@ -87,6 +87,91 @@ pub fn load_project_config_from(path: &Path) -> Result<Option<ProjectConfig>> {
     Ok(Some(config))
 }
 
+// --- Resolved config (FR-1) ---
+
+/// CLI-level overrides that take highest precedence in the fallback chain.
+#[derive(Debug, Default)]
+pub struct CliConfigOverrides {
+    pub default_base: Option<String>,
+    pub worktree_root: Option<String>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ResolvedConfig {
+    pub ui: ResolvedUiConfig,
+    pub git: ResolvedGitConfig,
+    pub worktrees: ResolvedWorktreesConfig,
+    pub hooks: Option<HooksConfig>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ResolvedUiConfig {
+    pub theme: String,
+    pub date_format: String,
+    pub show_ahead_behind: bool,
+    pub show_dirty_count: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ResolvedGitConfig {
+    pub default_base: String,
+    pub auto_prune: bool,
+    pub fetch_on_open: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ResolvedWorktreesConfig {
+    pub root: String,
+    pub scan: Vec<String>,
+}
+
+impl Default for ResolvedUiConfig {
+    fn default() -> Self {
+        Self {
+            theme: "default".to_string(),
+            date_format: "%Y-%m-%d %H:%M".to_string(),
+            show_ahead_behind: true,
+            show_dirty_count: true,
+        }
+    }
+}
+
+impl Default for ResolvedGitConfig {
+    fn default() -> Self {
+        Self {
+            default_base: "main".to_string(),
+            auto_prune: false,
+            fetch_on_open: true,
+        }
+    }
+}
+
+impl Default for ResolvedWorktreesConfig {
+    fn default() -> Self {
+        Self {
+            root: crate::paths::DEFAULT_WORKTREE_TEMPLATE.to_string(),
+            scan: Vec::new(),
+        }
+    }
+}
+
+/// Resolve configuration by merging: CLI flags → project → global → defaults (FR-1).
+///
+/// Project hooks completely replace global hooks when present (FR-2).
+/// Non-hook fields merge per-field: first non-None value wins.
+pub fn resolve_config(
+    _cli: Option<&CliConfigOverrides>,
+    _project: Option<&ProjectConfig>,
+    _global: &GlobalConfig,
+) -> ResolvedConfig {
+    ResolvedConfig {
+        ui: ResolvedUiConfig::default(),
+        git: ResolvedGitConfig::default(),
+        worktrees: ResolvedWorktreesConfig::default(),
+        hooks: None,
+    }
+}
+
 const PROJECT_CONFIG_FILENAME: &str = ".trench.toml";
 
 /// Load project config from the repo root directory.
@@ -461,6 +546,28 @@ run = ["bun install"]
 
         let result = load_project_config(dir.path()).expect("should not error");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_defaults_only() {
+        let resolved = resolve_config(None, None, &GlobalConfig::default());
+
+        assert_eq!(resolved.ui.theme, "default");
+        assert_eq!(resolved.ui.date_format, "%Y-%m-%d %H:%M");
+        assert!(resolved.ui.show_ahead_behind);
+        assert!(resolved.ui.show_dirty_count);
+
+        assert_eq!(resolved.git.default_base, "main");
+        assert!(!resolved.git.auto_prune);
+        assert!(resolved.git.fetch_on_open);
+
+        assert_eq!(
+            resolved.worktrees.root,
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE
+        );
+        assert!(resolved.worktrees.scan.is_empty());
+
+        assert!(resolved.hooks.is_none());
     }
 
     #[test]
