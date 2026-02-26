@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -6,7 +6,7 @@ const APP_NAME: &str = "trench";
 const DEFAULT_WORKTREE_DIR: &str = ".worktrees";
 
 /// Ensure a directory exists, creating it (and parents) if needed.
-fn ensure_dir(path: &PathBuf) -> Result<()> {
+fn ensure_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).with_context(|| format!("failed to create directory: {}", path.display()))?;
     Ok(())
 }
@@ -47,6 +47,27 @@ pub fn worktree_root() -> Result<PathBuf> {
         .join(DEFAULT_WORKTREE_DIR);
     ensure_dir(&path)?;
     Ok(path)
+}
+
+/// Default worktree path template (FR-17).
+pub const DEFAULT_WORKTREE_TEMPLATE: &str = "{{ repo }}/{{ branch | sanitize }}";
+
+/// Render a worktree path template using minijinja.
+///
+/// The template receives `repo` and `branch` variables, and a `sanitize` filter
+/// that applies branch name sanitization (FR-17).
+///
+/// Returns the rendered path relative to the worktree root.
+pub fn render_worktree_path(template: &str, repo: &str, branch: &str) -> Result<PathBuf> {
+    let mut env = minijinja::Environment::new();
+    env.add_filter("sanitize", sanitize_branch);
+    env.add_template("path", template)
+        .context("invalid worktree path template")?;
+    let tmpl = env.get_template("path").unwrap();
+    let rendered = tmpl
+        .render(minijinja::context! { repo => repo, branch => branch })
+        .context("failed to render worktree path template")?;
+    Ok(PathBuf::from(rendered))
 }
 
 /// Sanitize a branch name for use as a filesystem directory name.
@@ -119,6 +140,27 @@ mod tests {
         assert!(path.ends_with(".worktrees"));
         assert!(path.starts_with(dirs::home_dir().unwrap()));
         assert!(path.exists());
+    }
+
+    #[test]
+    fn render_default_template_with_repo_and_branch() {
+        let path = render_worktree_path(DEFAULT_WORKTREE_TEMPLATE, "my-project", "feature/auth").unwrap();
+        assert_eq!(path, PathBuf::from("my-project/feature-auth"));
+    }
+
+    #[test]
+    fn render_custom_template() {
+        let tmpl = "projects/{{ repo }}/{{ branch | sanitize }}";
+        let path = render_worktree_path(tmpl, "trench", "fix@home").unwrap();
+        assert_eq!(path, PathBuf::from("projects/trench/fix-home"));
+    }
+
+    #[test]
+    fn render_template_branch_without_sanitize_filter() {
+        // Using {{ branch }} directly (no filter) should pass through raw
+        let tmpl = "{{ repo }}/{{ branch }}";
+        let path = render_worktree_path(tmpl, "trench", "feature/auth").unwrap();
+        assert_eq!(path, PathBuf::from("trench/feature/auth"));
     }
 
     #[test]
