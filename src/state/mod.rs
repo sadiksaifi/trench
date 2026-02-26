@@ -16,6 +16,21 @@ pub struct Repo {
     pub created_at: i64,
 }
 
+/// A worktree tracked by trench.
+#[derive(Debug, Clone)]
+pub struct Worktree {
+    pub id: i64,
+    pub repo_id: i64,
+    pub name: String,
+    pub branch: String,
+    pub path: String,
+    pub base_branch: Option<String>,
+    pub managed: bool,
+    pub adopted_at: Option<i64>,
+    pub last_accessed: Option<i64>,
+    pub created_at: i64,
+}
+
 /// Core database handle wrapping a SQLite connection with migrations applied.
 pub struct Database {
     conn: Connection,
@@ -119,5 +134,44 @@ mod tests {
         assert_eq!(fetched.path, repo.path);
         assert_eq!(fetched.default_base, repo.default_base);
         assert_eq!(fetched.created_at, repo.created_at);
+    }
+
+    #[test]
+    fn insert_and_get_worktree_round_trip() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db
+            .insert_repo("my-project", "/home/user/my-project", Some("main"))
+            .unwrap();
+
+        let wt = db
+            .insert_worktree(
+                repo.id,
+                "feature-auth",
+                "feature/auth",
+                "/home/user/.worktrees/my-project/feature-auth",
+                Some("main"),
+            )
+            .expect("insert_worktree should succeed");
+
+        assert_eq!(wt.repo_id, repo.id);
+        assert_eq!(wt.name, "feature-auth");
+        assert_eq!(wt.branch, "feature/auth");
+        assert_eq!(wt.path, "/home/user/.worktrees/my-project/feature-auth");
+        assert_eq!(wt.base_branch.as_deref(), Some("main"));
+        assert!(wt.managed);
+        assert!(wt.adopted_at.is_none());
+        assert!(wt.created_at > 0);
+
+        let fetched = db
+            .get_worktree(wt.id)
+            .expect("get_worktree should succeed")
+            .expect("worktree should exist");
+
+        assert_eq!(fetched.id, wt.id);
+        assert_eq!(fetched.name, wt.name);
+        assert_eq!(fetched.branch, wt.branch);
+        assert_eq!(fetched.path, wt.path);
+        assert_eq!(fetched.base_branch, wt.base_branch);
+        assert_eq!(fetched.managed, wt.managed);
     }
 }
