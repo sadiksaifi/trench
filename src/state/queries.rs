@@ -240,4 +240,29 @@ impl Database {
 
         Ok(self.conn.last_insert_rowid())
     }
+
+    /// Count events for a worktree, optionally filtered by event type.
+    pub fn count_events(
+        &self,
+        worktree_id: i64,
+        event_type: Option<&str>,
+    ) -> Result<i64> {
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match event_type {
+            Some(et) => (
+                "SELECT COUNT(*) FROM events WHERE worktree_id = ?1 AND event_type = ?2",
+                vec![Box::new(worktree_id), Box::new(et.to_string())],
+            ),
+            None => (
+                "SELECT COUNT(*) FROM events WHERE worktree_id = ?1",
+                vec![Box::new(worktree_id)],
+            ),
+        };
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let count: i64 = self
+            .conn
+            .query_row(sql, param_refs.as_slice(), |row| row.get(0))
+            .context("failed to count events")?;
+        Ok(count)
+    }
 }
