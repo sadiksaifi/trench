@@ -6,6 +6,14 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{layout::Alignment, widgets::Paragraph, Frame};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    List,
+    Detail,
+    Create,
+    Help,
+}
+
 type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
 
 /// Stores the pre-TUI panic hook so `restore_panic_hook` can put it back.
@@ -53,15 +61,23 @@ fn restore_panic_hook() {
 
 pub struct App {
     running: bool,
+    nav_stack: Vec<Screen>,
 }
 
 impl App {
     pub fn new() -> Self {
-        Self { running: true }
+        Self {
+            running: true,
+            nav_stack: vec![Screen::List],
+        }
     }
 
     pub fn is_running(&self) -> bool {
         self.running
+    }
+
+    pub fn active_screen(&self) -> Screen {
+        *self.nav_stack.last().expect("nav stack must never be empty")
     }
 
     pub fn ui(&self, frame: &mut Frame) {
@@ -89,6 +105,31 @@ mod tests {
     fn app_starts_in_running_state() {
         let app = App::new();
         assert!(app.is_running(), "newly created app should be running");
+    }
+
+    #[test]
+    fn app_starts_on_list_screen() {
+        let app = App::new();
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "app should start on the List screen"
+        );
+    }
+
+    #[test]
+    fn screen_enum_has_four_variants() {
+        // Verify all four screen variants exist and are distinct
+        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help];
+        for (i, a) in screens.iter().enumerate() {
+            for (j, b) in screens.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
     }
 
     #[test]
