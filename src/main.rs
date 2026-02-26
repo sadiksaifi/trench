@@ -72,9 +72,15 @@ impl Cli {
     }
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let output_config = cli.output_config();
+    let _output_config = cli.output_config();
+
+    if cli.command.is_none() {
+        return tui::run();
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
