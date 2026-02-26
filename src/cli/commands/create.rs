@@ -157,4 +157,52 @@ mod tests {
             "expected BranchAlreadyExists, got: {git_err:?}"
         );
     }
+
+    #[test]
+    fn two_worktrees_in_same_repo_share_one_repo_record() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        execute(
+            "feature-a",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("first create should succeed");
+
+        execute(
+            "feature-b",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("second create should succeed");
+
+        // Only one repo record in DB
+        let repo_path_str = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let db_repo = db
+            .get_repo_by_path(&repo_path_str)
+            .unwrap()
+            .expect("repo should exist");
+
+        // Two worktree records under the same repo
+        let worktrees = db.list_worktrees(db_repo.id).unwrap();
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0].branch, "feature-a");
+        assert_eq!(worktrees[1].branch, "feature-b");
+    }
 }
