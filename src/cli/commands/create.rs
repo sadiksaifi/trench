@@ -38,7 +38,7 @@ pub fn execute(
     let repo_path_str = path_to_utf8(&repo_info.path)?;
     let repo = match db.get_repo_by_path(repo_path_str)? {
         Some(r) => r,
-        None => db.insert_repo(&repo_info.name, repo_path_str, Some(base))?,
+        None => db.insert_repo(&repo_info.name, repo_path_str, Some(&repo_info.default_branch))?,
     };
 
     let sanitized_name = paths::sanitize_branch(branch);
