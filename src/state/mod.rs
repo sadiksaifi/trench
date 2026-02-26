@@ -268,6 +268,24 @@ mod tests {
     }
 
     #[test]
+    fn update_worktree_not_found() {
+        let db = Database::open_in_memory().unwrap();
+        let result = db.update_worktree(
+            999,
+            &WorktreeUpdate {
+                managed: Some(true),
+                ..Default::default()
+            },
+        );
+        let err = result.expect_err("should error for non-existent worktree");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "error should mention 'not found', got: {msg}"
+        );
+    }
+
+    #[test]
     fn foreign_key_prevents_orphan_worktree() {
         let db = Database::open_in_memory().unwrap();
         let result = db.insert_worktree(9999, "wt", "b", "/wt", None);

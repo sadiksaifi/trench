@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::OptionalExtension;
 
 use super::{Database, Repo, Worktree, WorktreeUpdate};
@@ -185,9 +185,14 @@ impl Database {
             sets.join(", ")
         );
         let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        self.conn
+        let affected = self
+            .conn
             .execute(&sql, param_refs.as_slice())
             .context("failed to update worktree")?;
+
+        if affected == 0 {
+            bail!("worktree with id {id} not found");
+        }
 
         Ok(())
     }
