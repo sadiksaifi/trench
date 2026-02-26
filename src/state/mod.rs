@@ -395,4 +395,25 @@ mod tests {
         let result = db.insert_worktree(9999, "wt", "b", "/wt", None);
         assert!(result.is_err(), "FK should reject non-existent repo_id");
     }
+
+    #[test]
+    fn get_repo_by_path_returns_none_for_missing() {
+        let db = Database::open_in_memory().unwrap();
+        let result = db.get_repo_by_path("/nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_repo_by_path_returns_existing_repo() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("my-project", "/home/user/my-project", Some("main")).unwrap();
+
+        let found = db.get_repo_by_path("/home/user/my-project").unwrap()
+            .expect("should find repo by path");
+
+        assert_eq!(found.id, repo.id);
+        assert_eq!(found.name, "my-project");
+        assert_eq!(found.path, "/home/user/my-project");
+        assert_eq!(found.default_base.as_deref(), Some("main"));
+    }
 }

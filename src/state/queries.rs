@@ -61,6 +61,29 @@ impl Database {
         Ok(repo)
     }
 
+    /// Get a repo by its filesystem path. Returns `None` if not found.
+    pub fn get_repo_by_path(&self, path: &str) -> Result<Option<Repo>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, path, default_base, created_at FROM repos WHERE path = ?1")
+            .context("failed to prepare get_repo_by_path query")?;
+
+        let repo = stmt
+            .query_row(rusqlite::params![path], |row| {
+                Ok(Repo {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    path: row.get(2)?,
+                    default_base: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .optional()
+            .context("failed to get repo by path")?;
+
+        Ok(repo)
+    }
+
     /// Insert a new worktree and return the populated struct.
     pub fn insert_worktree(
         &self,
