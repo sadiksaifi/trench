@@ -112,8 +112,19 @@ impl App {
         }
     }
 
-    fn handle_screen_key(&mut self, _key: KeyEvent) {
-        // Screen-specific key dispatch — will be implemented per-screen
+    fn handle_screen_key(&mut self, key: KeyEvent) {
+        match self.active_screen() {
+            Screen::List => self.handle_list_key(key),
+            Screen::Detail | Screen::Create | Screen::Help => {}
+        }
+    }
+
+    fn handle_list_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.push_screen(Screen::Detail),
+            KeyCode::Char('n') => self.push_screen(Screen::Create),
+            _ => {}
+        }
     }
 }
 
@@ -230,6 +241,51 @@ mod tests {
         let mut app = App::new();
         app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(!app.is_running(), "app should stop after Ctrl+C");
+    }
+
+    #[test]
+    fn enter_on_list_pushes_detail() {
+        let mut app = App::new();
+        assert_eq!(app.active_screen(), Screen::List);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::Detail,
+            "Enter on List should push Detail screen"
+        );
+        assert_eq!(app.nav_stack_depth(), 2);
+    }
+
+    #[test]
+    fn n_on_list_pushes_create() {
+        let mut app = App::new();
+        assert_eq!(app.active_screen(), Screen::List);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::Create,
+            "n on List should push Create screen"
+        );
+        assert_eq!(app.nav_stack_depth(), 2);
+    }
+
+    #[test]
+    fn enter_on_non_list_screen_does_nothing() {
+        let mut app = App::new();
+        // Push Help
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Help);
+
+        // Enter on Help should not push anything
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::Help,
+            "Enter on Help should do nothing"
+        );
+        assert_eq!(app.nav_stack_depth(), 2);
     }
 
     #[test]
