@@ -89,6 +89,8 @@ impl App {
     }
 
     pub fn ui(&self, frame: &mut Frame) {
+        // Intentional for early navigation UAT: every screen renders the same placeholder.
+        // Only the navigation stack/state changes (verified via key handling + tests).
         let placeholder = Paragraph::new("trench TUI — press q to quit")
             .alignment(Alignment::Center);
         frame.render_widget(placeholder, frame.area());
