@@ -81,7 +81,7 @@ pub fn render_worktree_path(template: &str, repo: &str, branch: &str) -> Result<
 /// - `/` → `-`
 /// - spaces → `-`
 /// - `@` → `-`
-/// - `..` → stripped
+/// - `..` → `-`
 /// - consecutive dashes collapsed
 /// - single dots preserved
 pub fn sanitize_branch(branch: &str) -> String {
