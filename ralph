@@ -99,6 +99,7 @@ Rules:
   2. Create PR via \`gh pr create\` with the structure below
   3. Print the UAT Checklist to stdout
   4. Then stop — you are done
+- Do not ask any question to the user. Do your own scrutiny. Do not present any options to the user. Present an option to yourself and do thinking and brainstorming by yourself, and come to the conclusion. Do not ask the user anything; just do your own thinking and then start planning. 
 
 PR description MUST follow this exact structure:
 
