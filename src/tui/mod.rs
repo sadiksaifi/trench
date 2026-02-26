@@ -80,6 +80,14 @@ impl App {
         *self.nav_stack.last().expect("nav stack must never be empty")
     }
 
+    pub fn nav_stack_depth(&self) -> usize {
+        self.nav_stack.len()
+    }
+
+    pub fn push_screen(&mut self, screen: Screen) {
+        self.nav_stack.push(screen);
+    }
+
     pub fn ui(&self, frame: &mut Frame) {
         let placeholder = Paragraph::new("trench TUI — press q to quit")
             .alignment(Alignment::Center);
@@ -87,9 +95,11 @@ impl App {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
+        // Global keys handled at app level
         match (key.code, key.modifiers) {
-            (KeyCode::Char('q'), _) => self.running = false,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
+            (KeyCode::Char('?'), _) => self.push_screen(Screen::Help),
+            (KeyCode::Char('q'), _) => self.running = false,
             _ => {}
         }
     }
@@ -130,6 +140,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn question_mark_pushes_help_from_any_screen() {
+        let mut app = App::new();
+        assert_eq!(app.active_screen(), Screen::List);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::Help,
+            "? should push Help screen"
+        );
+        assert_eq!(app.nav_stack_depth(), 2, "stack should have List + Help");
     }
 
     #[test]
