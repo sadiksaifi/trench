@@ -158,13 +158,13 @@ impl Database {
         let mut sets = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-        if let Some(v) = update.last_accessed {
+        if let Some(ref v) = update.last_accessed {
             sets.push("last_accessed = ?");
-            params.push(Box::new(v));
+            params.push(Box::new(*v));
         }
-        if let Some(v) = update.adopted_at {
+        if let Some(ref v) = update.adopted_at {
             sets.push("adopted_at = ?");
-            params.push(Box::new(v));
+            params.push(Box::new(*v));
         }
         if let Some(v) = update.managed {
             sets.push("managed = ?");

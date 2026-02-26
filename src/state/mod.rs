@@ -31,13 +31,22 @@ pub struct Worktree {
     pub created_at: i64,
 }
 
-/// Partial update fields for a worktree. `None` = no change, `Some` = set value.
+/// Partial update fields for a worktree.
+///
+/// For nullable columns (`last_accessed`, `adopted_at`, `base_branch`):
+///   - `None` = no change
+///   - `Some(None)` = set to NULL
+///   - `Some(Some(v))` = set to value
+///
+/// For NOT NULL columns (`managed`):
+///   - `None` = no change
+///   - `Some(v)` = set value
 #[derive(Debug, Default)]
 pub struct WorktreeUpdate {
-    pub last_accessed: Option<i64>,
-    pub adopted_at: Option<i64>,
+    pub last_accessed: Option<Option<i64>>,
+    pub adopted_at: Option<Option<i64>>,
     pub managed: Option<bool>,
-    pub base_branch: Option<String>,
+    pub base_branch: Option<Option<String>>,
 }
 
 /// Core database handle wrapping a SQLite connection with migrations applied.
@@ -227,8 +236,8 @@ mod tests {
         db.update_worktree(
             wt.id,
             &WorktreeUpdate {
-                last_accessed: Some(ts),
-                adopted_at: Some(ts),
+                last_accessed: Some(Some(ts)),
+                adopted_at: Some(Some(ts)),
                 ..Default::default()
             },
         )
@@ -304,6 +313,63 @@ mod tests {
             msg.contains("not found"),
             "error should mention 'not found', got: {msg}"
         );
+    }
+
+    #[test]
+    fn update_worktree_clears_nullable_field() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", Some("main"))
+            .unwrap();
+        assert_eq!(wt.base_branch.as_deref(), Some("main"));
+
+        // Set base_branch to a new value via Some(Some(...))
+        db.update_worktree(
+            wt.id,
+            &WorktreeUpdate {
+                base_branch: Some(Some("develop".to_string())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let fetched = db.get_worktree(wt.id).unwrap().unwrap();
+        assert_eq!(fetched.base_branch.as_deref(), Some("develop"));
+
+        // Clear base_branch to NULL via Some(None)
+        db.update_worktree(
+            wt.id,
+            &WorktreeUpdate {
+                base_branch: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let fetched = db.get_worktree(wt.id).unwrap().unwrap();
+        assert_eq!(fetched.base_branch, None, "base_branch should be NULL");
+
+        // Similarly test adopted_at: set then clear
+        db.update_worktree(
+            wt.id,
+            &WorktreeUpdate {
+                adopted_at: Some(Some(1700000000)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let fetched = db.get_worktree(wt.id).unwrap().unwrap();
+        assert_eq!(fetched.adopted_at, Some(1700000000));
+
+        db.update_worktree(
+            wt.id,
+            &WorktreeUpdate {
+                adopted_at: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let fetched = db.get_worktree(wt.id).unwrap().unwrap();
+        assert_eq!(fetched.adopted_at, None, "adopted_at should be NULL");
     }
 
     #[test]
