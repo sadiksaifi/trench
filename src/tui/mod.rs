@@ -1,7 +1,39 @@
 pub mod screens;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{layout::Alignment, widgets::Paragraph, Frame};
+
+/// Launch the TUI. This is the single public entry point.
+pub fn run() -> Result<()> {
+    install_panic_hook();
+    let mut terminal = ratatui::init();
+    let mut app = App::new();
+
+    let result = (|| -> Result<()> {
+        while app.is_running() {
+            terminal.draw(|frame| app.ui(frame))?;
+
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    app.handle_key_event(key);
+                }
+            }
+        }
+        Ok(())
+    })();
+
+    ratatui::restore();
+    result
+}
+
+fn install_panic_hook() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        ratatui::restore();
+        original_hook(info);
+    }));
+}
 
 pub struct App {
     running: bool,
