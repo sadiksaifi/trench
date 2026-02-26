@@ -31,6 +31,15 @@ pub struct Worktree {
     pub created_at: i64,
 }
 
+/// Partial update fields for a worktree. `None` = no change, `Some` = set value.
+#[derive(Debug, Default)]
+pub struct WorktreeUpdate {
+    pub last_accessed: Option<i64>,
+    pub adopted_at: Option<i64>,
+    pub managed: Option<bool>,
+    pub base_branch: Option<String>,
+}
+
 /// Core database handle wrapping a SQLite connection with migrations applied.
 pub struct Database {
     conn: Connection,
@@ -195,5 +204,35 @@ mod tests {
         let list_b = db.list_worktrees(repo_b.id).unwrap();
         assert_eq!(list_b.len(), 1);
         assert_eq!(list_b[0].name, "wt-3");
+    }
+
+    #[test]
+    fn update_worktree_modifies_fields() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        assert!(wt.last_accessed.is_none());
+        assert!(wt.adopted_at.is_none());
+
+        let ts = 1700000000_i64;
+        db.update_worktree(
+            wt.id,
+            &WorktreeUpdate {
+                last_accessed: Some(ts),
+                adopted_at: Some(ts),
+                ..Default::default()
+            },
+        )
+        .expect("update should succeed");
+
+        let fetched = db.get_worktree(wt.id).unwrap().unwrap();
+        assert_eq!(fetched.last_accessed, Some(ts));
+        assert_eq!(fetched.adopted_at, Some(ts));
+        // Other fields unchanged
+        assert_eq!(fetched.name, "wt");
+        assert!(fetched.managed);
     }
 }

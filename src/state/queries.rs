@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
 
-use super::{Database, Repo, Worktree};
+use super::{Database, Repo, Worktree, WorktreeUpdate};
 
 fn now() -> i64 {
     SystemTime::now()
@@ -151,5 +151,44 @@ impl Database {
             worktrees.push(row.context("failed to read worktree row")?);
         }
         Ok(worktrees)
+    }
+
+    /// Update selected fields on a worktree. Only `Some` fields are written.
+    pub fn update_worktree(&self, id: i64, update: &WorktreeUpdate) -> Result<()> {
+        let mut sets = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(v) = update.last_accessed {
+            sets.push("last_accessed = ?");
+            params.push(Box::new(v));
+        }
+        if let Some(v) = update.adopted_at {
+            sets.push("adopted_at = ?");
+            params.push(Box::new(v));
+        }
+        if let Some(v) = update.managed {
+            sets.push("managed = ?");
+            params.push(Box::new(v as i64));
+        }
+        if let Some(ref v) = update.base_branch {
+            sets.push("base_branch = ?");
+            params.push(Box::new(v.clone()));
+        }
+
+        if sets.is_empty() {
+            return Ok(());
+        }
+
+        params.push(Box::new(id));
+        let sql = format!(
+            "UPDATE worktrees SET {} WHERE id = ?",
+            sets.join(", ")
+        );
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        self.conn
+            .execute(&sql, param_refs.as_slice())
+            .context("failed to update worktree")?;
+
+        Ok(())
     }
 }
