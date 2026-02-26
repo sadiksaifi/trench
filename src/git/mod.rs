@@ -84,4 +84,20 @@ mod tests {
         let expected_name = tmp.path().file_name().unwrap().to_str().unwrap();
         assert_eq!(info.name, expected_name);
     }
+
+    #[test]
+    fn discover_repo_finds_repo_from_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(tmp.path());
+
+        // Create a nested subdirectory
+        let subdir = tmp.path().join("src").join("deep");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let info = discover_repo(&subdir).expect("should discover repo from subdir");
+
+        assert_eq!(info.path, tmp.path().canonicalize().unwrap());
+        let expected_name = tmp.path().file_name().unwrap().to_str().unwrap();
+        assert_eq!(info.name, expected_name);
+    }
 }
