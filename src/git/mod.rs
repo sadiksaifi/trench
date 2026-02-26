@@ -265,4 +265,31 @@ mod tests {
             "worktree should have .git entry"
         );
     }
+
+    #[test]
+    fn create_worktree_errors_when_branch_already_exists() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = head_branch(&repo);
+
+        // Create a branch that already exists
+        let base_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("existing-branch", &base_commit, false).unwrap();
+
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("existing-branch");
+
+        let result = create_worktree(repo_dir.path(), "existing-branch", &base, &target);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, GitError::BranchAlreadyExists { ref branch } if branch == "existing-branch"),
+            "expected BranchAlreadyExists, got: {err:?}"
+        );
+        assert!(
+            !target.exists(),
+            "worktree directory should NOT be created"
+        );
+    }
 }
