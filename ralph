@@ -97,7 +97,7 @@ Rules:
 - After ALL acceptance criteria are met and all checks pass:
   1. Push branch to origin
   2. Create PR via \`gh pr create\` with the structure below
-  3. Print a "## Manual Testing Checklist" to stdout listing concrete steps I should test manually
+  3. Print the UAT Checklist to stdout
   4. Then stop — you are done
 
 PR description MUST follow this exact structure:
@@ -118,11 +118,10 @@ Closes #${ISSUE}
 - \`cargo clippy\`: <pass/fail>
 - \`cargo test\`: <pass/fail>
 
-## Manual Testing Checklist
-<numbered steps the reviewer should follow to verify this works end-to-end, e.g.:
-1. cd into a git repo
-2. Run \`trench create my-feature\`
-3. Verify worktree exists at ~/.worktrees/repo/my-feature
+## UAT Checklist
+<real-world usage scenarios as GitHub task list. NOT duplicates of automated tests.
+- [ ] \`trench create my-feature\` → worktree at expected path
+- [ ] \`trench list\` → shows the new worktree
 ...>
 
 ## Known Issues
