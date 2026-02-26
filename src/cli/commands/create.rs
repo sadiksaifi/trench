@@ -6,6 +6,11 @@ use crate::git;
 use crate::paths;
 use crate::state::Database;
 
+fn path_to_utf8(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))
+}
+
 /// Execute the `trench create <branch>` command.
 ///
 /// Discovers the git repo, resolves the worktree path, creates the worktree
@@ -30,14 +35,14 @@ pub fn execute(
 
     git::create_worktree(&repo_info.path, branch, base, &worktree_path)?;
 
-    let repo_path_str = repo_info.path.to_str().unwrap_or_default();
+    let repo_path_str = path_to_utf8(&repo_info.path)?;
     let repo = match db.get_repo_by_path(repo_path_str)? {
         Some(r) => r,
         None => db.insert_repo(&repo_info.name, repo_path_str, Some(base))?,
     };
 
     let sanitized_name = paths::sanitize_branch(branch);
-    let worktree_path_str = worktree_path.to_str().unwrap_or_default();
+    let worktree_path_str = path_to_utf8(&worktree_path)?;
     let wt = db.insert_worktree(repo.id, &sanitized_name, branch, worktree_path_str, Some(base))?;
 
     db.insert_event(repo.id, Some(wt.id), "created", None)?;
