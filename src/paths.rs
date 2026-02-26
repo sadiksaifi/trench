@@ -72,7 +72,15 @@ pub fn render_worktree_path(template: &str, repo: &str, branch: &str) -> Result<
     let rendered = tmpl
         .render(minijinja::context! { repo => repo, branch => branch })
         .context("failed to render worktree path template")?;
-    Ok(PathBuf::from(rendered))
+    let path = PathBuf::from(rendered);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        anyhow::bail!("worktree path template must render a relative path without '..'");
+    }
+    Ok(path)
 }
 
 /// Sanitize a branch name for use as a filesystem directory name.
@@ -171,6 +179,22 @@ mod tests {
         let tmpl = "{{ repo }}/{{ branch }}";
         let path = render_worktree_path(tmpl, "trench", "feature/auth").unwrap();
         assert_eq!(path, PathBuf::from("trench/feature/auth"));
+    }
+
+    #[test]
+    fn render_template_rejects_absolute_path() {
+        let result = render_worktree_path("/absolute/{{ repo }}", "trench", "main");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("relative"), "expected 'relative' in error: {msg}");
+    }
+
+    #[test]
+    fn render_template_rejects_parent_dir() {
+        let result = render_worktree_path("{{ repo }}/../../etc", "trench", "main");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("'..'"), "expected '..' in error: {msg}");
     }
 
     #[test]
