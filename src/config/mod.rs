@@ -32,6 +32,7 @@ pub struct GlobalConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
     pub worktrees: Option<WorktreesConfig>,
+    pub hooks: Option<HooksConfig>,
 }
 
 /// Project-level config parsed from `.trench.toml` at repo root.
@@ -460,6 +461,35 @@ run = ["bun install"]
 
         let result = load_project_config(dir.path()).expect("should not error");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn global_config_with_hooks_deserializes() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            r#"
+[git]
+default_base = "main"
+
+[hooks.post_create]
+copy = [".env"]
+run = ["npm install"]
+
+[hooks.pre_remove]
+shell = "echo cleanup"
+"#,
+        );
+
+        let config = load_global_config_from(&path).unwrap();
+
+        let hooks = config.hooks.expect("hooks should be present");
+        let post_create = hooks.post_create.expect("post_create should exist");
+        assert_eq!(post_create.copy, Some(vec![".env".to_string()]));
+        assert_eq!(post_create.run, Some(vec!["npm install".to_string()]));
+
+        let pre_remove = hooks.pre_remove.expect("pre_remove should exist");
+        assert_eq!(pre_remove.shell.as_deref(), Some("echo cleanup"));
     }
 
     #[test]
