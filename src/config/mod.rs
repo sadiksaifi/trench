@@ -65,11 +65,11 @@ pub struct WorktreesConfig {
     pub scan: Option<Vec<String>>,
 }
 
-/// Load project config from a specific file path.
+/// Read and parse an optional TOML config file.
 ///
 /// Returns `Ok(None)` if the file does not exist.
-/// Returns an error if the file exists but contains invalid TOML.
-pub fn load_project_config_from(path: &Path) -> Result<Option<ProjectConfig>> {
+/// Returns an error if the file exists but cannot be read or contains invalid TOML.
+fn load_optional_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -82,9 +82,17 @@ pub fn load_project_config_from(path: &Path) -> Result<Option<ProjectConfig>> {
             );
         }
     };
-    let config: ProjectConfig = toml::from_str(&contents)
+    let config: T = toml::from_str(&contents)
         .with_context(|| format!("invalid TOML in config file: {}", path.display()))?;
     Ok(Some(config))
+}
+
+/// Load project config from a specific file path.
+///
+/// Returns `Ok(None)` if the file does not exist.
+/// Returns an error if the file exists but contains invalid TOML.
+pub fn load_project_config_from(path: &Path) -> Result<Option<ProjectConfig>> {
+    load_optional_toml(path)
 }
 
 // --- Resolved config (FR-1) ---
@@ -245,21 +253,7 @@ pub fn load_project_config(repo_root: &Path) -> Result<Option<ProjectConfig>> {
 /// Returns `GlobalConfig::default()` if the file does not exist.
 /// Returns an error if the file exists but contains invalid TOML.
 pub fn load_global_config_from(path: &Path) -> Result<GlobalConfig> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(GlobalConfig::default());
-        }
-        Err(e) => {
-            return Err(
-                anyhow::Error::new(e)
-                    .context(format!("failed to read config file: {}", path.display())),
-            );
-        }
-    };
-    let config: GlobalConfig = toml::from_str(&contents)
-        .with_context(|| format!("invalid TOML in config file: {}", path.display()))?;
-    Ok(config)
+    load_optional_toml(path).map(|opt| opt.unwrap_or_default())
 }
 
 /// Return the path to the global config file (`~/.config/trench/config.toml`).
