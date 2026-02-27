@@ -589,6 +589,111 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_includes_hooks_when_configured() {
+        use crate::config::{HookDef, HooksConfig};
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+
+        let hooks = HooksConfig {
+            post_create: Some(HookDef {
+                copy: Some(vec![".env*".to_string()]),
+                run: Some(vec!["bun install".to_string()]),
+                ..HookDef::default()
+            }),
+            pre_create: Some(HookDef {
+                run: Some(vec!["echo pre".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let plan = execute_dry_run(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            Some(&hooks),
+        )
+        .expect("dry-run should succeed");
+
+        let plan_hooks = plan.hooks.expect("hooks should be present in plan");
+        let post_create = plan_hooks
+            .post_create
+            .expect("post_create should be present");
+        assert_eq!(
+            post_create.run,
+            Some(vec!["bun install".to_string()])
+        );
+        assert_eq!(
+            post_create.copy,
+            Some(vec![".env*".to_string()])
+        );
+
+        let pre_create = plan_hooks
+            .pre_create
+            .expect("pre_create should be present");
+        assert_eq!(
+            pre_create.run,
+            Some(vec!["echo pre".to_string()])
+        );
+    }
+
+    #[test]
+    fn dry_run_includes_hooks_in_text_output() {
+        use crate::config::{HookDef, HooksConfig};
+
+        let plan = DryRunPlan {
+            dry_run: true,
+            branch: "foo".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/tmp/wt/foo".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: Some(HooksConfig {
+                post_create: Some(HookDef {
+                    copy: Some(vec![".env*".to_string()]),
+                    run: Some(vec!["bun install".to_string()]),
+                    ..HookDef::default()
+                }),
+                ..HooksConfig::default()
+            }),
+        };
+
+        let text = plan.to_string();
+        assert!(text.contains("post_create"), "should mention post_create hook");
+        assert!(text.contains("bun install"), "should list run commands");
+        assert!(text.contains(".env*"), "should list copy patterns");
+    }
+
+    #[test]
+    fn dry_run_includes_hooks_in_json_output() {
+        use crate::config::{HookDef, HooksConfig};
+
+        let plan = DryRunPlan {
+            dry_run: true,
+            branch: "foo".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/tmp/wt/foo".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: Some(HooksConfig {
+                post_create: Some(HookDef {
+                    run: Some(vec!["bun install".to_string()]),
+                    ..HookDef::default()
+                }),
+                ..HooksConfig::default()
+            }),
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&plan).unwrap();
+        let hooks = &json["hooks"];
+        assert!(hooks.is_object(), "hooks should be an object");
+        let post_create = &hooks["post_create"];
+        assert_eq!(post_create["run"][0], "bun install");
+    }
+
+    #[test]
     fn create_with_from_stores_default_branch_not_from_override() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());
