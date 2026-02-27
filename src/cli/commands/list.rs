@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::git;
+use crate::output::table::Table;
 use crate::state::Database;
 
 /// Execute the `trench list` command.
@@ -27,7 +28,12 @@ pub fn execute(cwd: &Path, db: &Database) -> Result<String> {
         return Ok("No worktrees. Use `trench create` to get started.".to_string());
     }
 
-    todo!("table formatting")
+    let mut table = Table::new(vec!["Name", "Branch", "Path", "Status"]);
+    for wt in &worktrees {
+        table = table.row(vec![&wt.name, &wt.branch, &wt.path, "clean"]);
+    }
+
+    Ok(table.render())
 }
 
 #[cfg(test)]
@@ -45,6 +51,58 @@ mod tests {
                 .unwrap();
         }
         repo
+    }
+
+    #[test]
+    fn displays_worktrees_in_formatted_table() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        db.insert_worktree(
+            db_repo.id,
+            "feature-auth",
+            "feature/auth",
+            "/home/user/.worktrees/proj/feature-auth",
+            Some("main"),
+        )
+        .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "fix-bug",
+            "fix/bug",
+            "/home/user/.worktrees/proj/fix-bug",
+            Some("main"),
+        )
+        .unwrap();
+
+        let output = execute(repo_dir.path(), &db).expect("list should succeed");
+
+        // Should contain column headers
+        assert!(output.contains("Name"), "output should have Name header");
+        assert!(output.contains("Branch"), "output should have Branch header");
+        assert!(output.contains("Path"), "output should have Path header");
+        assert!(output.contains("Status"), "output should have Status header");
+
+        // Should contain both worktree names
+        assert!(
+            output.contains("feature-auth"),
+            "output should contain first worktree"
+        );
+        assert!(
+            output.contains("fix-bug"),
+            "output should contain second worktree"
+        );
+
+        // Should have header + 2 data rows
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 3, "expected header + 2 data rows");
     }
 
     #[test]
