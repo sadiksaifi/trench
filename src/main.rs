@@ -132,7 +132,8 @@ fn run_create(branch: &str, from: Option<&str>) -> anyhow::Result<()> {
         Err(e) => {
             if let Some(git_err) = e.downcast_ref::<git::GitError>() {
                 match git_err {
-                    git::GitError::BranchAlreadyExists { .. } => {
+                    git::GitError::BranchAlreadyExists { .. }
+                    | git::GitError::RemoteBranchAlreadyExists { .. } => {
                         eprintln!("error: {e}");
                         std::process::exit(3);
                     }

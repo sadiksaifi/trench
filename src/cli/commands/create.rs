@@ -187,6 +187,50 @@ mod tests {
     }
 
     #[test]
+    fn create_errors_when_branch_exists_on_remote() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Create a remote tracking ref (origin/remote-branch)
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree = repo
+            .find_tree(repo.index().unwrap().write_tree().unwrap())
+            .unwrap();
+        let remote_oid = repo
+            .commit(None, &sig, &sig, "remote commit", &tree, &[&head])
+            .unwrap();
+        repo.reference(
+            "refs/remotes/origin/remote-branch",
+            remote_oid,
+            false,
+            "fake remote tracking branch",
+        )
+        .unwrap();
+
+        let result = execute(
+            "remote-branch",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        );
+
+        let err = result.expect_err("should fail when branch exists on remote");
+        let git_err = err
+            .downcast_ref::<git::GitError>()
+            .expect("error should be GitError");
+        assert!(
+            matches!(git_err, git::GitError::RemoteBranchAlreadyExists { ref branch, .. } if branch == "remote-branch"),
+            "expected RemoteBranchAlreadyExists, got: {git_err:?}"
+        );
+    }
+
+    #[test]
     fn two_worktrees_in_same_repo_share_one_repo_record() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
