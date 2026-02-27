@@ -13,11 +13,21 @@ fn ensure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Return the trench config directory (`~/.config/trench/`), creating it if needed.
-pub fn config_dir() -> Result<PathBuf> {
+/// Return the trench config directory path (`~/.config/trench/`) without creating it.
+///
+/// Use this in read-only contexts (e.g. config loading, `--dry-run`) where no
+/// side effects are allowed. For contexts that need the directory to exist,
+/// use [`config_dir`].
+pub fn config_dir_path() -> Result<PathBuf> {
     let path = dirs::config_dir()
         .context("could not determine config directory")?
         .join(APP_NAME);
+    Ok(path)
+}
+
+/// Return the trench config directory (`~/.config/trench/`), creating it if needed.
+pub fn config_dir() -> Result<PathBuf> {
+    let path = config_dir_path()?;
     ensure_dir(&path)?;
     Ok(path)
 }
@@ -185,6 +195,13 @@ mod tests {
         let path = worktree_root_path().unwrap();
         assert!(path.ends_with(".worktrees"));
         assert!(path.starts_with(dirs::home_dir().unwrap()));
+    }
+
+    #[test]
+    fn config_dir_path_returns_path_without_creating_it() {
+        let path = config_dir_path().unwrap();
+        assert!(path.ends_with("trench"));
+        assert!(path.starts_with(dirs::config_dir().unwrap()));
     }
 
     #[test]

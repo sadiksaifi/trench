@@ -257,8 +257,11 @@ pub fn load_global_config_from(path: &Path) -> Result<GlobalConfig> {
 }
 
 /// Return the path to the global config file (`~/.config/trench/config.toml`).
+///
+/// Uses the non-mutating path accessor so config loading never creates
+/// directories as a side effect (important for `--dry-run`).
 pub fn global_config_path() -> Result<PathBuf> {
-    Ok(paths::config_dir()?.join("config.toml"))
+    Ok(paths::config_dir_path()?.join("config.toml"))
 }
 
 /// Load global config from the XDG config directory.
