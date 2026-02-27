@@ -1,10 +1,95 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::config::HooksConfig;
 use crate::git;
 use crate::paths;
 use crate::state::Database;
+
+/// Plan produced by `--dry-run` showing what `trench create` would do.
+#[derive(Debug, serde::Serialize)]
+pub struct DryRunPlan {
+    /// Always `true` — signals this is a preview, not a real operation.
+    pub dry_run: bool,
+    pub branch: String,
+    pub base_branch: String,
+    pub worktree_path: String,
+    pub repo_name: String,
+    pub hooks: Option<HooksConfig>,
+}
+
+impl fmt::Display for DryRunPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Dry run — no changes will be made\n")?;
+        writeln!(f, "  Branch:    {}", self.branch)?;
+        writeln!(f, "  Base:      {}", self.base_branch)?;
+        writeln!(f, "  Worktree:  {}", self.worktree_path)?;
+
+        match &self.hooks {
+            Some(hooks) if hooks.pre_create.is_some() || hooks.post_create.is_some() => {
+                writeln!(f, "  Hooks:")?;
+                if let Some(h) = &hooks.pre_create {
+                    writeln!(f, "    pre_create:")?;
+                    format_hook_def(f, h)?;
+                }
+                if let Some(h) = &hooks.post_create {
+                    writeln!(f, "    post_create:")?;
+                    format_hook_def(f, h)?;
+                }
+            }
+            _ => {
+                writeln!(f, "  Hooks:     (none)")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn format_hook_def(f: &mut fmt::Formatter<'_>, hook: &crate::config::HookDef) -> fmt::Result {
+    if let Some(copy) = &hook.copy {
+        writeln!(f, "      copy: {}", copy.join(", "))?;
+    }
+    if let Some(run) = &hook.run {
+        writeln!(f, "      run:  {}", run.join(", "))?;
+    }
+    if let Some(shell) = &hook.shell {
+        writeln!(f, "      shell: {shell}")?;
+    }
+    if let Some(timeout) = &hook.timeout_secs {
+        writeln!(f, "      timeout: {timeout}s")?;
+    }
+    Ok(())
+}
+
+/// Execute a dry-run of `trench create <branch>`.
+///
+/// Discovers the repo and resolves the worktree path, but performs no git
+/// operations, no DB writes, and no hook execution.
+pub fn execute_dry_run(
+    branch: &str,
+    from: Option<&str>,
+    cwd: &Path,
+    worktree_root: &Path,
+    template: &str,
+    hooks: Option<&HooksConfig>,
+) -> Result<DryRunPlan> {
+    let repo_info = git::discover_repo(cwd)?;
+    let relative_path = paths::render_worktree_path(template, &repo_info.name, branch)?;
+    let worktree_path = worktree_root.join(relative_path);
+    let base = from.unwrap_or(&repo_info.default_branch);
+
+    Ok(DryRunPlan {
+        dry_run: true,
+        branch: branch.to_string(),
+        base_branch: base.to_string(),
+        worktree_path: worktree_path.to_string_lossy().to_string(),
+        repo_name: repo_info.name.clone(),
+        hooks: hooks.cloned(),
+    })
+}
 
 fn path_to_utf8(path: &Path) -> Result<&str> {
     path.to_str()
@@ -401,6 +486,280 @@ mod tests {
             !expected_wt_path.exists(),
             "worktree directory should NOT be created"
         );
+    }
+
+    #[test]
+    fn dry_run_returns_plan_with_correct_fields_and_no_side_effects() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let plan = execute_dry_run(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            None,
+        )
+        .expect("dry-run should succeed");
+
+        // Plan fields are correct
+        assert_eq!(plan.branch, "my-feature");
+        assert!(!plan.base_branch.is_empty(), "base_branch should be set");
+        assert!(
+            plan.worktree_path.contains("my-feature"),
+            "worktree_path should contain branch name"
+        );
+        assert!(!plan.repo_name.is_empty(), "repo_name should be set");
+
+        // No side effects: no worktree on disk
+        let repo_name = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let expected_path = wt_root.path().join(&repo_name).join("my-feature");
+        assert!(
+            !expected_path.exists(),
+            "worktree directory should NOT be created on disk during dry-run"
+        );
+
+        // No side effects: no DB records
+        let repo_path_str = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap();
+        assert!(
+            db_repo.is_none(),
+            "no repo record should be inserted during dry-run"
+        );
+    }
+
+    #[test]
+    fn dry_run_plan_formats_as_readable_text() {
+        let plan = DryRunPlan {
+            dry_run: true,
+            branch: "my-feature".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/home/.worktrees/repo/my-feature".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: None,
+        };
+
+        let text = plan.to_string();
+        assert!(text.contains("my-feature"), "should contain branch name");
+        assert!(text.contains("main"), "should contain base branch");
+        assert!(
+            text.contains("/home/.worktrees/repo/my-feature"),
+            "should contain worktree path"
+        );
+        assert!(
+            text.contains("dry run") || text.contains("Dry run") || text.contains("DRY RUN"),
+            "should indicate this is a dry run"
+        );
+    }
+
+    #[test]
+    fn dry_run_plan_serializes_to_json_with_expected_fields() {
+        let plan = DryRunPlan {
+            dry_run: true,
+            branch: "my-feature".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/home/.worktrees/repo/my-feature".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: None,
+        };
+
+        let json: serde_json::Value =
+            serde_json::to_value(&plan).expect("should serialize to JSON");
+
+        assert_eq!(json["dry_run"], true);
+        assert_eq!(json["branch"], "my-feature");
+        assert_eq!(json["base_branch"], "main");
+        assert_eq!(json["worktree_path"], "/home/.worktrees/repo/my-feature");
+        assert!(json["hooks"].is_null() || json["hooks"].is_object());
+    }
+
+    #[test]
+    fn dry_run_includes_hooks_when_configured() {
+        use crate::config::{HookDef, HooksConfig};
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+
+        let hooks = HooksConfig {
+            post_create: Some(HookDef {
+                copy: Some(vec![".env*".to_string()]),
+                run: Some(vec!["bun install".to_string()]),
+                ..HookDef::default()
+            }),
+            pre_create: Some(HookDef {
+                run: Some(vec!["echo pre".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let plan = execute_dry_run(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            Some(&hooks),
+        )
+        .expect("dry-run should succeed");
+
+        let plan_hooks = plan.hooks.expect("hooks should be present in plan");
+        let post_create = plan_hooks
+            .post_create
+            .expect("post_create should be present");
+        assert_eq!(
+            post_create.run,
+            Some(vec!["bun install".to_string()])
+        );
+        assert_eq!(
+            post_create.copy,
+            Some(vec![".env*".to_string()])
+        );
+
+        let pre_create = plan_hooks
+            .pre_create
+            .expect("pre_create should be present");
+        assert_eq!(
+            pre_create.run,
+            Some(vec!["echo pre".to_string()])
+        );
+    }
+
+    #[test]
+    fn dry_run_includes_hooks_in_text_output() {
+        use crate::config::{HookDef, HooksConfig};
+
+        let plan = DryRunPlan {
+            dry_run: true,
+            branch: "foo".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/tmp/wt/foo".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: Some(HooksConfig {
+                post_create: Some(HookDef {
+                    copy: Some(vec![".env*".to_string()]),
+                    run: Some(vec!["bun install".to_string()]),
+                    ..HookDef::default()
+                }),
+                ..HooksConfig::default()
+            }),
+        };
+
+        let text = plan.to_string();
+        assert!(text.contains("post_create"), "should mention post_create hook");
+        assert!(text.contains("bun install"), "should list run commands");
+        assert!(text.contains(".env*"), "should list copy patterns");
+    }
+
+    #[test]
+    fn dry_run_shows_timeout_secs_when_configured() {
+        use crate::config::{HookDef, HooksConfig};
+
+        let plan = DryRunPlan {
+            dry_run: true,
+            branch: "foo".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/tmp/wt/foo".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: Some(HooksConfig {
+                post_create: Some(HookDef {
+                    run: Some(vec!["bun install".to_string()]),
+                    timeout_secs: Some(30),
+                    ..HookDef::default()
+                }),
+                ..HooksConfig::default()
+            }),
+        };
+
+        let text = plan.to_string();
+        assert!(text.contains("timeout"), "should display timeout_secs");
+        assert!(text.contains("30"), "should display timeout value");
+    }
+
+    #[test]
+    fn dry_run_includes_hooks_in_json_output() {
+        use crate::config::{HookDef, HooksConfig};
+
+        let plan = DryRunPlan {
+            dry_run: true,
+            branch: "foo".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/tmp/wt/foo".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: Some(HooksConfig {
+                post_create: Some(HookDef {
+                    run: Some(vec!["bun install".to_string()]),
+                    ..HookDef::default()
+                }),
+                ..HooksConfig::default()
+            }),
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&plan).unwrap();
+        let hooks = &json["hooks"];
+        assert!(hooks.is_object(), "hooks should be an object");
+        let post_create = &hooks["post_create"];
+        assert_eq!(post_create["run"][0], "bun install");
+    }
+
+    #[test]
+    fn dry_run_empty_hooks_config_shows_none() {
+        let plan = DryRunPlan {
+            dry_run: true,
+            branch: "foo".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/tmp/wt/foo".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: Some(crate::config::HooksConfig::default()),
+        };
+
+        let text = plan.to_string();
+        assert!(
+            text.contains("Hooks:") && text.contains("(none)"),
+            "empty HooksConfig should display '(none)', got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn dry_run_with_from_shows_custom_base() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+
+        // Create a "develop" branch so --from has something valid
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("develop", &head_commit, false).unwrap();
+
+        let plan = execute_dry_run(
+            "my-feature",
+            Some("develop"),
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            None,
+        )
+        .expect("dry-run with --from should succeed");
+
+        assert_eq!(plan.base_branch, "develop", "base should reflect --from override");
     }
 
     #[test]

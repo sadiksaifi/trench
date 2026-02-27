@@ -96,9 +96,12 @@ fn main() -> anyhow::Result<()> {
         return tui::run();
     }
 
+    let dry_run = cli.dry_run;
+    let json = cli.json;
+
     match cli.command {
         Some(Commands::Create { branch, from }) => {
-            run_create(&branch, from.as_deref())
+            run_create(&branch, from.as_deref(), dry_run, json)
         }
         Some(Commands::List) => run_list(),
         Some(_) => {
@@ -111,8 +114,37 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn run_create(branch: &str, from: Option<&str>) -> anyhow::Result<()> {
+fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
+
+    // Load config once so both dry-run and actual execution use the same
+    // resolved template and hooks.
+    let repo_info = git::discover_repo(&cwd)?;
+    let project_config = config::load_project_config(&repo_info.path)?;
+    let global_config = config::load_global_config()?;
+    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+
+    if dry_run {
+        // Use the non-mutating path accessor — dry-run must not create dirs.
+        let worktree_root = paths::worktree_root_path()?;
+        let plan = cli::commands::create::execute_dry_run(
+            branch,
+            from,
+            &cwd,
+            &worktree_root,
+            &resolved.worktrees.root,
+            resolved.hooks.as_ref(),
+        )?;
+
+        if json {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        } else {
+            print!("{plan}");
+        }
+        return Ok(());
+    }
+
+    // Only real execution creates the worktree root directory on disk.
     let worktree_root = paths::worktree_root()?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
@@ -122,7 +154,7 @@ fn run_create(branch: &str, from: Option<&str>) -> anyhow::Result<()> {
         from,
         &cwd,
         &worktree_root,
-        paths::DEFAULT_WORKTREE_TEMPLATE,
+        &resolved.worktrees.root,
         &db,
     ) {
         Ok(path) => {
@@ -314,6 +346,26 @@ mod tests {
     fn should_not_launch_tui_when_stdout_not_tty() {
         let cli = Cli::try_parse_from(["trench"]).unwrap();
         assert!(!cli.should_launch_tui(true, false));
+    }
+
+    #[test]
+    fn dry_run_flag_works_with_create_subcommand() {
+        let cli = Cli::try_parse_from(["trench", "--dry-run", "create", "my-feature"])
+            .expect("--dry-run with create should parse");
+        assert!(cli.dry_run);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Create { ref branch, .. }) if branch == "my-feature"
+        ));
+    }
+
+    #[test]
+    fn dry_run_and_json_flags_work_together_with_create() {
+        let cli =
+            Cli::try_parse_from(["trench", "--dry-run", "--json", "create", "my-feature"])
+                .expect("--dry-run --json with create should parse");
+        assert!(cli.dry_run);
+        assert!(cli.json);
     }
 
     #[test]

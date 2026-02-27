@@ -13,11 +13,21 @@ fn ensure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Return the trench config directory (`~/.config/trench/`), creating it if needed.
-pub fn config_dir() -> Result<PathBuf> {
+/// Return the trench config directory path (`~/.config/trench/`) without creating it.
+///
+/// Use this in read-only contexts (e.g. config loading, `--dry-run`) where no
+/// side effects are allowed. For contexts that need the directory to exist,
+/// use [`config_dir`].
+pub fn config_dir_path() -> Result<PathBuf> {
     let path = dirs::config_dir()
         .context("could not determine config directory")?
         .join(APP_NAME);
+    Ok(path)
+}
+
+/// Return the trench config directory (`~/.config/trench/`), creating it if needed.
+pub fn config_dir() -> Result<PathBuf> {
+    let path = config_dir_path()?;
     ensure_dir(&path)?;
     Ok(path)
 }
@@ -51,11 +61,21 @@ pub fn state_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Return the worktree root directory (`~/.worktrees/`), creating it if needed.
-pub fn worktree_root() -> Result<PathBuf> {
+/// Return the worktree root path (`~/.worktrees/`) without creating it on disk.
+///
+/// Use this in read-only contexts (e.g. `--dry-run`) where no side effects
+/// are allowed. For real execution, use [`worktree_root`] which also creates
+/// the directory.
+pub fn worktree_root_path() -> Result<PathBuf> {
     let path = dirs::home_dir()
         .context("could not determine home directory")?
         .join(DEFAULT_WORKTREE_DIR);
+    Ok(path)
+}
+
+/// Return the worktree root directory (`~/.worktrees/`), creating it if needed.
+pub fn worktree_root() -> Result<PathBuf> {
+    let path = worktree_root_path()?;
     ensure_dir(&path)?;
     Ok(path)
 }
@@ -164,6 +184,24 @@ mod tests {
         assert!(path.ends_with(".worktrees"));
         assert!(path.starts_with(dirs::home_dir().unwrap()));
         assert!(path.exists());
+    }
+
+    #[test]
+    fn worktree_root_path_returns_path_without_creating_it() {
+        // worktree_root_path() should return the same path as worktree_root()
+        // but must NOT create the directory. We can't easily test non-creation
+        // on a real home dir (it likely already exists), so we verify the
+        // function exists and returns the expected path shape.
+        let path = worktree_root_path().unwrap();
+        assert!(path.ends_with(".worktrees"));
+        assert!(path.starts_with(dirs::home_dir().unwrap()));
+    }
+
+    #[test]
+    fn config_dir_path_returns_path_without_creating_it() {
+        let path = config_dir_path().unwrap();
+        assert!(path.ends_with("trench"));
+        assert!(path.starts_with(dirs::config_dir().unwrap()));
     }
 
     #[test]
