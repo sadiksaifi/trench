@@ -108,13 +108,19 @@ pub fn create_worktree(
         });
     }
 
-    // Resolve base branch to a commit (try local first)
-    let base_commit = match repo.find_branch(base, git2::BranchType::Local) {
-        Ok(branch_ref) => branch_ref.get().peel_to_commit()?,
-        Err(_) => {
-            return Err(GitError::BaseBranchNotFound {
-                base: base.to_string(),
-            });
+    // Resolve base branch to a commit (try local, then remote tracking)
+    let base_commit = if let Ok(local) = repo.find_branch(base, git2::BranchType::Local) {
+        local.get().peel_to_commit()?
+    } else {
+        // Try remote tracking branch: origin/<base>
+        let remote_name = format!("origin/{base}");
+        match repo.find_branch(&remote_name, git2::BranchType::Remote) {
+            Ok(remote) => remote.get().peel_to_commit()?,
+            Err(_) => {
+                return Err(GitError::BaseBranchNotFound {
+                    base: base.to_string(),
+                });
+            }
         }
     };
 
@@ -363,6 +369,64 @@ mod tests {
             repo.find_branch("will-fail", git2::BranchType::Local)
                 .is_err(),
             "branch should be deleted after worktree creation failure"
+        );
+    }
+
+    #[test]
+    fn create_worktree_resolves_base_from_remote_tracking_branch() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+
+        // Create a distinct commit to use as the remote tracking branch tip
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+        let release_oid = repo
+            .commit(None, &sig, &sig, "release commit", &tree, &[&head])
+            .unwrap();
+
+        // Manually create a remote tracking ref (origin/release) without an actual remote
+        repo.reference(
+            "refs/remotes/origin/release",
+            release_oid,
+            false,
+            "fake remote tracking branch for test",
+        )
+        .unwrap();
+
+        // Verify: "release" does NOT exist locally, only as remote tracking
+        assert!(
+            repo.find_branch("release", git2::BranchType::Local).is_err(),
+            "release should not exist as a local branch"
+        );
+        assert!(
+            repo.find_branch("origin/release", git2::BranchType::Remote).is_ok(),
+            "origin/release should exist as a remote tracking branch"
+        );
+
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("my-feature");
+
+        // Use "release" as base — should resolve via remote tracking
+        let result = create_worktree(repo_dir.path(), "my-feature", "release", &target);
+        assert!(
+            result.is_ok(),
+            "should resolve base from remote tracking branch, got: {:?}",
+            result.unwrap_err()
+        );
+        assert!(target.exists(), "worktree directory should exist");
+
+        // Verify the new branch's commit matches origin/release
+        let feature_oid = repo
+            .find_branch("my-feature", git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+        assert_eq!(
+            feature_oid, release_oid,
+            "new branch should point to the same commit as origin/release"
         );
     }
 
