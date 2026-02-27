@@ -146,7 +146,11 @@ fn run_list() -> anyhow::Result<()> {
     let db = state::Database::open(&db_path)?;
 
     let output = cli::commands::list::execute(&cwd, &db)?;
-    print!("{output}");
+    if output.ends_with('\n') {
+        print!("{output}");
+    } else {
+        println!("{output}");
+    }
     Ok(())
 }
 

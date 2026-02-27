@@ -25,7 +25,7 @@ pub fn execute(cwd: &Path, db: &Database) -> Result<String> {
     };
 
     if worktrees.is_empty() {
-        return Ok("No worktrees. Use `trench create` to get started.".to_string());
+        return Ok("No worktrees. Use `trench create` to get started.\n".to_string());
     }
 
     let mut table = Table::new(vec!["Name", "Branch", "Path", "Status"]);
@@ -169,6 +169,20 @@ mod tests {
         assert!(
             output.contains("trench create"),
             "empty state should hint at 'trench create', got: {output}"
+        );
+    }
+
+    #[test]
+    fn empty_state_output_ends_with_newline() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let output = execute(repo_dir.path(), &db).expect("list should succeed");
+
+        assert!(
+            output.ends_with('\n'),
+            "empty-state output must end with newline, got: {output:?}"
         );
     }
 }
