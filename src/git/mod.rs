@@ -18,6 +18,9 @@ pub enum GitError {
     #[error("branch already exists: {branch}")]
     BranchAlreadyExists { branch: String },
 
+    #[error("base branch not found: {base}")]
+    BaseBranchNotFound { base: String },
+
     #[error("{0}")]
     Git(#[from] git2::Error),
 }
@@ -105,9 +108,15 @@ pub fn create_worktree(
         });
     }
 
-    // Resolve base branch to a commit
-    let base_ref = repo.find_branch(base, git2::BranchType::Local)?;
-    let base_commit = base_ref.get().peel_to_commit()?;
+    // Resolve base branch to a commit (try local first)
+    let base_commit = match repo.find_branch(base, git2::BranchType::Local) {
+        Ok(branch_ref) => branch_ref.get().peel_to_commit()?,
+        Err(_) => {
+            return Err(GitError::BaseBranchNotFound {
+                base: base.to_string(),
+            });
+        }
+    };
 
     // Create the new branch from base and add the worktree.
     // If worktree creation fails, clean up the orphaned branch.
@@ -367,9 +376,10 @@ mod tests {
         let result = create_worktree(repo_dir.path(), "feature", "nonexistent-base", &target);
 
         assert!(result.is_err());
+        let err = result.unwrap_err();
         assert!(
-            matches!(result.unwrap_err(), GitError::Git(_)),
-            "missing base branch should yield GitError::Git"
+            matches!(err, GitError::BaseBranchNotFound { ref base } if base == "nonexistent-base"),
+            "missing base branch should yield BaseBranchNotFound, got: {err:?}"
         );
     }
 
