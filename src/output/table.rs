@@ -107,8 +107,7 @@ impl Table {
             out.push('\n');
         };
 
-        let headers_as_strings: Vec<String> = self.headers.clone();
-        render_line(&mut out, &headers_as_strings, &col_widths);
+        render_line(&mut out, &self.headers, &col_widths);
 
         for row in &self.rows {
             render_line(&mut out, row, &col_widths);
