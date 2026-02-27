@@ -67,6 +67,12 @@ pub struct Database {
 }
 
 impl Database {
+    /// Expose the raw connection for test-only operations.
+    #[cfg(test)]
+    pub fn conn_for_test(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Open (or create) the database at the given file path.
     ///
     /// Applies pragmas (WAL, FK, synchronous NORMAL) and runs all pending migrations.
