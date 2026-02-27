@@ -115,6 +115,14 @@ pub fn create_worktree(
         });
     }
 
+    // Best-effort fetch to refresh remote-tracking refs.
+    // If fetch fails (offline, no remote, auth), fall back to stale local refs.
+    if let Ok(mut origin) = repo.find_remote("origin") {
+        let mut fetch_opts = git2::FetchOptions::new();
+        fetch_opts.prune(git2::FetchPrune::On);
+        let _ = origin.fetch(&[] as &[&str], Some(&mut fetch_opts), None);
+    }
+
     // Check if branch already exists on remote
     let remote_name = format!("origin/{branch}");
     if repo
@@ -561,6 +569,79 @@ mod tests {
             !target.exists(),
             "worktree directory should NOT be created"
         );
+    }
+
+    #[test]
+    fn create_worktree_succeeds_after_remote_branch_deleted() {
+        // Setup: bare "remote" repo with a branch, clone it, delete the branch on remote.
+        // The clone retains a stale remote-tracking ref (origin/stale-branch).
+        // create_worktree should fetch+prune, clearing the stale ref, and succeed.
+
+        let remote_dir = tempfile::tempdir().unwrap();
+        let remote_repo = git2::Repository::init_bare(remote_dir.path()).unwrap();
+        {
+            // Need an initial commit in the bare repo — build tree + commit directly
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let empty_tree = remote_repo
+                .treebuilder(None)
+                .unwrap()
+                .write()
+                .unwrap();
+            let tree = remote_repo.find_tree(empty_tree).unwrap();
+            let oid = remote_repo
+                .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+            // Create a branch that we'll later delete
+            let commit = remote_repo.find_commit(oid).unwrap();
+            remote_repo
+                .branch("stale-branch", &commit, false)
+                .unwrap();
+        }
+
+        // Clone (local file path)
+        let clone_dir = tempfile::tempdir().unwrap();
+        let clone = git2::build::RepoBuilder::new()
+            .clone(
+                remote_dir.path().to_str().unwrap(),
+                clone_dir.path(),
+            )
+            .unwrap();
+
+        // Verify the remote-tracking ref exists
+        assert!(
+            clone
+                .find_branch("origin/stale-branch", git2::BranchType::Remote)
+                .is_ok(),
+            "stale-branch should exist as remote tracking before deletion"
+        );
+
+        // Delete the branch on the bare remote
+        remote_repo
+            .find_branch("stale-branch", git2::BranchType::Local)
+            .unwrap()
+            .delete()
+            .unwrap();
+
+        // The stale ref still exists locally (no fetch yet)
+        assert!(
+            clone
+                .find_branch("origin/stale-branch", git2::BranchType::Remote)
+                .is_ok(),
+            "stale ref should still exist before fetch+prune"
+        );
+
+        let base = head_branch(&clone);
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("stale-branch");
+
+        // This should succeed: fetch+prune clears the stale ref
+        let result = create_worktree(clone_dir.path(), "stale-branch", &base, &target);
+
+        assert!(
+            result.is_ok(),
+            "should succeed after remote branch deleted, got: {result:?}"
+        );
+        assert!(target.exists(), "worktree directory should exist on disk");
     }
 
     #[test]
