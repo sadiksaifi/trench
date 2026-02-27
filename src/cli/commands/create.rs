@@ -235,6 +235,52 @@ mod tests {
     }
 
     #[test]
+    fn create_from_nondefault_base_has_correct_commit_ancestry() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Create a "develop" branch with an extra commit so it diverges from HEAD
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        let develop_branch = repo.branch("develop", &head_commit, false).unwrap();
+        let develop_oid = {
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+            // Commit on develop — now develop is 1 commit ahead of HEAD
+            let develop_tip = develop_branch.get().peel_to_commit().unwrap();
+            repo.commit(
+                Some("refs/heads/develop"),
+                &sig,
+                &sig,
+                "develop commit",
+                &tree,
+                &[&develop_tip],
+            )
+            .unwrap()
+        };
+
+        let path = execute(
+            "my-feature",
+            Some("develop"),
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create with --from develop should succeed");
+
+        // Open the worktree as a repo and verify its HEAD commit matches develop's tip
+        let wt_repo = git2::Repository::open(&path).unwrap();
+        let wt_head_oid = wt_repo.head().unwrap().peel_to_commit().unwrap().id();
+        assert_eq!(
+            wt_head_oid, develop_oid,
+            "worktree HEAD should match the develop branch's tip commit"
+        );
+    }
+
+    #[test]
     fn create_with_from_stores_default_branch_not_from_override() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());

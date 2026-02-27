@@ -18,6 +18,9 @@ pub enum GitError {
     #[error("branch already exists: {branch}")]
     BranchAlreadyExists { branch: String },
 
+    #[error("base branch not found: {base}")]
+    BaseBranchNotFound { base: String },
+
     #[error("{0}")]
     Git(#[from] git2::Error),
 }
@@ -82,10 +85,14 @@ pub fn discover_repo(path: &Path) -> Result<RepoInfo, GitError> {
 
 /// Create a new git worktree at `target_path` for the given branch.
 ///
-/// Opens the repository at `repo_path`, creates the branch from `base` if it
-/// doesn't exist locally, and adds a worktree at `target_path`.
+/// Opens the repository at `repo_path`, resolves `base` as a local branch
+/// first, then falls back to `origin/<base>` remote tracking branch.
+/// Creates the new branch from the resolved base commit and adds a
+/// worktree at `target_path`.
 ///
 /// Returns `GitError::BranchAlreadyExists` if the branch already exists.
+/// Returns `GitError::BaseBranchNotFound` if `base` is not found locally
+/// or as `origin/<base>`.
 pub fn create_worktree(
     repo_path: &Path,
     branch: &str,
@@ -105,9 +112,22 @@ pub fn create_worktree(
         });
     }
 
-    // Resolve base branch to a commit
-    let base_ref = repo.find_branch(base, git2::BranchType::Local)?;
-    let base_commit = base_ref.get().peel_to_commit()?;
+    // Resolve base branch to a commit (try local, then remote tracking)
+    let base_commit = if let Ok(local) = repo.find_branch(base, git2::BranchType::Local) {
+        local.get().peel_to_commit()?
+    } else {
+        // Try remote tracking branch: origin/<base>
+        let remote_name = format!("origin/{base}");
+        match repo.find_branch(&remote_name, git2::BranchType::Remote) {
+            Ok(remote) => remote.get().peel_to_commit()?,
+            Err(e) if e.code() == git2::ErrorCode::NotFound => {
+                return Err(GitError::BaseBranchNotFound {
+                    base: base.to_string(),
+                });
+            }
+            Err(e) => return Err(GitError::Git(e)),
+        }
+    };
 
     // Create the new branch from base and add the worktree.
     // If worktree creation fails, clean up the orphaned branch.
@@ -358,6 +378,90 @@ mod tests {
     }
 
     #[test]
+    fn create_worktree_resolves_base_from_remote_tracking_branch() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+
+        // Create a distinct commit to use as the remote tracking branch tip
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+        let release_oid = repo
+            .commit(None, &sig, &sig, "release commit", &tree, &[&head])
+            .unwrap();
+
+        // Manually create a remote tracking ref (origin/release) without an actual remote
+        repo.reference(
+            "refs/remotes/origin/release",
+            release_oid,
+            false,
+            "fake remote tracking branch for test",
+        )
+        .unwrap();
+
+        // Verify: "release" does NOT exist locally, only as remote tracking
+        assert!(
+            repo.find_branch("release", git2::BranchType::Local).is_err(),
+            "release should not exist as a local branch"
+        );
+        assert!(
+            repo.find_branch("origin/release", git2::BranchType::Remote).is_ok(),
+            "origin/release should exist as a remote tracking branch"
+        );
+
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("my-feature");
+
+        // Use "release" as base — should resolve via remote tracking
+        let result = create_worktree(repo_dir.path(), "my-feature", "release", &target);
+        assert!(
+            result.is_ok(),
+            "should resolve base from remote tracking branch, got: {:?}",
+            result.unwrap_err()
+        );
+        assert!(target.exists(), "worktree directory should exist");
+
+        // Verify the new branch's commit matches origin/release
+        let feature_oid = repo
+            .find_branch("my-feature", git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+        assert_eq!(
+            feature_oid, release_oid,
+            "new branch should point to the same commit as origin/release"
+        );
+    }
+
+    #[test]
+    fn create_worktree_propagates_non_not_found_git_errors() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+
+        // Corrupt a remote tracking ref by writing invalid content directly to the
+        // filesystem. This causes find_branch to fail with a non-NotFound error
+        // (invalid OID parse), which the Err(_) arm must propagate instead of
+        // swallowing as BaseBranchNotFound.
+        let ref_dir = repo_dir.path().join(".git/refs/remotes/origin");
+        std::fs::create_dir_all(&ref_dir).unwrap();
+        std::fs::write(ref_dir.join("corrupt"), "not-a-valid-oid\n").unwrap();
+
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("feature");
+
+        let result = create_worktree(repo_dir.path(), "feature", "corrupt", &target);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, GitError::Git(_)),
+            "non-NotFound git2 errors should propagate as GitError::Git, got: {err:?}"
+        );
+    }
+
+    #[test]
     fn create_worktree_errors_when_base_branch_does_not_exist() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
@@ -367,9 +471,10 @@ mod tests {
         let result = create_worktree(repo_dir.path(), "feature", "nonexistent-base", &target);
 
         assert!(result.is_err());
+        let err = result.unwrap_err();
         assert!(
-            matches!(result.unwrap_err(), GitError::Git(_)),
-            "missing base branch should yield GitError::Git"
+            matches!(err, GitError::BaseBranchNotFound { ref base } if base == "nonexistent-base"),
+            "missing base branch should yield BaseBranchNotFound, got: {err:?}"
         );
     }
 
