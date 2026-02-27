@@ -58,6 +58,9 @@ fn format_hook_def(f: &mut fmt::Formatter<'_>, hook: &crate::config::HookDef) ->
     if let Some(shell) = &hook.shell {
         writeln!(f, "      shell: {shell}")?;
     }
+    if let Some(timeout) = &hook.timeout_secs {
+        writeln!(f, "      timeout: {timeout}s")?;
+    }
     Ok(())
 }
 
@@ -665,6 +668,31 @@ mod tests {
         assert!(text.contains("post_create"), "should mention post_create hook");
         assert!(text.contains("bun install"), "should list run commands");
         assert!(text.contains(".env*"), "should list copy patterns");
+    }
+
+    #[test]
+    fn dry_run_shows_timeout_secs_when_configured() {
+        use crate::config::{HookDef, HooksConfig};
+
+        let plan = DryRunPlan {
+            dry_run: true,
+            branch: "foo".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/tmp/wt/foo".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: Some(HooksConfig {
+                post_create: Some(HookDef {
+                    run: Some(vec!["bun install".to_string()]),
+                    timeout_secs: Some(30),
+                    ..HookDef::default()
+                }),
+                ..HooksConfig::default()
+            }),
+        };
+
+        let text = plan.to_string();
+        assert!(text.contains("timeout"), "should display timeout_secs");
+        assert!(text.contains("30"), "should display timeout value");
     }
 
     #[test]
