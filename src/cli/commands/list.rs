@@ -33,6 +33,10 @@ pub fn execute(cwd: &Path, db: &Database) -> Result<String> {
         table = table.row(vec![&wt.name, &wt.branch, &wt.path, "clean"]);
     }
 
+    if let Ok((cols, _)) = crossterm::terminal::size() {
+        table = table.max_width(cols as usize);
+    }
+
     Ok(table.render())
 }
 
