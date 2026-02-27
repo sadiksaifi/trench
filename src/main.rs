@@ -51,7 +51,8 @@ enum Commands {
         /// Branch name for the new worktree
         branch: String,
 
-        /// Base branch to create from (defaults to repo's HEAD branch)
+        /// Base branch to create from (defaults to repo's HEAD branch).
+        /// Falls back to origin/<base> if not found locally.
         #[arg(long)]
         from: Option<String>,
     },
