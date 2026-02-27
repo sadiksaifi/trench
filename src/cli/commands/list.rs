@@ -106,6 +106,51 @@ mod tests {
     }
 
     #[test]
+    fn create_two_worktrees_then_list_shows_both() {
+        use crate::cli::commands::create;
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        create::execute(
+            "feature-one",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("first create should succeed");
+
+        create::execute(
+            "feature-two",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("second create should succeed");
+
+        let output = execute(repo_dir.path(), &db).expect("list should succeed");
+
+        assert!(
+            output.contains("feature-one"),
+            "list should show first worktree, got: {output}"
+        );
+        assert!(
+            output.contains("feature-two"),
+            "list should show second worktree, got: {output}"
+        );
+
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 3, "expected header + 2 data rows");
+    }
+
+    #[test]
     fn shows_empty_state_when_no_worktrees() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());

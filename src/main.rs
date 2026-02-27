@@ -99,6 +99,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Create { branch, from }) => {
             run_create(&branch, from.as_deref())
         }
+        Some(Commands::List) => run_list(),
         Some(_) => {
             // Other commands not yet implemented
             Ok(())
@@ -137,6 +138,16 @@ fn run_create(branch: &str, from: Option<&str>) -> anyhow::Result<()> {
             Err(e)
         }
     }
+}
+
+fn run_list() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    let output = cli::commands::list::execute(&cwd, &db)?;
+    print!("{output}");
+    Ok(())
 }
 
 #[cfg(test)]
