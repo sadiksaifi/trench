@@ -30,7 +30,7 @@ pub fn execute(cwd: &Path, db: &Database) -> Result<String> {
 
     let mut table = Table::new(vec!["Name", "Branch", "Path", "Status"]);
     for wt in &worktrees {
-        table = table.row(vec![&wt.name, &wt.branch, &wt.path, "clean"]);
+        table = table.row(vec![&wt.name, &wt.branch, &wt.path, "clean"]); // TODO: wire real git status
     }
 
     if let Ok((cols, _)) = crossterm::terminal::size() {
