@@ -129,11 +129,18 @@ fn run_create(branch: &str, from: Option<&str>) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => {
-            if e.downcast_ref::<git::GitError>().is_some_and(|g| {
-                matches!(g, git::GitError::BranchAlreadyExists { .. })
-            }) {
-                eprintln!("error: {e}");
-                std::process::exit(3);
+            if let Some(git_err) = e.downcast_ref::<git::GitError>() {
+                match git_err {
+                    git::GitError::BranchAlreadyExists { .. } => {
+                        eprintln!("error: {e}");
+                        std::process::exit(3);
+                    }
+                    git::GitError::BaseBranchNotFound { .. } => {
+                        eprintln!("error: {e}");
+                        std::process::exit(2);
+                    }
+                    _ => {}
+                }
             }
             Err(e)
         }
