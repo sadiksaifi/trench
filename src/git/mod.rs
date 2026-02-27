@@ -85,10 +85,14 @@ pub fn discover_repo(path: &Path) -> Result<RepoInfo, GitError> {
 
 /// Create a new git worktree at `target_path` for the given branch.
 ///
-/// Opens the repository at `repo_path`, creates the branch from `base` if it
-/// doesn't exist locally, and adds a worktree at `target_path`.
+/// Opens the repository at `repo_path`, resolves `base` as a local branch
+/// first, then falls back to `origin/<base>` remote tracking branch.
+/// Creates the new branch from the resolved base commit and adds a
+/// worktree at `target_path`.
 ///
 /// Returns `GitError::BranchAlreadyExists` if the branch already exists.
+/// Returns `GitError::BaseBranchNotFound` if `base` is not found locally
+/// or as `origin/<base>`.
 pub fn create_worktree(
     repo_path: &Path,
     branch: &str,
