@@ -9,8 +9,10 @@ use crate::paths;
 use crate::state::Database;
 
 /// Plan produced by `--dry-run` showing what `trench create` would do.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct DryRunPlan {
+    /// Always `true` — signals this is a preview, not a real operation.
+    pub dry_run: bool,
     pub branch: String,
     pub base_branch: String,
     pub worktree_path: String,
@@ -77,6 +79,7 @@ pub fn execute_dry_run(
     let base = from.unwrap_or(&repo_info.default_branch);
 
     Ok(DryRunPlan {
+        dry_run: true,
         branch: branch.to_string(),
         base_branch: base.to_string(),
         worktree_path: worktree_path.to_string_lossy().to_string(),
@@ -543,6 +546,7 @@ mod tests {
     #[test]
     fn dry_run_plan_formats_as_readable_text() {
         let plan = DryRunPlan {
+            dry_run: true,
             branch: "my-feature".to_string(),
             base_branch: "main".to_string(),
             worktree_path: "/home/.worktrees/repo/my-feature".to_string(),
@@ -561,6 +565,27 @@ mod tests {
             text.contains("dry run") || text.contains("Dry run") || text.contains("DRY RUN"),
             "should indicate this is a dry run"
         );
+    }
+
+    #[test]
+    fn dry_run_plan_serializes_to_json_with_expected_fields() {
+        let plan = DryRunPlan {
+            dry_run: true,
+            branch: "my-feature".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/home/.worktrees/repo/my-feature".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: None,
+        };
+
+        let json: serde_json::Value =
+            serde_json::to_value(&plan).expect("should serialize to JSON");
+
+        assert_eq!(json["dry_run"], true);
+        assert_eq!(json["branch"], "my-feature");
+        assert_eq!(json["base_branch"], "main");
+        assert_eq!(json["worktree_path"], "/home/.worktrees/repo/my-feature");
+        assert!(json["hooks"].is_null() || json["hooks"].is_object());
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::paths;
 
 // --- Hook types (FR-18, FR-19) ---
 
-#[derive(Debug, Default, Deserialize, PartialEq, Clone)]
+#[derive(Debug, Default, Deserialize, serde::Serialize, PartialEq, Clone)]
 pub struct HookDef {
     pub copy: Option<Vec<String>>,
     pub run: Option<Vec<String>>,
@@ -15,7 +15,7 @@ pub struct HookDef {
     pub timeout_secs: Option<u64>,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Clone)]
+#[derive(Debug, Default, Deserialize, serde::Serialize, PartialEq, Clone)]
 pub struct HooksConfig {
     pub pre_create: Option<HookDef>,
     pub post_create: Option<HookDef>,
