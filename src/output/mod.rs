@@ -1,3 +1,5 @@
+pub mod table;
+
 /// Output verbosity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verbosity {
