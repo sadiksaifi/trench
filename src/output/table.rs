@@ -17,7 +17,11 @@ impl Table {
     }
 
     pub fn row(mut self, cells: Vec<&str>) -> Self {
-        self.rows.push(cells.into_iter().map(String::from).collect());
+        let col_count = self.headers.len();
+        let mut row: Vec<String> = cells.into_iter().map(String::from).collect();
+        row.truncate(col_count);
+        row.resize(col_count, String::new());
+        self.rows.push(row);
         self
     }
 
@@ -159,6 +163,37 @@ mod tests {
                 line
             );
         }
+    }
+
+    #[test]
+    fn row_normalizes_to_header_count() {
+        // Short row → padded with empty strings so all columns render
+        let padded = Table::new(vec!["A", "B", "C"])
+            .row(vec!["only-one"])
+            .render();
+        let lines: Vec<&str> = padded.lines().collect();
+        assert_eq!(lines.len(), 2, "header + 1 data row");
+
+        // After padding, the data row must span all columns.
+        // Column B starts at offset 10 in the header ("only-one" is longest → 8 + 2 gap = 10).
+        // If the row were NOT padded, it would only contain "only-one" with no B/C columns.
+        let header = lines[0];
+        let data = lines[1];
+        let b_offset = header.find('B').expect("header should contain B");
+        assert!(
+            data.len() >= b_offset,
+            "short row must be padded to span all columns, got: {data:?}"
+        );
+
+        // Long row → truncated to header count
+        let truncated = Table::new(vec!["X", "Y"])
+            .row(vec!["a", "b", "extra1", "extra2"])
+            .render();
+        let data_line = truncated.lines().nth(1).unwrap();
+        assert!(
+            !data_line.contains("extra"),
+            "extra cells should not appear in output, got: {data_line:?}"
+        );
     }
 
     #[test]
