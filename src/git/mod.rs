@@ -18,6 +18,9 @@ pub enum GitError {
     #[error("branch already exists: {branch}")]
     BranchAlreadyExists { branch: String },
 
+    #[error("Branch '{branch}' already exists on {remote}. Use a different name.")]
+    RemoteBranchAlreadyExists { branch: String, remote: String },
+
     #[error("base branch not found: {base}")]
     BaseBranchNotFound { base: String },
 
@@ -109,6 +112,18 @@ pub fn create_worktree(
     {
         return Err(GitError::BranchAlreadyExists {
             branch: branch.to_string(),
+        });
+    }
+
+    // Check if branch already exists on remote
+    let remote_name = format!("origin/{branch}");
+    if repo
+        .find_branch(&remote_name, git2::BranchType::Remote)
+        .is_ok()
+    {
+        return Err(GitError::RemoteBranchAlreadyExists {
+            branch: branch.to_string(),
+            remote: "origin".to_string(),
         });
     }
 
@@ -492,6 +507,60 @@ mod tests {
         let result = create_worktree(repo_dir.path(), "occupied", &base, &target);
 
         assert!(result.is_err(), "should fail when target path already exists");
+    }
+
+    #[test]
+    fn create_worktree_errors_when_branch_exists_on_remote() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = head_branch(&repo);
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+
+        // Create a distinct commit for the remote tracking branch
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = repo
+            .find_tree(repo.index().unwrap().write_tree().unwrap())
+            .unwrap();
+        let remote_oid = repo
+            .commit(None, &sig, &sig, "remote commit", &tree, &[&head])
+            .unwrap();
+
+        // Manually create a remote tracking ref (origin/taken-branch) without an actual remote
+        repo.reference(
+            "refs/remotes/origin/taken-branch",
+            remote_oid,
+            false,
+            "fake remote tracking branch for test",
+        )
+        .unwrap();
+
+        // Verify: "taken-branch" does NOT exist locally, only as remote tracking
+        assert!(
+            repo.find_branch("taken-branch", git2::BranchType::Local)
+                .is_err(),
+            "taken-branch should not exist as a local branch"
+        );
+        assert!(
+            repo.find_branch("origin/taken-branch", git2::BranchType::Remote)
+                .is_ok(),
+            "origin/taken-branch should exist as a remote tracking branch"
+        );
+
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("taken-branch");
+
+        let result = create_worktree(repo_dir.path(), "taken-branch", &base, &target);
+
+        assert!(result.is_err(), "should fail when branch exists on remote");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, GitError::RemoteBranchAlreadyExists { ref branch, ref remote } if branch == "taken-branch" && remote == "origin"),
+            "expected RemoteBranchAlreadyExists, got: {err:?}"
+        );
+        assert!(
+            !target.exists(),
+            "worktree directory should NOT be created"
+        );
     }
 
     #[test]
