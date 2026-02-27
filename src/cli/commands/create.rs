@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -15,6 +16,47 @@ pub struct DryRunPlan {
     pub worktree_path: String,
     pub repo_name: String,
     pub hooks: Option<HooksConfig>,
+}
+
+impl fmt::Display for DryRunPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Dry run — no changes will be made\n")?;
+        writeln!(f, "  Branch:    {}", self.branch)?;
+        writeln!(f, "  Base:      {}", self.base_branch)?;
+        writeln!(f, "  Worktree:  {}", self.worktree_path)?;
+
+        match &self.hooks {
+            Some(hooks) => {
+                writeln!(f, "  Hooks:")?;
+                if let Some(h) = &hooks.pre_create {
+                    writeln!(f, "    pre_create:")?;
+                    format_hook_def(f, h)?;
+                }
+                if let Some(h) = &hooks.post_create {
+                    writeln!(f, "    post_create:")?;
+                    format_hook_def(f, h)?;
+                }
+            }
+            None => {
+                writeln!(f, "  Hooks:     (none)")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn format_hook_def(f: &mut fmt::Formatter<'_>, hook: &crate::config::HookDef) -> fmt::Result {
+    if let Some(copy) = &hook.copy {
+        writeln!(f, "      copy: {}", copy.join(", "))?;
+    }
+    if let Some(run) = &hook.run {
+        writeln!(f, "      run:  {}", run.join(", "))?;
+    }
+    if let Some(shell) = &hook.shell {
+        writeln!(f, "      shell: {shell}")?;
+    }
+    Ok(())
 }
 
 /// Execute a dry-run of `trench create <branch>`.
@@ -495,6 +537,29 @@ mod tests {
         assert!(
             db_repo.is_none(),
             "no repo record should be inserted during dry-run"
+        );
+    }
+
+    #[test]
+    fn dry_run_plan_formats_as_readable_text() {
+        let plan = DryRunPlan {
+            branch: "my-feature".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/home/.worktrees/repo/my-feature".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: None,
+        };
+
+        let text = plan.to_string();
+        assert!(text.contains("my-feature"), "should contain branch name");
+        assert!(text.contains("main"), "should contain base branch");
+        assert!(
+            text.contains("/home/.worktrees/repo/my-feature"),
+            "should contain worktree path"
+        );
+        assert!(
+            text.contains("dry run") || text.contains("Dry run") || text.contains("DRY RUN"),
+            "should indicate this is a dry run"
         );
     }
 
