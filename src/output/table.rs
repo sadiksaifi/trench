@@ -49,7 +49,7 @@ impl Table {
             let available = max.saturating_sub(total_gap);
             let total_content: usize = col_widths.iter().sum();
 
-            if total_content > available && available > 0 {
+            if total_content > available {
                 // Shrink widest columns first until we fit
                 while col_widths.iter().sum::<usize>() > available {
                     let max_idx = col_widths
@@ -58,7 +58,7 @@ impl Table {
                         .max_by_key(|(_, w)| *w)
                         .map(|(i, _)| i)
                         .unwrap();
-                    if col_widths[max_idx] <= 1 {
+                    if col_widths[max_idx] == 0 {
                         break;
                     }
                     col_widths[max_idx] -= 1;
@@ -70,14 +70,19 @@ impl Table {
 
         // Render a single line, truncating cells to column widths
         let render_line = |out: &mut String, cells: &[String], widths: &[usize]| {
+            let mut first_visible = true;
             for (i, cell) in cells.iter().enumerate() {
                 if i >= col_count {
                     break;
                 }
-                if i > 0 {
+                let w = widths[i];
+                if w == 0 {
+                    continue;
+                }
+                if !first_visible {
                     out.push_str(&" ".repeat(gap));
                 }
-                let w = widths[i];
+                first_visible = false;
                 let truncated: String = if cell.len() > w {
                     if w > 1 {
                         let mut s: String = cell.chars().take(w - 1).collect();
@@ -137,6 +142,23 @@ mod tests {
         // Content should still be present, just truncated
         assert!(output.contains("Name"), "header should still appear");
         assert!(output.contains("short"), "short values should not be truncated");
+    }
+
+    #[test]
+    fn enforces_max_width_on_extremely_narrow_terminals() {
+        let output = Table::new(vec!["Name", "Branch", "Path", "Status"])
+            .row(vec!["feature-auth", "feature/auth", "/home/user/proj", "clean"])
+            .max_width(5)
+            .render();
+
+        for line in output.lines() {
+            assert!(
+                line.len() <= 5,
+                "line exceeds max_width of 5: len={}, line={:?}",
+                line.len(),
+                line
+            );
+        }
     }
 
     #[test]
