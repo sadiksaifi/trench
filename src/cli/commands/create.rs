@@ -2,9 +2,46 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::config::HooksConfig;
 use crate::git;
 use crate::paths;
 use crate::state::Database;
+
+/// Plan produced by `--dry-run` showing what `trench create` would do.
+#[derive(Debug)]
+pub struct DryRunPlan {
+    pub branch: String,
+    pub base_branch: String,
+    pub worktree_path: String,
+    pub repo_name: String,
+    pub hooks: Option<HooksConfig>,
+}
+
+/// Execute a dry-run of `trench create <branch>`.
+///
+/// Discovers the repo and resolves the worktree path, but performs no git
+/// operations, no DB writes, and no hook execution.
+pub fn execute_dry_run(
+    branch: &str,
+    from: Option<&str>,
+    cwd: &Path,
+    worktree_root: &Path,
+    template: &str,
+    hooks: Option<&HooksConfig>,
+) -> Result<DryRunPlan> {
+    let repo_info = git::discover_repo(cwd)?;
+    let relative_path = paths::render_worktree_path(template, &repo_info.name, branch)?;
+    let worktree_path = worktree_root.join(relative_path);
+    let base = from.unwrap_or(&repo_info.default_branch);
+
+    Ok(DryRunPlan {
+        branch: branch.to_string(),
+        base_branch: base.to_string(),
+        worktree_path: worktree_path.to_string_lossy().to_string(),
+        repo_name: repo_info.name.clone(),
+        hooks: hooks.cloned(),
+    })
+}
 
 fn path_to_utf8(path: &Path) -> Result<&str> {
     path.to_str()
@@ -400,6 +437,64 @@ mod tests {
         assert!(
             !expected_wt_path.exists(),
             "worktree directory should NOT be created"
+        );
+    }
+
+    #[test]
+    fn dry_run_returns_plan_with_correct_fields_and_no_side_effects() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let plan = execute_dry_run(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            None,
+        )
+        .expect("dry-run should succeed");
+
+        // Plan fields are correct
+        assert_eq!(plan.branch, "my-feature");
+        assert!(!plan.base_branch.is_empty(), "base_branch should be set");
+        assert!(
+            plan.worktree_path.contains("my-feature"),
+            "worktree_path should contain branch name"
+        );
+        assert!(!plan.repo_name.is_empty(), "repo_name should be set");
+
+        // No side effects: no worktree on disk
+        let repo_name = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let expected_path = wt_root.path().join(&repo_name).join("my-feature");
+        assert!(
+            !expected_path.exists(),
+            "worktree directory should NOT be created on disk during dry-run"
+        );
+
+        // No side effects: no DB records
+        let repo_path_str = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap();
+        assert!(
+            db_repo.is_none(),
+            "no repo record should be inserted during dry-run"
         );
     }
 
