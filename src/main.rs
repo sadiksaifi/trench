@@ -116,7 +116,6 @@ fn main() -> anyhow::Result<()> {
 
 fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let worktree_root = paths::worktree_root()?;
 
     // Load config once so both dry-run and actual execution use the same
     // resolved template and hooks.
@@ -126,6 +125,8 @@ fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> an
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
 
     if dry_run {
+        // Use the non-mutating path accessor — dry-run must not create dirs.
+        let worktree_root = paths::worktree_root_path()?;
         let plan = cli::commands::create::execute_dry_run(
             branch,
             from,
@@ -143,6 +144,8 @@ fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> an
         return Ok(());
     }
 
+    // Only real execution creates the worktree root directory on disk.
+    let worktree_root = paths::worktree_root()?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
