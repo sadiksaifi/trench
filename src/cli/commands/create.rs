@@ -694,6 +694,29 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_with_from_shows_custom_base() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+
+        // Create a "develop" branch so --from has something valid
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("develop", &head_commit, false).unwrap();
+
+        let plan = execute_dry_run(
+            "my-feature",
+            Some("develop"),
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            None,
+        )
+        .expect("dry-run with --from should succeed");
+
+        assert_eq!(plan.base_branch, "develop", "base should reflect --from override");
+    }
+
+    #[test]
     fn create_with_from_stores_default_branch_not_from_override() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());
