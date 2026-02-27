@@ -28,7 +28,7 @@ impl fmt::Display for DryRunPlan {
         writeln!(f, "  Worktree:  {}", self.worktree_path)?;
 
         match &self.hooks {
-            Some(hooks) => {
+            Some(hooks) if hooks.pre_create.is_some() || hooks.post_create.is_some() => {
                 writeln!(f, "  Hooks:")?;
                 if let Some(h) = &hooks.pre_create {
                     writeln!(f, "    pre_create:")?;
@@ -39,7 +39,7 @@ impl fmt::Display for DryRunPlan {
                     format_hook_def(f, h)?;
                 }
             }
-            None => {
+            _ => {
                 writeln!(f, "  Hooks:     (none)")?;
             }
         }
@@ -719,6 +719,24 @@ mod tests {
         assert!(hooks.is_object(), "hooks should be an object");
         let post_create = &hooks["post_create"];
         assert_eq!(post_create["run"][0], "bun install");
+    }
+
+    #[test]
+    fn dry_run_empty_hooks_config_shows_none() {
+        let plan = DryRunPlan {
+            dry_run: true,
+            branch: "foo".to_string(),
+            base_branch: "main".to_string(),
+            worktree_path: "/tmp/wt/foo".to_string(),
+            repo_name: "repo".to_string(),
+            hooks: Some(crate::config::HooksConfig::default()),
+        };
+
+        let text = plan.to_string();
+        assert!(
+            text.contains("Hooks:") && text.contains("(none)"),
+            "empty HooksConfig should display '(none)', got:\n{text}"
+        );
     }
 
     #[test]
