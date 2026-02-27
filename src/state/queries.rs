@@ -108,6 +108,7 @@ impl Database {
             managed: true,
             adopted_at: None,
             last_accessed: None,
+            removed_at: None,
             created_at,
         })
     }
@@ -115,7 +116,7 @@ impl Database {
     /// Get a worktree by id. Returns `None` if not found.
     pub fn get_worktree(&self, id: i64) -> Result<Option<Worktree>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, name, branch, path, base_branch, managed, adopted_at, last_accessed, created_at
+            "SELECT id, repo_id, name, branch, path, base_branch, managed, adopted_at, last_accessed, removed_at, created_at
              FROM worktrees WHERE id = ?1",
         ).context("failed to prepare get_worktree query")?;
 
@@ -131,7 +132,8 @@ impl Database {
                     managed: row.get::<_, i64>(6)? != 0,
                     adopted_at: row.get(7)?,
                     last_accessed: row.get(8)?,
-                    created_at: row.get(9)?,
+                    removed_at: row.get(9)?,
+                    created_at: row.get(10)?,
                 })
             })
             .optional()
@@ -143,7 +145,7 @@ impl Database {
     /// List all worktrees belonging to a repo.
     pub fn list_worktrees(&self, repo_id: i64) -> Result<Vec<Worktree>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, name, branch, path, base_branch, managed, adopted_at, last_accessed, created_at
+            "SELECT id, repo_id, name, branch, path, base_branch, managed, adopted_at, last_accessed, removed_at, created_at
              FROM worktrees WHERE repo_id = ?1 ORDER BY created_at",
         ).context("failed to prepare list_worktrees query")?;
 
@@ -159,7 +161,8 @@ impl Database {
                     managed: row.get::<_, i64>(6)? != 0,
                     adopted_at: row.get(7)?,
                     last_accessed: row.get(8)?,
-                    created_at: row.get(9)?,
+                    removed_at: row.get(9)?,
+                    created_at: row.get(10)?,
                 })
             })
             .context("failed to list worktrees")?;
@@ -192,6 +195,10 @@ impl Database {
             sets.push("base_branch = ?");
             params.push(Box::new(v.clone()));
         }
+        if let Some(ref v) = update.removed_at {
+            sets.push("removed_at = ?");
+            params.push(Box::new(*v));
+        }
 
         if sets.is_empty() {
             return Ok(());
@@ -213,6 +220,44 @@ impl Database {
         }
 
         Ok(())
+    }
+
+    /// Find an active worktree by its sanitized name or branch name.
+    ///
+    /// Only returns worktrees that have not been removed (`removed_at IS NULL`).
+    /// Checks the `name` column first (sanitized), then `branch` (original).
+    pub fn find_worktree_by_identifier(
+        &self,
+        repo_id: i64,
+        identifier: &str,
+    ) -> Result<Option<Worktree>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo_id, name, branch, path, base_branch, managed, adopted_at, last_accessed, removed_at, created_at
+             FROM worktrees
+             WHERE repo_id = ?1 AND (name = ?2 OR branch = ?2) AND removed_at IS NULL
+             LIMIT 1",
+        ).context("failed to prepare find_worktree_by_identifier query")?;
+
+        let wt = stmt
+            .query_row(rusqlite::params![repo_id, identifier], |row| {
+                Ok(Worktree {
+                    id: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    name: row.get(2)?,
+                    branch: row.get(3)?,
+                    path: row.get(4)?,
+                    base_branch: row.get(5)?,
+                    managed: row.get::<_, i64>(6)? != 0,
+                    adopted_at: row.get(7)?,
+                    last_accessed: row.get(8)?,
+                    removed_at: row.get(9)?,
+                    created_at: row.get(10)?,
+                })
+            })
+            .optional()
+            .context("failed to find worktree by identifier")?;
+
+        Ok(wt)
     }
 
     /// Insert an event and return its id.
