@@ -116,11 +116,12 @@ pub fn create_worktree(
         let remote_name = format!("origin/{base}");
         match repo.find_branch(&remote_name, git2::BranchType::Remote) {
             Ok(remote) => remote.get().peel_to_commit()?,
-            Err(_) => {
+            Err(e) if e.code() == git2::ErrorCode::NotFound => {
                 return Err(GitError::BaseBranchNotFound {
                     base: base.to_string(),
                 });
             }
+            Err(e) => return Err(GitError::Git(e)),
         }
     };
 
@@ -427,6 +428,32 @@ mod tests {
         assert_eq!(
             feature_oid, release_oid,
             "new branch should point to the same commit as origin/release"
+        );
+    }
+
+    #[test]
+    fn create_worktree_propagates_non_not_found_git_errors() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+
+        // Corrupt a remote tracking ref by writing invalid content directly to the
+        // filesystem. This causes find_branch to fail with a non-NotFound error
+        // (invalid OID parse), which the Err(_) arm must propagate instead of
+        // swallowing as BaseBranchNotFound.
+        let ref_dir = repo_dir.path().join(".git/refs/remotes/origin");
+        std::fs::create_dir_all(&ref_dir).unwrap();
+        std::fs::write(ref_dir.join("corrupt"), "not-a-valid-oid\n").unwrap();
+
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("feature");
+
+        let result = create_worktree(repo_dir.path(), "feature", "corrupt", &target);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, GitError::Git(_)),
+            "non-NotFound git2 errors should propagate as GitError::Git, got: {err:?}"
         );
     }
 
