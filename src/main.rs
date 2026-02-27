@@ -118,13 +118,14 @@ fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> an
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let worktree_root = paths::worktree_root()?;
 
-    if dry_run {
-        // Load config to surface hooks in the plan
-        let repo_info = git::discover_repo(&cwd)?;
-        let project_config = config::load_project_config(&repo_info.path)?;
-        let global_config = config::load_global_config()?;
-        let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+    // Load config once so both dry-run and actual execution use the same
+    // resolved template and hooks.
+    let repo_info = git::discover_repo(&cwd)?;
+    let project_config = config::load_project_config(&repo_info.path)?;
+    let global_config = config::load_global_config()?;
+    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
 
+    if dry_run {
         let plan = cli::commands::create::execute_dry_run(
             branch,
             from,
@@ -150,7 +151,7 @@ fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> an
         from,
         &cwd,
         &worktree_root,
-        paths::DEFAULT_WORKTREE_TEMPLATE,
+        &resolved.worktrees.root,
         &db,
     ) {
         Ok(path) => {
