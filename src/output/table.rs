@@ -85,6 +85,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn empty_rows_returns_empty_string() {
+        let output = Table::new(vec!["Name", "Branch"]).render();
+        assert!(output.is_empty(), "no rows should produce empty output");
+    }
+
+    #[test]
     fn renders_headers_and_rows_with_aligned_columns() {
         let output = Table::new(vec!["Name", "Branch", "Path"])
             .row(vec!["foo", "main", "/tmp/foo"])
