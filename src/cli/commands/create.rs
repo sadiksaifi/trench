@@ -325,6 +325,85 @@ mod tests {
     }
 
     #[test]
+    fn create_errors_when_branch_exists_on_real_remote() {
+        // Set up a bare "origin" repo with a commit created directly in it
+        let origin_dir = tempfile::tempdir().unwrap();
+        let origin = git2::Repository::init_bare(origin_dir.path()).unwrap();
+        {
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let tree_id = origin.treebuilder(None).unwrap().write().unwrap();
+            let tree = origin.find_tree(tree_id).unwrap();
+            let oid = origin
+                .commit(Some("refs/heads/main"), &sig, &sig, "initial", &tree, &[])
+                .unwrap();
+            origin.set_head("refs/heads/main").unwrap();
+
+            // Create a branch on origin that will conflict
+            origin
+                .reference("refs/heads/taken-remote", oid, true, "conflicting branch")
+                .unwrap();
+        }
+
+        // Clone origin into a local working repo
+        let local_dir = tempfile::tempdir().unwrap();
+        let local = git2::Repository::clone(
+            origin_dir.path().to_str().unwrap(),
+            local_dir.path(),
+        )
+        .unwrap();
+
+        // Verify the remote tracking branch exists locally
+        assert!(
+            local
+                .find_branch("origin/taken-remote", git2::BranchType::Remote)
+                .is_ok(),
+            "origin/taken-remote should exist as a remote tracking branch after clone"
+        );
+
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let result = execute(
+            "taken-remote",
+            None,
+            local_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        );
+
+        let err = result.expect_err("should fail when branch exists on real remote");
+        let git_err = err
+            .downcast_ref::<git::GitError>()
+            .expect("error should be GitError");
+        assert!(
+            matches!(git_err, git::GitError::RemoteBranchAlreadyExists { ref branch, ref remote }
+                if branch == "taken-remote" && remote == "origin"),
+            "expected RemoteBranchAlreadyExists for 'taken-remote', got: {git_err:?}"
+        );
+
+        // Verify no worktree was created
+        let expected_wt_path = wt_root
+            .path()
+            .join(
+                local_dir
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
+            .join("taken-remote");
+        assert!(
+            !expected_wt_path.exists(),
+            "worktree directory should NOT be created"
+        );
+    }
+
+    #[test]
     fn create_with_from_stores_default_branch_not_from_override() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());
