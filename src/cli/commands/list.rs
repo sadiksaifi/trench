@@ -702,6 +702,61 @@ mod tests {
     }
 
     #[test]
+    fn list_json_shows_correct_ahead_behind_and_dirty_values() {
+        use crate::cli::commands::create;
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        create::execute(
+            "feature-e2e",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        // Find the worktree path from DB
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let db_repo = db
+            .get_repo_by_path(repo_path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let wts = db.list_worktrees(db_repo.id).unwrap();
+        let wt_path = std::path::Path::new(&wts[0].path);
+
+        // Add a commit in the worktree (makes it 1 ahead)
+        {
+            let wt_repo = git2::Repository::open(wt_path).unwrap();
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let parent = wt_repo.head().unwrap().peel_to_commit().unwrap();
+            let tree = wt_repo
+                .find_tree(wt_repo.index().unwrap().write_tree().unwrap())
+                .unwrap();
+            wt_repo
+                .commit(Some("HEAD"), &sig, &sig, "wt commit", &tree, &[&parent])
+                .unwrap();
+        }
+
+        // Create an untracked file in the worktree (makes it dirty)
+        std::fs::write(wt_path.join("untracked.txt"), "dirty").unwrap();
+
+        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let wt_json = &parsed.as_array().unwrap()[0];
+
+        assert_eq!(wt_json["ahead"], serde_json::json!(1), "should be 1 ahead");
+        assert_eq!(wt_json["behind"], serde_json::json!(0), "should be 0 behind");
+        assert_eq!(wt_json["dirty"], serde_json::json!(1), "should have 1 dirty file");
+        assert_eq!(wt_json["status"], serde_json::json!("~1"), "status should show ~1");
+    }
+
+    #[test]
     fn list_table_shows_ahead_behind_and_dirty_columns() {
         use crate::cli::commands::create;
         use crate::paths;
