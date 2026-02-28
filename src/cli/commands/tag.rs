@@ -195,6 +195,69 @@ mod tests {
         assert!(output.contains("No tags"));
     }
 
+    #[test]
+    fn execute_removes_tags_from_worktree() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+        let wt = db
+            .insert_worktree(db_repo.id, "my-wt", "my-branch", "/wt/my-wt", Some("main"))
+            .unwrap();
+
+        db.add_tag(wt.id, "wip").unwrap();
+        db.add_tag(wt.id, "review").unwrap();
+
+        let output = execute(
+            "my-wt",
+            &["-wip".to_string()],
+            repo_dir.path(),
+            &db,
+        )
+        .unwrap();
+
+        assert!(!output.contains("wip"), "wip should be removed");
+        assert!(output.contains("review"), "review should remain");
+
+        let tags = db.list_tags(wt.id).unwrap();
+        assert_eq!(tags, vec!["review"]);
+    }
+
+    #[test]
+    fn execute_removes_all_tags_shows_message() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+        let wt = db
+            .insert_worktree(db_repo.id, "my-wt", "my-branch", "/wt/my-wt", Some("main"))
+            .unwrap();
+
+        db.add_tag(wt.id, "wip").unwrap();
+
+        let output = execute(
+            "my-wt",
+            &["-wip".to_string()],
+            repo_dir.path(),
+            &db,
+        )
+        .unwrap();
+
+        assert!(output.contains("All tags removed"), "should show removal message");
+        let tags = db.list_tags(wt.id).unwrap();
+        assert!(tags.is_empty());
+    }
+
     fn init_repo_with_commit(dir: &Path) -> git2::Repository {
         let repo = git2::Repository::init(dir).expect("failed to init repo");
         {
