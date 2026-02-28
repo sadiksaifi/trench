@@ -24,7 +24,7 @@ struct Cli {
     json: bool,
 
     /// Output in porcelain format
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with = "json")]
     porcelain: bool,
 
     /// Disable colored output
@@ -362,16 +362,30 @@ mod tests {
     #[test]
     fn global_flags_are_accepted() {
         let cli = Cli::try_parse_from([
-            "trench", "--json", "--porcelain", "--no-color", "--quiet", "--verbose", "--dry-run",
+            "trench", "--json", "--no-color", "--quiet", "--verbose", "--dry-run",
         ])
         .expect("all global flags should be accepted");
 
         assert!(cli.json);
-        assert!(cli.porcelain);
         assert!(cli.no_color);
         assert!(cli.quiet);
         assert!(cli.verbose);
         assert!(cli.dry_run);
+
+        let cli2 = Cli::try_parse_from(["trench", "--porcelain"])
+            .expect("porcelain flag should be accepted");
+        assert!(cli2.porcelain);
+    }
+
+    #[test]
+    fn json_and_porcelain_conflict() {
+        let result = Cli::try_parse_from(["trench", "--json", "--porcelain"]);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "expected ArgumentConflict, got: {err}"
+        );
     }
 
     #[test]
