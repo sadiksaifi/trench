@@ -37,9 +37,78 @@ impl fmt::Display for HookEvent {
     }
 }
 
+/// Context needed to build TRENCH_* environment variables for hook processes (FR-23).
+pub struct HookEnvContext {
+    pub worktree_path: String,
+    pub worktree_name: String,
+    pub branch: String,
+    pub repo_name: String,
+    pub repo_path: String,
+    pub base_branch: String,
+}
+
+/// Build the 7 TRENCH_* environment variables injected into hook processes (FR-23).
+pub fn build_env(ctx: &HookEnvContext, event: &HookEvent) -> HashMap<String, String> {
+    HashMap::from([
+        ("TRENCH_WORKTREE_PATH".into(), ctx.worktree_path.clone()),
+        ("TRENCH_WORKTREE_NAME".into(), ctx.worktree_name.clone()),
+        ("TRENCH_BRANCH".into(), ctx.branch.clone()),
+        ("TRENCH_REPO_NAME".into(), ctx.repo_name.clone()),
+        ("TRENCH_REPO_PATH".into(), ctx.repo_path.clone()),
+        ("TRENCH_BASE_BRANCH".into(), ctx.base_branch.clone()),
+        ("TRENCH_EVENT".into(), event.as_str().to_string()),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_env_returns_all_seven_trench_vars() {
+        let ctx = HookEnvContext {
+            worktree_path: "/home/user/.worktrees/myrepo/feat-auth".into(),
+            worktree_name: "feat-auth".into(),
+            branch: "feature/auth".into(),
+            repo_name: "myrepo".into(),
+            repo_path: "/home/user/code/myrepo".into(),
+            base_branch: "main".into(),
+        };
+
+        let env = build_env(&ctx, &HookEvent::PostCreate);
+
+        assert_eq!(env.len(), 7);
+        assert_eq!(env["TRENCH_WORKTREE_PATH"], "/home/user/.worktrees/myrepo/feat-auth");
+        assert_eq!(env["TRENCH_WORKTREE_NAME"], "feat-auth");
+        assert_eq!(env["TRENCH_BRANCH"], "feature/auth");
+        assert_eq!(env["TRENCH_REPO_NAME"], "myrepo");
+        assert_eq!(env["TRENCH_REPO_PATH"], "/home/user/code/myrepo");
+        assert_eq!(env["TRENCH_BASE_BRANCH"], "main");
+        assert_eq!(env["TRENCH_EVENT"], "post_create");
+    }
+
+    #[test]
+    fn build_env_event_string_matches_hook_event() {
+        let ctx = HookEnvContext {
+            worktree_path: "/tmp/wt".into(),
+            worktree_name: "wt".into(),
+            branch: "fix/bug".into(),
+            repo_name: "repo".into(),
+            repo_path: "/tmp/repo".into(),
+            base_branch: "develop".into(),
+        };
+
+        for (event, expected) in [
+            (HookEvent::PreCreate, "pre_create"),
+            (HookEvent::PreSync, "pre_sync"),
+            (HookEvent::PostSync, "post_sync"),
+            (HookEvent::PreRemove, "pre_remove"),
+            (HookEvent::PostRemove, "post_remove"),
+        ] {
+            let env = build_env(&ctx, &event);
+            assert_eq!(env["TRENCH_EVENT"], expected);
+        }
+    }
 
     #[test]
     fn hook_event_has_six_variants_with_correct_strings() {
