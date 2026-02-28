@@ -828,9 +828,13 @@ mod tests {
         let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
 
         // The Ahead/Behind column should show "-" for no upstream
+        let row = output
+            .lines()
+            .find(|line| line.contains("no-upstream-wt"))
+            .expect("expected no-upstream-wt row");
         assert!(
-            output.contains('-'),
-            "table should show '-' for no upstream ahead/behind, got: {output}"
+            row.split_whitespace().any(|cell| cell == "-"),
+            "Ahead/Behind cell should be '-', got row: {row}"
         );
     }
 
