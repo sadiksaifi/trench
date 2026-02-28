@@ -7,11 +7,16 @@ use crate::paths;
 
 // --- Hook types (FR-18, FR-19) ---
 
+fn default_timeout_secs() -> Option<u64> {
+    Some(120)
+}
+
 #[derive(Debug, Default, Deserialize, serde::Serialize, PartialEq, Clone)]
 pub struct HookDef {
     pub copy: Option<Vec<String>>,
     pub run: Option<Vec<String>>,
     pub shell: Option<String>,
+    #[serde(default = "default_timeout_secs")]
     pub timeout_secs: Option<u64>,
 }
 

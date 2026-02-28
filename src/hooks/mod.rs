@@ -222,6 +222,18 @@ timeout_secs = 60
     }
 
     #[test]
+    fn hooks_timeout_defaults_to_120_when_omitted() {
+        let toml_str = r#"
+[hooks.post_sync]
+run = ["echo synced"]
+"#;
+        let config: crate::config::ProjectConfig = toml::from_str(toml_str).unwrap();
+        let hooks = config.hooks.unwrap();
+        let post_sync = get_hook_config(&hooks, &HookEvent::PostSync).unwrap();
+        assert_eq!(post_sync.timeout_secs, Some(120));
+    }
+
+    #[test]
     fn hook_event_has_six_variants_with_correct_strings() {
         let cases = vec![
             (HookEvent::PreCreate, "pre_create"),
