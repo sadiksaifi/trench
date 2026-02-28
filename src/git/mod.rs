@@ -785,6 +785,40 @@ mod tests {
     }
 
     #[test]
+    fn ahead_behind_counts_commits_ahead_of_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        let base = head_branch(&repo);
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+
+        // Create feature branch at same point as base
+        let base_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature-ahead", &base_commit, false).unwrap();
+
+        // Add 2 commits on feature-ahead
+        // Switch HEAD to feature-ahead to commit on it
+        repo.set_head("refs/heads/feature-ahead").unwrap();
+        for i in 0..2 {
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+            let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+            repo.commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                &format!("feature commit {i}"),
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        }
+
+        let result = ahead_behind(tmp.path(), "feature-ahead", Some(&base))
+            .expect("should succeed");
+
+        assert_eq!(result, Some((2, 0)), "feature should be 2 ahead, 0 behind");
+    }
+
+    #[test]
     fn dirty_count_returns_zero_for_clean_worktree() {
         let tmp = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(tmp.path());
