@@ -50,10 +50,7 @@ pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<String> {
     }
 
     // Update DB: set removed_at timestamp
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_secs() as i64;
+    let now = crate::state::unix_epoch_secs() as i64;
 
     db.update_worktree(
         wt.id,
