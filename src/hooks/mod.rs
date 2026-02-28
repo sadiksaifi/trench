@@ -38,6 +38,7 @@ impl fmt::Display for HookEvent {
 }
 
 /// Context needed to build TRENCH_* environment variables for hook processes (FR-23).
+#[derive(Debug, Clone)]
 pub struct HookEnvContext {
     pub worktree_path: String,
     pub worktree_name: String,
@@ -198,6 +199,26 @@ timeout_secs = 60
         assert!(get_hook_config(&hooks, &HookEvent::PreSync).is_none());
         assert!(get_hook_config(&hooks, &HookEvent::PostSync).is_none());
         assert!(get_hook_config(&hooks, &HookEvent::PostRemove).is_none());
+    }
+
+    #[test]
+    fn hook_env_context_is_debug_and_clone() {
+        let ctx = HookEnvContext {
+            worktree_path: "/tmp/wt".into(),
+            worktree_name: "wt".into(),
+            branch: "main".into(),
+            repo_name: "repo".into(),
+            repo_path: "/tmp/repo".into(),
+            base_branch: "main".into(),
+        };
+
+        // Debug
+        let debug_str = format!("{:?}", ctx);
+        assert!(debug_str.contains("HookEnvContext"));
+
+        // Clone
+        let cloned = ctx.clone();
+        assert_eq!(cloned.worktree_name, "wt");
     }
 
     #[test]
