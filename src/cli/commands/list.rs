@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -10,8 +10,12 @@ use crate::output::table::Table;
 use crate::state::{Database, Worktree};
 
 /// Discover the git repo from `cwd` and fetch worktrees from the DB,
-/// optionally filtered by tag.
-fn fetch_worktrees(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Vec<Worktree>> {
+/// optionally filtered by tag. Returns the repo path alongside worktrees.
+fn fetch_worktrees(
+    cwd: &Path,
+    db: &Database,
+    tag: Option<&str>,
+) -> Result<(PathBuf, Vec<Worktree>)> {
     let repo_info = git::discover_repo(cwd)?;
     let repo_path_str = repo_info
         .path
@@ -28,7 +32,51 @@ fn fetch_worktrees(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Vec<W
         None => Vec::new(),
     };
 
-    Ok(worktrees)
+    Ok((repo_info.path, worktrees))
+}
+
+/// Git status metadata for a worktree.
+struct GitStatus {
+    ahead: Option<usize>,
+    behind: Option<usize>,
+    dirty: usize,
+}
+
+/// Compute git status for a worktree. Returns default values on error
+/// (e.g., worktree path no longer exists on disk).
+fn compute_git_status(repo_path: &Path, wt: &Worktree) -> GitStatus {
+    let wt_path = Path::new(&wt.path);
+
+    let (ahead, behind) = git::ahead_behind(repo_path, &wt.branch, wt.base_branch.as_deref())
+        .ok()
+        .flatten()
+        .map(|(a, b)| (Some(a), Some(b)))
+        .unwrap_or((None, None));
+
+    let dirty = git::dirty_count(wt_path).unwrap_or(0);
+
+    GitStatus {
+        ahead,
+        behind,
+        dirty,
+    }
+}
+
+/// Format ahead/behind as a display string (e.g., "+3/-1" or "-").
+fn format_ahead_behind(ahead: Option<usize>, behind: Option<usize>) -> String {
+    match (ahead, behind) {
+        (Some(a), Some(b)) => format!("+{a}/-{b}"),
+        _ => "-".to_string(),
+    }
+}
+
+/// Format dirty count as a display string (e.g., "~5" or "clean").
+fn format_dirty(dirty: usize) -> String {
+    if dirty == 0 {
+        "clean".to_string()
+    } else {
+        format!("~{dirty}")
+    }
 }
 
 #[derive(Serialize)]
@@ -37,6 +85,9 @@ struct WorktreeJson {
     branch: String,
     path: String,
     status: String,
+    ahead: Option<usize>,
+    behind: Option<usize>,
+    dirty: usize,
     managed: bool,
     tags: Vec<String>,
 }
@@ -48,6 +99,9 @@ impl PorcelainRecord for WorktreeJson {
             self.branch.clone(),
             self.path.clone(),
             self.status.clone(),
+            self.ahead.map_or("-".to_string(), |v| v.to_string()),
+            self.behind.map_or("-".to_string(), |v| v.to_string()),
+            self.dirty.to_string(),
             self.managed.to_string(),
         ]
     }
@@ -58,17 +112,34 @@ impl PorcelainRecord for WorktreeJson {
 /// Discovers the git repo from `cwd`, queries managed worktrees from the DB,
 /// and returns a formatted string for display. Optionally filters by tag.
 pub fn execute(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let worktrees = fetch_worktrees(cwd, db, tag)?;
+    let (repo_path, worktrees) = fetch_worktrees(cwd, db, tag)?;
 
     if worktrees.is_empty() {
         return Ok("No worktrees. Use `trench create` to get started.\n".to_string());
     }
 
-    let mut table = Table::new(vec!["Name", "Branch", "Path", "Status", "Tags"]);
+    let mut table = Table::new(vec![
+        "Name",
+        "Branch",
+        "Path",
+        "Status",
+        "Ahead/Behind",
+        "Tags",
+    ]);
     for wt in &worktrees {
         let tags = db.list_tags(wt.id)?;
         let tags_str = tags.join(", ");
-        table = table.row(vec![&wt.name, &wt.branch, &wt.path, "clean", &tags_str]);
+        let status = compute_git_status(&repo_path, wt);
+        let dirty_str = format_dirty(status.dirty);
+        let ab_str = format_ahead_behind(status.ahead, status.behind);
+        table = table.row(vec![
+            &wt.name,
+            &wt.branch,
+            &wt.path,
+            &dirty_str,
+            &ab_str,
+            &tags_str,
+        ]);
     }
 
     if let Ok((cols, _)) = crossterm::terminal::size() {
@@ -82,16 +153,21 @@ pub fn execute(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
 ///
 /// Returns JSON array of worktree objects including tags.
 pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let worktrees = fetch_worktrees(cwd, db, tag)?;
+    let (repo_path, worktrees) = fetch_worktrees(cwd, db, tag)?;
 
     let mut json_items = Vec::new();
     for wt in &worktrees {
         let tags = db.list_tags(wt.id)?;
+        let status = compute_git_status(&repo_path, wt);
+        let status_str = format_dirty(status.dirty);
         json_items.push(WorktreeJson {
             name: wt.name.clone(),
             branch: wt.branch.clone(),
             path: wt.path.clone(),
-            status: "clean".to_string(),
+            status: status_str,
+            ahead: status.ahead,
+            behind: status.behind,
+            dirty: status.dirty,
             managed: wt.managed,
             tags,
         });
@@ -102,19 +178,24 @@ pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Stri
 
 /// Execute the `trench list --porcelain` command.
 ///
-/// Returns colon-separated lines: `name:branch:path:status:managed`.
+/// Returns colon-separated lines: `name:branch:path:status:ahead:behind:dirty:managed`.
 pub fn execute_porcelain(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let worktrees = fetch_worktrees(cwd, db, tag)?;
+    let (repo_path, worktrees) = fetch_worktrees(cwd, db, tag)?;
 
     let items: Vec<WorktreeJson> = worktrees
         .iter()
         .map(|wt| -> Result<WorktreeJson> {
             let tags = db.list_tags(wt.id)?;
+            let status = compute_git_status(&repo_path, wt);
+            let status_str = format_dirty(status.dirty);
             Ok(WorktreeJson {
                 name: wt.name.clone(),
                 branch: wt.branch.clone(),
                 path: wt.path.clone(),
-                status: "clean".to_string(),
+                status: status_str,
+                ahead: status.ahead,
+                behind: status.behind,
+                dirty: status.dirty,
                 managed: wt.managed,
                 tags,
             })
@@ -576,6 +657,38 @@ mod tests {
     }
 
     #[test]
+    fn list_table_shows_ahead_behind_and_dirty_columns() {
+        use crate::cli::commands::create;
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        create::execute(
+            "feature-status",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+
+        assert!(
+            output.contains("Ahead/Behind"),
+            "table should have Ahead/Behind header, got: {output}"
+        );
+        assert!(
+            output.contains("Status"),
+            "table should have Status header, got: {output}"
+        );
+    }
+
+    #[test]
     fn list_porcelain_outputs_colon_separated_lines() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
@@ -608,13 +721,14 @@ mod tests {
         let lines: Vec<&str> = output.lines().collect();
 
         assert_eq!(lines.len(), 2);
+        // Porcelain format: name:branch:path:status:ahead:behind:dirty:managed
         assert_eq!(
             lines[0],
-            "feature-auth:feature/auth:/home/user/.worktrees/proj/feature-auth:clean:true"
+            "feature-auth:feature/auth:/home/user/.worktrees/proj/feature-auth:clean:-:-:0:true"
         );
         assert_eq!(
             lines[1],
-            "fix-bug:fix/bug:/home/user/.worktrees/proj/fix-bug:clean:true"
+            "fix-bug:fix/bug:/home/user/.worktrees/proj/fix-bug:clean:-:-:0:true"
         );
     }
 
@@ -732,12 +846,13 @@ mod tests {
         let lines: Vec<&str> = porcelain_output.lines().collect();
         assert_eq!(lines.len(), 2);
 
-        // Each line should have exactly 5 colon-separated fields
+        // Each line should have exactly 8 colon-separated fields
+        // (name:branch:path:status:ahead:behind:dirty:managed)
         for line in &lines {
             let fields: Vec<&str> = line.split(':').collect();
             assert_eq!(
-                fields.len(), 5,
-                "porcelain line should have 5 fields, got {}: {:?}",
+                fields.len(), 8,
+                "porcelain line should have 8 fields, got {}: {:?}",
                 fields.len(), line
             );
         }
