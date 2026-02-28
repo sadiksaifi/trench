@@ -624,6 +624,122 @@ mod tests {
     }
 
     #[test]
+    fn add_and_list_tags_for_worktree() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        // No tags initially
+        let tags = db.list_tags(wt.id).unwrap();
+        assert!(tags.is_empty(), "should have no tags initially");
+
+        // Add two tags
+        db.add_tag(wt.id, "wip").unwrap();
+        db.add_tag(wt.id, "review").unwrap();
+
+        let tags = db.list_tags(wt.id).unwrap();
+        assert_eq!(tags.len(), 2);
+        assert!(tags.contains(&"wip".to_string()));
+        assert!(tags.contains(&"review".to_string()));
+    }
+
+    #[test]
+    fn add_tag_is_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        db.add_tag(wt.id, "wip").unwrap();
+        db.add_tag(wt.id, "wip").unwrap(); // should not error
+
+        let tags = db.list_tags(wt.id).unwrap();
+        assert_eq!(tags.len(), 1, "duplicate add should not create second tag");
+    }
+
+    #[test]
+    fn remove_tag_deletes_tag() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        db.add_tag(wt.id, "wip").unwrap();
+        db.add_tag(wt.id, "review").unwrap();
+
+        db.remove_tag(wt.id, "wip").unwrap();
+
+        let tags = db.list_tags(wt.id).unwrap();
+        assert_eq!(tags, vec!["review"]);
+    }
+
+    #[test]
+    fn remove_nonexistent_tag_is_noop() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        // Should not error
+        db.remove_tag(wt.id, "nonexistent").unwrap();
+    }
+
+    #[test]
+    fn list_worktrees_by_tag_filters_correctly() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt1 = db
+            .insert_worktree(repo.id, "wt1", "branch1", "/wt1", None)
+            .unwrap();
+        let wt2 = db
+            .insert_worktree(repo.id, "wt2", "branch2", "/wt2", None)
+            .unwrap();
+        let _wt3 = db
+            .insert_worktree(repo.id, "wt3", "branch3", "/wt3", None)
+            .unwrap();
+
+        db.add_tag(wt1.id, "wip").unwrap();
+        db.add_tag(wt2.id, "wip").unwrap();
+        db.add_tag(wt2.id, "review").unwrap();
+
+        let wip_wts = db.list_worktrees_by_tag(repo.id, "wip").unwrap();
+        assert_eq!(wip_wts.len(), 2);
+        assert!(wip_wts.iter().any(|w| w.name == "wt1"));
+        assert!(wip_wts.iter().any(|w| w.name == "wt2"));
+
+        let review_wts = db.list_worktrees_by_tag(repo.id, "review").unwrap();
+        assert_eq!(review_wts.len(), 1);
+        assert_eq!(review_wts[0].name, "wt2");
+    }
+
+    #[test]
+    fn list_worktrees_by_tag_excludes_removed() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt1 = db
+            .insert_worktree(repo.id, "wt1", "branch1", "/wt1", None)
+            .unwrap();
+
+        db.add_tag(wt1.id, "wip").unwrap();
+        db.update_worktree(
+            wt1.id,
+            &WorktreeUpdate {
+                removed_at: Some(Some(1_700_000_000)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let wts = db.list_worktrees_by_tag(repo.id, "wip").unwrap();
+        assert!(wts.is_empty(), "removed worktree should not appear");
+    }
+
+    #[test]
     fn get_repo_by_path_returns_existing_repo() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("my-project", "/home/user/my-project", Some("main")).unwrap();

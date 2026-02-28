@@ -74,10 +74,23 @@ enum Commands {
         #[arg(long)]
         print_path: bool,
     },
+    /// Manage tags on a worktree
+    Tag {
+        /// Branch name or sanitized name of the worktree
+        branch: String,
+
+        /// Tags to add (+name) or remove (-name). No arguments = list current tags
+        #[arg(allow_hyphen_values = true)]
+        tags: Vec<String>,
+    },
     /// Open a worktree in $EDITOR
     Open,
     /// List all worktrees
-    List,
+    List {
+        /// Filter worktrees by tag
+        #[arg(long)]
+        tag: Option<String>,
+    },
     /// Show worktree status
     Status,
     /// Sync worktree with base branch
@@ -119,7 +132,8 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Remove { branch, force }) => run_remove(&branch, force),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
-        Some(Commands::List) => run_list(),
+        Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
+        Some(Commands::List { tag }) => run_list(tag.as_deref(), json),
         Some(_) => {
             // Other commands not yet implemented
             Ok(())
@@ -272,12 +286,26 @@ fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
     }
 }
 
-fn run_list() -> anyhow::Result<()> {
+fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
-    let output = cli::commands::list::execute(&cwd, &db)?;
+    let output = cli::commands::tag::execute(identifier, tags, &cwd, &db)?;
+    print!("{output}");
+    Ok(())
+}
+
+fn run_list(tag: Option<&str>, json: bool) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    let output = if json {
+        cli::commands::list::execute_json(&cwd, &db, tag)?
+    } else {
+        cli::commands::list::execute(&cwd, &db, tag)?
+    };
     if output.ends_with('\n') {
         print!("{output}");
     } else {
@@ -526,6 +554,50 @@ mod tests {
                 assert!(print_path);
             }
             _ => panic!("expected Commands::Switch"),
+        }
+    }
+
+    #[test]
+    fn tag_subcommand_requires_branch() {
+        let result = Cli::try_parse_from(["trench", "tag"]);
+        assert!(result.is_err(), "tag without branch should fail");
+    }
+
+    #[test]
+    fn tag_subcommand_accepts_branch_only() {
+        let cli = Cli::try_parse_from(["trench", "tag", "my-feature"])
+            .expect("tag with branch should succeed");
+        match cli.command {
+            Some(Commands::Tag { branch, tags }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(tags.is_empty());
+            }
+            _ => panic!("expected Commands::Tag"),
+        }
+    }
+
+    #[test]
+    fn tag_subcommand_accepts_add_and_remove_args() {
+        let cli = Cli::try_parse_from(["trench", "tag", "my-feature", "+wip", "-old", "+review"])
+            .expect("tag with +/- args should succeed");
+        match cli.command {
+            Some(Commands::Tag { branch, tags }) => {
+                assert_eq!(branch, "my-feature");
+                assert_eq!(tags, vec!["+wip", "-old", "+review"]);
+            }
+            _ => panic!("expected Commands::Tag"),
+        }
+    }
+
+    #[test]
+    fn list_subcommand_accepts_tag_filter() {
+        let cli = Cli::try_parse_from(["trench", "list", "--tag", "wip"])
+            .expect("list with --tag should succeed");
+        match cli.command {
+            Some(Commands::List { tag }) => {
+                assert_eq!(tag.as_deref(), Some("wip"));
+            }
+            _ => panic!("expected Commands::List"),
         }
     }
 
