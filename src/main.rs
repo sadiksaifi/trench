@@ -558,6 +558,50 @@ mod tests {
     }
 
     #[test]
+    fn tag_subcommand_requires_branch() {
+        let result = Cli::try_parse_from(["trench", "tag"]);
+        assert!(result.is_err(), "tag without branch should fail");
+    }
+
+    #[test]
+    fn tag_subcommand_accepts_branch_only() {
+        let cli = Cli::try_parse_from(["trench", "tag", "my-feature"])
+            .expect("tag with branch should succeed");
+        match cli.command {
+            Some(Commands::Tag { branch, tags }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(tags.is_empty());
+            }
+            _ => panic!("expected Commands::Tag"),
+        }
+    }
+
+    #[test]
+    fn tag_subcommand_accepts_add_and_remove_args() {
+        let cli = Cli::try_parse_from(["trench", "tag", "my-feature", "+wip", "-old", "+review"])
+            .expect("tag with +/- args should succeed");
+        match cli.command {
+            Some(Commands::Tag { branch, tags }) => {
+                assert_eq!(branch, "my-feature");
+                assert_eq!(tags, vec!["+wip", "-old", "+review"]);
+            }
+            _ => panic!("expected Commands::Tag"),
+        }
+    }
+
+    #[test]
+    fn list_subcommand_accepts_tag_filter() {
+        let cli = Cli::try_parse_from(["trench", "list", "--tag", "wip"])
+            .expect("list with --tag should succeed");
+        match cli.command {
+            Some(Commands::List { tag }) => {
+                assert_eq!(tag.as_deref(), Some("wip"));
+            }
+            _ => panic!("expected Commands::List"),
+        }
+    }
+
+    #[test]
     fn cli_produces_output_config() {
         let cli = Cli::try_parse_from(["trench", "--no-color", "--quiet"])
             .expect("flags should parse");
