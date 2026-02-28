@@ -108,18 +108,18 @@ pub fn execute_porcelain(cwd: &Path, db: &Database, tag: Option<&str>) -> Result
 
     let items: Vec<WorktreeJson> = worktrees
         .iter()
-        .map(|wt| {
-            let tags = db.list_tags(wt.id).unwrap_or_default();
-            WorktreeJson {
+        .map(|wt| -> Result<WorktreeJson> {
+            let tags = db.list_tags(wt.id)?;
+            Ok(WorktreeJson {
                 name: wt.name.clone(),
                 branch: wt.branch.clone(),
                 path: wt.path.clone(),
                 status: "clean".to_string(),
                 managed: wt.managed,
                 tags,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(format_porcelain(&items))
 }
