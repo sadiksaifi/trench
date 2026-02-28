@@ -169,4 +169,24 @@ mod tests {
         let contents = std::fs::read_to_string(&existing).unwrap();
         assert_eq!(contents, "# existing config\n");
     }
+
+    #[test]
+    fn init_force_overwrites_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let existing = dir.path().join(".trench.toml");
+        std::fs::write(&existing, "# old config\n").unwrap();
+
+        let result = execute(dir.path(), true);
+
+        assert!(result.is_ok(), "init --force should succeed: {:?}", result.err());
+        let contents = std::fs::read_to_string(&existing).unwrap();
+        assert!(
+            contents.contains("# trench — project configuration"),
+            "file should contain scaffold content, not old content"
+        );
+        assert!(
+            !contents.contains("# old config"),
+            "old content should be replaced"
+        );
+    }
 }
