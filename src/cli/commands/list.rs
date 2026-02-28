@@ -7,7 +7,29 @@ use crate::git;
 use crate::output::json::format_json;
 use crate::output::porcelain::{format_porcelain, PorcelainRecord};
 use crate::output::table::Table;
-use crate::state::Database;
+use crate::state::{Database, Worktree};
+
+/// Discover the git repo from `cwd` and fetch worktrees from the DB,
+/// optionally filtered by tag.
+fn fetch_worktrees(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Vec<Worktree>> {
+    let repo_info = git::discover_repo(cwd)?;
+    let repo_path_str = repo_info
+        .path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
+
+    let repo = db.get_repo_by_path(repo_path_str)?;
+
+    let worktrees = match repo {
+        Some(ref r) => match tag {
+            Some(t) => db.list_worktrees_by_tag(r.id, t)?,
+            None => db.list_worktrees(r.id)?,
+        },
+        None => Vec::new(),
+    };
+
+    Ok(worktrees)
+}
 
 #[derive(Serialize)]
 struct WorktreeJson {
@@ -36,21 +58,7 @@ impl PorcelainRecord for WorktreeJson {
 /// Discovers the git repo from `cwd`, queries managed worktrees from the DB,
 /// and returns a formatted string for display. Optionally filters by tag.
 pub fn execute(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let repo_info = git::discover_repo(cwd)?;
-    let repo_path_str = repo_info
-        .path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
-
-    let repo = db.get_repo_by_path(repo_path_str)?;
-
-    let worktrees = match repo {
-        Some(ref r) => match tag {
-            Some(t) => db.list_worktrees_by_tag(r.id, t)?,
-            None => db.list_worktrees(r.id)?,
-        },
-        None => Vec::new(),
-    };
+    let worktrees = fetch_worktrees(cwd, db, tag)?;
 
     if worktrees.is_empty() {
         return Ok("No worktrees. Use `trench create` to get started.\n".to_string());
@@ -74,21 +82,7 @@ pub fn execute(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
 ///
 /// Returns JSON array of worktree objects including tags.
 pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let repo_info = git::discover_repo(cwd)?;
-    let repo_path_str = repo_info
-        .path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
-
-    let repo = db.get_repo_by_path(repo_path_str)?;
-
-    let worktrees = match repo {
-        Some(ref r) => match tag {
-            Some(t) => db.list_worktrees_by_tag(r.id, t)?,
-            None => db.list_worktrees(r.id)?,
-        },
-        None => Vec::new(),
-    };
+    let worktrees = fetch_worktrees(cwd, db, tag)?;
 
     let mut json_items = Vec::new();
     for wt in &worktrees {
@@ -110,21 +104,7 @@ pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Stri
 ///
 /// Returns colon-separated lines: `name:branch:path:status:managed`.
 pub fn execute_porcelain(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let repo_info = git::discover_repo(cwd)?;
-    let repo_path_str = repo_info
-        .path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
-
-    let repo = db.get_repo_by_path(repo_path_str)?;
-
-    let worktrees = match repo {
-        Some(ref r) => match tag {
-            Some(t) => db.list_worktrees_by_tag(r.id, t)?,
-            None => db.list_worktrees(r.id)?,
-        },
-        None => Vec::new(),
-    };
+    let worktrees = fetch_worktrees(cwd, db, tag)?;
 
     let items: Vec<WorktreeJson> = worktrees
         .iter()
