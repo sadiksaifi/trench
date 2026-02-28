@@ -27,6 +27,54 @@ pub fn dirty_count(worktree_path: &Path) -> Result<usize, GitError> {
     Ok(statuses.len())
 }
 
+/// Calculate commits ahead/behind for a branch relative to its upstream.
+///
+/// Checks for an upstream tracking branch first, then falls back to
+/// `base_branch`. Returns `None` if no reference point can be found.
+pub fn ahead_behind(
+    repo_path: &Path,
+    branch: &str,
+    base_branch: Option<&str>,
+) -> Result<Option<(usize, usize)>, GitError> {
+    let repo =
+        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+
+    let local = match repo.find_branch(branch, git2::BranchType::Local) {
+        Ok(b) => b,
+        Err(_) => return Ok(None),
+    };
+    let local_oid = match local.get().target() {
+        Some(oid) => oid,
+        None => return Ok(None),
+    };
+
+    // Try upstream tracking branch first
+    let upstream_oid = if let Ok(upstream) = local.upstream() {
+        upstream.get().target()
+    } else {
+        // Fall back to base_branch
+        base_branch.and_then(|base| {
+            repo.find_branch(base, git2::BranchType::Local)
+                .ok()
+                .and_then(|b| b.get().target())
+                .or_else(|| {
+                    let remote = format!("origin/{base}");
+                    repo.find_branch(&remote, git2::BranchType::Remote)
+                        .ok()
+                        .and_then(|b| b.get().target())
+                })
+        })
+    };
+
+    match upstream_oid {
+        Some(oid) => {
+            let (ahead, behind) = repo.graph_ahead_behind(local_oid, oid)?;
+            Ok(Some((ahead, behind)))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Errors specific to git operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -743,6 +791,22 @@ mod tests {
 
         let count = dirty_count(tmp.path()).expect("should succeed");
         assert_eq!(count, 0, "clean worktree should have 0 dirty files");
+    }
+
+    #[test]
+    fn ahead_behind_returns_zero_zero_when_at_same_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        let base = head_branch(&repo);
+
+        // Create a feature branch at the same commit as base
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature", &head_commit, false).unwrap();
+
+        let result = ahead_behind(tmp.path(), "feature", Some(&base))
+            .expect("should succeed");
+
+        assert_eq!(result, Some((0, 0)), "same commit should be (0, 0)");
     }
 
     #[test]
