@@ -159,6 +159,48 @@ mod tests {
     }
 
     #[test]
+    fn hooks_deserialize_from_toml_and_resolve_by_event() {
+        let toml_str = r#"
+[hooks.post_create]
+copy = [".env*", "!.env.example"]
+run = ["bun install", "bunx prisma generate"]
+timeout_secs = 300
+
+[hooks.pre_remove]
+shell = "pkill -f 'next dev' || true"
+timeout_secs = 60
+"#;
+        let config: crate::config::ProjectConfig = toml::from_str(toml_str).unwrap();
+        let hooks = config.hooks.unwrap();
+
+        // post_create is configured with copy + run
+        let post_create = get_hook_config(&hooks, &HookEvent::PostCreate).unwrap();
+        assert_eq!(
+            post_create.copy,
+            Some(vec![".env*".to_string(), "!.env.example".to_string()])
+        );
+        assert_eq!(
+            post_create.run,
+            Some(vec!["bun install".to_string(), "bunx prisma generate".to_string()])
+        );
+        assert!(post_create.shell.is_none());
+        assert_eq!(post_create.timeout_secs, Some(300));
+
+        // pre_remove uses shell instead of run
+        let pre_remove = get_hook_config(&hooks, &HookEvent::PreRemove).unwrap();
+        assert!(pre_remove.copy.is_none());
+        assert!(pre_remove.run.is_none());
+        assert_eq!(pre_remove.shell, Some("pkill -f 'next dev' || true".to_string()));
+        assert_eq!(pre_remove.timeout_secs, Some(60));
+
+        // unconfigured hooks return None
+        assert!(get_hook_config(&hooks, &HookEvent::PreCreate).is_none());
+        assert!(get_hook_config(&hooks, &HookEvent::PreSync).is_none());
+        assert!(get_hook_config(&hooks, &HookEvent::PostSync).is_none());
+        assert!(get_hook_config(&hooks, &HookEvent::PostRemove).is_none());
+    }
+
+    #[test]
     fn hook_event_has_six_variants_with_correct_strings() {
         let cases = vec![
             (HookEvent::PreCreate, "pre_create"),
