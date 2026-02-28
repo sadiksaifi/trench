@@ -218,16 +218,16 @@ fn run_remove(identifier: &str, force: bool) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not found") || msg.contains("not tracked") {
-                eprintln!("error: {e}");
-                std::process::exit(2);
-            }
             if let Some(git_err) = e.downcast_ref::<git::GitError>() {
                 if matches!(git_err, git::GitError::WorktreeNotFound { .. }) {
                     eprintln!("error: {e}");
                     std::process::exit(2);
                 }
+            }
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("not tracked") {
+                eprintln!("error: {e}");
+                std::process::exit(2);
             }
             Err(e)
         }
