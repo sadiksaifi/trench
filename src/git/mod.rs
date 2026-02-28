@@ -9,6 +9,24 @@ pub struct RepoInfo {
     pub default_branch: String,
 }
 
+/// Count modified, staged, and untracked files in a worktree.
+///
+/// Opens the repository at `worktree_path` and counts all files with
+/// non-clean status (modified, new, deleted, renamed, typechanged).
+/// Returns 0 for a clean worktree.
+pub fn dirty_count(worktree_path: &Path) -> Result<usize, GitError> {
+    let repo = git2::Repository::open(worktree_path)
+        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+
+    let statuses = repo.statuses(Some(
+        git2::StatusOptions::new()
+            .include_untracked(true)
+            .recurse_untracked_dirs(true),
+    ))?;
+
+    Ok(statuses.len())
+}
+
 /// Errors specific to git operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -716,6 +734,15 @@ mod tests {
 
         let result = remove_worktree(repo_dir.path(), &fake_path);
         assert!(result.is_err(), "should error for nonexistent worktree path");
+    }
+
+    #[test]
+    fn dirty_count_returns_zero_for_clean_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(tmp.path());
+
+        let count = dirty_count(tmp.path()).expect("should succeed");
+        assert_eq!(count, 0, "clean worktree should have 0 dirty files");
     }
 
     #[test]
