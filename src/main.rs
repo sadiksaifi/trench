@@ -74,6 +74,15 @@ enum Commands {
         #[arg(long)]
         print_path: bool,
     },
+    /// Manage tags on a worktree
+    Tag {
+        /// Branch name or sanitized name of the worktree
+        branch: String,
+
+        /// Tags to add (+name) or remove (-name). No arguments = list current tags
+        #[arg(allow_hyphen_values = true)]
+        tags: Vec<String>,
+    },
     /// Open a worktree in $EDITOR
     Open,
     /// List all worktrees
@@ -119,6 +128,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Remove { branch, force }) => run_remove(&branch, force),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
+        Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::List) => run_list(),
         Some(_) => {
             // Other commands not yet implemented
@@ -270,6 +280,16 @@ fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
             Err(e)
         }
     }
+}
+
+fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    let output = cli::commands::tag::execute(identifier, tags, &cwd, &db)?;
+    print!("{output}");
+    Ok(())
 }
 
 fn run_list() -> anyhow::Result<()> {
