@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -83,11 +84,24 @@ const SCAFFOLD: &str = r#"# trench — project configuration
 pub fn execute(repo_root: &Path, force: bool) -> Result<PathBuf> {
     let path = repo_root.join(PROJECT_CONFIG_FILENAME);
 
-    if path.exists() && !force {
-        return Err(InitError::FileAlreadyExists.into());
+    if force {
+        std::fs::write(&path, SCAFFOLD)?;
+        return Ok(path);
     }
 
-    std::fs::write(&path, SCAFFOLD)?;
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(InitError::FileAlreadyExists.into());
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    file.write_all(SCAFFOLD.as_bytes())?;
     Ok(path)
 }
 
