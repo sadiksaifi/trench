@@ -55,6 +55,9 @@ pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<SwitchResu
     // Update session state
     db.set_session("current_worktree", &wt.name)?;
 
+    // Record "switched" event
+    db.insert_event(repo.id, Some(wt.id), "switched", None)?;
+
     Ok(SwitchResult {
         path: wt.path.clone(),
         name: wt.name.clone(),
@@ -225,5 +228,60 @@ mod tests {
             msg.contains("not found"),
             "error should mention 'not found', got: {msg}"
         );
+    }
+
+    #[test]
+    fn create_then_switch_updates_last_accessed_and_session() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Create a worktree end-to-end
+        let path = crate::cli::commands::create::execute(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+        assert!(path.exists());
+
+        // Verify last_accessed is None after create
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.get_repo_by_path(repo_path_str).unwrap().unwrap();
+        let wt_before = db
+            .find_worktree_by_identifier(db_repo.id, "my-feature")
+            .unwrap()
+            .unwrap();
+        assert!(
+            wt_before.last_accessed.is_none(),
+            "last_accessed should be None before switch"
+        );
+
+        // Switch to the worktree
+        let switch = execute("my-feature", repo_dir.path(), &db)
+            .expect("switch should succeed");
+        assert_eq!(switch.name, "my-feature");
+        assert_eq!(switch.path, path.to_str().unwrap());
+
+        // Verify last_accessed is now set
+        let wt_after = db.get_worktree(wt_before.id).unwrap().unwrap();
+        assert!(
+            wt_after.last_accessed.is_some(),
+            "last_accessed should be set after switch"
+        );
+
+        // Verify session state
+        let current = db.get_session("current_worktree").unwrap();
+        assert_eq!(current.as_deref(), Some("my-feature"));
+
+        // Verify a "switched" event was recorded
+        let event_count = db.count_events(wt_before.id, Some("switched")).unwrap();
+        assert_eq!(event_count, 1, "exactly one 'switched' event should exist");
     }
 }
