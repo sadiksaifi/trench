@@ -443,6 +443,105 @@ mod tests {
     }
 
     #[test]
+    fn integration_tag_filter_verify_lifecycle() {
+        use crate::cli::commands::{create, tag};
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        // Create two worktrees
+        create::execute(
+            "feature-alpha",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .unwrap();
+        create::execute(
+            "feature-beta",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .unwrap();
+
+        // Tag alpha with wip and review, beta with wip only
+        tag::execute(
+            "feature-alpha",
+            &["+wip".to_string(), "+review".to_string()],
+            repo_dir.path(),
+            &db,
+        )
+        .unwrap();
+        tag::execute(
+            "feature-beta",
+            &["+wip".to_string()],
+            repo_dir.path(),
+            &db,
+        )
+        .unwrap();
+
+        // List all — both should appear with tags
+        let all_output = execute(repo_dir.path(), &db, None).unwrap();
+        assert!(all_output.contains("feature-alpha"));
+        assert!(all_output.contains("feature-beta"));
+        assert!(all_output.contains("Tags"), "should have Tags header");
+
+        // Filter by wip — both should appear
+        let wip_output = execute(repo_dir.path(), &db, Some("wip")).unwrap();
+        assert!(wip_output.contains("feature-alpha"));
+        assert!(wip_output.contains("feature-beta"));
+
+        // Filter by review — only alpha
+        let review_output = execute(repo_dir.path(), &db, Some("review")).unwrap();
+        assert!(review_output.contains("feature-alpha"));
+        assert!(!review_output.contains("feature-beta"));
+
+        // Remove wip from alpha
+        tag::execute(
+            "feature-alpha",
+            &["-wip".to_string()],
+            repo_dir.path(),
+            &db,
+        )
+        .unwrap();
+
+        // Filter by wip — only beta now
+        let wip_after = execute(repo_dir.path(), &db, Some("wip")).unwrap();
+        assert!(!wip_after.contains("feature-alpha"));
+        assert!(wip_after.contains("feature-beta"));
+
+        // JSON output should include tags
+        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let items = parsed.as_array().unwrap();
+        assert_eq!(items.len(), 2);
+
+        // Find alpha in JSON and check tags
+        let alpha = items
+            .iter()
+            .find(|i| i["name"] == "feature-alpha")
+            .expect("alpha should be in JSON");
+        let alpha_tags = alpha["tags"].as_array().unwrap();
+        assert_eq!(alpha_tags, &[serde_json::json!("review")]);
+
+        // Find beta in JSON and check tags
+        let beta = items
+            .iter()
+            .find(|i| i["name"] == "feature-beta")
+            .expect("beta should be in JSON");
+        let beta_tags = beta["tags"].as_array().unwrap();
+        assert_eq!(beta_tags, &[serde_json::json!("wip")]);
+    }
+
+    #[test]
     fn empty_state_output_ends_with_newline() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
