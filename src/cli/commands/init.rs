@@ -4,6 +4,13 @@ use anyhow::Result;
 
 const TRENCH_TOML_FILENAME: &str = ".trench.toml";
 
+/// Errors specific to the `init` command.
+#[derive(Debug, thiserror::Error)]
+pub enum InitError {
+    #[error("`.trench.toml` already exists. Use `--force` to overwrite.")]
+    FileAlreadyExists,
+}
+
 /// The scaffold content for `.trench.toml`.
 const SCAFFOLD: &str = r#"# trench — project configuration
 # Uncomment and modify the sections you need.
@@ -73,8 +80,13 @@ const SCAFFOLD: &str = r#"# trench — project configuration
 "#;
 
 /// Execute `trench init` — scaffold a commented `.trench.toml` at the repo root.
-pub fn execute(repo_root: &Path, _force: bool) -> Result<PathBuf> {
+pub fn execute(repo_root: &Path, force: bool) -> Result<PathBuf> {
     let path = repo_root.join(TRENCH_TOML_FILENAME);
+
+    if path.exists() && !force {
+        return Err(InitError::FileAlreadyExists.into());
+    }
+
     std::fs::write(&path, SCAFFOLD)?;
     Ok(path)
 }
@@ -131,5 +143,30 @@ mod tests {
 
         // Should have inline documentation
         assert!(contents.contains("Uncomment"), "should have usage instructions");
+    }
+
+    #[test]
+    fn init_fails_when_file_already_exists() {
+        let dir = TempDir::new().unwrap();
+        let existing = dir.path().join(".trench.toml");
+        std::fs::write(&existing, "# existing config\n").unwrap();
+
+        let result = execute(dir.path(), false);
+
+        assert!(result.is_err(), "init should fail when file exists");
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("already exists"),
+            "error should mention 'already exists': {msg}"
+        );
+        assert!(
+            msg.contains("--force"),
+            "error should mention --force: {msg}"
+        );
+
+        // Original file should be untouched
+        let contents = std::fs::read_to_string(&existing).unwrap();
+        assert_eq!(contents, "# existing config\n");
     }
 }
