@@ -133,7 +133,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Remove { branch, force }) => run_remove(&branch, force),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
-        Some(Commands::List { tag }) => run_list(tag.as_deref()),
+        Some(Commands::List { tag }) => run_list(tag.as_deref(), json),
         Some(_) => {
             // Other commands not yet implemented
             Ok(())
@@ -296,12 +296,16 @@ fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_list(tag: Option<&str>) -> anyhow::Result<()> {
+fn run_list(tag: Option<&str>, json: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
-    let output = cli::commands::list::execute(&cwd, &db, tag)?;
+    let output = if json {
+        cli::commands::list::execute_json(&cwd, &db, tag)?
+    } else {
+        cli::commands::list::execute(&cwd, &db, tag)?
+    };
     if output.ends_with('\n') {
         print!("{output}");
     } else {
