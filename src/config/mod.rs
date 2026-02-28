@@ -7,12 +7,30 @@ use crate::paths;
 
 // --- Hook types (FR-18, FR-19) ---
 
-#[derive(Debug, Default, Deserialize, serde::Serialize, PartialEq, Clone)]
+pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 120;
+
+fn default_timeout_secs() -> Option<u64> {
+    Some(DEFAULT_HOOK_TIMEOUT_SECS)
+}
+
+#[derive(Debug, Deserialize, serde::Serialize, PartialEq, Clone)]
 pub struct HookDef {
     pub copy: Option<Vec<String>>,
     pub run: Option<Vec<String>>,
     pub shell: Option<String>,
+    #[serde(default = "default_timeout_secs")]
     pub timeout_secs: Option<u64>,
+}
+
+impl Default for HookDef {
+    fn default() -> Self {
+        Self {
+            copy: None,
+            run: None,
+            shell: None,
+            timeout_secs: Some(DEFAULT_HOOK_TIMEOUT_SECS),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, serde::Serialize, PartialEq, Clone)]
@@ -998,6 +1016,16 @@ shell = "echo cleanup"
         let err = load_project_config_from(&path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("invalid TOML"), "error should mention 'invalid TOML': {msg}");
+    }
+
+    #[test]
+    fn hook_def_default_timeout_matches_serde_default() {
+        let def = HookDef::default();
+        assert_eq!(
+            def.timeout_secs,
+            Some(120),
+            "HookDef::default() must match serde default of 120"
+        );
     }
 
     #[test]
