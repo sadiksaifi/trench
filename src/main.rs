@@ -129,6 +129,7 @@ fn main() -> anyhow::Result<()> {
 
     let dry_run = cli.dry_run;
     let json = cli.json;
+    let porcelain = cli.porcelain;
 
     match cli.command {
         Some(Commands::Create { branch, from }) => {
@@ -137,7 +138,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Remove { branch, force }) => run_remove(&branch, force),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
-        Some(Commands::List { tag }) => run_list(tag.as_deref(), json),
+        Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
         Some(Commands::Init { force }) => run_init(force),
         Some(_) => {
             // Other commands not yet implemented
@@ -301,13 +302,15 @@ fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_list(tag: Option<&str>, json: bool) -> anyhow::Result<()> {
+fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
     let output = if json {
         cli::commands::list::execute_json(&cwd, &db, tag)?
+    } else if porcelain {
+        cli::commands::list::execute_porcelain(&cwd, &db, tag)?
     } else {
         cli::commands::list::execute(&cwd, &db, tag)?
     };
