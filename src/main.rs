@@ -205,7 +205,12 @@ fn run_remove(identifier: &str, force: bool) -> anyhow::Result<()> {
                     wt.name, wt.path
                 );
                 let mut input = String::new();
-                if std::io::stdin().read_line(&mut input).is_err() || !input.trim().eq_ignore_ascii_case("y") {
+                if std::io::stdin().read_line(&mut input).is_err() {
+                    eprintln!("error: failed to read input");
+                    return Ok(());
+                }
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("Cancelled.");
                     return Ok(());
                 }
             }
