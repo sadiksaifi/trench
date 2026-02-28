@@ -657,6 +657,51 @@ mod tests {
     }
 
     #[test]
+    fn list_json_includes_ahead_behind_dirty_fields() {
+        use crate::cli::commands::create;
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        create::execute(
+            "feature-json-fields",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+
+        let items = parsed.as_array().expect("should be an array");
+        assert_eq!(items.len(), 1);
+
+        let wt = &items[0];
+        // Should have ahead, behind, and dirty fields
+        assert!(
+            wt.get("ahead").is_some(),
+            "JSON should have 'ahead' field, got: {wt}"
+        );
+        assert!(
+            wt.get("behind").is_some(),
+            "JSON should have 'behind' field, got: {wt}"
+        );
+        assert!(
+            wt.get("dirty").is_some(),
+            "JSON should have 'dirty' field, got: {wt}"
+        );
+
+        // For a freshly created worktree, dirty should be 0
+        assert_eq!(wt["dirty"], serde_json::json!(0));
+    }
+
+    #[test]
     fn list_table_shows_ahead_behind_and_dirty_columns() {
         use crate::cli::commands::create;
         use crate::paths;
