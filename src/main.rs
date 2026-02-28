@@ -98,7 +98,11 @@ enum Commands {
     /// View event log
     Log,
     /// Initialize .trench.toml in current directory
-    Init,
+    Init {
+        /// Overwrite existing .trench.toml
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 impl Cli {
@@ -134,6 +138,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json),
+        Some(Commands::Init { force }) => run_init(force),
         Some(_) => {
             // Other commands not yet implemented
             Ok(())
@@ -312,6 +317,25 @@ fn run_list(tag: Option<&str>, json: bool) -> anyhow::Result<()> {
         println!("{output}");
     }
     Ok(())
+}
+
+fn run_init(force: bool) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let repo_info = git::discover_repo(&cwd)?;
+
+    match cli::commands::init::execute(&repo_info.path, force) {
+        Ok(path) => {
+            println!("Created {}", path.display());
+            Ok(())
+        }
+        Err(e) => {
+            if e.downcast_ref::<cli::commands::init::InitError>().is_some() {
+                eprintln!("error: {e}");
+                std::process::exit(6);
+            }
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -598,6 +622,30 @@ mod tests {
                 assert_eq!(tag.as_deref(), Some("wip"));
             }
             _ => panic!("expected Commands::List"),
+        }
+    }
+
+    #[test]
+    fn init_subcommand_defaults_force_to_false() {
+        let cli = Cli::try_parse_from(["trench", "init"])
+            .expect("init should parse");
+        match cli.command {
+            Some(Commands::Init { force }) => {
+                assert!(!force, "force should default to false");
+            }
+            _ => panic!("expected Commands::Init"),
+        }
+    }
+
+    #[test]
+    fn init_subcommand_accepts_force_flag() {
+        let cli = Cli::try_parse_from(["trench", "init", "--force"])
+            .expect("init --force should parse");
+        match cli.command {
+            Some(Commands::Init { force }) => {
+                assert!(force, "force should be true");
+            }
+            _ => panic!("expected Commands::Init"),
         }
     }
 
