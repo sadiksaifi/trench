@@ -309,6 +309,36 @@ impl Database {
         Ok(value)
     }
 
+    /// Add a tag to a worktree. Idempotent — duplicate adds are silently ignored.
+    pub fn add_tag(&self, worktree_id: i64, name: &str) -> Result<()> {
+        let created_at = now();
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO tags (worktree_id, name, created_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![worktree_id, name, created_at],
+            )
+            .context("failed to add tag")?;
+        Ok(())
+    }
+
+    /// List all tags for a worktree, sorted alphabetically.
+    pub fn list_tags(&self, worktree_id: i64) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM tags WHERE worktree_id = ?1 ORDER BY name")
+            .context("failed to prepare list_tags query")?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![worktree_id], |row| row.get(0))
+            .context("failed to list tags")?;
+
+        let mut tags = Vec::new();
+        for row in rows {
+            tags.push(row.context("failed to read tag row")?);
+        }
+        Ok(tags)
+    }
+
     /// Count events for a worktree, optionally filtered by event type.
     pub fn count_events(
         &self,

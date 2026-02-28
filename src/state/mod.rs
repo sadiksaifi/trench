@@ -624,6 +624,43 @@ mod tests {
     }
 
     #[test]
+    fn add_and_list_tags_for_worktree() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        // No tags initially
+        let tags = db.list_tags(wt.id).unwrap();
+        assert!(tags.is_empty(), "should have no tags initially");
+
+        // Add two tags
+        db.add_tag(wt.id, "wip").unwrap();
+        db.add_tag(wt.id, "review").unwrap();
+
+        let tags = db.list_tags(wt.id).unwrap();
+        assert_eq!(tags.len(), 2);
+        assert!(tags.contains(&"wip".to_string()));
+        assert!(tags.contains(&"review".to_string()));
+    }
+
+    #[test]
+    fn add_tag_is_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        db.add_tag(wt.id, "wip").unwrap();
+        db.add_tag(wt.id, "wip").unwrap(); // should not error
+
+        let tags = db.list_tags(wt.id).unwrap();
+        assert_eq!(tags.len(), 1, "duplicate add should not create second tag");
+    }
+
+    #[test]
     fn get_repo_by_path_returns_existing_repo() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("my-project", "/home/user/my-project", Some("main")).unwrap();
