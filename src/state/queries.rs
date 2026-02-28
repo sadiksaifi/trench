@@ -339,6 +339,41 @@ impl Database {
         Ok(tags)
     }
 
+    /// List worktrees that have a specific tag, excluding removed worktrees.
+    pub fn list_worktrees_by_tag(&self, repo_id: i64, tag: &str) -> Result<Vec<Worktree>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT w.id, w.repo_id, w.name, w.branch, w.path, w.base_branch, w.managed, w.adopted_at, w.last_accessed, w.removed_at, w.created_at
+             FROM worktrees w
+             INNER JOIN tags t ON t.worktree_id = w.id
+             WHERE w.repo_id = ?1 AND t.name = ?2 AND w.removed_at IS NULL
+             ORDER BY w.created_at",
+        ).context("failed to prepare list_worktrees_by_tag query")?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![repo_id, tag], |row| {
+                Ok(Worktree {
+                    id: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    name: row.get(2)?,
+                    branch: row.get(3)?,
+                    path: row.get(4)?,
+                    base_branch: row.get(5)?,
+                    managed: row.get::<_, i64>(6)? != 0,
+                    adopted_at: row.get(7)?,
+                    last_accessed: row.get(8)?,
+                    removed_at: row.get(9)?,
+                    created_at: row.get(10)?,
+                })
+            })
+            .context("failed to list worktrees by tag")?;
+
+        let mut worktrees = Vec::new();
+        for row in rows {
+            worktrees.push(row.context("failed to read worktree row")?);
+        }
+        Ok(worktrees)
+    }
+
     /// Remove a tag from a worktree. No-op if the tag doesn't exist.
     pub fn remove_tag(&self, worktree_id: i64, name: &str) -> Result<()> {
         self.conn

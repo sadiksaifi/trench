@@ -9,8 +9,8 @@ use crate::state::Database;
 /// Execute the `trench list` command.
 ///
 /// Discovers the git repo from `cwd`, queries managed worktrees from the DB,
-/// and returns a formatted string for display.
-pub fn execute(cwd: &Path, db: &Database) -> Result<String> {
+/// and returns a formatted string for display. Optionally filters by tag.
+pub fn execute(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
     let repo_info = git::discover_repo(cwd)?;
     let repo_path_str = repo_info
         .path
@@ -20,7 +20,10 @@ pub fn execute(cwd: &Path, db: &Database) -> Result<String> {
     let repo = db.get_repo_by_path(repo_path_str)?;
 
     let worktrees = match repo {
-        Some(r) => db.list_worktrees(r.id)?,
+        Some(ref r) => match tag {
+            Some(t) => db.list_worktrees_by_tag(r.id, t)?,
+            None => db.list_worktrees(r.id)?,
+        },
         None => Vec::new(),
     };
 
@@ -86,7 +89,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = execute(repo_dir.path(), &db).expect("list should succeed");
+        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
 
         // Should contain column headers
         assert!(output.contains("Name"), "output should have Name header");
@@ -139,7 +142,7 @@ mod tests {
         )
         .expect("second create should succeed");
 
-        let output = execute(repo_dir.path(), &db).expect("list should succeed");
+        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
 
         assert!(
             output.contains("feature-one"),
@@ -160,7 +163,7 @@ mod tests {
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
 
-        let output = execute(repo_dir.path(), &db).expect("list should succeed");
+        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
 
         assert!(
             output.contains("No worktrees"),
@@ -216,7 +219,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = execute(repo_dir.path(), &db).expect("list should succeed");
+        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
 
         assert!(
             output.contains("active-feature"),
@@ -255,7 +258,7 @@ mod tests {
         remove::execute("ephemeral", repo_dir.path(), &db)
             .expect("remove should succeed");
 
-        let output = execute(repo_dir.path(), &db).expect("list should succeed");
+        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
 
         assert!(
             output.contains("No worktrees"),
@@ -264,12 +267,74 @@ mod tests {
     }
 
     #[test]
+    fn list_with_tag_filter_shows_only_matching() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        let wt1 = db
+            .insert_worktree(
+                db_repo.id,
+                "tagged-wt",
+                "feature/tagged",
+                "/wt/tagged",
+                Some("main"),
+            )
+            .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "untagged-wt",
+            "feature/untagged",
+            "/wt/untagged",
+            Some("main"),
+        )
+        .unwrap();
+
+        db.add_tag(wt1.id, "wip").unwrap();
+
+        let output = execute(repo_dir.path(), &db, Some("wip")).unwrap();
+
+        assert!(
+            output.contains("tagged-wt"),
+            "output should contain tagged worktree, got: {output}"
+        );
+        assert!(
+            !output.contains("untagged-wt"),
+            "output should NOT contain untagged worktree, got: {output}"
+        );
+
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2, "expected header + 1 data row");
+    }
+
+    #[test]
+    fn list_with_tag_filter_shows_empty_when_no_match() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        db.insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        let output = execute(repo_dir.path(), &db, Some("nonexistent")).unwrap();
+        assert!(output.contains("No worktrees"));
+    }
+
+    #[test]
     fn empty_state_output_ends_with_newline() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
 
-        let output = execute(repo_dir.path(), &db).expect("list should succeed");
+        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
 
         assert!(
             output.ends_with('\n'),
