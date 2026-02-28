@@ -281,6 +281,34 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Set a session key-value pair (upsert).
+    pub fn set_session(&self, key: &str, value: &str) -> Result<()> {
+        let updated_at = now();
+        self.conn
+            .execute(
+                "INSERT INTO session (key, value, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                rusqlite::params![key, value, updated_at],
+            )
+            .context("failed to set session key")?;
+        Ok(())
+    }
+
+    /// Get a session value by key. Returns `None` if not found.
+    pub fn get_session(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM session WHERE key = ?1")
+            .context("failed to prepare get_session query")?;
+
+        let value = stmt
+            .query_row(rusqlite::params![key], |row| row.get(0))
+            .optional()
+            .context("failed to get session key")?;
+
+        Ok(value)
+    }
+
     /// Count events for a worktree, optionally filtered by event type.
     pub fn count_events(
         &self,

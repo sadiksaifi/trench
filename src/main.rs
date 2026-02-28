@@ -66,7 +66,14 @@ enum Commands {
         force: bool,
     },
     /// Switch to a worktree
-    Switch,
+    Switch {
+        /// Branch name or sanitized name of the worktree
+        branch: String,
+
+        /// Print only the worktree path (for shell integration)
+        #[arg(long)]
+        print_path: bool,
+    },
     /// Open a worktree in $EDITOR
     Open,
     /// List all worktrees
@@ -111,6 +118,7 @@ fn main() -> anyhow::Result<()> {
             run_create(&branch, from.as_deref(), dry_run, json)
         }
         Some(Commands::Remove { branch, force }) => run_remove(&branch, force),
+        Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::List) => run_list(),
         Some(_) => {
             // Other commands not yet implemented
@@ -239,6 +247,31 @@ fn run_remove(identifier: &str, force: bool) -> anyhow::Result<()> {
     }
 }
 
+fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    match cli::commands::switch::execute(identifier, &cwd, &db) {
+        Ok(result) => {
+            if print_path {
+                println!("{}", result.path);
+            } else {
+                println!("Switched to worktree '{}' at {}", result.name, result.path);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("not tracked") {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+            Err(e)
+        }
+    }
+}
+
 fn run_list() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
@@ -309,9 +342,9 @@ mod tests {
 
     #[test]
     fn all_subcommands_are_accepted() {
-        // remove requires a branch argument, so test it separately
+        // switch and remove require a branch argument, so test them separately
         let subcommands = [
-            "switch", "open", "list", "status", "sync", "log", "init",
+            "open", "list", "status", "sync", "log", "init",
         ];
         for sub in subcommands {
             let result = Cli::try_parse_from(["trench", sub]);
@@ -322,9 +355,11 @@ mod tests {
                 result.unwrap_err()
             );
         }
-        // remove needs a branch arg
+        // remove and switch need a branch arg
         let result = Cli::try_parse_from(["trench", "remove", "my-feature"]);
         assert!(result.is_ok(), "remove with branch should be accepted");
+        let result = Cli::try_parse_from(["trench", "switch", "my-feature"]);
+        assert!(result.is_ok(), "switch with branch should be accepted");
     }
 
     #[test]
@@ -459,6 +494,38 @@ mod tests {
                 assert!(force);
             }
             _ => panic!("expected Commands::Remove"),
+        }
+    }
+
+    #[test]
+    fn switch_subcommand_requires_branch() {
+        let result = Cli::try_parse_from(["trench", "switch"]);
+        assert!(result.is_err(), "switch without branch should fail");
+    }
+
+    #[test]
+    fn switch_subcommand_accepts_branch() {
+        let cli = Cli::try_parse_from(["trench", "switch", "my-feature"])
+            .expect("switch with branch should succeed");
+        match cli.command {
+            Some(Commands::Switch { branch, print_path }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(!print_path);
+            }
+            _ => panic!("expected Commands::Switch"),
+        }
+    }
+
+    #[test]
+    fn switch_subcommand_accepts_print_path_flag() {
+        let cli = Cli::try_parse_from(["trench", "switch", "my-feature", "--print-path"])
+            .expect("switch with --print-path should succeed");
+        match cli.command {
+            Some(Commands::Switch { branch, print_path }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(print_path);
+            }
+            _ => panic!("expected Commands::Switch"),
         }
     }
 
