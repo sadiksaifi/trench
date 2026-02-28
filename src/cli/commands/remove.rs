@@ -107,6 +107,18 @@ mod tests {
         .expect("create should succeed");
         assert!(path.exists(), "worktree should exist after create");
 
+        // Capture the worktree ID before removal
+        let repo_path_str = repo_dir.path().canonicalize().unwrap();
+        let db_repo = db
+            .get_repo_by_path(repo_path_str.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let wt_before = db
+            .find_worktree_by_identifier(db_repo.id, "my-feature")
+            .unwrap()
+            .expect("worktree should exist before removal");
+        let wt_id = wt_before.id;
+
         // Remove it
         let name = execute("my-feature", repo_dir.path(), &db)
             .expect("remove should succeed");
@@ -116,20 +128,21 @@ mod tests {
         assert!(!path.exists(), "worktree directory should be deleted");
 
         // Verify: DB record has removed_at set
-        let repo_path_str = repo_dir.path().canonicalize().unwrap();
-        let db_repo = db
-            .get_repo_by_path(repo_path_str.to_str().unwrap())
+        let wt = db
+            .get_worktree(wt_id)
             .unwrap()
-            .unwrap();
-        let worktrees = db.list_worktrees(db_repo.id).unwrap();
-        assert_eq!(worktrees.len(), 1);
+            .expect("worktree record should still exist in DB");
         assert!(
-            worktrees[0].removed_at.is_some(),
+            wt.removed_at.is_some(),
             "removed_at should be set"
         );
 
+        // list_worktrees should no longer include the removed worktree
+        let worktrees = db.list_worktrees(db_repo.id).unwrap();
+        assert_eq!(worktrees.len(), 0, "removed worktree should not appear in list");
+
         // Verify: "removed" event was inserted
-        let event_count = db.count_events(worktrees[0].id, Some("removed")).unwrap();
+        let event_count = db.count_events(wt_id, Some("removed")).unwrap();
         assert_eq!(event_count, 1, "exactly one 'removed' event should exist");
     }
 

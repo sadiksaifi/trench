@@ -146,7 +146,7 @@ impl Database {
     pub fn list_worktrees(&self, repo_id: i64) -> Result<Vec<Worktree>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, name, branch, path, base_branch, managed, adopted_at, last_accessed, removed_at, created_at
-             FROM worktrees WHERE repo_id = ?1 ORDER BY created_at",
+             FROM worktrees WHERE repo_id = ?1 AND removed_at IS NULL ORDER BY created_at",
         ).context("failed to prepare list_worktrees query")?;
 
         let rows = stmt
