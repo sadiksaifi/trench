@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::git;
 use crate::output::json::format_json;
+use crate::output::porcelain::{format_porcelain, PorcelainRecord};
 use crate::output::table::Table;
 use crate::state::Database;
 
@@ -16,6 +17,18 @@ struct WorktreeJson {
     status: String,
     managed: bool,
     tags: Vec<String>,
+}
+
+impl PorcelainRecord for WorktreeJson {
+    fn porcelain_fields(&self) -> Vec<String> {
+        vec![
+            self.name.clone(),
+            self.branch.clone(),
+            self.path.clone(),
+            self.status.clone(),
+            self.managed.to_string(),
+        ]
+    }
 }
 
 /// Execute the `trench list` command.
@@ -91,6 +104,44 @@ pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Stri
     }
 
     format_json(&json_items)
+}
+
+/// Execute the `trench list --porcelain` command.
+///
+/// Returns colon-separated lines: `name:branch:path:status:managed`.
+pub fn execute_porcelain(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
+    let repo_info = git::discover_repo(cwd)?;
+    let repo_path_str = repo_info
+        .path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
+
+    let repo = db.get_repo_by_path(repo_path_str)?;
+
+    let worktrees = match repo {
+        Some(ref r) => match tag {
+            Some(t) => db.list_worktrees_by_tag(r.id, t)?,
+            None => db.list_worktrees(r.id)?,
+        },
+        None => Vec::new(),
+    };
+
+    let items: Vec<WorktreeJson> = worktrees
+        .iter()
+        .map(|wt| {
+            let tags = db.list_tags(wt.id).unwrap_or_default();
+            WorktreeJson {
+                name: wt.name.clone(),
+                branch: wt.branch.clone(),
+                path: wt.path.clone(),
+                status: "clean".to_string(),
+                managed: wt.managed,
+                tags,
+            }
+        })
+        .collect();
+
+    Ok(format_porcelain(&items))
 }
 
 #[cfg(test)]
@@ -542,6 +593,59 @@ mod tests {
             .expect("beta should be in JSON");
         let beta_tags = beta["tags"].as_array().unwrap();
         assert_eq!(beta_tags, &[serde_json::json!("wip")]);
+    }
+
+    #[test]
+    fn list_porcelain_outputs_colon_separated_lines() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        db.insert_worktree(
+            db_repo.id,
+            "feature-auth",
+            "feature/auth",
+            "/home/user/.worktrees/proj/feature-auth",
+            Some("main"),
+        )
+        .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "fix-bug",
+            "fix/bug",
+            "/home/user/.worktrees/proj/fix-bug",
+            Some("main"),
+        )
+        .unwrap();
+
+        let output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            "feature-auth:feature/auth:/home/user/.worktrees/proj/feature-auth:clean:true"
+        );
+        assert_eq!(
+            lines[1],
+            "fix-bug:fix/bug:/home/user/.worktrees/proj/fix-bug:clean:true"
+        );
+    }
+
+    #[test]
+    fn list_porcelain_empty_returns_empty() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
+        assert!(output.is_empty(), "empty worktree list should produce empty porcelain output");
     }
 
     #[test]
