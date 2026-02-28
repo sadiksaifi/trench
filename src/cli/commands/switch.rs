@@ -52,6 +52,9 @@ pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<SwitchResu
         },
     )?;
 
+    // Update session state
+    db.set_session("current_worktree", &wt.name)?;
+
     Ok(SwitchResult {
         path: wt.path.clone(),
         name: wt.name.clone(),
@@ -177,6 +180,31 @@ mod tests {
         assert!(
             updated.last_accessed.unwrap() > 0,
             "last_accessed should be a positive timestamp"
+        );
+    }
+
+    #[test]
+    fn switch_updates_session_state() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        // No session state initially
+        assert!(db.get_session("current_worktree").unwrap().is_none());
+
+        execute("my-feature", repo_dir.path(), &db).expect("switch should succeed");
+
+        let current = db.get_session("current_worktree").unwrap();
+        assert_eq!(
+            current.as_deref(),
+            Some("my-feature"),
+            "session should track current worktree name"
         );
     }
 
