@@ -1,11 +1,11 @@
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
-use crate::paths;
 use crate::state::Database;
 
 /// Result of a successful switch operation.
+#[derive(Debug)]
 pub struct SwitchResult {
     /// Absolute path to the worktree.
     pub path: String,
@@ -73,5 +73,24 @@ mod tests {
 
         assert_eq!(switch.path, "/wt/my-feature");
         assert_eq!(switch.name, "my-feature");
+    }
+
+    #[test]
+    fn switch_not_found_returns_error() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+
+        let result = execute("nonexistent", repo_dir.path(), &db);
+        let err = result.expect_err("should error for nonexistent worktree");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "error should mention 'not found', got: {msg}"
+        );
     }
 }
