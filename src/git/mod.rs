@@ -851,6 +851,21 @@ mod tests {
     }
 
     #[test]
+    fn ahead_behind_returns_none_when_no_upstream_and_no_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+
+        // Create a branch with no upstream and pass no base_branch
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("orphan-branch", &head_commit, false).unwrap();
+
+        let result = ahead_behind(tmp.path(), "orphan-branch", None)
+            .expect("should succeed");
+
+        assert_eq!(result, None, "no upstream and no base should return None");
+    }
+
+    #[test]
     fn dirty_count_returns_zero_for_clean_worktree() {
         let tmp = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(tmp.path());
