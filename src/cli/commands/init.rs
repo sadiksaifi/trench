@@ -171,6 +171,64 @@ mod tests {
     }
 
     #[test]
+    fn scaffold_is_valid_toml_when_uncommented() {
+        // Uncomment only TOML-content lines (section headers and key=value pairs).
+        // Decorative dividers and prose documentation are left as comments.
+        let uncommented: String = SCAFFOLD
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim_start();
+                if let Some(rest) = trimmed.strip_prefix("# ") {
+                    // Only uncomment lines that look like TOML content
+                    let rest_trimmed = rest.trim_start();
+                    if rest_trimmed.starts_with('[')
+                        || rest_trimmed.contains(" = ")
+                    {
+                        return rest;
+                    }
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let result: Result<crate::config::ProjectConfig, _> = toml::from_str(&uncommented);
+        assert!(
+            result.is_ok(),
+            "uncommented scaffold should be valid TOML: {:?}\n\nContent:\n{}",
+            result.err(),
+            uncommented
+        );
+    }
+
+    #[test]
+    fn integration_init_in_temp_git_repo() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        {
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let tree_id = repo.index().unwrap().write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+
+        let path = execute(dir.path(), false).unwrap();
+        assert_eq!(path, dir.path().join(".trench.toml"));
+        assert!(path.exists());
+
+        // Verify the file can be loaded by the config system
+        let config = crate::config::load_project_config(dir.path())
+            .expect("should load without error");
+        // All sections are commented out, so parsed config should have no active sections
+        let config = config.expect("file exists, so should return Some");
+        assert!(config.ui.is_none(), "all sections should be commented out");
+        assert!(config.git.is_none());
+        assert!(config.worktrees.is_none());
+        assert!(config.hooks.is_none());
+    }
+
+    #[test]
     fn init_force_overwrites_existing_file() {
         let dir = TempDir::new().unwrap();
         let existing = dir.path().join(".trench.toml");
