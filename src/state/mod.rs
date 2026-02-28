@@ -37,6 +37,7 @@ pub struct Worktree {
     pub managed: bool,
     pub adopted_at: Option<i64>,
     pub last_accessed: Option<i64>,
+    pub removed_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -56,6 +57,7 @@ pub struct WorktreeUpdate {
     pub adopted_at: Option<Option<i64>>,
     pub managed: Option<bool>,
     pub base_branch: Option<Option<String>>,
+    pub removed_at: Option<Option<i64>>,
 }
 
 /// Core database handle wrapping a SQLite connection with migrations applied.
@@ -65,6 +67,12 @@ pub struct Database {
 }
 
 impl Database {
+    /// Expose the raw connection for test-only operations.
+    #[cfg(test)]
+    pub fn conn_for_test(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Open (or create) the database at the given file path.
     ///
     /// Applies pragmas (WAL, FK, synchronous NORMAL) and runs all pending migrations.
@@ -105,7 +113,10 @@ impl Database {
     }
 
     fn migrations() -> Migrations<'static> {
-        Migrations::new(vec![M::up(include_str!("sql/001_initial_schema.sql"))])
+        Migrations::new(vec![
+            M::up(include_str!("sql/001_initial_schema.sql")),
+            M::up(include_str!("sql/002_add_removed_at.sql")),
+        ])
     }
 
     fn is_db_too_far_ahead(err: &anyhow::Error) -> bool {
@@ -523,6 +534,93 @@ mod tests {
         // After 2023-11-14 and before 2100
         assert!(ts > 1_700_000_000, "timestamp too old: {ts}");
         assert!(ts < 4_102_444_800, "timestamp too far in the future: {ts}");
+    }
+
+    #[test]
+    fn find_worktree_by_identifier_matches_sanitized_name() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        db.insert_worktree(repo.id, "feature-auth", "feature/auth", "/wt/feature-auth", Some("main"))
+            .unwrap();
+
+        let found = db
+            .find_worktree_by_identifier(repo.id, "feature-auth")
+            .unwrap()
+            .expect("should find by sanitized name");
+
+        assert_eq!(found.name, "feature-auth");
+        assert_eq!(found.branch, "feature/auth");
+    }
+
+    #[test]
+    fn find_worktree_by_identifier_matches_branch_name() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        db.insert_worktree(repo.id, "feature-auth", "feature/auth", "/wt/feature-auth", Some("main"))
+            .unwrap();
+
+        let found = db
+            .find_worktree_by_identifier(repo.id, "feature/auth")
+            .unwrap()
+            .expect("should find by branch name");
+
+        assert_eq!(found.name, "feature-auth");
+        assert_eq!(found.branch, "feature/auth");
+    }
+
+    #[test]
+    fn find_worktree_by_identifier_returns_none_for_unknown() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+
+        let found = db.find_worktree_by_identifier(repo.id, "nonexistent").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_worktree_by_identifier_excludes_removed() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "old-wt", "old-branch", "/wt/old", Some("main"))
+            .unwrap();
+
+        // Mark as removed
+        db.update_worktree(
+            wt.id,
+            &WorktreeUpdate {
+                removed_at: Some(Some(1700000000)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let found = db.find_worktree_by_identifier(repo.id, "old-wt").unwrap();
+        assert!(found.is_none(), "removed worktree should not be found");
+    }
+
+    #[test]
+    fn removed_at_column_exists_after_migration() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        assert!(wt.removed_at.is_none(), "removed_at should default to NULL");
+
+        let ts = 1700000000_i64;
+        db.update_worktree(
+            wt.id,
+            &WorktreeUpdate {
+                removed_at: Some(Some(ts)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let fetched = db.get_worktree(wt.id).unwrap().unwrap();
+        assert_eq!(fetched.removed_at, Some(ts));
     }
 
     #[test]

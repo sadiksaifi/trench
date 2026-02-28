@@ -57,7 +57,14 @@ enum Commands {
         from: Option<String>,
     },
     /// Remove a worktree
-    Remove,
+    Remove {
+        /// Branch name or sanitized name of the worktree to remove
+        branch: String,
+
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
     /// Switch to a worktree
     Switch,
     /// Open a worktree in $EDITOR
@@ -103,6 +110,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Create { branch, from }) => {
             run_create(&branch, from.as_deref(), dry_run, json)
         }
+        Some(Commands::Remove { branch, force }) => run_remove(&branch, force),
         Some(Commands::List) => run_list(),
         Some(_) => {
             // Other commands not yet implemented
@@ -181,6 +189,56 @@ fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> an
     }
 }
 
+fn run_remove(identifier: &str, force: bool) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    // If not forced, look up the worktree to show details in the confirmation prompt
+    if !force {
+        let repo_info = git::discover_repo(&cwd)?;
+        let repo_path_str = repo_info.path.to_str().unwrap_or("");
+        if let Some(repo) = db.get_repo_by_path(repo_path_str)? {
+            if let Some(wt) = db.find_worktree_by_identifier(repo.id, identifier)? {
+                eprint!(
+                    "Remove worktree '{}' at {}? [y/N] ",
+                    wt.name, wt.path
+                );
+                let mut input = String::new();
+                if std::io::stdin().read_line(&mut input).is_err() {
+                    eprintln!("error: failed to read input");
+                    return Ok(());
+                }
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("Cancelled.");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    match cli::commands::remove::execute(identifier, &cwd, &db) {
+        Ok(name) => {
+            eprintln!("Removed worktree '{name}'");
+            Ok(())
+        }
+        Err(e) => {
+            if let Some(git_err) = e.downcast_ref::<git::GitError>() {
+                if matches!(git_err, git::GitError::WorktreeNotFound { .. }) {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                }
+            }
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("not tracked") {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+            Err(e)
+        }
+    }
+}
+
 fn run_list() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
@@ -251,8 +309,9 @@ mod tests {
 
     #[test]
     fn all_subcommands_are_accepted() {
+        // remove requires a branch argument, so test it separately
         let subcommands = [
-            "remove", "switch", "open", "list", "status", "sync", "log", "init",
+            "switch", "open", "list", "status", "sync", "log", "init",
         ];
         for sub in subcommands {
             let result = Cli::try_parse_from(["trench", sub]);
@@ -263,6 +322,9 @@ mod tests {
                 result.unwrap_err()
             );
         }
+        // remove needs a branch arg
+        let result = Cli::try_parse_from(["trench", "remove", "my-feature"]);
+        assert!(result.is_ok(), "remove with branch should be accepted");
     }
 
     #[test]
@@ -366,6 +428,38 @@ mod tests {
                 .expect("--dry-run --json with create should parse");
         assert!(cli.dry_run);
         assert!(cli.json);
+    }
+
+    #[test]
+    fn remove_subcommand_requires_branch() {
+        let result = Cli::try_parse_from(["trench", "remove"]);
+        assert!(result.is_err(), "remove without branch should fail");
+    }
+
+    #[test]
+    fn remove_subcommand_accepts_branch() {
+        let cli = Cli::try_parse_from(["trench", "remove", "my-feature"])
+            .expect("remove with branch should succeed");
+        match cli.command {
+            Some(Commands::Remove { branch, force }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(!force);
+            }
+            _ => panic!("expected Commands::Remove"),
+        }
+    }
+
+    #[test]
+    fn remove_subcommand_accepts_force_flag() {
+        let cli = Cli::try_parse_from(["trench", "remove", "my-feature", "--force"])
+            .expect("remove with --force should succeed");
+        match cli.command {
+            Some(Commands::Remove { branch, force }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(force);
+            }
+            _ => panic!("expected Commands::Remove"),
+        }
     }
 
     #[test]

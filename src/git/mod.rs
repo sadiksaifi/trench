@@ -24,6 +24,12 @@ pub enum GitError {
     #[error("base branch not found: {base}")]
     BaseBranchNotFound { base: String },
 
+    #[error("worktree not found: {name}")]
+    WorktreeNotFound { name: String },
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("{0}")]
     Git(#[from] git2::Error),
 }
@@ -166,6 +172,41 @@ pub fn create_worktree(
             let _ = orphan.delete();
         }
         return Err(GitError::Git(e));
+    }
+
+    Ok(())
+}
+
+/// Remove a git worktree at the given path.
+///
+/// Removes the worktree directory from disk, then prunes stale worktree
+/// bookkeeping from the repository. The branch itself is preserved.
+pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(), GitError> {
+    if !worktree_path.exists() {
+        return Err(GitError::WorktreeNotFound {
+            name: worktree_path.to_string_lossy().into_owned(),
+        });
+    }
+
+    // Remove the worktree directory
+    std::fs::remove_dir_all(worktree_path)?;
+
+    // Open repo and prune stale worktree references
+    let repo =
+        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+
+    // Iterate worktrees and prune any that point to missing directories
+    if let Ok(worktrees) = repo.worktrees() {
+        for name in worktrees.iter().flatten() {
+            if let Ok(wt) = repo.find_worktree(name) {
+                let _ = wt.prune(Some(
+                    git2::WorktreePruneOptions::new()
+                        .working_tree(false)
+                        .valid(false)
+                        .locked(false),
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -642,6 +683,39 @@ mod tests {
             "should succeed after remote branch deleted, got: {result:?}"
         );
         assert!(target.exists(), "worktree directory should exist on disk");
+    }
+
+    #[test]
+    fn remove_worktree_deletes_directory_and_prunes() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = head_branch(&repo);
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("to-remove");
+
+        create_worktree(repo_dir.path(), "to-remove", &base, &target)
+            .expect("should create worktree");
+        assert!(target.exists(), "worktree should exist before removal");
+
+        remove_worktree(repo_dir.path(), &target).expect("should remove worktree");
+
+        assert!(!target.exists(), "worktree directory should be deleted");
+
+        // The branch should still exist (we only remove the worktree, not the branch)
+        assert!(
+            repo.find_branch("to-remove", git2::BranchType::Local).is_ok(),
+            "branch should still exist after worktree removal"
+        );
+    }
+
+    #[test]
+    fn remove_worktree_errors_for_nonexistent_path() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let fake_path = repo_dir.path().join("nonexistent-worktree");
+
+        let result = remove_worktree(repo_dir.path(), &fake_path);
+        assert!(result.is_err(), "should error for nonexistent worktree path");
     }
 
     #[test]

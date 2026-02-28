@@ -173,6 +173,97 @@ mod tests {
     }
 
     #[test]
+    fn excludes_removed_worktrees() {
+        use crate::state::WorktreeUpdate;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        let _active_wt = db
+            .insert_worktree(
+                db_repo.id,
+                "active-feature",
+                "feature/active",
+                "/home/user/.worktrees/proj/active-feature",
+                Some("main"),
+            )
+            .unwrap();
+
+        let removed_wt = db
+            .insert_worktree(
+                db_repo.id,
+                "removed-feature",
+                "feature/removed",
+                "/home/user/.worktrees/proj/removed-feature",
+                Some("main"),
+            )
+            .unwrap();
+
+        // Mark the second worktree as removed
+        db.update_worktree(
+            removed_wt.id,
+            &WorktreeUpdate {
+                removed_at: Some(Some(1_700_000_000)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let output = execute(repo_dir.path(), &db).expect("list should succeed");
+
+        assert!(
+            output.contains("active-feature"),
+            "output should contain the active worktree, got: {output}"
+        );
+        assert!(
+            !output.contains("removed-feature"),
+            "output should NOT contain the removed worktree, got: {output}"
+        );
+
+        // Should have header + 1 data row only
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2, "expected header + 1 data row, got: {output}");
+    }
+
+    #[test]
+    fn create_remove_list_shows_empty_state() {
+        use crate::cli::commands::{create, remove};
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        create::execute(
+            "ephemeral",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        remove::execute("ephemeral", repo_dir.path(), &db)
+            .expect("remove should succeed");
+
+        let output = execute(repo_dir.path(), &db).expect("list should succeed");
+
+        assert!(
+            output.contains("No worktrees"),
+            "list should show empty state after removal, got: {output}"
+        );
+    }
+
+    #[test]
     fn empty_state_output_ends_with_newline() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
