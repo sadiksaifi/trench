@@ -11,6 +11,13 @@ pub trait PorcelainRecord {
 ///
 /// This is the canonical way to produce `--porcelain` output across all trench
 /// commands.
+///
+/// # Limitations
+///
+/// Fields are joined with `:` and records are separated by `\n`. If a field
+/// value contains either character the output becomes ambiguous. Consumers
+/// should parse left-to-right using the known field count for each record
+/// type rather than splitting blindly on `:`.
 pub fn format_porcelain(items: &[impl PorcelainRecord]) -> String {
     let mut out = String::new();
     for item in items {
