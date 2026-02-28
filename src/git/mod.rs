@@ -27,6 +27,9 @@ pub enum GitError {
     #[error("worktree not found: {name}")]
     WorktreeNotFound { name: String },
 
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("{0}")]
     Git(#[from] git2::Error),
 }
@@ -186,12 +189,7 @@ pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(), Git
     }
 
     // Remove the worktree directory
-    std::fs::remove_dir_all(worktree_path).map_err(|e| {
-        git2::Error::from_str(&format!(
-            "failed to remove worktree directory {}: {e}",
-            worktree_path.display()
-        ))
-    })?;
+    std::fs::remove_dir_all(worktree_path)?;
 
     // Open repo and prune stale worktree references
     let repo =
