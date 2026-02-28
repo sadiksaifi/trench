@@ -746,6 +746,35 @@ mod tests {
     }
 
     #[test]
+    fn dirty_count_counts_modified_and_untracked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+
+        // Create an untracked file
+        std::fs::write(tmp.path().join("untracked.txt"), "new").unwrap();
+
+        // Modify a tracked file: add a file to the index, then change it on disk
+        let tracked_path = tmp.path().join("tracked.txt");
+        std::fs::write(&tracked_path, "original").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(std::path::Path::new("tracked.txt")).unwrap();
+            index.write().unwrap();
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "add tracked", &tree, &[&head])
+                .unwrap();
+        }
+        // Now modify the tracked file
+        std::fs::write(&tracked_path, "modified").unwrap();
+
+        let count = dirty_count(tmp.path()).expect("should succeed");
+        assert_eq!(count, 2, "should count 1 modified + 1 untracked = 2");
+    }
+
+    #[test]
     fn create_worktree_errors_when_branch_already_exists() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());
