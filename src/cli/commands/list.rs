@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::git;
+use crate::output::json::format_json;
 use crate::output::table::Table;
 use crate::state::Database;
 
@@ -13,6 +14,7 @@ struct WorktreeJson {
     branch: String,
     path: String,
     status: String,
+    managed: bool,
     tags: Vec<String>,
 }
 
@@ -83,11 +85,12 @@ pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Stri
             branch: wt.branch.clone(),
             path: wt.path.clone(),
             status: "clean".to_string(),
+            managed: wt.managed,
             tags,
         });
     }
 
-    Ok(serde_json::to_string_pretty(&json_items)?)
+    format_json(&json_items)
 }
 
 #[cfg(test)]
@@ -539,6 +542,39 @@ mod tests {
             .expect("beta should be in JSON");
         let beta_tags = beta["tags"].as_array().unwrap();
         assert_eq!(beta_tags, &[serde_json::json!("wip")]);
+    }
+
+    #[test]
+    fn list_json_includes_managed_field() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        db.insert_worktree(
+            db_repo.id,
+            "my-wt",
+            "my-branch",
+            "/wt/my-wt",
+            Some("main"),
+        )
+        .unwrap();
+
+        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+
+        let worktrees = parsed.as_array().expect("should be an array");
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(
+            worktrees[0]["managed"],
+            serde_json::json!(true),
+            "JSON output should include managed field"
+        );
     }
 
     #[test]
