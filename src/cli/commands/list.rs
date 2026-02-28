@@ -694,4 +694,94 @@ mod tests {
             "empty-state output must end with newline, got: {output:?}"
         );
     }
+
+    #[test]
+    fn integration_create_worktrees_verify_json_and_porcelain() {
+        use crate::cli::commands::create;
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        create::execute(
+            "feature-json",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("first create should succeed");
+
+        create::execute(
+            "feature-porcelain",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("second create should succeed");
+
+        // Verify JSON output
+        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output)
+            .expect("JSON output must be valid JSON");
+
+        let items = parsed.as_array().expect("JSON should be an array");
+        assert_eq!(items.len(), 2);
+
+        // Both should have all required fields
+        for item in items {
+            assert!(item["name"].is_string(), "name should be a string");
+            assert!(item["branch"].is_string(), "branch should be a string");
+            assert!(item["path"].is_string(), "path should be a string");
+            assert!(item["status"].is_string(), "status should be a string");
+            assert!(item["managed"].is_boolean(), "managed should be a boolean");
+            assert!(item["tags"].is_array(), "tags should be an array");
+        }
+
+        // Verify managed is true for worktrees created by trench
+        let first = items.iter().find(|i| i["name"] == "feature-json").unwrap();
+        assert_eq!(first["managed"], serde_json::json!(true));
+
+        // Verify porcelain output
+        let porcelain_output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
+        let lines: Vec<&str> = porcelain_output.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        // Each line should have exactly 5 colon-separated fields
+        for line in &lines {
+            let fields: Vec<&str> = line.split(':').collect();
+            assert_eq!(
+                fields.len(), 5,
+                "porcelain line should have 5 fields, got {}: {:?}",
+                fields.len(), line
+            );
+        }
+
+        // Verify both worktrees appear in porcelain
+        assert!(
+            porcelain_output.contains("feature-json"),
+            "porcelain should contain feature-json"
+        );
+        assert!(
+            porcelain_output.contains("feature-porcelain"),
+            "porcelain should contain feature-porcelain"
+        );
+
+        // Verify porcelain contains no ANSI escape codes
+        assert!(
+            !porcelain_output.contains('\x1b'),
+            "porcelain output must not contain ANSI codes"
+        );
+
+        // Verify JSON contains no ANSI escape codes
+        assert!(
+            !json_output.contains('\x1b'),
+            "JSON output must not contain ANSI codes"
+        );
+    }
 }
