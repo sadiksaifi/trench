@@ -47,6 +47,18 @@ pub struct HookEnvContext {
     pub base_branch: String,
 }
 
+/// Retrieve the HookConfig for a specific lifecycle event from HooksConfig.
+pub fn get_hook_config<'a>(hooks: &'a HooksConfig, event: &HookEvent) -> Option<&'a HookConfig> {
+    match event {
+        HookEvent::PreCreate => hooks.pre_create.as_ref(),
+        HookEvent::PostCreate => hooks.post_create.as_ref(),
+        HookEvent::PreSync => hooks.pre_sync.as_ref(),
+        HookEvent::PostSync => hooks.post_sync.as_ref(),
+        HookEvent::PreRemove => hooks.pre_remove.as_ref(),
+        HookEvent::PostRemove => hooks.post_remove.as_ref(),
+    }
+}
+
 /// Build the 7 TRENCH_* environment variables injected into hook processes (FR-23).
 pub fn build_env(ctx: &HookEnvContext, event: &HookEvent) -> HashMap<String, String> {
     HashMap::from([
@@ -107,6 +119,42 @@ mod tests {
         ] {
             let env = build_env(&ctx, &event);
             assert_eq!(env["TRENCH_EVENT"], expected);
+        }
+    }
+
+    #[test]
+    fn get_hook_config_returns_matching_hook() {
+        let hooks = HooksConfig {
+            post_create: Some(HookDef {
+                copy: Some(vec![".env*".into()]),
+                run: Some(vec!["bun install".into()]),
+                shell: None,
+                timeout_secs: Some(300),
+            }),
+            ..Default::default()
+        };
+
+        let config = get_hook_config(&hooks, &HookEvent::PostCreate);
+        assert!(config.is_some());
+        let config = config.unwrap();
+        assert_eq!(config.copy, Some(vec![".env*".to_string()]));
+        assert_eq!(config.run, Some(vec!["bun install".to_string()]));
+        assert_eq!(config.timeout_secs, Some(300));
+    }
+
+    #[test]
+    fn get_hook_config_returns_none_for_unconfigured_hook() {
+        let hooks = HooksConfig::default();
+
+        for event in [
+            HookEvent::PreCreate,
+            HookEvent::PostCreate,
+            HookEvent::PreSync,
+            HookEvent::PostSync,
+            HookEvent::PreRemove,
+            HookEvent::PostRemove,
+        ] {
+            assert!(get_hook_config(&hooks, &event).is_none());
         }
     }
 
