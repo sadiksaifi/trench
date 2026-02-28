@@ -45,6 +45,8 @@ pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<String> {
     // Remove worktree from disk and prune git references
     if worktree_path.exists() {
         git::remove_worktree(&repo_info.path, worktree_path)?;
+    } else {
+        eprintln!("warning: worktree directory already removed from disk");
     }
 
     // Update DB: set removed_at timestamp
