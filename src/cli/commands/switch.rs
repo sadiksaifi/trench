@@ -42,6 +42,16 @@ pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<SwitchResu
         }
     };
 
+    // Update last_accessed timestamp
+    let now = crate::state::unix_epoch_secs() as i64;
+    db.update_worktree(
+        wt.id,
+        &crate::state::WorktreeUpdate {
+            last_accessed: Some(Some(now)),
+            ..Default::default()
+        },
+    )?;
+
     Ok(SwitchResult {
         path: wt.path.clone(),
         name: wt.name.clone(),
@@ -140,6 +150,34 @@ mod tests {
         let switch = execute("feat/login", repo_dir.path(), &db)
             .expect("switch by sanitized fallback should succeed");
         assert_eq!(switch.path, "/wt/feat-login");
+    }
+
+    #[test]
+    fn switch_updates_last_accessed() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        let wt = db
+            .insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        assert!(wt.last_accessed.is_none(), "last_accessed should be None initially");
+
+        execute("my-feature", repo_dir.path(), &db).expect("switch should succeed");
+
+        let updated = db.get_worktree(wt.id).unwrap().unwrap();
+        assert!(
+            updated.last_accessed.is_some(),
+            "last_accessed should be set after switch"
+        );
+        assert!(
+            updated.last_accessed.unwrap() > 0,
+            "last_accessed should be a positive timestamp"
+        );
     }
 
     #[test]
