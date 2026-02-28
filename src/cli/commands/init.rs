@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-const TRENCH_TOML_FILENAME: &str = ".trench.toml";
+use crate::config::PROJECT_CONFIG_FILENAME;
 
 /// Errors specific to the `init` command.
 #[derive(Debug, thiserror::Error)]
@@ -81,7 +81,7 @@ const SCAFFOLD: &str = r#"# trench — project configuration
 
 /// Execute `trench init` — scaffold a commented `.trench.toml` at the repo root.
 pub fn execute(repo_root: &Path, force: bool) -> Result<PathBuf> {
-    let path = repo_root.join(TRENCH_TOML_FILENAME);
+    let path = repo_root.join(PROJECT_CONFIG_FILENAME);
 
     if path.exists() && !force {
         return Err(InitError::FileAlreadyExists.into());

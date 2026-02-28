@@ -237,7 +237,7 @@ pub fn resolve_config(
     }
 }
 
-const PROJECT_CONFIG_FILENAME: &str = ".trench.toml";
+pub const PROJECT_CONFIG_FILENAME: &str = ".trench.toml";
 
 /// Load project config from the repo root directory.
 ///
