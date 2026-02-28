@@ -339,6 +339,17 @@ impl Database {
         Ok(tags)
     }
 
+    /// Remove a tag from a worktree. No-op if the tag doesn't exist.
+    pub fn remove_tag(&self, worktree_id: i64, name: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM tags WHERE worktree_id = ?1 AND name = ?2",
+                rusqlite::params![worktree_id, name],
+            )
+            .context("failed to remove tag")?;
+        Ok(())
+    }
+
     /// Count events for a worktree, optionally filtered by event type.
     pub fn count_events(
         &self,

@@ -661,6 +661,35 @@ mod tests {
     }
 
     #[test]
+    fn remove_tag_deletes_tag() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        db.add_tag(wt.id, "wip").unwrap();
+        db.add_tag(wt.id, "review").unwrap();
+
+        db.remove_tag(wt.id, "wip").unwrap();
+
+        let tags = db.list_tags(wt.id).unwrap();
+        assert_eq!(tags, vec!["review"]);
+    }
+
+    #[test]
+    fn remove_nonexistent_tag_is_noop() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        // Should not error
+        db.remove_tag(wt.id, "nonexistent").unwrap();
+    }
+
+    #[test]
     fn get_repo_by_path_returns_existing_repo() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("my-project", "/home/user/my-project", Some("main")).unwrap();
