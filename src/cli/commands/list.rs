@@ -757,6 +757,74 @@ mod tests {
     }
 
     #[test]
+    fn list_json_shows_null_ahead_behind_when_no_upstream() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        // Insert worktree with no base_branch — simulates no upstream info
+        db.insert_worktree(
+            db_repo.id,
+            "orphan-wt",
+            "orphan-branch",
+            "/nonexistent/path",
+            None, // no base_branch
+        )
+        .unwrap();
+
+        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+
+        let wt = &parsed.as_array().unwrap()[0];
+        assert!(
+            wt["ahead"].is_null(),
+            "ahead should be null when no upstream, got: {}",
+            wt["ahead"]
+        );
+        assert!(
+            wt["behind"].is_null(),
+            "behind should be null when no upstream, got: {}",
+            wt["behind"]
+        );
+    }
+
+    #[test]
+    fn list_table_shows_dash_for_no_upstream() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        db.insert_worktree(
+            db_repo.id,
+            "no-upstream-wt",
+            "no-upstream-branch",
+            "/nonexistent/path",
+            None,
+        )
+        .unwrap();
+
+        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+
+        // The Ahead/Behind column should show "-" for no upstream
+        assert!(
+            output.contains('-'),
+            "table should show '-' for no upstream ahead/behind, got: {output}"
+        );
+    }
+
+    #[test]
     fn list_table_shows_ahead_behind_and_dirty_columns() {
         use crate::cli::commands::create;
         use crate::paths;
