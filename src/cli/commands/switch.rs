@@ -28,9 +28,19 @@ pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<SwitchResu
         .get_repo_by_path(repo_path_str)?
         .ok_or_else(|| anyhow::anyhow!("repository not tracked by trench"))?;
 
-    let wt = db
-        .find_worktree_by_identifier(repo.id, identifier)?
-        .ok_or_else(|| anyhow::anyhow!("worktree not found: {identifier}"))?;
+    // Try the identifier as-is first, then try sanitizing it
+    let wt = match db.find_worktree_by_identifier(repo.id, identifier)? {
+        Some(wt) => wt,
+        None => {
+            let sanitized = crate::paths::sanitize_branch(identifier);
+            if sanitized != identifier {
+                db.find_worktree_by_identifier(repo.id, &sanitized)?
+            } else {
+                None
+            }
+            .ok_or_else(|| anyhow::anyhow!("worktree not found: {identifier}"))?
+        }
+    };
 
     Ok(SwitchResult {
         path: wt.path.clone(),
@@ -73,6 +83,63 @@ mod tests {
 
         assert_eq!(switch.path, "/wt/my-feature");
         assert_eq!(switch.name, "my-feature");
+    }
+
+    #[test]
+    fn switch_resolves_by_branch_with_slash() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "feature-auth",
+            "feature/auth",
+            "/wt/feature-auth",
+            Some("main"),
+        )
+        .unwrap();
+
+        // Switch using the original branch name (with slash)
+        let switch = execute("feature/auth", repo_dir.path(), &db)
+            .expect("switch by branch name should succeed");
+        assert_eq!(switch.path, "/wt/feature-auth");
+        assert_eq!(switch.name, "feature-auth");
+
+        // Switch using the sanitized name
+        let switch = execute("feature-auth", repo_dir.path(), &db)
+            .expect("switch by sanitized name should succeed");
+        assert_eq!(switch.path, "/wt/feature-auth");
+        assert_eq!(switch.name, "feature-auth");
+    }
+
+    #[test]
+    fn switch_resolves_sanitized_fallback() {
+        // When the identifier doesn't directly match, but sanitizing it does
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        // DB only has the sanitized name, not the slashed branch
+        db.insert_worktree(
+            db_repo.id,
+            "feat-login",
+            "feat-login",
+            "/wt/feat-login",
+            Some("main"),
+        )
+        .unwrap();
+
+        // User passes "feat/login" which sanitizes to "feat-login"
+        let switch = execute("feat/login", repo_dir.path(), &db)
+            .expect("switch by sanitized fallback should succeed");
+        assert_eq!(switch.path, "/wt/feat-login");
     }
 
     #[test]
