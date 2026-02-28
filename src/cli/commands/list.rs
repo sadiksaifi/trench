@@ -42,18 +42,28 @@ struct GitStatus {
     dirty: usize,
 }
 
-/// Compute git status for a worktree. Returns default values on error
-/// (e.g., worktree path no longer exists on disk).
+/// Compute git status for a worktree. Expected "no upstream" cases silently
+/// yield `None`; unexpected errors print a warning and fall back to defaults.
 fn compute_git_status(repo_path: &Path, wt: &Worktree) -> GitStatus {
     let wt_path = Path::new(&wt.path);
 
-    let (ahead, behind) = git::ahead_behind(repo_path, &wt.branch, wt.base_branch.as_deref())
-        .ok()
-        .flatten()
-        .map(|(a, b)| (Some(a), Some(b)))
-        .unwrap_or((None, None));
+    let (ahead, behind) =
+        match git::ahead_behind(repo_path, &wt.branch, wt.base_branch.as_deref()) {
+            Ok(Some((a, b))) => (Some(a), Some(b)),
+            Ok(None) => (None, None),
+            Err(e) => {
+                eprintln!("warning: ahead/behind for '{}': {e}", wt.branch);
+                (None, None)
+            }
+        };
 
-    let dirty = git::dirty_count(wt_path).unwrap_or(0);
+    let dirty = match git::dirty_count(wt_path) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("warning: dirty count for '{}': {e}", wt_path.display());
+            0
+        }
+    };
 
     GitStatus {
         ahead,
