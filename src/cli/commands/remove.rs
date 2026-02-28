@@ -24,16 +24,17 @@ pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("repository not tracked by trench"))?;
 
     // Try the identifier as-is first, then try sanitizing it
-    let wt = db
-        .find_worktree_by_identifier(repo.id, identifier)?
-        .or({
+    let wt = match db.find_worktree_by_identifier(repo.id, identifier)? {
+        Some(wt) => Some(wt),
+        None => {
             let sanitized = paths::sanitize_branch(identifier);
             if sanitized != identifier {
                 db.find_worktree_by_identifier(repo.id, &sanitized)?
             } else {
                 None
             }
-        });
+        }
+    };
 
     let wt = match wt {
         Some(wt) => wt,
