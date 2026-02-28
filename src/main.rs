@@ -24,7 +24,7 @@ struct Cli {
     json: bool,
 
     /// Output in porcelain format
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with = "json")]
     porcelain: bool,
 
     /// Disable colored output
@@ -129,6 +129,7 @@ fn main() -> anyhow::Result<()> {
 
     let dry_run = cli.dry_run;
     let json = cli.json;
+    let porcelain = cli.porcelain;
 
     match cli.command {
         Some(Commands::Create { branch, from }) => {
@@ -137,7 +138,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Remove { branch, force }) => run_remove(&branch, force),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
-        Some(Commands::List { tag }) => run_list(tag.as_deref(), json),
+        Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
         Some(Commands::Init { force }) => run_init(force),
         Some(_) => {
             // Other commands not yet implemented
@@ -301,13 +302,15 @@ fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_list(tag: Option<&str>, json: bool) -> anyhow::Result<()> {
+fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
     let output = if json {
         cli::commands::list::execute_json(&cwd, &db, tag)?
+    } else if porcelain {
+        cli::commands::list::execute_porcelain(&cwd, &db, tag)?
     } else {
         cli::commands::list::execute(&cwd, &db, tag)?
     };
@@ -359,16 +362,30 @@ mod tests {
     #[test]
     fn global_flags_are_accepted() {
         let cli = Cli::try_parse_from([
-            "trench", "--json", "--porcelain", "--no-color", "--quiet", "--verbose", "--dry-run",
+            "trench", "--json", "--no-color", "--quiet", "--verbose", "--dry-run",
         ])
         .expect("all global flags should be accepted");
 
         assert!(cli.json);
-        assert!(cli.porcelain);
         assert!(cli.no_color);
         assert!(cli.quiet);
         assert!(cli.verbose);
         assert!(cli.dry_run);
+
+        let cli2 = Cli::try_parse_from(["trench", "--porcelain"])
+            .expect("porcelain flag should be accepted");
+        assert!(cli2.porcelain);
+    }
+
+    #[test]
+    fn json_and_porcelain_conflict() {
+        let result = Cli::try_parse_from(["trench", "--json", "--porcelain"]);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "expected ArgumentConflict, got: {err}"
+        );
     }
 
     #[test]
