@@ -186,7 +186,7 @@ mod tests {
             .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
             .unwrap();
 
-        let active_wt = db
+        let _active_wt = db
             .insert_worktree(
                 db_repo.id,
                 "active-feature",
