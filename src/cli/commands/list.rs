@@ -110,7 +110,7 @@ fn fetch_all_worktrees(
             if !managed_paths.contains(&gw.path) {
                 entries.push(ListEntry {
                     name: gw.name.clone(),
-                    branch: gw.branch.unwrap_or_default(),
+                    branch: gw.branch.unwrap_or_else(|| "(detached)".to_string()),
                     path: gw.path.to_string_lossy().into_owned(),
                     base_branch: None,
                     managed: false,
@@ -1462,6 +1462,36 @@ mod tests {
         assert!(
             !json_output.contains('\x1b'),
             "JSON output must not contain ANSI codes"
+        );
+    }
+
+    #[test]
+    fn unborn_head_shows_detached_instead_of_empty_branch() {
+        // A repo with no commits has an unborn HEAD → branch is None.
+        // The branch column should show "(detached)" instead of an empty string.
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = git2::Repository::init(repo_dir.path()).unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        // JSON output: branch should be "(detached)", not ""
+        let json_output = execute_json(repo_dir.path(), &db, None)
+            .expect("json list should succeed for unborn repo");
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let items = parsed.as_array().expect("should be an array");
+        let main_wt = items.first().expect("should have at least the main worktree");
+        assert_eq!(
+            main_wt["branch"],
+            serde_json::json!("(detached)"),
+            "unborn HEAD should show (detached) branch, got: {}",
+            main_wt["branch"]
+        );
+
+        // Table output: should also show "(detached)"
+        let table_output = render_table(repo_dir.path(), &db, None, None)
+            .expect("table list should succeed for unborn repo");
+        assert!(
+            table_output.contains("(detached)"),
+            "table should show (detached) for unborn HEAD, got: {table_output}"
         );
     }
 }
