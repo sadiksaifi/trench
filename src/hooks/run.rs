@@ -247,4 +247,41 @@ mod tests {
 
         assert!(result.executed.is_empty());
     }
+
+    #[tokio::test]
+    async fn integration_with_build_env_all_seven_vars() {
+        use crate::hooks::{build_env, HookEnvContext, HookEvent};
+
+        let dir = TempDir::new().unwrap();
+        let ctx = HookEnvContext {
+            worktree_path: "/tmp/wt".into(),
+            worktree_name: "feat-auth".into(),
+            branch: "feature/auth".into(),
+            repo_name: "myrepo".into(),
+            repo_path: "/tmp/repo".into(),
+            base_branch: "main".into(),
+        };
+        let env = build_env(&ctx, &HookEvent::PostCreate);
+
+        let commands = vec![
+            "echo $TRENCH_WORKTREE_PATH".to_string(),
+            "echo $TRENCH_WORKTREE_NAME".to_string(),
+            "echo $TRENCH_BRANCH".to_string(),
+            "echo $TRENCH_REPO_NAME".to_string(),
+            "echo $TRENCH_REPO_PATH".to_string(),
+            "echo $TRENCH_BASE_BRANCH".to_string(),
+            "echo $TRENCH_EVENT".to_string(),
+        ];
+
+        let result = execute_run_step(&commands, dir.path(), &env).await.unwrap();
+
+        assert_eq!(result.executed.len(), 7);
+        assert_eq!(result.executed[0].stdout.trim(), "/tmp/wt");
+        assert_eq!(result.executed[1].stdout.trim(), "feat-auth");
+        assert_eq!(result.executed[2].stdout.trim(), "feature/auth");
+        assert_eq!(result.executed[3].stdout.trim(), "myrepo");
+        assert_eq!(result.executed[4].stdout.trim(), "/tmp/repo");
+        assert_eq!(result.executed[5].stdout.trim(), "main");
+        assert_eq!(result.executed[6].stdout.trim(), "post_create");
+    }
 }
