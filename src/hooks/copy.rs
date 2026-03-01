@@ -8,9 +8,9 @@ use globset::{Glob, GlobSetBuilder};
 pub struct CopiedFile {
     /// File name (relative path from source root).
     pub name: String,
-    /// Absolute source path.
+    /// Source path (absolute if `source_dir` is absolute).
     pub source: PathBuf,
-    /// Absolute destination path.
+    /// Destination path (absolute if `dest_dir` is absolute).
     pub destination: PathBuf,
 }
 
