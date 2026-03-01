@@ -177,4 +177,21 @@ mod tests {
         let actual = std::path::PathBuf::from(output_path).canonicalize().unwrap();
         assert_eq!(actual, expected);
     }
+
+    #[tokio::test]
+    async fn env_vars_available_in_commands() {
+        let dir = TempDir::new().unwrap();
+        let commands = vec![
+            "echo $TRENCH_BRANCH".to_string(),
+            "echo $TRENCH_EVENT".to_string(),
+        ];
+        let mut env = HashMap::new();
+        env.insert("TRENCH_BRANCH".to_string(), "feature/auth".to_string());
+        env.insert("TRENCH_EVENT".to_string(), "post_create".to_string());
+
+        let result = execute_run_step(&commands, dir.path(), &env).await.unwrap();
+
+        assert_eq!(result.executed[0].stdout.trim(), "feature/auth");
+        assert_eq!(result.executed[1].stdout.trim(), "post_create");
+    }
 }
