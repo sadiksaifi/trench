@@ -72,8 +72,20 @@ fn collect_matching_files(
         let entry = entry?;
         let path = entry.path();
 
-        if path.is_dir() {
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to read file type: {}", path.display()))?;
+
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        if file_type.is_dir() {
             collect_matching_files(root, &path, dest_dir, includes, excludes, copied)?;
+            continue;
+        }
+
+        if !file_type.is_file() {
             continue;
         }
 
@@ -236,5 +248,30 @@ mod tests {
         let result = execute_copy_step(source.path(), dest.path(), &patterns).unwrap();
 
         assert!(result.copied.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_symlinked_directories() {
+        // Create an external directory with a file that should NOT be copied
+        let external = TempDir::new().unwrap();
+        std::fs::write(external.path().join("secret.env"), "LEAKED=true").unwrap();
+
+        // Create source directory with a real file and a symlink to the external dir
+        let source = TempDir::new().unwrap();
+        std::fs::write(source.path().join(".env"), "OK=true").unwrap();
+        std::os::unix::fs::symlink(external.path(), source.path().join("linked")).unwrap();
+
+        let dest = TempDir::new().unwrap();
+
+        // Match everything
+        let patterns = vec!["**/*".to_string()];
+        let result = execute_copy_step(source.path(), dest.path(), &patterns).unwrap();
+
+        // Only the real .env should be copied; the symlinked dir must be skipped
+        assert_eq!(result.copied.len(), 1);
+        assert_eq!(result.copied[0].name, ".env");
+        assert!(!dest.path().join("linked").exists());
+        assert!(!dest.path().join("linked/secret.env").exists());
     }
 }
