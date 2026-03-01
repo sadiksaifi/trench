@@ -1113,6 +1113,42 @@ mod tests {
     }
 
     #[test]
+    fn list_porcelain_shows_unmanaged_worktree_with_managed_false() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a worktree via git directly
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("porcelain-external");
+        git::create_worktree(repo_dir.path(), "porcelain-external", &base, &target)
+            .expect("should create worktree via git");
+
+        let output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+
+        // Should have at least 2 entries (main + the external worktree)
+        assert!(lines.len() >= 2, "should have at least 2 porcelain lines, got: {}", lines.len());
+
+        // Find the line for the unmanaged worktree
+        let external_line = lines.iter()
+            .find(|l| l.starts_with("porcelain-external:"))
+            .expect("should find porcelain-external in porcelain output");
+
+        let fields: Vec<&str> = external_line.split(':').collect();
+        assert_eq!(fields.len(), 8, "should have 8 fields");
+        assert_eq!(fields[7], "false", "managed field should be 'false'");
+
+        // All lines should have 8 fields and no ANSI codes
+        for line in &lines {
+            let f: Vec<&str> = line.split(':').collect();
+            assert_eq!(f.len(), 8, "each porcelain line should have 8 fields");
+            assert!(!line.contains('\x1b'), "porcelain should not contain ANSI codes");
+        }
+    }
+
+    #[test]
     fn list_json_shows_unmanaged_worktree_with_managed_false() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());
