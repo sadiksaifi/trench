@@ -9,6 +9,72 @@ pub struct RepoInfo {
     pub default_branch: String,
 }
 
+/// Count modified, staged, and untracked files in a worktree.
+///
+/// Opens the repository at `worktree_path` and counts all files with
+/// non-clean status (modified, new, deleted, renamed, typechanged).
+/// Returns 0 for a clean worktree.
+pub fn dirty_count(worktree_path: &Path) -> Result<usize, GitError> {
+    let repo = git2::Repository::open(worktree_path)
+        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+
+    let statuses = repo.statuses(Some(
+        git2::StatusOptions::new()
+            .include_untracked(true)
+            .recurse_untracked_dirs(true),
+    ))?;
+
+    Ok(statuses.len())
+}
+
+/// Calculate commits ahead/behind for a branch relative to its upstream.
+///
+/// Checks for an upstream tracking branch first, then falls back to
+/// `base_branch`. Returns `None` if no reference point can be found.
+pub fn ahead_behind(
+    repo_path: &Path,
+    branch: &str,
+    base_branch: Option<&str>,
+) -> Result<Option<(usize, usize)>, GitError> {
+    let repo =
+        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+
+    let local = match repo.find_branch(branch, git2::BranchType::Local) {
+        Ok(b) => b,
+        Err(_) => return Ok(None),
+    };
+    let local_oid = match local.get().target() {
+        Some(oid) => oid,
+        None => return Ok(None),
+    };
+
+    // Try upstream tracking branch first
+    let upstream_oid = if let Ok(upstream) = local.upstream() {
+        upstream.get().target()
+    } else {
+        // Fall back to base_branch
+        base_branch.and_then(|base| {
+            repo.find_branch(base, git2::BranchType::Local)
+                .ok()
+                .and_then(|b| b.get().target())
+                .or_else(|| {
+                    let remote = format!("origin/{base}");
+                    repo.find_branch(&remote, git2::BranchType::Remote)
+                        .ok()
+                        .and_then(|b| b.get().target())
+                })
+        })
+    };
+
+    match upstream_oid {
+        Some(oid) => {
+            let (ahead, behind) = repo.graph_ahead_behind(local_oid, oid)?;
+            Ok(Some((ahead, behind)))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Errors specific to git operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -716,6 +782,141 @@ mod tests {
 
         let result = remove_worktree(repo_dir.path(), &fake_path);
         assert!(result.is_err(), "should error for nonexistent worktree path");
+    }
+
+    #[test]
+    fn ahead_behind_counts_commits_ahead_of_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        let base = head_branch(&repo);
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+
+        // Create feature branch at same point as base
+        let base_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature-ahead", &base_commit, false).unwrap();
+
+        // Add 2 commits on feature-ahead
+        // Switch HEAD to feature-ahead to commit on it
+        repo.set_head("refs/heads/feature-ahead").unwrap();
+        for i in 0..2 {
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+            let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+            repo.commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                &format!("feature commit {i}"),
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        }
+
+        let result = ahead_behind(tmp.path(), "feature-ahead", Some(&base))
+            .expect("should succeed");
+
+        assert_eq!(result, Some((2, 0)), "feature should be 2 ahead, 0 behind");
+    }
+
+    #[test]
+    fn ahead_behind_counts_commits_behind_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        let base = head_branch(&repo);
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+
+        // Create feature branch at current commit
+        let base_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature-behind", &base_commit, false).unwrap();
+
+        // Add 3 commits on the base branch (feature stays at original commit)
+        for i in 0..3 {
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+            let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+            repo.commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                &format!("base commit {i}"),
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        }
+
+        let result = ahead_behind(tmp.path(), "feature-behind", Some(&base))
+            .expect("should succeed");
+
+        assert_eq!(result, Some((0, 3)), "feature should be 0 ahead, 3 behind");
+    }
+
+    #[test]
+    fn ahead_behind_returns_none_when_no_upstream_and_no_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+
+        // Create a branch with no upstream and pass no base_branch
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("orphan-branch", &head_commit, false).unwrap();
+
+        let result = ahead_behind(tmp.path(), "orphan-branch", None)
+            .expect("should succeed");
+
+        assert_eq!(result, None, "no upstream and no base should return None");
+    }
+
+    #[test]
+    fn dirty_count_returns_zero_for_clean_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(tmp.path());
+
+        let count = dirty_count(tmp.path()).expect("should succeed");
+        assert_eq!(count, 0, "clean worktree should have 0 dirty files");
+    }
+
+    #[test]
+    fn ahead_behind_returns_zero_zero_when_at_same_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        let base = head_branch(&repo);
+
+        // Create a feature branch at the same commit as base
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature", &head_commit, false).unwrap();
+
+        let result = ahead_behind(tmp.path(), "feature", Some(&base))
+            .expect("should succeed");
+
+        assert_eq!(result, Some((0, 0)), "same commit should be (0, 0)");
+    }
+
+    #[test]
+    fn dirty_count_counts_modified_and_untracked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+
+        // Create an untracked file
+        std::fs::write(tmp.path().join("untracked.txt"), "new").unwrap();
+
+        // Modify a tracked file: add a file to the index, then change it on disk
+        let tracked_path = tmp.path().join("tracked.txt");
+        std::fs::write(&tracked_path, "original").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(std::path::Path::new("tracked.txt")).unwrap();
+            index.write().unwrap();
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "add tracked", &tree, &[&head])
+                .unwrap();
+        }
+        // Now modify the tracked file
+        std::fs::write(&tracked_path, "modified").unwrap();
+
+        let count = dirty_count(tmp.path()).expect("should succeed");
+        assert_eq!(count, 2, "should count 1 modified + 1 untracked = 2");
     }
 
     #[test]

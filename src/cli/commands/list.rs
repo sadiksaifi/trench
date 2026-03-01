@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -10,8 +10,12 @@ use crate::output::table::Table;
 use crate::state::{Database, Worktree};
 
 /// Discover the git repo from `cwd` and fetch worktrees from the DB,
-/// optionally filtered by tag.
-fn fetch_worktrees(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Vec<Worktree>> {
+/// optionally filtered by tag. Returns the repo path alongside worktrees.
+fn fetch_worktrees(
+    cwd: &Path,
+    db: &Database,
+    tag: Option<&str>,
+) -> Result<(PathBuf, Vec<Worktree>)> {
     let repo_info = git::discover_repo(cwd)?;
     let repo_path_str = repo_info
         .path
@@ -28,7 +32,61 @@ fn fetch_worktrees(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Vec<W
         None => Vec::new(),
     };
 
-    Ok(worktrees)
+    Ok((repo_info.path, worktrees))
+}
+
+/// Git status metadata for a worktree.
+struct GitStatus {
+    ahead: Option<usize>,
+    behind: Option<usize>,
+    dirty: usize,
+}
+
+/// Compute git status for a worktree. Expected "no upstream" cases silently
+/// yield `None`; unexpected errors print a warning and fall back to defaults.
+fn compute_git_status(repo_path: &Path, wt: &Worktree) -> GitStatus {
+    let wt_path = Path::new(&wt.path);
+
+    let (ahead, behind) =
+        match git::ahead_behind(repo_path, &wt.branch, wt.base_branch.as_deref()) {
+            Ok(Some((a, b))) => (Some(a), Some(b)),
+            Ok(None) => (None, None),
+            Err(e) => {
+                eprintln!("warning: ahead/behind for '{}': {e}", wt.branch);
+                (None, None)
+            }
+        };
+
+    let dirty = match git::dirty_count(wt_path) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("warning: dirty count for '{}': {e}", wt_path.display());
+            0
+        }
+    };
+
+    GitStatus {
+        ahead,
+        behind,
+        dirty,
+    }
+}
+
+/// Format ahead/behind as a display string (e.g., "+3/-1" or "-").
+fn format_ahead_behind(ahead: Option<usize>, behind: Option<usize>) -> String {
+    match (ahead, behind) {
+        (Some(a), Some(b)) => format!("+{a}/-{b}"),
+        _ => "-".to_string(),
+    }
+}
+
+/// Format dirty count as a display string (e.g., "~5" or "clean").
+fn format_dirty(dirty: usize) -> String {
+    if dirty == 0 {
+        "clean".to_string()
+    } else {
+        format!("~{dirty}")
+    }
 }
 
 #[derive(Serialize)]
@@ -37,6 +95,9 @@ struct WorktreeJson {
     branch: String,
     path: String,
     status: String,
+    ahead: Option<usize>,
+    behind: Option<usize>,
+    dirty: usize,
     managed: bool,
     tags: Vec<String>,
 }
@@ -48,6 +109,9 @@ impl PorcelainRecord for WorktreeJson {
             self.branch.clone(),
             self.path.clone(),
             self.status.clone(),
+            self.ahead.map_or("-".to_string(), |v| v.to_string()),
+            self.behind.map_or("-".to_string(), |v| v.to_string()),
+            self.dirty.to_string(),
             self.managed.to_string(),
         ]
     }
@@ -58,17 +122,34 @@ impl PorcelainRecord for WorktreeJson {
 /// Discovers the git repo from `cwd`, queries managed worktrees from the DB,
 /// and returns a formatted string for display. Optionally filters by tag.
 pub fn execute(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let worktrees = fetch_worktrees(cwd, db, tag)?;
+    let (repo_path, worktrees) = fetch_worktrees(cwd, db, tag)?;
 
     if worktrees.is_empty() {
         return Ok("No worktrees. Use `trench create` to get started.\n".to_string());
     }
 
-    let mut table = Table::new(vec!["Name", "Branch", "Path", "Status", "Tags"]);
+    let mut table = Table::new(vec![
+        "Name",
+        "Branch",
+        "Path",
+        "Status",
+        "Ahead/Behind",
+        "Tags",
+    ]);
     for wt in &worktrees {
         let tags = db.list_tags(wt.id)?;
         let tags_str = tags.join(", ");
-        table = table.row(vec![&wt.name, &wt.branch, &wt.path, "clean", &tags_str]);
+        let status = compute_git_status(&repo_path, wt);
+        let dirty_str = format_dirty(status.dirty);
+        let ab_str = format_ahead_behind(status.ahead, status.behind);
+        table = table.row(vec![
+            &wt.name,
+            &wt.branch,
+            &wt.path,
+            &dirty_str,
+            &ab_str,
+            &tags_str,
+        ]);
     }
 
     if let Ok((cols, _)) = crossterm::terminal::size() {
@@ -78,23 +159,32 @@ pub fn execute(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
     Ok(table.render())
 }
 
+/// Build a `WorktreeJson` from a worktree, its tags, and computed git status.
+fn build_worktree_json(wt: &Worktree, tags: Vec<String>, status: GitStatus) -> WorktreeJson {
+    WorktreeJson {
+        name: wt.name.clone(),
+        branch: wt.branch.clone(),
+        path: wt.path.clone(),
+        status: format_dirty(status.dirty),
+        ahead: status.ahead,
+        behind: status.behind,
+        dirty: status.dirty,
+        managed: wt.managed,
+        tags,
+    }
+}
+
 /// Execute the `trench list --json` command.
 ///
 /// Returns JSON array of worktree objects including tags.
 pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let worktrees = fetch_worktrees(cwd, db, tag)?;
+    let (repo_path, worktrees) = fetch_worktrees(cwd, db, tag)?;
 
     let mut json_items = Vec::new();
     for wt in &worktrees {
         let tags = db.list_tags(wt.id)?;
-        json_items.push(WorktreeJson {
-            name: wt.name.clone(),
-            branch: wt.branch.clone(),
-            path: wt.path.clone(),
-            status: "clean".to_string(),
-            managed: wt.managed,
-            tags,
-        });
+        let status = compute_git_status(&repo_path, wt);
+        json_items.push(build_worktree_json(wt, tags, status));
     }
 
     format_json(&json_items)
@@ -102,22 +192,16 @@ pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Stri
 
 /// Execute the `trench list --porcelain` command.
 ///
-/// Returns colon-separated lines: `name:branch:path:status:managed`.
+/// Returns colon-separated lines: `name:branch:path:status:ahead:behind:dirty:managed`.
 pub fn execute_porcelain(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let worktrees = fetch_worktrees(cwd, db, tag)?;
+    let (repo_path, worktrees) = fetch_worktrees(cwd, db, tag)?;
 
     let items: Vec<WorktreeJson> = worktrees
         .iter()
         .map(|wt| -> Result<WorktreeJson> {
             let tags = db.list_tags(wt.id)?;
-            Ok(WorktreeJson {
-                name: wt.name.clone(),
-                branch: wt.branch.clone(),
-                path: wt.path.clone(),
-                status: "clean".to_string(),
-                managed: wt.managed,
-                tags,
-            })
+            let status = compute_git_status(&repo_path, wt);
+            Ok(build_worktree_json(wt, tags, status))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -576,6 +660,218 @@ mod tests {
     }
 
     #[test]
+    fn list_json_includes_ahead_behind_dirty_fields() {
+        use crate::cli::commands::create;
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        create::execute(
+            "feature-json-fields",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+
+        let items = parsed.as_array().expect("should be an array");
+        assert_eq!(items.len(), 1);
+
+        let wt = &items[0];
+        // Should have ahead, behind, and dirty fields
+        assert!(
+            wt.get("ahead").is_some(),
+            "JSON should have 'ahead' field, got: {wt}"
+        );
+        assert!(
+            wt.get("behind").is_some(),
+            "JSON should have 'behind' field, got: {wt}"
+        );
+        assert!(
+            wt.get("dirty").is_some(),
+            "JSON should have 'dirty' field, got: {wt}"
+        );
+
+        // For a freshly created worktree, dirty should be 0
+        assert_eq!(wt["dirty"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn list_json_shows_correct_ahead_behind_and_dirty_values() {
+        use crate::cli::commands::create;
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        create::execute(
+            "feature-e2e",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        // Find the worktree path from DB
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let db_repo = db
+            .get_repo_by_path(repo_path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let wts = db.list_worktrees(db_repo.id).unwrap();
+        let wt_path = std::path::Path::new(&wts[0].path);
+
+        // Add a commit in the worktree (makes it 1 ahead)
+        {
+            let wt_repo = git2::Repository::open(wt_path).unwrap();
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let parent = wt_repo.head().unwrap().peel_to_commit().unwrap();
+            let tree = wt_repo
+                .find_tree(wt_repo.index().unwrap().write_tree().unwrap())
+                .unwrap();
+            wt_repo
+                .commit(Some("HEAD"), &sig, &sig, "wt commit", &tree, &[&parent])
+                .unwrap();
+        }
+
+        // Create an untracked file in the worktree (makes it dirty)
+        std::fs::write(wt_path.join("untracked.txt"), "dirty").unwrap();
+
+        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let wt_json = &parsed.as_array().unwrap()[0];
+
+        assert_eq!(wt_json["ahead"], serde_json::json!(1), "should be 1 ahead");
+        assert_eq!(wt_json["behind"], serde_json::json!(0), "should be 0 behind");
+        assert_eq!(wt_json["dirty"], serde_json::json!(1), "should have 1 dirty file");
+        assert_eq!(wt_json["status"], serde_json::json!("~1"), "status should show ~1");
+    }
+
+    #[test]
+    fn list_json_shows_null_ahead_behind_when_no_upstream() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        // Create a real local branch with no upstream tracking
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("orphan-branch", &head_commit, false).unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        // Insert worktree pointing to the real branch and repo path, no base_branch
+        db.insert_worktree(
+            db_repo.id,
+            "orphan-wt",
+            "orphan-branch",
+            repo_path.to_str().unwrap(),
+            None, // no base_branch
+        )
+        .unwrap();
+
+        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+
+        let wt = &parsed.as_array().unwrap()[0];
+        assert!(
+            wt["ahead"].is_null(),
+            "ahead should be null when no upstream, got: {}",
+            wt["ahead"]
+        );
+        assert!(
+            wt["behind"].is_null(),
+            "behind should be null when no upstream, got: {}",
+            wt["behind"]
+        );
+    }
+
+    #[test]
+    fn list_table_shows_dash_for_no_upstream() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        // Create a real local branch with no upstream tracking
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("no-upstream-branch", &head_commit, false).unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        db.insert_worktree(
+            db_repo.id,
+            "no-upstream-wt",
+            "no-upstream-branch",
+            repo_path.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+
+        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+
+        // The Ahead/Behind column should show "-" for no upstream
+        let row = output
+            .lines()
+            .find(|line| line.contains("no-upstream-wt"))
+            .expect("expected no-upstream-wt row");
+        assert!(
+            row.split_whitespace().any(|cell| cell == "-"),
+            "Ahead/Behind cell should be '-', got row: {row}"
+        );
+    }
+
+    #[test]
+    fn list_table_shows_ahead_behind_and_dirty_columns() {
+        use crate::cli::commands::create;
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        create::execute(
+            "feature-status",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+
+        assert!(
+            output.contains("Ahead/Behind"),
+            "table should have Ahead/Behind header, got: {output}"
+        );
+        assert!(
+            output.contains("Status"),
+            "table should have Status header, got: {output}"
+        );
+    }
+
+    #[test]
     fn list_porcelain_outputs_colon_separated_lines() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
@@ -608,13 +904,14 @@ mod tests {
         let lines: Vec<&str> = output.lines().collect();
 
         assert_eq!(lines.len(), 2);
+        // Porcelain format: name:branch:path:status:ahead:behind:dirty:managed
         assert_eq!(
             lines[0],
-            "feature-auth:feature/auth:/home/user/.worktrees/proj/feature-auth:clean:true"
+            "feature-auth:feature/auth:/home/user/.worktrees/proj/feature-auth:clean:-:-:0:true"
         );
         assert_eq!(
             lines[1],
-            "fix-bug:fix/bug:/home/user/.worktrees/proj/fix-bug:clean:true"
+            "fix-bug:fix/bug:/home/user/.worktrees/proj/fix-bug:clean:-:-:0:true"
         );
     }
 
@@ -732,12 +1029,13 @@ mod tests {
         let lines: Vec<&str> = porcelain_output.lines().collect();
         assert_eq!(lines.len(), 2);
 
-        // Each line should have exactly 5 colon-separated fields
+        // Each line should have exactly 8 colon-separated fields
+        // (name:branch:path:status:ahead:behind:dirty:managed)
         for line in &lines {
             let fields: Vec<&str> = line.split(':').collect();
             assert_eq!(
-                fields.len(), 5,
-                "porcelain line should have 5 fields, got {}: {:?}",
+                fields.len(), 8,
+                "porcelain line should have 8 fields, got {}: {:?}",
                 fields.len(), line
             );
         }
