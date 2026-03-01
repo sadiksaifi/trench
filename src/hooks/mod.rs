@@ -1,3 +1,5 @@
+pub mod copy;
+
 use std::collections::HashMap;
 use std::fmt;
 
