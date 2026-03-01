@@ -161,6 +161,36 @@ mod tests {
     }
 
     #[test]
+    fn result_contains_source_and_destination_for_each_copied_file() {
+        let source = TempDir::new().unwrap();
+        std::fs::write(source.path().join(".env"), "SECRET=abc").unwrap();
+
+        let dest = TempDir::new().unwrap();
+
+        let patterns = vec![".env".to_string()];
+        let result = execute_copy_step(source.path(), dest.path(), &patterns).unwrap();
+
+        assert_eq!(result.copied.len(), 1);
+        let entry = &result.copied[0];
+        assert_eq!(entry.name, ".env");
+        assert_eq!(entry.source, source.path().join(".env"));
+        assert_eq!(entry.destination, dest.path().join(".env"));
+    }
+
+    #[test]
+    fn no_op_when_no_files_match() {
+        let source = TempDir::new().unwrap();
+        std::fs::write(source.path().join("README.md"), "# Hello").unwrap();
+
+        let dest = TempDir::new().unwrap();
+
+        let patterns = vec![".env*".to_string()];
+        let result = execute_copy_step(source.path(), dest.path(), &patterns).unwrap();
+
+        assert!(result.copied.is_empty());
+    }
+
+    #[test]
     fn exclusion_pattern_filters_out_matches() {
         let source = TempDir::new().unwrap();
         std::fs::write(source.path().join(".env"), "SECRET=abc").unwrap();
