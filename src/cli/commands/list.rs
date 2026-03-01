@@ -1113,6 +1113,69 @@ mod tests {
     }
 
     #[test]
+    fn integration_manual_git_worktree_appears_in_all_formats() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a worktree via git directly (simulating manual `git worktree add`)
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("manually-added");
+        git::create_worktree(repo_dir.path(), "manually-added", &base, &target)
+            .expect("should create worktree via git");
+
+        // Table output should include the manual worktree with badge
+        let table_output = render_table(repo_dir.path(), &db, None, None)
+            .expect("table list should succeed");
+        assert!(
+            table_output.contains("manually-added"),
+            "table should show manually-added worktree, got: {table_output}"
+        );
+        assert!(
+            table_output.contains("[unmanaged]"),
+            "table should show [unmanaged] badge, got: {table_output}"
+        );
+
+        // JSON output should include with managed=false
+        let json_output = execute_json(repo_dir.path(), &db, None)
+            .expect("json list should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let items = parsed.as_array().unwrap();
+        let manual_wt = items.iter()
+            .find(|i| i["name"] == "manually-added")
+            .expect("JSON should include manually-added worktree");
+        assert_eq!(manual_wt["managed"], serde_json::json!(false));
+        assert_eq!(manual_wt["branch"], serde_json::json!("manually-added"));
+        // Should have git metadata
+        assert!(manual_wt.get("dirty").is_some());
+        assert!(manual_wt.get("status").is_some());
+
+        // Porcelain output should include with managed=false
+        let porcelain_output = execute_porcelain(repo_dir.path(), &db, None)
+            .expect("porcelain list should succeed");
+        let manual_line = porcelain_output.lines()
+            .find(|l| l.starts_with("manually-added:"))
+            .expect("porcelain should include manually-added worktree");
+        let fields: Vec<&str> = manual_line.split(':').collect();
+        assert_eq!(fields.len(), 8, "porcelain should have 8 fields");
+        assert_eq!(fields[0], "manually-added");
+        assert_eq!(fields[7], "false", "managed should be false");
+
+        // Main worktree should also appear in all formats
+        let repo_name = repo_dir.path().canonicalize().unwrap()
+            .file_name().unwrap().to_str().unwrap().to_string();
+        assert!(
+            table_output.contains(&repo_name),
+            "table should include main worktree '{repo_name}'"
+        );
+        let main_json = items.iter()
+            .find(|i| i["name"] == repo_name.as_str())
+            .expect("JSON should include main worktree");
+        assert_eq!(main_json["managed"], serde_json::json!(false));
+    }
+
+    #[test]
     fn list_table_dims_unmanaged_worktree_rows() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());
