@@ -144,4 +144,22 @@ mod tests {
         assert_eq!(result.executed[0].stdout.trim(), "hello");
         assert_eq!(result.executed[0].exit_code, 0);
     }
+
+    #[tokio::test]
+    async fn sequential_commands_execute_in_order() {
+        let dir = TempDir::new().unwrap();
+        let commands = vec![
+            "echo first".to_string(),
+            "echo second".to_string(),
+            "echo third".to_string(),
+        ];
+        let env = HashMap::new();
+
+        let result = execute_run_step(&commands, dir.path(), &env).await.unwrap();
+
+        assert_eq!(result.executed.len(), 3);
+        assert_eq!(result.executed[0].stdout.trim(), "first");
+        assert_eq!(result.executed[1].stdout.trim(), "second");
+        assert_eq!(result.executed[2].stdout.trim(), "third");
+    }
 }
