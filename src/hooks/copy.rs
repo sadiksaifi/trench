@@ -80,9 +80,8 @@ fn collect_matching_files(
         let relative = path
             .strip_prefix(root)
             .context("failed to compute relative path")?;
-        let rel_str = relative.to_string_lossy();
 
-        if includes.is_match(&*rel_str) && !excludes.is_match(&*rel_str) {
+        if includes.is_match(relative) && !excludes.is_match(relative) {
             let dest_path = dest_dir.join(relative);
             if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -91,7 +90,7 @@ fn collect_matching_files(
                 .with_context(|| format!("failed to copy {} → {}", path.display(), dest_path.display()))?;
 
             copied.push(CopiedFile {
-                name: rel_str.into_owned(),
+                name: relative.to_string_lossy().into_owned(),
                 source: path,
                 destination: dest_path,
             });
