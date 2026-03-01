@@ -64,6 +64,10 @@ enum Commands {
         /// Skip confirmation prompt
         #[arg(long)]
         force: bool,
+
+        /// Also delete the corresponding remote branch
+        #[arg(long)]
+        prune: bool,
     },
     /// Switch to a worktree
     Switch {
@@ -135,7 +139,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Create { branch, from }) => {
             run_create(&branch, from.as_deref(), dry_run, json)
         }
-        Some(Commands::Remove { branch, force }) => run_remove(&branch, force),
+        Some(Commands::Remove { branch, force, prune }) => run_remove(&branch, force, prune),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
@@ -217,7 +221,7 @@ fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> an
     }
 }
 
-fn run_remove(identifier: &str, force: bool) -> anyhow::Result<()> {
+fn run_remove(identifier: &str, force: bool, _prune: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
@@ -545,9 +549,10 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "remove", "my-feature"])
             .expect("remove with branch should succeed");
         match cli.command {
-            Some(Commands::Remove { branch, force }) => {
+            Some(Commands::Remove { branch, force, prune }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(!force);
+                assert!(!prune);
             }
             _ => panic!("expected Commands::Remove"),
         }
@@ -558,9 +563,10 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "remove", "my-feature", "--force"])
             .expect("remove with --force should succeed");
         match cli.command {
-            Some(Commands::Remove { branch, force }) => {
+            Some(Commands::Remove { branch, force, prune }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(force);
+                assert!(!prune);
             }
             _ => panic!("expected Commands::Remove"),
         }
@@ -663,6 +669,46 @@ mod tests {
                 assert!(force, "force should be true");
             }
             _ => panic!("expected Commands::Init"),
+        }
+    }
+
+    #[test]
+    fn remove_subcommand_accepts_prune_flag() {
+        let cli = Cli::try_parse_from(["trench", "remove", "my-feature", "--prune"])
+            .expect("remove with --prune should succeed");
+        match cli.command {
+            Some(Commands::Remove { branch, force, prune }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(!force);
+                assert!(prune);
+            }
+            _ => panic!("expected Commands::Remove"),
+        }
+    }
+
+    #[test]
+    fn remove_subcommand_accepts_force_and_prune_combined() {
+        let cli = Cli::try_parse_from(["trench", "remove", "my-feature", "--force", "--prune"])
+            .expect("remove with --force --prune should succeed");
+        match cli.command {
+            Some(Commands::Remove { branch, force, prune }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(force);
+                assert!(prune);
+            }
+            _ => panic!("expected Commands::Remove"),
+        }
+    }
+
+    #[test]
+    fn remove_subcommand_prune_defaults_to_false() {
+        let cli = Cli::try_parse_from(["trench", "remove", "my-feature"])
+            .expect("remove with branch should succeed");
+        match cli.command {
+            Some(Commands::Remove { prune, .. }) => {
+                assert!(!prune);
+            }
+            _ => panic!("expected Commands::Remove"),
         }
     }
 
