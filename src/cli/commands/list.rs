@@ -159,6 +159,21 @@ pub fn execute(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
     Ok(table.render())
 }
 
+/// Build a `WorktreeJson` from a worktree, its tags, and computed git status.
+fn build_worktree_json(wt: &Worktree, tags: Vec<String>, status: GitStatus) -> WorktreeJson {
+    WorktreeJson {
+        name: wt.name.clone(),
+        branch: wt.branch.clone(),
+        path: wt.path.clone(),
+        status: format_dirty(status.dirty),
+        ahead: status.ahead,
+        behind: status.behind,
+        dirty: status.dirty,
+        managed: wt.managed,
+        tags,
+    }
+}
+
 /// Execute the `trench list --json` command.
 ///
 /// Returns JSON array of worktree objects including tags.
@@ -169,18 +184,7 @@ pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Stri
     for wt in &worktrees {
         let tags = db.list_tags(wt.id)?;
         let status = compute_git_status(&repo_path, wt);
-        let status_str = format_dirty(status.dirty);
-        json_items.push(WorktreeJson {
-            name: wt.name.clone(),
-            branch: wt.branch.clone(),
-            path: wt.path.clone(),
-            status: status_str,
-            ahead: status.ahead,
-            behind: status.behind,
-            dirty: status.dirty,
-            managed: wt.managed,
-            tags,
-        });
+        json_items.push(build_worktree_json(wt, tags, status));
     }
 
     format_json(&json_items)
@@ -197,18 +201,7 @@ pub fn execute_porcelain(cwd: &Path, db: &Database, tag: Option<&str>) -> Result
         .map(|wt| -> Result<WorktreeJson> {
             let tags = db.list_tags(wt.id)?;
             let status = compute_git_status(&repo_path, wt);
-            let status_str = format_dirty(status.dirty);
-            Ok(WorktreeJson {
-                name: wt.name.clone(),
-                branch: wt.branch.clone(),
-                path: wt.path.clone(),
-                status: status_str,
-                ahead: status.ahead,
-                behind: status.behind,
-                dirty: status.dirty,
-                managed: wt.managed,
-                tags,
-            })
+            Ok(build_worktree_json(wt, tags, status))
         })
         .collect::<Result<Vec<_>>>()?;
 
