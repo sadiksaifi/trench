@@ -136,6 +136,30 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn preserves_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = TempDir::new().unwrap();
+        let script_path = source.path().join("setup.sh");
+        std::fs::write(&script_path, "#!/bin/sh\necho hello").unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let dest = TempDir::new().unwrap();
+
+        let patterns = vec!["setup.sh".to_string()];
+        execute_copy_step(source.path(), dest.path(), &patterns).unwrap();
+
+        let dest_perms = std::fs::metadata(dest.path().join("setup.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+
+        // Verify the executable bit is preserved (at least owner execute)
+        assert_ne!(dest_perms & 0o100, 0, "executable permission should be preserved");
+    }
+
     #[test]
     fn exclusion_pattern_filters_out_matches() {
         let source = TempDir::new().unwrap();
