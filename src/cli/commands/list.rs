@@ -62,20 +62,18 @@ fn fetch_all_worktrees(
 
     // When filtering by tag, only return managed worktrees (unmanaged can't have tags)
     if tag.is_some() {
-        let entries = db_worktrees
-            .iter()
-            .map(|wt| {
-                let tags = db.list_tags(wt.id).unwrap_or_default();
-                ListEntry {
-                    name: wt.name.clone(),
-                    branch: wt.branch.clone(),
-                    path: wt.path.clone(),
-                    base_branch: wt.base_branch.clone(),
-                    managed: true,
-                    tags,
-                }
-            })
-            .collect();
+        let mut entries = Vec::with_capacity(db_worktrees.len());
+        for wt in &db_worktrees {
+            let tags = db.list_tags(wt.id)?;
+            entries.push(ListEntry {
+                name: wt.name.clone(),
+                branch: wt.branch.clone(),
+                path: wt.path.clone(),
+                base_branch: wt.base_branch.clone(),
+                managed: true,
+                tags,
+            });
+        }
         return Ok((repo_path, entries));
     }
 
@@ -93,7 +91,7 @@ fn fetch_all_worktrees(
 
     // Add managed worktrees first
     for wt in &db_worktrees {
-        let tags = db.list_tags(wt.id).unwrap_or_default();
+        let tags = db.list_tags(wt.id)?;
         entries.push(ListEntry {
             name: wt.name.clone(),
             branch: wt.branch.clone(),
