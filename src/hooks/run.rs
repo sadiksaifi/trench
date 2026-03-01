@@ -224,4 +224,16 @@ mod tests {
         assert_eq!(run_err.results.executed[0].stdout.trim(), "first");
         assert_eq!(run_err.results.executed[1].exit_code, 42);
     }
+
+    #[tokio::test]
+    async fn stderr_captured_separately_from_stdout() {
+        let dir = TempDir::new().unwrap();
+        let commands = vec!["echo out_msg; echo err_msg >&2".to_string()];
+        let env = HashMap::new();
+
+        let result = execute_run_step(&commands, dir.path(), &env).await.unwrap();
+
+        assert_eq!(result.executed[0].stdout.trim(), "out_msg");
+        assert_eq!(result.executed[0].stderr.trim(), "err_msg");
+    }
 }
