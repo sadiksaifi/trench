@@ -221,7 +221,7 @@ fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> an
     }
 }
 
-fn run_remove(identifier: &str, force: bool, _prune: bool) -> anyhow::Result<()> {
+fn run_remove(identifier: &str, force: bool, prune: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
@@ -232,9 +232,14 @@ fn run_remove(identifier: &str, force: bool, _prune: bool) -> anyhow::Result<()>
         let repo_path_str = repo_info.path.to_str().unwrap_or("");
         if let Some(repo) = db.get_repo_by_path(repo_path_str)? {
             if let Some(wt) = db.find_worktree_by_identifier(repo.id, identifier)? {
+                let prune_hint = if prune {
+                    " (including remote branch)"
+                } else {
+                    ""
+                };
                 eprint!(
-                    "Remove worktree '{}' at {}? [y/N] ",
-                    wt.name, wt.path
+                    "Remove worktree '{}' at {}{}? [y/N] ",
+                    wt.name, wt.path, prune_hint
                 );
                 let mut input = String::new();
                 if std::io::stdin().read_line(&mut input).is_err() {
@@ -249,9 +254,13 @@ fn run_remove(identifier: &str, force: bool, _prune: bool) -> anyhow::Result<()>
         }
     }
 
-    match cli::commands::remove::execute(identifier, &cwd, &db) {
-        Ok(name) => {
-            eprintln!("Removed worktree '{name}'");
+    match cli::commands::remove::execute(identifier, &cwd, &db, prune) {
+        Ok(result) => {
+            if result.pruned_remote {
+                eprintln!("Removed worktree '{}' and remote branch", result.name);
+            } else {
+                eprintln!("Removed worktree '{}'", result.name);
+            }
             Ok(())
         }
         Err(e) => {
