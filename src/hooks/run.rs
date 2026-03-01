@@ -236,4 +236,15 @@ mod tests {
         assert_eq!(result.executed[0].stdout.trim(), "out_msg");
         assert_eq!(result.executed[0].stderr.trim(), "err_msg");
     }
+
+    #[tokio::test]
+    async fn empty_commands_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let commands: Vec<String> = vec![];
+        let env = HashMap::new();
+
+        let result = execute_run_step(&commands, dir.path(), &env).await.unwrap();
+
+        assert!(result.executed.is_empty());
+    }
 }
