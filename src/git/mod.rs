@@ -102,6 +102,9 @@ pub enum GitError {
     #[error("worktree not found: {name}")]
     WorktreeNotFound { name: String },
 
+    #[error("remote branch '{branch}' not found on {remote}")]
+    RemoteBranchNotFound { branch: String, remote: String },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -341,6 +344,38 @@ pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(), Git
             }
         }
     }
+
+    Ok(())
+}
+
+/// Delete a branch on a remote by pushing a delete refspec.
+///
+/// Checks that the remote-tracking ref (`<remote>/<branch>`) exists first,
+/// then pushes `:refs/heads/<branch>` to delete it on the remote.
+/// Returns `RemoteBranchNotFound` if the branch does not exist on the remote.
+pub fn delete_remote_branch(
+    repo_path: &Path,
+    remote_name: &str,
+    branch: &str,
+) -> Result<(), GitError> {
+    let repo =
+        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+
+    // Check if the remote tracking ref exists
+    let tracking_ref = format!("{remote_name}/{branch}");
+    if repo
+        .find_branch(&tracking_ref, git2::BranchType::Remote)
+        .is_err()
+    {
+        return Err(GitError::RemoteBranchNotFound {
+            branch: branch.to_string(),
+            remote: remote_name.to_string(),
+        });
+    }
+
+    let mut remote = repo.find_remote(remote_name)?;
+    let refspec = format!(":refs/heads/{branch}");
+    remote.push(&[&refspec], None)?;
 
     Ok(())
 }
@@ -1019,6 +1054,93 @@ mod tests {
         assert_eq!(additional.path, target.canonicalize().unwrap());
         assert_eq!(additional.branch.as_deref(), Some("extra-wt"));
         assert!(!additional.is_main);
+    }
+
+    /// Helper: create a bare remote repo, clone it, return (clone_repo, clone_dir, remote_dir).
+    fn setup_clone_with_remote() -> (
+        git2::Repository,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let remote_repo = git2::Repository::init_bare(remote_dir.path()).unwrap();
+        {
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let empty_tree = remote_repo
+                .treebuilder(None)
+                .unwrap()
+                .write()
+                .unwrap();
+            let tree = remote_repo.find_tree(empty_tree).unwrap();
+            remote_repo
+                .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+        let clone_dir = tempfile::tempdir().unwrap();
+        let clone = git2::build::RepoBuilder::new()
+            .clone(
+                remote_dir.path().to_str().unwrap(),
+                clone_dir.path(),
+            )
+            .unwrap();
+        (clone, clone_dir, remote_dir)
+    }
+
+    #[test]
+    fn delete_remote_branch_deletes_branch_on_remote() {
+        let (clone, clone_dir, remote_dir) = setup_clone_with_remote();
+
+        // Create a branch and push it to the remote
+        let head_commit = clone.head().unwrap().peel_to_commit().unwrap();
+        clone.branch("feature-to-delete", &head_commit, false).unwrap();
+        {
+            let mut origin = clone.find_remote("origin").unwrap();
+            origin
+                .push(&["refs/heads/feature-to-delete:refs/heads/feature-to-delete"], None)
+                .unwrap();
+        }
+
+        // Fetch to update remote tracking refs
+        {
+            let mut origin = clone.find_remote("origin").unwrap();
+            origin.fetch(&[] as &[&str], None, None).unwrap();
+        }
+
+        // Verify the remote tracking ref exists
+        assert!(
+            clone
+                .find_branch("origin/feature-to-delete", git2::BranchType::Remote)
+                .is_ok(),
+            "remote tracking ref should exist before deletion"
+        );
+
+        // Delete the remote branch
+        delete_remote_branch(clone_dir.path(), "origin", "feature-to-delete")
+            .expect("should delete remote branch");
+
+        // Verify the branch is gone on the bare remote
+        let remote_repo = git2::Repository::open_bare(remote_dir.path()).unwrap();
+        assert!(
+            remote_repo
+                .find_branch("feature-to-delete", git2::BranchType::Local)
+                .is_err(),
+            "branch should be deleted on remote"
+        );
+    }
+
+    #[test]
+    fn delete_remote_branch_returns_not_found_when_branch_missing() {
+        let (_clone, clone_dir, _remote_dir) = setup_clone_with_remote();
+
+        let result = delete_remote_branch(clone_dir.path(), "origin", "nonexistent-branch");
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, GitError::RemoteBranchNotFound { ref branch, ref remote }
+                if branch == "nonexistent-branch" && remote == "origin"),
+            "expected RemoteBranchNotFound, got: {err:?}"
+        );
     }
 
     #[test]
