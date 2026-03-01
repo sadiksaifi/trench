@@ -350,8 +350,8 @@ pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(), Git
 
 /// Delete a branch on a remote by pushing a delete refspec.
 ///
-/// Checks that the remote-tracking ref (`<remote>/<branch>`) exists first,
-/// then pushes `:refs/heads/<branch>` to delete it on the remote.
+/// Connects to the remote to verify the branch exists, then pushes
+/// `:refs/heads/<branch>` to delete it.
 /// Returns `RemoteBranchNotFound` if the branch does not exist on the remote.
 pub fn delete_remote_branch(
     repo_path: &Path,
@@ -361,19 +361,26 @@ pub fn delete_remote_branch(
     let repo =
         git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
 
-    // Check if the remote tracking ref exists
-    let tracking_ref = format!("{remote_name}/{branch}");
-    if repo
-        .find_branch(&tracking_ref, git2::BranchType::Remote)
-        .is_err()
-    {
+    let mut remote = repo.find_remote(remote_name)?;
+
+    // Query the actual remote for branch existence (not local tracking refs,
+    // which can be stale or missing after push-without-fetch).
+    let target_ref = format!("refs/heads/{branch}");
+    let exists = {
+        let connection = remote.connect_auth(git2::Direction::Fetch, None, None)?;
+        connection
+            .list()?
+            .iter()
+            .any(|head| head.name() == target_ref)
+    }; // connection dropped here → auto-disconnect
+
+    if !exists {
         return Err(GitError::RemoteBranchNotFound {
             branch: branch.to_string(),
             remote: remote_name.to_string(),
         });
     }
 
-    let mut remote = repo.find_remote(remote_name)?;
     let refspec = format!(":refs/heads/{branch}");
     remote.push(&[&refspec], None)?;
 
