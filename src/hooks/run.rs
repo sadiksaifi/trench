@@ -162,4 +162,19 @@ mod tests {
         assert_eq!(result.executed[1].stdout.trim(), "second");
         assert_eq!(result.executed[2].stdout.trim(), "third");
     }
+
+    #[tokio::test]
+    async fn commands_run_with_specified_working_directory() {
+        let dir = TempDir::new().unwrap();
+        let commands = vec!["pwd".to_string()];
+        let env = HashMap::new();
+
+        let result = execute_run_step(&commands, dir.path(), &env).await.unwrap();
+
+        let output_path = result.executed[0].stdout.trim();
+        // Canonicalize both to handle symlinks like /tmp -> /private/tmp on macOS
+        let expected = dir.path().canonicalize().unwrap();
+        let actual = std::path::PathBuf::from(output_path).canonicalize().unwrap();
+        assert_eq!(actual, expected);
+    }
 }
