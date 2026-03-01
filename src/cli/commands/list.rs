@@ -1113,6 +1113,45 @@ mod tests {
     }
 
     #[test]
+    fn list_json_shows_unmanaged_worktree_with_managed_false() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a worktree via git directly (not through trench)
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("git-only-wt");
+        git::create_worktree(repo_dir.path(), "git-only-wt", &base, &target)
+            .expect("should create worktree via git");
+
+        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let items = parsed.as_array().expect("should be an array");
+
+        // Find the unmanaged worktree
+        let unmanaged = items.iter().find(|i| i["name"] == "git-only-wt")
+            .expect("should find unmanaged worktree in JSON");
+        assert_eq!(
+            unmanaged["managed"],
+            serde_json::json!(false),
+            "unmanaged worktree should have managed=false"
+        );
+        // Should still have all required fields
+        assert!(unmanaged["branch"].is_string());
+        assert!(unmanaged["path"].is_string());
+        assert!(unmanaged["status"].is_string());
+        assert!(unmanaged["dirty"].is_number());
+        assert!(unmanaged["tags"].is_array());
+
+        // Main worktree should also be unmanaged
+        let main_wt = items.iter().find(|i| {
+            i["managed"] == false && i["name"] != "git-only-wt"
+        }).expect("should find main worktree as unmanaged");
+        assert_eq!(main_wt["managed"], serde_json::json!(false));
+    }
+
+    #[test]
     fn list_shows_unmanaged_worktree_with_badge() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());
