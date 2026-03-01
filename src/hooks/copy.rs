@@ -135,4 +135,22 @@ mod tests {
             "LOCAL=xyz"
         );
     }
+
+    #[test]
+    fn exclusion_pattern_filters_out_matches() {
+        let source = TempDir::new().unwrap();
+        std::fs::write(source.path().join(".env"), "SECRET=abc").unwrap();
+        std::fs::write(source.path().join(".env.local"), "LOCAL=xyz").unwrap();
+        std::fs::write(source.path().join(".env.example"), "EXAMPLE=template").unwrap();
+
+        let dest = TempDir::new().unwrap();
+
+        let patterns = vec![".env*".to_string(), "!.env.example".to_string()];
+        let result = execute_copy_step(source.path(), dest.path(), &patterns).unwrap();
+
+        assert_eq!(result.copied.len(), 2);
+        assert!(dest.path().join(".env").exists());
+        assert!(dest.path().join(".env.local").exists());
+        assert!(!dest.path().join(".env.example").exists());
+    }
 }
