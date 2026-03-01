@@ -207,4 +207,35 @@ mod tests {
         assert!(dest.path().join(".env.local").exists());
         assert!(!dest.path().join(".env.example").exists());
     }
+
+    #[test]
+    fn multiple_include_patterns_match_different_file_types() {
+        let source = TempDir::new().unwrap();
+        std::fs::write(source.path().join("config.json"), "{}").unwrap();
+        std::fs::write(source.path().join("settings.toml"), "[ui]").unwrap();
+        std::fs::write(source.path().join("main.rs"), "fn main(){}").unwrap();
+
+        let dest = TempDir::new().unwrap();
+
+        let patterns = vec!["*.json".to_string(), "*.toml".to_string()];
+        let result = execute_copy_step(source.path(), dest.path(), &patterns).unwrap();
+
+        assert_eq!(result.copied.len(), 2);
+        assert!(dest.path().join("config.json").exists());
+        assert!(dest.path().join("settings.toml").exists());
+        assert!(!dest.path().join("main.rs").exists());
+    }
+
+    #[test]
+    fn empty_patterns_copies_nothing() {
+        let source = TempDir::new().unwrap();
+        std::fs::write(source.path().join(".env"), "SECRET=abc").unwrap();
+
+        let dest = TempDir::new().unwrap();
+
+        let patterns: Vec<String> = vec![];
+        let result = execute_copy_step(source.path(), dest.path(), &patterns).unwrap();
+
+        assert!(result.copied.is_empty());
+    }
 }
