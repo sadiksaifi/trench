@@ -194,4 +194,34 @@ mod tests {
         assert_eq!(result.executed[0].stdout.trim(), "feature/auth");
         assert_eq!(result.executed[1].stdout.trim(), "post_create");
     }
+
+    #[tokio::test]
+    async fn nonzero_exit_stops_sequence_and_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let commands = vec![
+            "echo first".to_string(),
+            "exit 42".to_string(),
+            "echo should_not_run".to_string(),
+        ];
+        let env = HashMap::new();
+
+        let err = execute_run_step(&commands, dir.path(), &env)
+            .await
+            .unwrap_err();
+
+        // Error message contains command and exit code
+        let msg = err.to_string();
+        assert!(msg.contains("exit 42"), "error should contain command: {msg}");
+        assert!(msg.contains("42"), "error should contain exit code: {msg}");
+
+        // Downcast to get partial results
+        let run_err = err.downcast_ref::<RunStepError>().unwrap();
+        assert_eq!(run_err.command, "exit 42");
+        assert_eq!(run_err.exit_code, 42);
+
+        // Only 2 commands executed (first + failed), third never ran
+        assert_eq!(run_err.results.executed.len(), 2);
+        assert_eq!(run_err.results.executed[0].stdout.trim(), "first");
+        assert_eq!(run_err.results.executed[1].exit_code, 42);
+    }
 }
