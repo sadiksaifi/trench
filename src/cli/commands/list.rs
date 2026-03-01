@@ -1113,6 +1113,67 @@ mod tests {
     }
 
     #[test]
+    fn list_table_dims_unmanaged_worktree_rows() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Register the repo in DB and add a managed worktree
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some(&base))
+            .unwrap();
+
+        // Create a managed worktree via trench (add to DB + git)
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("managed-wt");
+        git::create_worktree(repo_dir.path(), "managed-wt", &base, &wt_path).unwrap();
+        let canonical_path = wt_path.canonicalize().unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "managed-wt",
+            "managed-wt",
+            canonical_path.to_str().unwrap(),
+            Some(&base),
+        )
+        .unwrap();
+
+        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+
+        // Unmanaged rows (main worktree) should have ANSI dim codes
+        let lines: Vec<&str> = output.lines().collect();
+        let dim_start = "\x1b[2m";
+        let dim_end = "\x1b[0m";
+
+        let unmanaged_lines: Vec<&&str> = lines.iter()
+            .filter(|l| l.contains("[unmanaged]"))
+            .collect();
+        assert!(!unmanaged_lines.is_empty(), "should have at least one unmanaged row");
+
+        for line in &unmanaged_lines {
+            assert!(
+                line.starts_with(dim_start),
+                "unmanaged row should start with dim ANSI code, got: {:?}", line
+            );
+            assert!(
+                line.ends_with(dim_end),
+                "unmanaged row should end with reset ANSI code, got: {:?}", line
+            );
+        }
+
+        // Managed row should NOT have dim codes
+        let managed_line = lines.iter()
+            .find(|l| l.contains("managed-wt") && !l.contains("[unmanaged]"))
+            .expect("should find managed worktree row");
+        assert!(
+            !managed_line.starts_with(dim_start),
+            "managed row should NOT have dim ANSI code, got: {:?}", managed_line
+        );
+    }
+
+    #[test]
     fn list_porcelain_shows_unmanaged_worktree_with_managed_false() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());
