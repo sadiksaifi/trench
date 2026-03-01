@@ -103,18 +103,17 @@ fn fetch_all_worktrees(
     }
 
     // Discover git worktrees and add unmanaged ones
-    if let Ok(git_worktrees) = git::list_worktrees(&repo_path) {
-        for gw in git_worktrees {
-            if !managed_paths.contains(&gw.path) {
-                entries.push(ListEntry {
-                    name: gw.name.clone(),
-                    branch: gw.branch.unwrap_or_else(|| "(detached)".to_string()),
-                    path: gw.path.to_string_lossy().into_owned(),
-                    base_branch: None,
-                    managed: false,
-                    tags: Vec::new(),
-                });
-            }
+    let git_worktrees = git::list_worktrees(&repo_path)?;
+    for gw in git_worktrees {
+        if !managed_paths.contains(&gw.path) {
+            entries.push(ListEntry {
+                name: gw.name.clone(),
+                branch: gw.branch.unwrap_or_else(|| "(detached)".to_string()),
+                path: gw.path.to_string_lossy().into_owned(),
+                base_branch: None,
+                managed: false,
+                tags: Vec::new(),
+            });
         }
     }
 
