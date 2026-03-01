@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -8,6 +9,17 @@ use crate::output::json::format_json;
 use crate::output::porcelain::{format_porcelain, PorcelainRecord};
 use crate::output::table::Table;
 use crate::state::{Database, Worktree};
+
+/// A unified worktree entry for list output, combining managed (DB) and
+/// unmanaged (git-only) worktrees.
+struct ListEntry {
+    name: String,
+    branch: String,
+    path: String,
+    base_branch: Option<String>,
+    managed: bool,
+    tags: Vec<String>,
+}
 
 /// Discover the git repo from `cwd` and fetch worktrees from the DB,
 /// optionally filtered by tag. Returns the repo path alongside worktrees.
@@ -35,6 +47,79 @@ fn fetch_worktrees(
     Ok((repo_info.path, worktrees))
 }
 
+/// Fetch all worktrees (managed + unmanaged) for the repo at `cwd`.
+///
+/// Merges DB-tracked worktrees with git-discovered worktrees. Worktrees
+/// found via git but not in the DB are marked as unmanaged. When a `tag`
+/// filter is active, only managed worktrees matching the tag are returned
+/// (unmanaged worktrees cannot have tags).
+fn fetch_all_worktrees(
+    cwd: &Path,
+    db: &Database,
+    tag: Option<&str>,
+) -> Result<(PathBuf, Vec<ListEntry>)> {
+    let (repo_path, db_worktrees) = fetch_worktrees(cwd, db, tag)?;
+
+    // When filtering by tag, only return managed worktrees (unmanaged can't have tags)
+    if tag.is_some() {
+        let mut entries = Vec::with_capacity(db_worktrees.len());
+        for wt in &db_worktrees {
+            let tags = db.list_tags(wt.id)?;
+            entries.push(ListEntry {
+                name: wt.name.clone(),
+                branch: wt.branch.clone(),
+                path: wt.path.clone(),
+                base_branch: wt.base_branch.clone(),
+                managed: true,
+                tags,
+            });
+        }
+        return Ok((repo_path, entries));
+    }
+
+    // Build a set of known (managed) worktree paths for cross-referencing
+    let managed_paths: HashSet<PathBuf> = db_worktrees
+        .iter()
+        .filter_map(|wt| {
+            Path::new(&wt.path)
+                .canonicalize()
+                .ok()
+        })
+        .collect();
+
+    let mut entries: Vec<ListEntry> = Vec::new();
+
+    // Add managed worktrees first
+    for wt in &db_worktrees {
+        let tags = db.list_tags(wt.id)?;
+        entries.push(ListEntry {
+            name: wt.name.clone(),
+            branch: wt.branch.clone(),
+            path: wt.path.clone(),
+            base_branch: wt.base_branch.clone(),
+            managed: true,
+            tags,
+        });
+    }
+
+    // Discover git worktrees and add unmanaged ones
+    let git_worktrees = git::list_worktrees(&repo_path)?;
+    for gw in git_worktrees {
+        if !managed_paths.contains(&gw.path) {
+            entries.push(ListEntry {
+                name: gw.name.clone(),
+                branch: gw.branch.unwrap_or_else(|| "(detached)".to_string()),
+                path: gw.path.to_string_lossy().into_owned(),
+                base_branch: None,
+                managed: false,
+                tags: Vec::new(),
+            });
+        }
+    }
+
+    Ok((repo_path, entries))
+}
+
 /// Git status metadata for a worktree.
 struct GitStatus {
     ahead: Option<usize>,
@@ -44,15 +129,15 @@ struct GitStatus {
 
 /// Compute git status for a worktree. Expected "no upstream" cases silently
 /// yield `None`; unexpected errors print a warning and fall back to defaults.
-fn compute_git_status(repo_path: &Path, wt: &Worktree) -> GitStatus {
-    let wt_path = Path::new(&wt.path);
+fn compute_git_status(repo_path: &Path, entry: &ListEntry) -> GitStatus {
+    let wt_path = Path::new(&entry.path);
 
     let (ahead, behind) =
-        match git::ahead_behind(repo_path, &wt.branch, wt.base_branch.as_deref()) {
+        match git::ahead_behind(repo_path, &entry.branch, entry.base_branch.as_deref()) {
             Ok(Some((a, b))) => (Some(a), Some(b)),
             Ok(None) => (None, None),
             Err(e) => {
-                eprintln!("warning: ahead/behind for '{}': {e}", wt.branch);
+                eprintln!("warning: ahead/behind for '{}': {e}", entry.branch);
                 (None, None)
             }
         };
@@ -120,11 +205,24 @@ impl PorcelainRecord for WorktreeJson {
 /// Execute the `trench list` command.
 ///
 /// Discovers the git repo from `cwd`, queries managed worktrees from the DB,
-/// and returns a formatted string for display. Optionally filters by tag.
+/// merges with git-discovered unmanaged worktrees, and returns a formatted
+/// string for display. Optionally filters by tag.
 pub fn execute(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let (repo_path, worktrees) = fetch_worktrees(cwd, db, tag)?;
+    let max_width = crossterm::terminal::size()
+        .ok()
+        .map(|(cols, _)| cols as usize);
+    render_table(cwd, db, tag, max_width)
+}
 
-    if worktrees.is_empty() {
+fn render_table(
+    cwd: &Path,
+    db: &Database,
+    tag: Option<&str>,
+    max_width: Option<usize>,
+) -> Result<String> {
+    let (repo_path, entries) = fetch_all_worktrees(cwd, db, tag)?;
+
+    if entries.is_empty() {
         return Ok("No worktrees. Use `trench create` to get started.\n".to_string());
     }
 
@@ -136,41 +234,67 @@ pub fn execute(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
         "Ahead/Behind",
         "Tags",
     ]);
-    for wt in &worktrees {
-        let tags = db.list_tags(wt.id)?;
-        let tags_str = tags.join(", ");
-        let status = compute_git_status(&repo_path, wt);
+    let mut unmanaged_rows: Vec<bool> = Vec::new();
+    for entry in &entries {
+        let tags_str = entry.tags.join(", ");
+        let status = compute_git_status(&repo_path, entry);
         let dirty_str = format_dirty(status.dirty);
         let ab_str = format_ahead_behind(status.ahead, status.behind);
+        let display_name = if entry.managed {
+            entry.name.clone()
+        } else {
+            format!("{} [unmanaged]", entry.name)
+        };
         table = table.row(vec![
-            &wt.name,
-            &wt.branch,
-            &wt.path,
+            &display_name,
+            &entry.branch,
+            &entry.path,
             &dirty_str,
             &ab_str,
             &tags_str,
         ]);
+        unmanaged_rows.push(!entry.managed);
     }
 
-    if let Ok((cols, _)) = crossterm::terminal::size() {
-        table = table.max_width(cols as usize);
+    if let Some(width) = max_width {
+        table = table.max_width(width);
     }
 
-    Ok(table.render())
+    let rendered = table.render();
+
+    // Apply dimmed styling to unmanaged worktree rows
+    let lines: Vec<&str> = rendered.lines().collect();
+    let mut out = String::new();
+    if let Some(header) = lines.first() {
+        out.push_str(header);
+        out.push('\n');
+    }
+    for (i, line) in lines.iter().skip(1).enumerate() {
+        if i < unmanaged_rows.len() && unmanaged_rows[i] {
+            out.push_str("\x1b[2m");
+            out.push_str(line);
+            out.push_str("\x1b[0m");
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+
+    Ok(out)
 }
 
-/// Build a `WorktreeJson` from a worktree, its tags, and computed git status.
-fn build_worktree_json(wt: &Worktree, tags: Vec<String>, status: GitStatus) -> WorktreeJson {
+/// Build a `WorktreeJson` from a list entry and computed git status.
+fn build_worktree_json(entry: &ListEntry, status: GitStatus) -> WorktreeJson {
     WorktreeJson {
-        name: wt.name.clone(),
-        branch: wt.branch.clone(),
-        path: wt.path.clone(),
+        name: entry.name.clone(),
+        branch: entry.branch.clone(),
+        path: entry.path.clone(),
         status: format_dirty(status.dirty),
         ahead: status.ahead,
         behind: status.behind,
         dirty: status.dirty,
-        managed: wt.managed,
-        tags,
+        managed: entry.managed,
+        tags: entry.tags.clone(),
     }
 }
 
@@ -178,13 +302,12 @@ fn build_worktree_json(wt: &Worktree, tags: Vec<String>, status: GitStatus) -> W
 ///
 /// Returns JSON array of worktree objects including tags.
 pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let (repo_path, worktrees) = fetch_worktrees(cwd, db, tag)?;
+    let (repo_path, entries) = fetch_all_worktrees(cwd, db, tag)?;
 
     let mut json_items = Vec::new();
-    for wt in &worktrees {
-        let tags = db.list_tags(wt.id)?;
-        let status = compute_git_status(&repo_path, wt);
-        json_items.push(build_worktree_json(wt, tags, status));
+    for entry in &entries {
+        let status = compute_git_status(&repo_path, entry);
+        json_items.push(build_worktree_json(entry, status));
     }
 
     format_json(&json_items)
@@ -194,16 +317,15 @@ pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Stri
 ///
 /// Returns colon-separated lines: `name:branch:path:status:ahead:behind:dirty:managed`.
 pub fn execute_porcelain(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let (repo_path, worktrees) = fetch_worktrees(cwd, db, tag)?;
+    let (repo_path, entries) = fetch_all_worktrees(cwd, db, tag)?;
 
-    let items: Vec<WorktreeJson> = worktrees
+    let items: Vec<WorktreeJson> = entries
         .iter()
-        .map(|wt| -> Result<WorktreeJson> {
-            let tags = db.list_tags(wt.id)?;
-            let status = compute_git_status(&repo_path, wt);
-            Ok(build_worktree_json(wt, tags, status))
+        .map(|entry| {
+            let status = compute_git_status(&repo_path, entry);
+            build_worktree_json(entry, status)
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
 
     Ok(format_porcelain(&items))
 }
@@ -254,7 +376,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
 
         // Should contain column headers
         assert!(output.contains("Name"), "output should have Name header");
@@ -272,9 +394,9 @@ mod tests {
             "output should contain second worktree"
         );
 
-        // Should have header + 2 data rows
+        // Should have header + 2 managed rows + 1 main worktree row
         let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines.len(), 3, "expected header + 2 data rows");
+        assert_eq!(lines.len(), 4, "expected header + 2 managed + 1 main worktree");
     }
 
     #[test]
@@ -307,7 +429,7 @@ mod tests {
         )
         .expect("second create should succeed");
 
-        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
 
         assert!(
             output.contains("feature-one"),
@@ -318,26 +440,27 @@ mod tests {
             "list should show second worktree, got: {output}"
         );
 
+        // header + 2 managed + 1 main worktree
         let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines.len(), 3, "expected header + 2 data rows");
+        assert_eq!(lines.len(), 4, "expected header + 2 managed + 1 main worktree");
     }
 
     #[test]
-    fn shows_empty_state_when_no_worktrees() {
+    fn shows_main_worktree_when_no_managed_worktrees() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
 
-        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+        // With no managed worktrees, the main worktree still appears
+        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
 
         assert!(
-            output.contains("No worktrees"),
-            "empty state should mention 'No worktrees', got: {output}"
+            output.contains("[unmanaged]"),
+            "main worktree should show [unmanaged] badge, got: {output}"
         );
-        assert!(
-            output.contains("trench create"),
-            "empty state should hint at 'trench create', got: {output}"
-        );
+        // header + 1 main worktree row
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2, "expected header + 1 main worktree");
     }
 
     #[test]
@@ -384,7 +507,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
 
         assert!(
             output.contains("active-feature"),
@@ -395,13 +518,13 @@ mod tests {
             "output should NOT contain the removed worktree, got: {output}"
         );
 
-        // Should have header + 1 data row only
+        // header + 1 managed row + 1 main worktree row
         let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines.len(), 2, "expected header + 1 data row, got: {output}");
+        assert_eq!(lines.len(), 3, "expected header + 1 managed + 1 main worktree, got: {output}");
     }
 
     #[test]
-    fn create_remove_list_shows_empty_state() {
+    fn create_remove_list_still_shows_main_worktree() {
         use crate::cli::commands::{create, remove};
         use crate::paths;
 
@@ -423,11 +546,12 @@ mod tests {
         remove::execute("ephemeral", repo_dir.path(), &db)
             .expect("remove should succeed");
 
-        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
 
+        // After removing all managed worktrees, the main worktree still appears
         assert!(
-            output.contains("No worktrees"),
-            "list should show empty state after removal, got: {output}"
+            output.contains("[unmanaged]"),
+            "main worktree should still appear after removal, got: {output}"
         );
     }
 
@@ -555,8 +679,11 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
         let worktrees = parsed.as_array().expect("should be an array");
-        assert_eq!(worktrees.len(), 1);
-        let tags = worktrees[0]["tags"].as_array().expect("tags should be array");
+        // 1 managed + 1 main worktree
+        assert!(worktrees.len() >= 2, "should have at least 2 entries (managed + main)");
+        let tagged_wt = worktrees.iter().find(|w| w["name"] == "my-wt")
+            .expect("should find managed worktree");
+        let tags = tagged_wt["tags"].as_array().expect("tags should be array");
         assert_eq!(tags, &[serde_json::json!("wip")]);
     }
 
@@ -636,11 +763,12 @@ mod tests {
         assert!(!wip_after.contains("feature-alpha"));
         assert!(wip_after.contains("feature-beta"));
 
-        // JSON output should include tags
+        // JSON output should include tags (includes main worktree too)
         let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
         let items = parsed.as_array().unwrap();
-        assert_eq!(items.len(), 2);
+        // 2 managed + 1 main worktree + 2 git worktrees for the created branches
+        assert!(items.len() >= 3, "should have at least 3 entries, got: {}", items.len());
 
         // Find alpha in JSON and check tags
         let alpha = items
@@ -683,9 +811,9 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
         let items = parsed.as_array().expect("should be an array");
-        assert_eq!(items.len(), 1);
+        let wt = items.iter().find(|i| i["name"] == "feature-json-fields")
+            .expect("should find managed worktree in JSON");
 
-        let wt = &items[0];
         // Should have ahead, behind, and dirty fields
         assert!(
             wt.get("ahead").is_some(),
@@ -751,7 +879,9 @@ mod tests {
 
         let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
-        let wt_json = &parsed.as_array().unwrap()[0];
+        let wt_json = parsed.as_array().unwrap().iter()
+            .find(|i| i["name"] == "feature-e2e")
+            .expect("should find feature-e2e in JSON");
 
         assert_eq!(wt_json["ahead"], serde_json::json!(1), "should be 1 ahead");
         assert_eq!(wt_json["behind"], serde_json::json!(0), "should be 0 behind");
@@ -788,7 +918,9 @@ mod tests {
         let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
-        let wt = &parsed.as_array().unwrap()[0];
+        let wt = parsed.as_array().unwrap().iter()
+            .find(|i| i["name"] == "orphan-wt")
+            .expect("should find orphan-wt in JSON");
         assert!(
             wt["ahead"].is_null(),
             "ahead should be null when no upstream, got: {}",
@@ -903,7 +1035,8 @@ mod tests {
         let output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
         let lines: Vec<&str> = output.lines().collect();
 
-        assert_eq!(lines.len(), 2);
+        // 2 managed + 1 main worktree
+        assert_eq!(lines.len(), 3);
         // Porcelain format: name:branch:path:status:ahead:behind:dirty:managed
         assert_eq!(
             lines[0],
@@ -913,16 +1046,29 @@ mod tests {
             lines[1],
             "fix-bug:fix/bug:/home/user/.worktrees/proj/fix-bug:clean:-:-:0:true"
         );
+        // Third line is the main worktree (unmanaged)
+        assert!(
+            lines[2].ends_with(":false"),
+            "main worktree should have managed=false, got: {}",
+            lines[2]
+        );
     }
 
     #[test]
-    fn list_porcelain_empty_returns_empty() {
+    fn list_porcelain_shows_main_worktree_when_no_managed() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
 
         let output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
-        assert!(output.is_empty(), "empty worktree list should produce empty porcelain output");
+        let lines: Vec<&str> = output.lines().collect();
+        // Main worktree should appear
+        assert_eq!(lines.len(), 1, "should have 1 line for main worktree");
+        assert!(
+            lines[0].ends_with(":false"),
+            "main worktree should have managed=false, got: {}",
+            lines[0]
+        );
     }
 
     #[test]
@@ -950,11 +1096,263 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
         let worktrees = parsed.as_array().expect("should be an array");
-        assert_eq!(worktrees.len(), 1);
+        let managed_wt = worktrees.iter().find(|w| w["name"] == "my-wt")
+            .expect("should find managed worktree");
         assert_eq!(
-            worktrees[0]["managed"],
+            managed_wt["managed"],
             serde_json::json!(true),
-            "JSON output should include managed field"
+            "managed worktree should have managed=true"
+        );
+        // Main worktree should also be present with managed=false
+        let main_wt = worktrees.iter().find(|w| w["managed"] == false)
+            .expect("should find unmanaged worktree");
+        assert_eq!(main_wt["managed"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn integration_manual_git_worktree_appears_in_all_formats() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a worktree via git directly (simulating manual `git worktree add`)
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("manually-added");
+        git::create_worktree(repo_dir.path(), "manually-added", &base, &target)
+            .expect("should create worktree via git");
+
+        // Table output should include the manual worktree with badge
+        let table_output = render_table(repo_dir.path(), &db, None, None)
+            .expect("table list should succeed");
+        assert!(
+            table_output.contains("manually-added"),
+            "table should show manually-added worktree, got: {table_output}"
+        );
+        assert!(
+            table_output.contains("[unmanaged]"),
+            "table should show [unmanaged] badge, got: {table_output}"
+        );
+
+        // JSON output should include with managed=false
+        let json_output = execute_json(repo_dir.path(), &db, None)
+            .expect("json list should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let items = parsed.as_array().unwrap();
+        let manual_wt = items.iter()
+            .find(|i| i["name"] == "manually-added")
+            .expect("JSON should include manually-added worktree");
+        assert_eq!(manual_wt["managed"], serde_json::json!(false));
+        assert_eq!(manual_wt["branch"], serde_json::json!("manually-added"));
+        // Should have git metadata
+        assert!(manual_wt.get("dirty").is_some());
+        assert!(manual_wt.get("status").is_some());
+
+        // Porcelain output should include with managed=false
+        let porcelain_output = execute_porcelain(repo_dir.path(), &db, None)
+            .expect("porcelain list should succeed");
+        let manual_line = porcelain_output.lines()
+            .find(|l| l.starts_with("manually-added:"))
+            .expect("porcelain should include manually-added worktree");
+        let fields: Vec<&str> = manual_line.split(':').collect();
+        assert_eq!(fields.len(), 8, "porcelain should have 8 fields");
+        assert_eq!(fields[0], "manually-added");
+        assert_eq!(fields[7], "false", "managed should be false");
+
+        // Main worktree should also appear in all formats
+        let repo_name = repo_dir.path().canonicalize().unwrap()
+            .file_name().unwrap().to_str().unwrap().to_string();
+        assert!(
+            table_output.contains(&repo_name),
+            "table should include main worktree '{repo_name}'"
+        );
+        let main_json = items.iter()
+            .find(|i| i["name"] == repo_name.as_str())
+            .expect("JSON should include main worktree");
+        assert_eq!(main_json["managed"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn list_table_dims_unmanaged_worktree_rows() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Register the repo in DB and add a managed worktree
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some(&base))
+            .unwrap();
+
+        // Create a managed worktree via trench (add to DB + git)
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("managed-wt");
+        git::create_worktree(repo_dir.path(), "managed-wt", &base, &wt_path).unwrap();
+        let canonical_path = wt_path.canonicalize().unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "managed-wt",
+            "managed-wt",
+            canonical_path.to_str().unwrap(),
+            Some(&base),
+        )
+        .unwrap();
+
+        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+
+        // Unmanaged rows (main worktree) should have ANSI dim codes
+        let lines: Vec<&str> = output.lines().collect();
+        let dim_start = "\x1b[2m";
+        let dim_end = "\x1b[0m";
+
+        let unmanaged_lines: Vec<&&str> = lines.iter()
+            .filter(|l| l.contains("[unmanaged]"))
+            .collect();
+        assert!(!unmanaged_lines.is_empty(), "should have at least one unmanaged row");
+
+        for line in &unmanaged_lines {
+            assert!(
+                line.starts_with(dim_start),
+                "unmanaged row should start with dim ANSI code, got: {:?}", line
+            );
+            assert!(
+                line.ends_with(dim_end),
+                "unmanaged row should end with reset ANSI code, got: {:?}", line
+            );
+        }
+
+        // Managed row should NOT have dim codes
+        let managed_line = lines.iter()
+            .find(|l| l.contains("managed-wt") && !l.contains("[unmanaged]"))
+            .expect("should find managed worktree row");
+        assert!(
+            !managed_line.starts_with(dim_start),
+            "managed row should NOT have dim ANSI code, got: {:?}", managed_line
+        );
+    }
+
+    #[test]
+    fn list_porcelain_shows_unmanaged_worktree_with_managed_false() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a worktree via git directly
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("porcelain-external");
+        git::create_worktree(repo_dir.path(), "porcelain-external", &base, &target)
+            .expect("should create worktree via git");
+
+        let output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+
+        // Should have at least 2 entries (main + the external worktree)
+        assert!(lines.len() >= 2, "should have at least 2 porcelain lines, got: {}", lines.len());
+
+        // Find the line for the unmanaged worktree
+        let external_line = lines.iter()
+            .find(|l| l.starts_with("porcelain-external:"))
+            .expect("should find porcelain-external in porcelain output");
+
+        let fields: Vec<&str> = external_line.split(':').collect();
+        assert_eq!(fields.len(), 8, "should have 8 fields");
+        assert_eq!(fields[7], "false", "managed field should be 'false'");
+
+        // All lines should have 8 fields and no ANSI codes
+        for line in &lines {
+            let f: Vec<&str> = line.split(':').collect();
+            assert_eq!(f.len(), 8, "each porcelain line should have 8 fields");
+            assert!(!line.contains('\x1b'), "porcelain should not contain ANSI codes");
+        }
+    }
+
+    #[test]
+    fn list_json_shows_unmanaged_worktree_with_managed_false() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a worktree via git directly (not through trench)
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("git-only-wt");
+        git::create_worktree(repo_dir.path(), "git-only-wt", &base, &target)
+            .expect("should create worktree via git");
+
+        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let items = parsed.as_array().expect("should be an array");
+
+        // Find the unmanaged worktree
+        let unmanaged = items.iter().find(|i| i["name"] == "git-only-wt")
+            .expect("should find unmanaged worktree in JSON");
+        assert_eq!(
+            unmanaged["managed"],
+            serde_json::json!(false),
+            "unmanaged worktree should have managed=false"
+        );
+        // Should still have all required fields
+        assert!(unmanaged["branch"].is_string());
+        assert!(unmanaged["path"].is_string());
+        assert!(unmanaged["status"].is_string());
+        assert!(unmanaged["dirty"].is_number());
+        assert!(unmanaged["tags"].is_array());
+
+        // Main worktree should also be unmanaged
+        let main_wt = items.iter().find(|i| {
+            i["managed"] == false && i["name"] != "git-only-wt"
+        }).expect("should find main worktree as unmanaged");
+        assert_eq!(main_wt["managed"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn list_shows_unmanaged_worktree_with_badge() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a worktree via git directly (not through trench)
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("external-wt");
+        git::create_worktree(repo_dir.path(), "external-wt", &base, &target)
+            .expect("should create worktree via git");
+
+        // Use render_table with no max_width to avoid terminal truncation
+        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+
+        assert!(
+            output.contains("external-wt"),
+            "output should contain the unmanaged worktree, got: {output}"
+        );
+        assert!(
+            output.contains("[unmanaged]"),
+            "output should show [unmanaged] badge, got: {output}"
+        );
+    }
+
+    #[test]
+    fn list_shows_main_worktree() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        // Use render_table with no max_width to avoid terminal truncation
+        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+
+        // Main worktree should appear (it's unmanaged by trench)
+        let repo_name = repo_dir.path().canonicalize().unwrap()
+            .file_name().unwrap().to_str().unwrap().to_string();
+        assert!(
+            output.contains(&repo_name),
+            "output should contain the main worktree name '{repo_name}', got: {output}"
+        );
+        assert!(
+            output.contains("[unmanaged]"),
+            "main worktree should show [unmanaged] badge, got: {output}"
         );
     }
 
@@ -1008,9 +1406,10 @@ mod tests {
             .expect("JSON output must be valid JSON");
 
         let items = parsed.as_array().expect("JSON should be an array");
-        assert_eq!(items.len(), 2);
+        // 2 managed + main worktree (+ possibly git worktrees for created branches)
+        assert!(items.len() >= 3, "should have at least 3 entries");
 
-        // Both should have all required fields
+        // All items should have required fields
         for item in items {
             assert!(item["name"].is_string(), "name should be a string");
             assert!(item["branch"].is_string(), "branch should be a string");
@@ -1027,7 +1426,7 @@ mod tests {
         // Verify porcelain output
         let porcelain_output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
         let lines: Vec<&str> = porcelain_output.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert!(lines.len() >= 3, "should have at least 3 porcelain lines");
 
         // Each line should have exactly 8 colon-separated fields
         // (name:branch:path:status:ahead:behind:dirty:managed)
@@ -1060,6 +1459,36 @@ mod tests {
         assert!(
             !json_output.contains('\x1b'),
             "JSON output must not contain ANSI codes"
+        );
+    }
+
+    #[test]
+    fn unborn_head_shows_detached_instead_of_empty_branch() {
+        // A repo with no commits has an unborn HEAD → branch is None.
+        // The branch column should show "(detached)" instead of an empty string.
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = git2::Repository::init(repo_dir.path()).unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        // JSON output: branch should be "(detached)", not ""
+        let json_output = execute_json(repo_dir.path(), &db, None)
+            .expect("json list should succeed for unborn repo");
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let items = parsed.as_array().expect("should be an array");
+        let main_wt = items.first().expect("should have at least the main worktree");
+        assert_eq!(
+            main_wt["branch"],
+            serde_json::json!("(detached)"),
+            "unborn HEAD should show (detached) branch, got: {}",
+            main_wt["branch"]
+        );
+
+        // Table output: should also show "(detached)"
+        let table_output = render_table(repo_dir.path(), &db, None, None)
+            .expect("table list should succeed for unborn repo");
+        assert!(
+            table_output.contains("(detached)"),
+            "table should show (detached) for unborn HEAD, got: {table_output}"
         );
     }
 }

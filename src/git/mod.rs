@@ -75,6 +75,15 @@ pub fn ahead_behind(
     }
 }
 
+/// A worktree discovered via git (includes both main and additional worktrees).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GitWorktreeEntry {
+    pub name: String,
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub is_main: bool,
+}
+
 /// Errors specific to git operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -241,6 +250,64 @@ pub fn create_worktree(
     }
 
     Ok(())
+}
+
+/// Enumerate all git worktrees for a repository, including the main worktree.
+///
+/// Opens the repository at `repo_path` and discovers all worktrees: the main
+/// working directory plus any additional worktrees created via `git worktree add`.
+/// Returns each worktree's name, path, current branch, and whether it is the main worktree.
+pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeEntry>, GitError> {
+    let repo =
+        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+    let mut entries = Vec::new();
+
+    // Main worktree
+    if let Some(workdir) = repo.workdir() {
+        let branch = repo
+            .head()
+            .ok()
+            .and_then(|r| r.shorthand().map(String::from));
+        let canonical = workdir
+            .canonicalize()
+            .unwrap_or_else(|_| workdir.to_path_buf());
+        let name = canonical
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "main".to_string());
+        entries.push(GitWorktreeEntry {
+            name,
+            path: canonical,
+            branch,
+            is_main: true,
+        });
+    }
+
+    // Additional worktrees
+    if let Ok(worktrees) = repo.worktrees() {
+        for wt_name in worktrees.iter().flatten() {
+            if let Ok(wt) = repo.find_worktree(wt_name) {
+                let wt_path = wt.path().to_path_buf();
+                let canonical = wt_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| wt_path.clone());
+                // Open as repository to get HEAD branch
+                let branch = if let Ok(wt_repo) = git2::Repository::open(&canonical) {
+                    wt_repo.head().ok().and_then(|h| h.shorthand().map(String::from))
+                } else {
+                    None
+                };
+                entries.push(GitWorktreeEntry {
+                    name: wt_name.to_string(),
+                    path: canonical,
+                    branch,
+                    is_main: false,
+                });
+            }
+        }
+    }
+
+    Ok(entries)
 }
 
 /// Remove a git worktree at the given path.
@@ -917,6 +984,41 @@ mod tests {
 
         let count = dirty_count(tmp.path()).expect("should succeed");
         assert_eq!(count, 2, "should count 1 modified + 1 untracked = 2");
+    }
+
+    #[test]
+    fn list_worktrees_includes_main_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        let base = head_branch(&repo);
+
+        let worktrees = list_worktrees(tmp.path()).expect("should list worktrees");
+
+        assert!(!worktrees.is_empty(), "should include at least the main worktree");
+        let main_wt = worktrees.iter().find(|w| w.is_main).expect("should have main worktree");
+        assert_eq!(main_wt.path, tmp.path().canonicalize().unwrap());
+        assert_eq!(main_wt.branch.as_deref(), Some(base.as_str()));
+    }
+
+    #[test]
+    fn list_worktrees_includes_additional_worktrees() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = head_branch(&repo);
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("extra-wt");
+
+        create_worktree(repo_dir.path(), "extra-wt", &base, &target)
+            .expect("should create worktree");
+
+        let worktrees = list_worktrees(repo_dir.path()).expect("should list worktrees");
+
+        assert_eq!(worktrees.len(), 2, "should include main + additional worktree");
+
+        let additional = worktrees.iter().find(|w| !w.is_main).expect("should have additional worktree");
+        assert_eq!(additional.path, target.canonicalize().unwrap());
+        assert_eq!(additional.branch.as_deref(), Some("extra-wt"));
+        assert!(!additional.is_main);
     }
 
     #[test]
