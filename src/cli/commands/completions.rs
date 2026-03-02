@@ -1,4 +1,4 @@
-/// Generate shell completions for the trench CLI.
+//! Generate shell completions for the trench CLI.
 
 use clap::CommandFactory;
 use clap_complete::{generate as gen_completions, Shell};

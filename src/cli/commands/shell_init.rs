@@ -1,8 +1,8 @@
-/// Generate shell function definitions for `tr()` shell integration.
-///
-/// The `tr()` function wraps `trench switch --print-path` with `cd` so
-/// switching worktrees changes the shell's working directory. All other
-/// subcommands pass through to `trench` unmodified.
+//! Generate shell function definitions for `tr()` shell integration.
+//!
+//! The `tr()` function wraps `trench switch --print-path` with `cd` so
+//! switching worktrees changes the shell's working directory. All other
+//! subcommands pass through to `trench` unmodified.
 
 /// Generate the shell function definition for the given shell type.
 pub fn generate(shell: &str) -> &'static str {
