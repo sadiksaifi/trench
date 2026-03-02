@@ -326,7 +326,14 @@ fn run_open(identifier: &str) -> anyhow::Result<()> {
         resolved.editor_command.as_deref(),
     ) {
         Ok(result) => {
-            let status = std::process::Command::new(&result.editor)
+            let parts = shell_words::split(&result.editor)
+                .with_context(|| format!("invalid editor command: '{}'", result.editor))?;
+            let (program, args) = parts
+                .split_first()
+                .ok_or_else(|| anyhow::anyhow!("editor command is empty after parsing"))?;
+
+            let status = std::process::Command::new(program)
+                .args(args)
                 .arg(&result.path)
                 .status()
                 .with_context(|| format!("failed to launch editor '{}'", result.editor))?;
