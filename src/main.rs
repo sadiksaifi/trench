@@ -115,6 +115,9 @@ enum Commands {
     /// The `tr()` shell function wraps `trench switch --print-path` with `cd`
     /// so you can instantly navigate between worktrees.
     ///
+    /// Note: this will shadow the POSIX `tr` utility (translate characters).
+    /// To access the original, use `command tr`.
+    ///
     /// Add this to your shell configuration file:
     ///
     ///   # ~/.bashrc
@@ -878,6 +881,22 @@ mod tests {
         assert!(
             output.contains(".bashrc") || output.contains(".zshrc"),
             "shell-init help should reference shell config files, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn shell_init_help_warns_about_posix_tr_shadowing() {
+        let result = Cli::try_parse_from(["trench", "shell-init", "--help"]);
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let output = err.to_string();
+        assert!(
+            output.contains("shadow"),
+            "shell-init help should warn about POSIX tr shadowing, got:\n{output}"
+        );
+        assert!(
+            output.contains("command tr"),
+            "shell-init help should explain how to access the POSIX tr utility, got:\n{output}"
         );
     }
 
