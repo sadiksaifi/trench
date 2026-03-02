@@ -13,6 +13,10 @@ pub struct OpenResult {
     pub path: String,
     /// Editor command that should be used to open the worktree.
     pub editor: String,
+    /// Repo ID (for deferred DB writes after editor launch).
+    pub repo_id: i64,
+    /// Worktree ID (for deferred DB writes after editor launch).
+    pub wt_id: i64,
 }
 
 /// Resolve the editor command from the fallback chain:
@@ -74,24 +78,29 @@ pub fn resolve(
 
     let editor = resolve_editor(config_editor)?;
 
-    // Update last_accessed timestamp
+    Ok(OpenResult {
+        name: wt.name.clone(),
+        path: wt.path.clone(),
+        editor,
+        repo_id: repo.id,
+        wt_id: wt.id,
+    })
+}
+
+/// Record a successful open: update last_accessed and insert an "opened" event.
+///
+/// Call this only after the editor has exited successfully.
+pub fn record_open(db: &Database, repo_id: i64, wt_id: i64) -> Result<()> {
     let now = crate::state::unix_epoch_secs() as i64;
     db.update_worktree(
-        wt.id,
+        wt_id,
         &crate::state::WorktreeUpdate {
             last_accessed: Some(Some(now)),
             ..Default::default()
         },
     )?;
-
-    // Record "opened" event
-    db.insert_event(repo.id, Some(wt.id), "opened", None)?;
-
-    Ok(OpenResult {
-        name: wt.name.clone(),
-        path: wt.path.clone(),
-        editor,
-    })
+    db.insert_event(repo_id, Some(wt_id), "opened", None)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -238,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_updates_last_accessed() {
+    fn resolve_does_not_write_db() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
@@ -246,33 +255,34 @@ mod tests {
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
         let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        let wt = db
+            .insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        resolve("my-feature", repo_dir.path(), &db, Some("vim")).unwrap();
+
+        // resolve() must NOT touch the DB — no last_accessed update, no event
+        let unchanged = db.get_worktree(wt.id).unwrap().unwrap();
+        assert!(unchanged.last_accessed.is_none(), "resolve should not update last_accessed");
+        let event_count = db.count_events(wt.id, Some("opened")).unwrap();
+        assert_eq!(event_count, 0, "resolve should not insert events");
+    }
+
+    #[test]
+    fn record_open_updates_last_accessed_and_event() {
+        let db = Database::open_in_memory().unwrap();
+        let db_repo = db.insert_repo("my-project", "/tmp/fake", Some("main")).unwrap();
         let wt = db
             .insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
             .unwrap();
 
         assert!(wt.last_accessed.is_none());
 
-        resolve("my-feature", repo_dir.path(), &db, Some("vim")).unwrap();
+        record_open(&db, db_repo.id, wt.id).unwrap();
 
         let updated = db.get_worktree(wt.id).unwrap().unwrap();
         assert!(updated.last_accessed.is_some());
         assert!(updated.last_accessed.unwrap() > 0);
-    }
-
-    #[test]
-    fn resolve_records_opened_event() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let _repo = init_repo_with_commit(repo_dir.path());
-        let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
-        let wt = db
-            .insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
-            .unwrap();
-
-        resolve("my-feature", repo_dir.path(), &db, Some("vim")).unwrap();
 
         let event_count = db.count_events(wt.id, Some("opened")).unwrap();
         assert_eq!(event_count, 1, "exactly one 'opened' event should exist");

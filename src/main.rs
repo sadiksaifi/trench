@@ -334,6 +334,10 @@ fn run_open(identifier: &str) -> anyhow::Result<()> {
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
             }
+
+            // Record DB side-effects only after a successful launch
+            cli::commands::open::record_open(&db, result.repo_id, result.wt_id)?;
+
             Ok(())
         }
         Err(e) => {
