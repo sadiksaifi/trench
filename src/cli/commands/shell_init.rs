@@ -183,71 +183,38 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bash_output_is_valid_shell_syntax() {
-        let result = std::process::Command::new("bash")
-            .arg("-n")
-            .arg("-c")
-            .arg(&generate(ShellType::Bash))
+    fn assert_valid_shell_syntax(shell: &str, args: &[&str], script: &str) {
+        let result = std::process::Command::new(shell)
+            .args(args)
+            .arg(script)
             .output();
         match result {
             Ok(output) => {
                 assert!(
                     output.status.success(),
-                    "bash syntax check failed: {}",
+                    "{shell} syntax check failed: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("bash not found, skipping syntax check");
+                eprintln!("{shell} not found, skipping syntax check");
             }
-            Err(e) => panic!("failed to run bash: {e}"),
+            Err(e) => panic!("failed to run {shell}: {e}"),
         }
+    }
+
+    #[test]
+    fn bash_output_is_valid_shell_syntax() {
+        assert_valid_shell_syntax("bash", &["-n", "-c"], generate(ShellType::Bash));
     }
 
     #[test]
     fn zsh_output_is_valid_shell_syntax() {
-        let result = std::process::Command::new("zsh")
-            .arg("-n")
-            .arg("-c")
-            .arg(&generate(ShellType::Zsh))
-            .output();
-        match result {
-            Ok(output) => {
-                assert!(
-                    output.status.success(),
-                    "zsh syntax check failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("zsh not found, skipping syntax check");
-            }
-            Err(e) => panic!("failed to run zsh: {e}"),
-        }
+        assert_valid_shell_syntax("zsh", &["-n", "-c"], generate(ShellType::Zsh));
     }
 
     #[test]
     fn fish_output_is_valid_shell_syntax() {
-        // fish --no-execute parses without executing
-        let result = std::process::Command::new("fish")
-            .arg("--no-execute")
-            .arg("-c")
-            .arg(&generate(ShellType::Fish))
-            .output();
-        match result {
-            Ok(output) => {
-                assert!(
-                    output.status.success(),
-                    "fish syntax check failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // fish not installed — skip gracefully
-                eprintln!("fish not found, skipping syntax check");
-            }
-            Err(e) => panic!("failed to run fish: {e}"),
-        }
+        assert_valid_shell_syntax("fish", &["--no-execute", "-c"], generate(ShellType::Fish));
     }
 }
