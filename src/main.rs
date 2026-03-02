@@ -246,8 +246,8 @@ fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> an
         &resolved.worktrees.root,
         &db,
     ) {
-        Ok(path) => {
-            println!("{}", path.display());
+        Ok(result) => {
+            println!("{}", result.path.display());
             Ok(())
         }
         Err(e) => {

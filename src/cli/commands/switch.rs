@@ -239,7 +239,7 @@ mod tests {
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
 
         // Create a worktree end-to-end
-        let path = crate::cli::commands::create::execute(
+        let create_result = crate::cli::commands::create::execute(
             "my-feature",
             None,
             repo_dir.path(),
@@ -248,7 +248,7 @@ mod tests {
             &db,
         )
         .expect("create should succeed");
-        assert!(path.exists());
+        assert!(create_result.path.exists());
 
         // Verify last_accessed is None after create
         let repo_path = repo_dir.path().canonicalize().unwrap();
@@ -267,7 +267,7 @@ mod tests {
         let switch = execute("my-feature", repo_dir.path(), &db)
             .expect("switch should succeed");
         assert_eq!(switch.name, "my-feature");
-        assert_eq!(switch.path, path.to_str().unwrap());
+        assert_eq!(switch.path, create_result.path.to_str().unwrap());
 
         // Verify last_accessed is now set
         let wt_after = db.get_worktree(wt_before.id).unwrap().unwrap();
