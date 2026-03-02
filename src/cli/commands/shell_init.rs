@@ -159,4 +159,60 @@ mod tests {
         let bash = generate("bash");
         assert_ne!(fish, bash, "fish syntax differs from bash/zsh");
     }
+
+    #[test]
+    fn bash_output_is_valid_shell_syntax() {
+        let output = generate("bash");
+        let status = std::process::Command::new("bash")
+            .arg("-n")
+            .arg("-c")
+            .arg(&output)
+            .output()
+            .expect("failed to run bash");
+        assert!(
+            status.status.success(),
+            "bash syntax check failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    #[test]
+    fn zsh_output_is_valid_shell_syntax() {
+        let output = generate("zsh");
+        let status = std::process::Command::new("zsh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&output)
+            .output()
+            .expect("failed to run zsh");
+        assert!(
+            status.status.success(),
+            "zsh syntax check failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    #[test]
+    fn fish_output_is_valid_shell_syntax() {
+        // fish --no-execute parses without executing
+        let result = std::process::Command::new("fish")
+            .arg("--no-execute")
+            .arg("-c")
+            .arg(&generate("fish"))
+            .output();
+        match result {
+            Ok(output) => {
+                assert!(
+                    output.status.success(),
+                    "fish syntax check failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // fish not installed — skip gracefully
+                eprintln!("fish not found, skipping syntax check");
+            }
+            Err(e) => panic!("failed to run fish: {e}"),
+        }
+    }
 }
