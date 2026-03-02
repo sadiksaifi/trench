@@ -116,4 +116,47 @@ mod tests {
         let zsh = generate("zsh");
         assert_eq!(bash, zsh, "bash and zsh should use the same POSIX function");
     }
+
+    #[test]
+    fn fish_output_defines_tr_function() {
+        let output = generate("fish");
+        assert!(
+            output.contains("function tr"),
+            "fish output should define function tr"
+        );
+    }
+
+    #[test]
+    fn fish_output_contains_trench_switch_with_print_path() {
+        let output = generate("fish");
+        assert!(
+            output.contains("trench switch --print-path"),
+            "fish output should call trench switch --print-path"
+        );
+    }
+
+    #[test]
+    fn fish_output_contains_cd() {
+        let output = generate("fish");
+        assert!(
+            output.contains("cd "),
+            "fish output should cd into the worktree path"
+        );
+    }
+
+    #[test]
+    fn fish_output_passes_through_non_switch_commands() {
+        let output = generate("fish");
+        assert!(
+            output.contains("command trench"),
+            "fish output should pass non-switch commands through to trench"
+        );
+    }
+
+    #[test]
+    fn fish_output_differs_from_bash() {
+        let fish = generate("fish");
+        let bash = generate("bash");
+        assert_ne!(fish, bash, "fish syntax differs from bash/zsh");
+    }
 }
