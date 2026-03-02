@@ -543,7 +543,7 @@ mod tests {
         )
         .expect("create should succeed");
 
-        remove::execute("ephemeral", repo_dir.path(), &db)
+        remove::execute("ephemeral", repo_dir.path(), &db, false)
             .expect("remove should succeed");
 
         let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
