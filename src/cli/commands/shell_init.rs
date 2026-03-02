@@ -5,7 +5,7 @@
 /// subcommands pass through to `trench` unmodified.
 
 /// Generate the shell function definition for the given shell type.
-pub fn generate(shell: &str) -> String {
+pub fn generate(shell: &str) -> &'static str {
     match shell {
         "bash" | "zsh" => generate_posix(),
         "fish" => generate_fish(),
@@ -13,7 +13,7 @@ pub fn generate(shell: &str) -> String {
     }
 }
 
-fn generate_posix() -> String {
+fn generate_posix() -> &'static str {
     r#"tr() {
     if [ "$1" = "switch" ]; then
         shift
@@ -30,10 +30,9 @@ fn generate_posix() -> String {
     fi
 }
 "#
-    .to_string()
 }
 
-fn generate_fish() -> String {
+fn generate_fish() -> &'static str {
     r#"function tr
     if test (count $argv) -gt 0 -a "$argv[1]" = "switch"
         set -l rest $argv[2..-1]
@@ -49,7 +48,6 @@ fn generate_fish() -> String {
     end
 end
 "#
-    .to_string()
 }
 
 #[cfg(test)]
