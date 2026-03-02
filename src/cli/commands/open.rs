@@ -18,17 +18,19 @@ pub struct OpenResult {
 /// Resolve the editor command from the fallback chain:
 /// config override → $EDITOR → $VISUAL → error.
 fn resolve_editor(config_editor: Option<&str>) -> Result<String> {
-    if let Some(cmd) = config_editor {
+    if let Some(cmd) = config_editor.map(str::trim).filter(|s| !s.is_empty()) {
         return Ok(cmd.to_string());
     }
     if let Ok(editor) = std::env::var("EDITOR") {
-        if !editor.is_empty() {
-            return Ok(editor);
+        let trimmed = editor.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
         }
     }
     if let Ok(visual) = std::env::var("VISUAL") {
-        if !visual.is_empty() {
-            return Ok(visual);
+        let trimmed = visual.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
         }
     }
     anyhow::bail!(
@@ -274,6 +276,79 @@ mod tests {
 
         let event_count = db.count_events(wt.id, Some("opened")).unwrap();
         assert_eq!(event_count, 1, "exactly one 'opened' event should exist");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_editor_trims_whitespace_config() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        std::env::remove_var("EDITOR");
+        std::env::remove_var("VISUAL");
+
+        // Whitespace-only config should fall through → error
+        let err = resolve("my-feature", repo_dir.path(), &db, Some("   ")).unwrap_err();
+        assert!(
+            err.to_string().contains("no editor configured"),
+            "whitespace-only config should fall through, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_editor_trims_empty_config() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        std::env::remove_var("EDITOR");
+        std::env::remove_var("VISUAL");
+
+        // Empty config should fall through → error
+        let err = resolve("my-feature", repo_dir.path(), &db, Some("")).unwrap_err();
+        assert!(
+            err.to_string().contains("no editor configured"),
+            "empty config should fall through, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_editor_trims_whitespace_env() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        // Whitespace-only EDITOR should fall through to VISUAL
+        std::env::set_var("EDITOR", "  \t ");
+        std::env::set_var("VISUAL", "nano");
+        let result = resolve("my-feature", repo_dir.path(), &db, None).unwrap();
+        std::env::remove_var("EDITOR");
+        std::env::remove_var("VISUAL");
+
+        assert_eq!(result.editor, "nano");
     }
 
     #[test]
