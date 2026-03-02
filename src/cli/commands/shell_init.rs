@@ -91,4 +91,29 @@ mod tests {
             "bash output should pass non-switch commands through to trench"
         );
     }
+
+    #[test]
+    fn zsh_output_defines_tr_function() {
+        let output = generate("zsh");
+        assert!(
+            output.contains("tr()"),
+            "zsh output should define tr() function"
+        );
+    }
+
+    #[test]
+    fn zsh_output_contains_trench_switch_with_print_path() {
+        let output = generate("zsh");
+        assert!(
+            output.contains("trench switch --print-path"),
+            "zsh output should call trench switch --print-path"
+        );
+    }
+
+    #[test]
+    fn zsh_and_bash_produce_same_output() {
+        let bash = generate("bash");
+        let zsh = generate("zsh");
+        assert_eq!(bash, zsh, "bash and zsh should use the same POSIX function");
+    }
 }
