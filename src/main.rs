@@ -145,6 +145,16 @@ enum ShellType {
     Fish,
 }
 
+impl ShellType {
+    fn as_str(self) -> &'static str {
+        match self {
+            ShellType::Bash => "bash",
+            ShellType::Zsh => "zsh",
+            ShellType::Fish => "fish",
+        }
+    }
+}
+
 impl Cli {
     fn output_config(&self) -> OutputConfig {
         let is_tty = std::io::stdout().is_terminal();
@@ -181,6 +191,14 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
         Some(Commands::Init { force }) => run_init(force),
+        Some(Commands::ShellInit { shell }) => {
+            print!("{}", cli::commands::shell_init::generate(shell.as_str()));
+            Ok(())
+        }
+        Some(Commands::Completions { shell }) => {
+            cli::commands::completions::generate::<Cli>(shell.as_str());
+            Ok(())
+        }
         Some(_) => {
             // Other commands not yet implemented
             Ok(())
@@ -514,6 +532,15 @@ mod tests {
         let subcommands = [
             "list", "status", "sync", "log", "init",
         ];
+        // shell-init and completions require a shell argument
+        for sub in ["shell-init", "completions"] {
+            let result = Cli::try_parse_from(["trench", sub, "bash"]);
+            assert!(
+                result.is_ok(),
+                "subcommand '{sub}' with shell should be accepted, got: {:?}",
+                result.unwrap_err()
+            );
+        }
         for sub in subcommands {
             let result = Cli::try_parse_from(["trench", sub]);
             assert!(

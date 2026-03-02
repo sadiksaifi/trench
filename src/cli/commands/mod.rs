@@ -1,3 +1,4 @@
+pub mod completions;
 pub mod create;
 pub mod init;
 pub mod list;
