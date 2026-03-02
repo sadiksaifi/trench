@@ -145,6 +145,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Remove { branch, force, prune }) => run_remove(&branch, force, prune),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
+        Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
         Some(Commands::Init { force }) => run_init(force),
         Some(_) => {
@@ -294,6 +295,44 @@ fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
                 println!("{}", result.path);
             } else {
                 println!("Switched to worktree '{}' at {}", result.name, result.path);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("not tracked") {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+            Err(e)
+        }
+    }
+}
+
+fn run_open(identifier: &str) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    let repo_info = git::discover_repo(&cwd)?;
+    let project_config = config::load_project_config(&repo_info.path)?;
+    let global_config = config::load_global_config()?;
+    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+
+    match cli::commands::open::resolve(
+        identifier,
+        &cwd,
+        &db,
+        resolved.editor_command.as_deref(),
+    ) {
+        Ok(result) => {
+            let status = std::process::Command::new(&result.editor)
+                .arg(&result.path)
+                .status()
+                .with_context(|| format!("failed to launch editor '{}'", result.editor))?;
+
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
             }
             Ok(())
         }
