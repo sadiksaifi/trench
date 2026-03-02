@@ -8,7 +8,7 @@ mod state;
 mod tui;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 
 use output::OutputConfig;
@@ -110,6 +110,39 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Output shell function definition for eval.
+    ///
+    /// The `tr()` shell function wraps `trench switch --print-path` with `cd`
+    /// so you can instantly navigate between worktrees.
+    ///
+    /// Add this to your shell configuration file:
+    ///
+    ///   # ~/.bashrc
+    ///   eval "$(trench shell-init bash)"
+    ///
+    ///   # ~/.zshrc
+    ///   eval "$(trench shell-init zsh)"
+    ///
+    ///   # ~/.config/fish/config.fish
+    ///   trench shell-init fish | source
+    #[command(name = "shell-init")]
+    ShellInit {
+        /// Target shell
+        shell: ShellType,
+    },
+    /// Generate shell completions for trench
+    Completions {
+        /// Target shell
+        shell: ShellType,
+    },
+}
+
+/// Supported shells for shell-init and completions
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ShellType {
+    Bash,
+    Zsh,
+    Fish,
 }
 
 impl Cli {
@@ -792,6 +825,52 @@ mod tests {
             }
             _ => panic!("expected Commands::Remove"),
         }
+    }
+
+    #[test]
+    fn shell_init_subcommand_requires_shell_argument() {
+        let result = Cli::try_parse_from(["trench", "shell-init"]);
+        assert!(result.is_err(), "shell-init without shell should fail");
+    }
+
+    #[test]
+    fn shell_init_subcommand_accepts_bash() {
+        let cli = Cli::try_parse_from(["trench", "shell-init", "bash"])
+            .expect("shell-init bash should succeed");
+        assert!(matches!(cli.command, Some(Commands::ShellInit { .. })));
+    }
+
+    #[test]
+    fn shell_init_subcommand_accepts_zsh() {
+        let cli = Cli::try_parse_from(["trench", "shell-init", "zsh"])
+            .expect("shell-init zsh should succeed");
+        assert!(matches!(cli.command, Some(Commands::ShellInit { .. })));
+    }
+
+    #[test]
+    fn shell_init_subcommand_accepts_fish() {
+        let cli = Cli::try_parse_from(["trench", "shell-init", "fish"])
+            .expect("shell-init fish should succeed");
+        assert!(matches!(cli.command, Some(Commands::ShellInit { .. })));
+    }
+
+    #[test]
+    fn shell_init_rejects_unknown_shell() {
+        let result = Cli::try_parse_from(["trench", "shell-init", "powershell"]);
+        assert!(result.is_err(), "shell-init should reject unknown shells");
+    }
+
+    #[test]
+    fn completions_subcommand_requires_shell_argument() {
+        let result = Cli::try_parse_from(["trench", "completions"]);
+        assert!(result.is_err(), "completions without shell should fail");
+    }
+
+    #[test]
+    fn completions_subcommand_accepts_bash() {
+        let cli = Cli::try_parse_from(["trench", "completions", "bash"])
+            .expect("completions bash should succeed");
+        assert!(matches!(cli.command, Some(Commands::Completions { .. })));
     }
 
     #[test]
