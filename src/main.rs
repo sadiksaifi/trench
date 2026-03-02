@@ -938,6 +938,29 @@ mod tests {
     }
 
     #[test]
+    fn completions_for_real_cli_contain_subcommands() {
+        let mut buf = Vec::new();
+        cli::commands::completions::generate::<Cli>(ShellType::Bash, &mut buf);
+        let output = String::from_utf8(buf).expect("completions should be valid utf-8");
+        assert!(
+            output.contains("create"),
+            "bash completions should include 'create' subcommand"
+        );
+        assert!(
+            output.contains("switch"),
+            "bash completions should include 'switch' subcommand"
+        );
+        assert!(
+            output.contains("shell-init"),
+            "bash completions should include 'shell-init' subcommand"
+        );
+        assert!(
+            output.contains("completions"),
+            "bash completions should include 'completions' subcommand"
+        );
+    }
+
+    #[test]
     fn cli_produces_output_config() {
         let cli = Cli::try_parse_from(["trench", "--no-color", "--quiet"])
             .expect("flags should parse");
