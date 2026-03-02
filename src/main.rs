@@ -8,7 +8,7 @@ mod state;
 mod tui;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 
 use output::OutputConfig;
@@ -110,7 +110,44 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Output shell function definition for eval.
+    ///
+    /// The `tr()` shell function wraps `trench switch --print-path` with `cd`
+    /// so you can instantly navigate between worktrees.
+    ///
+    /// Note: this will shadow the POSIX `tr` utility (translate characters).
+    /// To access the original, use `command tr`.
+    ///
+    /// Add this to your shell configuration file:
+    ///
+    ///   # ~/.bashrc
+    ///   eval "$(trench shell-init bash)"
+    ///
+    ///   # ~/.zshrc
+    ///   eval "$(trench shell-init zsh)"
+    ///
+    ///   # ~/.config/fish/config.fish
+    ///   trench shell-init fish | source
+    #[command(name = "shell-init")]
+    ShellInit {
+        /// Target shell
+        shell: ShellType,
+    },
+    /// Generate shell completions for trench
+    Completions {
+        /// Target shell
+        shell: ShellType,
+    },
 }
+
+/// Supported shells for shell-init and completions
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum ShellType {
+    Bash,
+    Zsh,
+    Fish,
+}
+
 
 impl Cli {
     fn output_config(&self) -> OutputConfig {
@@ -148,6 +185,14 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
         Some(Commands::Init { force }) => run_init(force),
+        Some(Commands::ShellInit { shell }) => {
+            print!("{}", cli::commands::shell_init::generate(shell));
+            Ok(())
+        }
+        Some(Commands::Completions { shell }) => {
+            cli::commands::completions::generate::<Cli>(shell, &mut std::io::stdout());
+            Ok(())
+        }
         Some(_) => {
             // Other commands not yet implemented
             Ok(())
@@ -481,6 +526,15 @@ mod tests {
         let subcommands = [
             "list", "status", "sync", "log", "init",
         ];
+        // shell-init and completions require a shell argument
+        for sub in ["shell-init", "completions"] {
+            let result = Cli::try_parse_from(["trench", sub, "bash"]);
+            assert!(
+                result.is_ok(),
+                "subcommand '{sub}' with shell should be accepted, got: {:?}",
+                result.unwrap_err()
+            );
+        }
         for sub in subcommands {
             let result = Cli::try_parse_from(["trench", sub]);
             assert!(
@@ -792,6 +846,118 @@ mod tests {
             }
             _ => panic!("expected Commands::Remove"),
         }
+    }
+
+    #[test]
+    fn shell_init_help_explains_eval_installation() {
+        let result = Cli::try_parse_from(["trench", "shell-init", "--help"]);
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let output = err.to_string();
+        assert!(
+            output.contains("eval"),
+            "shell-init help should explain eval installation, got:\n{output}"
+        );
+        assert!(
+            output.contains("shell-init"),
+            "shell-init help should mention the command name"
+        );
+    }
+
+    #[test]
+    fn shell_init_help_shows_shell_config_examples() {
+        let result = Cli::try_parse_from(["trench", "shell-init", "--help"]);
+        let err = result.unwrap_err();
+        let output = err.to_string();
+        assert!(
+            output.contains(".bashrc") || output.contains(".zshrc"),
+            "shell-init help should reference shell config files, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn shell_init_help_warns_about_posix_tr_shadowing() {
+        let result = Cli::try_parse_from(["trench", "shell-init", "--help"]);
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let output = err.to_string();
+        assert!(
+            output.contains("shadow"),
+            "shell-init help should warn about POSIX tr shadowing, got:\n{output}"
+        );
+        assert!(
+            output.contains("command tr"),
+            "shell-init help should explain how to access the POSIX tr utility, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn shell_init_subcommand_requires_shell_argument() {
+        let result = Cli::try_parse_from(["trench", "shell-init"]);
+        assert!(result.is_err(), "shell-init without shell should fail");
+    }
+
+    #[test]
+    fn shell_init_subcommand_accepts_bash() {
+        let cli = Cli::try_parse_from(["trench", "shell-init", "bash"])
+            .expect("shell-init bash should succeed");
+        assert!(matches!(cli.command, Some(Commands::ShellInit { .. })));
+    }
+
+    #[test]
+    fn shell_init_subcommand_accepts_zsh() {
+        let cli = Cli::try_parse_from(["trench", "shell-init", "zsh"])
+            .expect("shell-init zsh should succeed");
+        assert!(matches!(cli.command, Some(Commands::ShellInit { .. })));
+    }
+
+    #[test]
+    fn shell_init_subcommand_accepts_fish() {
+        let cli = Cli::try_parse_from(["trench", "shell-init", "fish"])
+            .expect("shell-init fish should succeed");
+        assert!(matches!(cli.command, Some(Commands::ShellInit { .. })));
+    }
+
+    #[test]
+    fn shell_init_rejects_unknown_shell() {
+        let result = Cli::try_parse_from(["trench", "shell-init", "powershell"]);
+        assert!(result.is_err(), "shell-init should reject unknown shells");
+    }
+
+    #[test]
+    fn completions_subcommand_requires_shell_argument() {
+        let result = Cli::try_parse_from(["trench", "completions"]);
+        assert!(result.is_err(), "completions without shell should fail");
+    }
+
+    #[test]
+    fn completions_subcommand_accepts_bash() {
+        let cli = Cli::try_parse_from(["trench", "completions", "bash"])
+            .expect("completions bash should succeed");
+        assert!(matches!(cli.command, Some(Commands::Completions { .. })));
+    }
+
+    #[test]
+    fn completions_for_real_cli_contain_subcommands() {
+        let mut buf = Vec::new();
+        cli::commands::completions::generate::<Cli>(ShellType::Bash, &mut buf);
+        let output = String::from_utf8(buf).expect("completions should be valid utf-8");
+        assert!(
+            output.contains("create"),
+            "bash completions should include 'create' subcommand"
+        );
+        assert!(
+            output.contains("switch"),
+            "bash completions should include 'switch' subcommand"
+        );
+        assert!(
+            output.contains("shell-init"),
+            "bash completions should include 'shell-init' subcommand"
+        );
+        assert!(
+            output.contains("completions"),
+            "bash completions should include 'completions' subcommand"
+        );
     }
 
     #[test]
