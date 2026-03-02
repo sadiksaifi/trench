@@ -3,5 +3,6 @@ pub mod init;
 pub mod list;
 pub mod open;
 pub mod remove;
+pub mod shell_init;
 pub mod switch;
 pub mod tag;
