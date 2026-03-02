@@ -88,7 +88,10 @@ enum Commands {
         tags: Vec<String>,
     },
     /// Open a worktree in $EDITOR
-    Open,
+    Open {
+        /// Branch name or sanitized name of the worktree
+        branch: String,
+    },
     /// List all worktrees
     List {
         /// Filter worktrees by tag
@@ -424,9 +427,9 @@ mod tests {
 
     #[test]
     fn all_subcommands_are_accepted() {
-        // switch and remove require a branch argument, so test them separately
+        // open, switch, and remove require a branch argument, so test them separately
         let subcommands = [
-            "open", "list", "status", "sync", "log", "init",
+            "list", "status", "sync", "log", "init",
         ];
         for sub in subcommands {
             let result = Cli::try_parse_from(["trench", sub]);
@@ -437,11 +440,31 @@ mod tests {
                 result.unwrap_err()
             );
         }
-        // remove and switch need a branch arg
+        // open, remove, and switch need a branch arg
+        let result = Cli::try_parse_from(["trench", "open", "my-feature"]);
+        assert!(result.is_ok(), "open with branch should be accepted");
         let result = Cli::try_parse_from(["trench", "remove", "my-feature"]);
         assert!(result.is_ok(), "remove with branch should be accepted");
         let result = Cli::try_parse_from(["trench", "switch", "my-feature"]);
         assert!(result.is_ok(), "switch with branch should be accepted");
+    }
+
+    #[test]
+    fn open_subcommand_requires_branch() {
+        let result = Cli::try_parse_from(["trench", "open"]);
+        assert!(result.is_err(), "open without branch should fail");
+    }
+
+    #[test]
+    fn open_subcommand_accepts_branch() {
+        let cli = Cli::try_parse_from(["trench", "open", "my-feature"])
+            .expect("open with branch should succeed");
+        match cli.command {
+            Some(Commands::Open { branch }) => {
+                assert_eq!(branch, "my-feature");
+            }
+            _ => panic!("expected Commands::Open"),
+        }
     }
 
     #[test]
