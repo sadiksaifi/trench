@@ -88,7 +88,10 @@ enum Commands {
         tags: Vec<String>,
     },
     /// Open a worktree in $EDITOR
-    Open,
+    Open {
+        /// Branch name or sanitized name of the worktree
+        branch: String,
+    },
     /// List all worktrees
     List {
         /// Filter worktrees by tag
@@ -142,6 +145,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Remove { branch, force, prune }) => run_remove(&branch, force, prune),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
+        Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
         Some(Commands::Init { force }) => run_init(force),
         Some(_) => {
@@ -305,6 +309,55 @@ fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
     }
 }
 
+fn run_open(identifier: &str) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    let repo_info = git::discover_repo(&cwd)?;
+    let project_config = config::load_project_config(&repo_info.path)?;
+    let global_config = config::load_global_config()?;
+    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+
+    match cli::commands::open::resolve(
+        identifier,
+        &cwd,
+        &db,
+        resolved.editor_command.as_deref(),
+    ) {
+        Ok(result) => {
+            let parts = shell_words::split(&result.editor)
+                .with_context(|| format!("invalid editor command: '{}'", result.editor))?;
+            let (program, args) = parts
+                .split_first()
+                .ok_or_else(|| anyhow::anyhow!("editor command is empty after parsing"))?;
+
+            let status = std::process::Command::new(program)
+                .args(args)
+                .arg(&result.path)
+                .status()
+                .with_context(|| format!("failed to launch editor '{}'", result.editor))?;
+
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+
+            // Record DB side-effects only after a successful launch
+            cli::commands::open::record_open(&db, result.repo_id, result.wt_id)?;
+
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("not tracked") {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+            Err(e)
+        }
+    }
+}
+
 fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
@@ -424,9 +477,9 @@ mod tests {
 
     #[test]
     fn all_subcommands_are_accepted() {
-        // switch and remove require a branch argument, so test them separately
+        // open, switch, and remove require a branch argument, so test them separately
         let subcommands = [
-            "open", "list", "status", "sync", "log", "init",
+            "list", "status", "sync", "log", "init",
         ];
         for sub in subcommands {
             let result = Cli::try_parse_from(["trench", sub]);
@@ -437,11 +490,31 @@ mod tests {
                 result.unwrap_err()
             );
         }
-        // remove and switch need a branch arg
+        // open, remove, and switch need a branch arg
+        let result = Cli::try_parse_from(["trench", "open", "my-feature"]);
+        assert!(result.is_ok(), "open with branch should be accepted");
         let result = Cli::try_parse_from(["trench", "remove", "my-feature"]);
         assert!(result.is_ok(), "remove with branch should be accepted");
         let result = Cli::try_parse_from(["trench", "switch", "my-feature"]);
         assert!(result.is_ok(), "switch with branch should be accepted");
+    }
+
+    #[test]
+    fn open_subcommand_requires_branch() {
+        let result = Cli::try_parse_from(["trench", "open"]);
+        assert!(result.is_err(), "open without branch should fail");
+    }
+
+    #[test]
+    fn open_subcommand_accepts_branch() {
+        let cli = Cli::try_parse_from(["trench", "open", "my-feature"])
+            .expect("open with branch should succeed");
+        match cli.command {
+            Some(Commands::Open { branch }) => {
+                assert_eq!(branch, "my-feature");
+            }
+            _ => panic!("expected Commands::Open"),
+        }
     }
 
     #[test]

@@ -49,6 +49,7 @@ pub struct HooksConfig {
 pub struct GlobalConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
+    pub editor: Option<EditorConfig>,
     pub worktrees: Option<WorktreesConfig>,
     pub hooks: Option<HooksConfig>,
 }
@@ -58,6 +59,7 @@ pub struct GlobalConfig {
 pub struct ProjectConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
+    pub editor: Option<EditorConfig>,
     pub worktrees: Option<WorktreesConfig>,
     pub hooks: Option<HooksConfig>,
 }
@@ -75,6 +77,11 @@ pub struct GitConfig {
     pub default_base: Option<String>,
     pub auto_prune: Option<bool>,
     pub fetch_on_open: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq)]
+pub struct EditorConfig {
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -126,6 +133,7 @@ pub struct CliConfigOverrides {
 pub struct ResolvedConfig {
     pub ui: ResolvedUiConfig,
     pub git: ResolvedGitConfig,
+    pub editor_command: Option<String>,
     pub worktrees: ResolvedWorktreesConfig,
     pub hooks: Option<HooksConfig>,
 }
@@ -202,6 +210,13 @@ pub fn resolve_config(
     let g_git = global.git.as_ref();
     let g_wt = global.worktrees.as_ref();
 
+    // Editor: project > global (simple first-wins)
+    let p_editor = project.and_then(|p| p.editor.as_ref());
+    let g_editor = global.editor.as_ref();
+    let editor_command = p_editor
+        .and_then(|e| e.command.clone())
+        .or_else(|| g_editor.and_then(|e| e.command.clone()));
+
     // Hooks: project replaces global entirely (FR-2)
     let p_hooks = project.and_then(|p| p.hooks.as_ref());
     let hooks = p_hooks.or(global.hooks.as_ref()).cloned();
@@ -240,6 +255,7 @@ pub fn resolve_config(
                 .or_else(|| g_git.and_then(|g| g.fetch_on_open))
                 .unwrap_or(defaults_git.fetch_on_open),
         },
+        editor_command,
         worktrees: ResolvedWorktreesConfig {
             root: cli
                 .and_then(|c| c.worktree_root.clone())
@@ -660,7 +676,7 @@ run = ["bun install"]
                 root: Some("custom/{{ repo }}/{{ branch }}".to_string()),
                 scan: Some(vec!["/extra".to_string()]),
             }),
-            hooks: None,
+            ..GlobalConfig::default()
         };
 
         let resolved = resolve_config(None, None, &global);
@@ -696,8 +712,7 @@ run = ["bun install"]
                 auto_prune: Some(true),
                 fetch_on_open: None,
             }),
-            worktrees: None,
-            hooks: None,
+            ..GlobalConfig::default()
         };
 
         let project = ProjectConfig {
@@ -716,7 +731,7 @@ run = ["bun install"]
                 root: Some("proj/{{ repo }}/{{ branch }}".to_string()),
                 scan: None,
             }),
-            hooks: None,
+            ..ProjectConfig::default()
         };
 
         let resolved = resolve_config(None, Some(&project), &global);
@@ -1055,6 +1070,61 @@ run = ["make setup"]
             Some("custom/{{ repo }}/{{ branch | sanitize }}")
         );
         assert!(config.hooks.unwrap().post_create.is_some());
+    }
+
+    #[test]
+    fn editor_config_deserializes_from_global() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            r#"
+[editor]
+command = "code"
+"#,
+        );
+
+        let config = load_global_config_from(&path).unwrap();
+        let editor = config.editor.expect("editor section should be present");
+        assert_eq!(editor.command.as_deref(), Some("code"));
+    }
+
+    #[test]
+    fn editor_config_resolves_from_project_over_global() {
+        let global = GlobalConfig {
+            editor: Some(EditorConfig {
+                command: Some("vim".to_string()),
+            }),
+            ..GlobalConfig::default()
+        };
+
+        let project = ProjectConfig {
+            editor: Some(EditorConfig {
+                command: Some("code".to_string()),
+            }),
+            ..ProjectConfig::default()
+        };
+
+        let resolved = resolve_config(None, Some(&project), &global);
+        assert_eq!(resolved.editor_command.as_deref(), Some("code"));
+    }
+
+    #[test]
+    fn editor_config_falls_through_to_global() {
+        let global = GlobalConfig {
+            editor: Some(EditorConfig {
+                command: Some("vim".to_string()),
+            }),
+            ..GlobalConfig::default()
+        };
+
+        let resolved = resolve_config(None, None, &global);
+        assert_eq!(resolved.editor_command.as_deref(), Some("vim"));
+    }
+
+    #[test]
+    fn editor_config_none_when_not_set() {
+        let resolved = resolve_config(None, None, &GlobalConfig::default());
+        assert!(resolved.editor_command.is_none());
     }
 
 }
