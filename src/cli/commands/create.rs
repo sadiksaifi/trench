@@ -61,6 +61,52 @@ pub struct CreateResult {
     pub base_branch: String,
 }
 
+impl CreateResult {
+    /// Convert to a JSON-serializable output struct.
+    pub fn to_json_output(self, hooks: HooksStatus) -> CreateJsonOutput {
+        CreateJsonOutput {
+            worktree: self.name,
+            branch: self.branch,
+            path: self.path.to_string_lossy().to_string(),
+            base_branch: self.base_branch,
+            hooks,
+        }
+    }
+}
+
+/// JSON-serializable output for `trench create --json` (FR-35, US-4).
+#[derive(Debug, serde::Serialize)]
+pub struct CreateJsonOutput {
+    pub worktree: String,
+    pub branch: String,
+    pub path: String,
+    pub base_branch: String,
+    pub hooks: HooksStatus,
+}
+
+/// Hook execution status included in JSON output.
+#[derive(Debug, serde::Serialize)]
+pub struct HooksStatus {
+    pub status: String,
+}
+
+impl HooksStatus {
+    /// No hooks were configured for this operation.
+    pub fn none() -> Self {
+        Self { status: "none".to_string() }
+    }
+
+    /// Hooks were configured and executed successfully.
+    pub fn ran() -> Self {
+        Self { status: "ran".to_string() }
+    }
+
+    /// Hooks were configured but skipped (e.g. `--no-hooks`).
+    pub fn skipped() -> Self {
+        Self { status: "skipped".to_string() }
+    }
+}
+
 fn format_hook_def(f: &mut fmt::Formatter<'_>, hook: &crate::config::HookDef) -> fmt::Result {
     if let Some(copy) = &hook.copy {
         writeln!(f, "      copy: {}", copy.join(", "))?;
@@ -781,6 +827,29 @@ mod tests {
         assert_eq!(result.name, "my-feature");
         assert!(result.path.exists(), "worktree path should exist on disk");
         assert!(!result.base_branch.is_empty(), "base_branch should be set");
+    }
+
+    #[test]
+    fn create_result_serializes_to_json_with_all_required_fields() {
+        use crate::output::json::format_json_value;
+
+        let result = CreateResult {
+            name: "my-feature".to_string(),
+            branch: "my-feature".to_string(),
+            path: std::path::PathBuf::from("/home/.worktrees/repo/my-feature"),
+            base_branch: "main".to_string(),
+        };
+
+        let hooks = HooksStatus::none();
+        let json_output = result.to_json_output(hooks);
+        let json_str = format_json_value(&json_output).expect("should serialize to JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("should be valid JSON");
+
+        assert_eq!(parsed["worktree"], "my-feature");
+        assert_eq!(parsed["branch"], "my-feature");
+        assert_eq!(parsed["path"], "/home/.worktrees/repo/my-feature");
+        assert_eq!(parsed["base_branch"], "main");
+        assert_eq!(parsed["hooks"]["status"], "none");
     }
 
     #[test]
