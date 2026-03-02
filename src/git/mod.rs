@@ -382,7 +382,18 @@ pub fn delete_remote_branch(
     }
 
     let refspec = format!(":refs/heads/{branch}");
-    remote.push(&[&refspec], None)?;
+    remote.push(&[&refspec], None).map_err(|e| {
+        // Fallback: if the branch was deleted between our existence check
+        // and the push, map the "not found" error accordingly.
+        if e.class() == git2::ErrorClass::Reference && e.code() == git2::ErrorCode::NotFound {
+            GitError::RemoteBranchNotFound {
+                branch: branch.to_string(),
+                remote: remote_name.to_string(),
+            }
+        } else {
+            e.into()
+        }
+    })?;
 
     Ok(())
 }
