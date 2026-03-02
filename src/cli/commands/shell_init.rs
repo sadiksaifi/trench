@@ -169,8 +169,8 @@ mod tests {
     fn posix_output_reports_error_on_empty_path() {
         let output = generate(ShellType::Bash);
         assert!(
-            output.contains("switch returned empty path"),
-            "posix output should report error when switch returns empty path"
+            output.contains("switch returned empty path\" >&2\n            return 1"),
+            "posix output should report error and return non-zero when switch returns empty path"
         );
     }
 
@@ -178,8 +178,8 @@ mod tests {
     fn fish_output_reports_error_on_empty_path() {
         let output = generate(ShellType::Fish);
         assert!(
-            output.contains("switch returned empty path"),
-            "fish output should report error when switch returns empty path"
+            output.contains("switch returned empty path\" >&2\n            return 1"),
+            "fish output should report error and return non-zero when switch returns empty path"
         );
     }
 
