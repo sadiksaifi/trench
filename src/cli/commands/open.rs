@@ -216,4 +216,91 @@ mod tests {
 
         assert_eq!(result.editor, "code", "config should override env vars");
     }
+
+    #[test]
+    fn resolve_not_found_returns_error() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+
+        let err = resolve("nonexistent", repo_dir.path(), &db, Some("vim")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "error should mention 'not found', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_updates_last_accessed() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        let wt = db
+            .insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        assert!(wt.last_accessed.is_none());
+
+        resolve("my-feature", repo_dir.path(), &db, Some("vim")).unwrap();
+
+        let updated = db.get_worktree(wt.id).unwrap().unwrap();
+        assert!(updated.last_accessed.is_some());
+        assert!(updated.last_accessed.unwrap() > 0);
+    }
+
+    #[test]
+    fn resolve_records_opened_event() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        let wt = db
+            .insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        resolve("my-feature", repo_dir.path(), &db, Some("vim")).unwrap();
+
+        let event_count = db.count_events(wt.id, Some("opened")).unwrap();
+        assert_eq!(event_count, 1, "exactly one 'opened' event should exist");
+    }
+
+    #[test]
+    fn resolve_by_branch_with_slash() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "feature-auth",
+            "feature/auth",
+            "/wt/feature-auth",
+            Some("main"),
+        )
+        .unwrap();
+
+        // Resolve using original branch name (with slash)
+        let result = resolve("feature/auth", repo_dir.path(), &db, Some("vim")).unwrap();
+        assert_eq!(result.name, "feature-auth");
+        assert_eq!(result.path, "/wt/feature-auth");
+
+        // Resolve using sanitized name
+        let result = resolve("feature-auth", repo_dir.path(), &db, Some("vim")).unwrap();
+        assert_eq!(result.name, "feature-auth");
+    }
 }
