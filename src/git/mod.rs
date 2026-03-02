@@ -367,7 +367,7 @@ pub fn delete_remote_branch(
     // which can be stale or missing after push-without-fetch).
     let target_ref = format!("refs/heads/{branch}");
     let exists = {
-        let connection = remote.connect_auth(git2::Direction::Fetch, None, None)?;
+        let connection = remote.connect_auth(git2::Direction::Push, None, None)?;
         connection
             .list()?
             .iter()
