@@ -161,34 +161,46 @@ mod tests {
 
     #[test]
     fn bash_output_is_valid_shell_syntax() {
-        let output = generate(ShellType::Bash);
-        let status = std::process::Command::new("bash")
+        let result = std::process::Command::new("bash")
             .arg("-n")
             .arg("-c")
-            .arg(&output)
-            .output()
-            .expect("failed to run bash");
-        assert!(
-            status.status.success(),
-            "bash syntax check failed: {}",
-            String::from_utf8_lossy(&status.stderr)
-        );
+            .arg(&generate(ShellType::Bash))
+            .output();
+        match result {
+            Ok(output) => {
+                assert!(
+                    output.status.success(),
+                    "bash syntax check failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("bash not found, skipping syntax check");
+            }
+            Err(e) => panic!("failed to run bash: {e}"),
+        }
     }
 
     #[test]
     fn zsh_output_is_valid_shell_syntax() {
-        let output = generate(ShellType::Zsh);
-        let status = std::process::Command::new("zsh")
+        let result = std::process::Command::new("zsh")
             .arg("-n")
             .arg("-c")
-            .arg(&output)
-            .output()
-            .expect("failed to run zsh");
-        assert!(
-            status.status.success(),
-            "zsh syntax check failed: {}",
-            String::from_utf8_lossy(&status.stderr)
-        );
+            .arg(&generate(ShellType::Zsh))
+            .output();
+        match result {
+            Ok(output) => {
+                assert!(
+                    output.status.success(),
+                    "zsh syntax check failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("zsh not found, skipping syntax check");
+            }
+            Err(e) => panic!("failed to run zsh: {e}"),
+        }
     }
 
     #[test]
