@@ -21,11 +21,14 @@ fn generate_posix() -> &'static str {
         local dir
         dir="$(command trench switch --print-path "$@")"
         local exit_code=$?
-        if [ "$exit_code" -eq 0 ] && [ -n "$dir" ]; then
-            cd "$dir" || return 1
-        else
+        if [ "$exit_code" -ne 0 ]; then
             return "$exit_code"
         fi
+        if [ -z "$dir" ]; then
+            echo "trench: switch returned empty path" >&2
+            return 1
+        fi
+        cd -- "$dir" || return 1
     else
         command trench "$@"
     fi
@@ -39,11 +42,14 @@ fn generate_fish() -> &'static str {
         set -l rest $argv[2..-1]
         set -l dir (command trench switch --print-path $rest)
         set -l exit_code $status
-        if test $exit_code -eq 0 -a -n "$dir"
-            cd $dir
-        else
+        if test $exit_code -ne 0
             return $exit_code
         end
+        if test -z "$dir"
+            echo "trench: switch returned empty path" >&2
+            return 1
+        end
+        cd -- "$dir"
     else
         command trench $argv
     end
@@ -157,6 +163,24 @@ mod tests {
         let fish = generate(ShellType::Fish);
         let bash = generate(ShellType::Bash);
         assert_ne!(fish, bash, "fish syntax differs from bash/zsh");
+    }
+
+    #[test]
+    fn posix_output_reports_error_on_empty_path() {
+        let output = generate(ShellType::Bash);
+        assert!(
+            output.contains("switch returned empty path"),
+            "posix output should report error when switch returns empty path"
+        );
+    }
+
+    #[test]
+    fn fish_output_reports_error_on_empty_path() {
+        let output = generate(ShellType::Fish);
+        assert!(
+            output.contains("switch returned empty path"),
+            "fish output should report error when switch returns empty path"
+        );
     }
 
     #[test]
