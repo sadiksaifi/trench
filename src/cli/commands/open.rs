@@ -107,7 +107,34 @@ pub fn record_open(db: &Database, repo_id: i64, wt_id: i64) -> Result<()> {
 mod tests {
     use super::*;
     use crate::state::Database;
+    use std::ffi::OsString;
     use std::path::Path;
+
+    /// RAII guard that saves the current value of an env var and restores it on drop.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let prev = std::env::var_os(key);
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn init_repo_with_commit(dir: &Path) -> git2::Repository {
         let repo = git2::Repository::init(dir).expect("failed to init repo");
@@ -153,10 +180,9 @@ mod tests {
         db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
             .unwrap();
 
-        std::env::set_var("EDITOR", "vim");
-        std::env::remove_var("VISUAL");
+        let _editor = EnvGuard::set("EDITOR", Some("vim"));
+        let _visual = EnvGuard::set("VISUAL", None);
         let result = resolve("my-feature", repo_dir.path(), &db, None).unwrap();
-        std::env::remove_var("EDITOR");
 
         assert_eq!(result.editor, "vim");
     }
@@ -174,10 +200,9 @@ mod tests {
         db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
             .unwrap();
 
-        std::env::remove_var("EDITOR");
-        std::env::set_var("VISUAL", "nano");
+        let _editor = EnvGuard::set("EDITOR", None);
+        let _visual = EnvGuard::set("VISUAL", Some("nano"));
         let result = resolve("my-feature", repo_dir.path(), &db, None).unwrap();
-        std::env::remove_var("VISUAL");
 
         assert_eq!(result.editor, "nano");
     }
@@ -195,8 +220,8 @@ mod tests {
         db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
             .unwrap();
 
-        std::env::remove_var("EDITOR");
-        std::env::remove_var("VISUAL");
+        let _editor = EnvGuard::set("EDITOR", None);
+        let _visual = EnvGuard::set("VISUAL", None);
         let err = resolve("my-feature", repo_dir.path(), &db, None).unwrap_err();
         let msg = err.to_string();
 
@@ -219,11 +244,9 @@ mod tests {
         db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
             .unwrap();
 
-        std::env::set_var("EDITOR", "vim");
-        std::env::set_var("VISUAL", "nano");
+        let _editor = EnvGuard::set("EDITOR", Some("vim"));
+        let _visual = EnvGuard::set("VISUAL", Some("nano"));
         let result = resolve("my-feature", repo_dir.path(), &db, Some("code")).unwrap();
-        std::env::remove_var("EDITOR");
-        std::env::remove_var("VISUAL");
 
         assert_eq!(result.editor, "code", "config should override env vars");
     }
@@ -301,8 +324,8 @@ mod tests {
         db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
             .unwrap();
 
-        std::env::remove_var("EDITOR");
-        std::env::remove_var("VISUAL");
+        let _editor = EnvGuard::set("EDITOR", None);
+        let _visual = EnvGuard::set("VISUAL", None);
 
         // Whitespace-only config should fall through → error
         let err = resolve("my-feature", repo_dir.path(), &db, Some("   ")).unwrap_err();
@@ -326,8 +349,8 @@ mod tests {
         db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
             .unwrap();
 
-        std::env::remove_var("EDITOR");
-        std::env::remove_var("VISUAL");
+        let _editor = EnvGuard::set("EDITOR", None);
+        let _visual = EnvGuard::set("VISUAL", None);
 
         // Empty config should fall through → error
         let err = resolve("my-feature", repo_dir.path(), &db, Some("")).unwrap_err();
@@ -352,11 +375,9 @@ mod tests {
             .unwrap();
 
         // Whitespace-only EDITOR should fall through to VISUAL
-        std::env::set_var("EDITOR", "  \t ");
-        std::env::set_var("VISUAL", "nano");
+        let _editor = EnvGuard::set("EDITOR", Some("  \t "));
+        let _visual = EnvGuard::set("VISUAL", Some("nano"));
         let result = resolve("my-feature", repo_dir.path(), &db, None).unwrap();
-        std::env::remove_var("EDITOR");
-        std::env::remove_var("VISUAL");
 
         assert_eq!(result.editor, "nano");
     }
