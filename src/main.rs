@@ -142,21 +142,12 @@ enum Commands {
 
 /// Supported shells for shell-init and completions
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum ShellType {
+pub(crate) enum ShellType {
     Bash,
     Zsh,
     Fish,
 }
 
-impl ShellType {
-    fn as_str(self) -> &'static str {
-        match self {
-            ShellType::Bash => "bash",
-            ShellType::Zsh => "zsh",
-            ShellType::Fish => "fish",
-        }
-    }
-}
 
 impl Cli {
     fn output_config(&self) -> OutputConfig {
@@ -195,11 +186,11 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
         Some(Commands::Init { force }) => run_init(force),
         Some(Commands::ShellInit { shell }) => {
-            print!("{}", cli::commands::shell_init::generate(shell.as_str()));
+            print!("{}", cli::commands::shell_init::generate(shell));
             Ok(())
         }
         Some(Commands::Completions { shell }) => {
-            cli::commands::completions::generate::<Cli>(shell.as_str());
+            cli::commands::completions::generate::<Cli>(shell, &mut std::io::stdout());
             Ok(())
         }
         Some(_) => {

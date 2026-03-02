@@ -4,12 +4,13 @@
 //! switching worktrees changes the shell's working directory. All other
 //! subcommands pass through to `trench` unmodified.
 
+use crate::ShellType;
+
 /// Generate the shell function definition for the given shell type.
-pub fn generate(shell: &str) -> &'static str {
+pub fn generate(shell: ShellType) -> &'static str {
     match shell {
-        "bash" | "zsh" => generate_posix(),
-        "fish" => generate_fish(),
-        _ => unreachable!("unsupported shell: {shell}"),
+        ShellType::Bash | ShellType::Zsh => generate_posix(),
+        ShellType::Fish => generate_fish(),
     }
 }
 
@@ -56,7 +57,7 @@ mod tests {
 
     #[test]
     fn bash_output_defines_tr_function() {
-        let output = generate("bash");
+        let output = generate(ShellType::Bash);
         assert!(
             output.contains("tr()"),
             "bash output should define tr() function"
@@ -65,7 +66,7 @@ mod tests {
 
     #[test]
     fn bash_output_contains_trench_switch_with_print_path() {
-        let output = generate("bash");
+        let output = generate(ShellType::Bash);
         assert!(
             output.contains("trench switch --print-path"),
             "bash output should call trench switch --print-path"
@@ -74,7 +75,7 @@ mod tests {
 
     #[test]
     fn bash_output_contains_cd() {
-        let output = generate("bash");
+        let output = generate(ShellType::Bash);
         assert!(
             output.contains("cd "),
             "bash output should cd into the worktree path"
@@ -83,7 +84,7 @@ mod tests {
 
     #[test]
     fn bash_output_passes_through_non_switch_commands() {
-        let output = generate("bash");
+        let output = generate(ShellType::Bash);
         assert!(
             output.contains("command trench"),
             "bash output should pass non-switch commands through to trench"
@@ -92,7 +93,7 @@ mod tests {
 
     #[test]
     fn zsh_output_defines_tr_function() {
-        let output = generate("zsh");
+        let output = generate(ShellType::Zsh);
         assert!(
             output.contains("tr()"),
             "zsh output should define tr() function"
@@ -101,7 +102,7 @@ mod tests {
 
     #[test]
     fn zsh_output_contains_trench_switch_with_print_path() {
-        let output = generate("zsh");
+        let output = generate(ShellType::Zsh);
         assert!(
             output.contains("trench switch --print-path"),
             "zsh output should call trench switch --print-path"
@@ -110,14 +111,14 @@ mod tests {
 
     #[test]
     fn zsh_and_bash_produce_same_output() {
-        let bash = generate("bash");
-        let zsh = generate("zsh");
+        let bash = generate(ShellType::Bash);
+        let zsh = generate(ShellType::Zsh);
         assert_eq!(bash, zsh, "bash and zsh should use the same POSIX function");
     }
 
     #[test]
     fn fish_output_defines_tr_function() {
-        let output = generate("fish");
+        let output = generate(ShellType::Fish);
         assert!(
             output.contains("function tr"),
             "fish output should define function tr"
@@ -126,7 +127,7 @@ mod tests {
 
     #[test]
     fn fish_output_contains_trench_switch_with_print_path() {
-        let output = generate("fish");
+        let output = generate(ShellType::Fish);
         assert!(
             output.contains("trench switch --print-path"),
             "fish output should call trench switch --print-path"
@@ -135,7 +136,7 @@ mod tests {
 
     #[test]
     fn fish_output_contains_cd() {
-        let output = generate("fish");
+        let output = generate(ShellType::Fish);
         assert!(
             output.contains("cd "),
             "fish output should cd into the worktree path"
@@ -144,7 +145,7 @@ mod tests {
 
     #[test]
     fn fish_output_passes_through_non_switch_commands() {
-        let output = generate("fish");
+        let output = generate(ShellType::Fish);
         assert!(
             output.contains("command trench"),
             "fish output should pass non-switch commands through to trench"
@@ -153,14 +154,14 @@ mod tests {
 
     #[test]
     fn fish_output_differs_from_bash() {
-        let fish = generate("fish");
-        let bash = generate("bash");
+        let fish = generate(ShellType::Fish);
+        let bash = generate(ShellType::Bash);
         assert_ne!(fish, bash, "fish syntax differs from bash/zsh");
     }
 
     #[test]
     fn bash_output_is_valid_shell_syntax() {
-        let output = generate("bash");
+        let output = generate(ShellType::Bash);
         let status = std::process::Command::new("bash")
             .arg("-n")
             .arg("-c")
@@ -176,7 +177,7 @@ mod tests {
 
     #[test]
     fn zsh_output_is_valid_shell_syntax() {
-        let output = generate("zsh");
+        let output = generate(ShellType::Zsh);
         let status = std::process::Command::new("zsh")
             .arg("-n")
             .arg("-c")
@@ -196,7 +197,7 @@ mod tests {
         let result = std::process::Command::new("fish")
             .arg("--no-execute")
             .arg("-c")
-            .arg(&generate("fish"))
+            .arg(&generate(ShellType::Fish))
             .output();
         match result {
             Ok(output) => {
