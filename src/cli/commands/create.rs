@@ -853,6 +853,43 @@ mod tests {
     }
 
     #[test]
+    fn integration_create_json_output_matches_real_worktree() {
+        use crate::output::json::format_json_value;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let result = execute(
+            "json-test",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let json_output = result.to_json_output(HooksStatus::none());
+        let json_str = format_json_value(&json_output).expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("valid JSON");
+
+        // worktree name is the sanitized branch name
+        assert_eq!(parsed["worktree"], "json-test");
+        // branch is the original branch name
+        assert_eq!(parsed["branch"], "json-test");
+        // path is a real path on disk that exists
+        let path_str = parsed["path"].as_str().unwrap();
+        assert!(std::path::Path::new(path_str).exists(), "path should exist on disk");
+        // base_branch is set to the repo's default
+        assert!(!parsed["base_branch"].as_str().unwrap().is_empty());
+        // hooks status reflects no hooks configured
+        assert_eq!(parsed["hooks"]["status"], "none");
+    }
+
+    #[test]
     fn dry_run_with_from_shows_custom_base() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());
