@@ -128,4 +128,92 @@ mod tests {
         assert_eq!(result.path, "/wt/my-feature");
         assert_eq!(result.editor, "code");
     }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_uses_editor_env_when_no_config() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        std::env::set_var("EDITOR", "vim");
+        std::env::remove_var("VISUAL");
+        let result = resolve("my-feature", repo_dir.path(), &db, None).unwrap();
+        std::env::remove_var("EDITOR");
+
+        assert_eq!(result.editor, "vim");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_uses_visual_env_when_no_editor() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        std::env::remove_var("EDITOR");
+        std::env::set_var("VISUAL", "nano");
+        let result = resolve("my-feature", repo_dir.path(), &db, None).unwrap();
+        std::env::remove_var("VISUAL");
+
+        assert_eq!(result.editor, "nano");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_errors_when_no_editor_available() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        std::env::remove_var("EDITOR");
+        std::env::remove_var("VISUAL");
+        let err = resolve("my-feature", repo_dir.path(), &db, None).unwrap_err();
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("no editor configured"),
+            "error should mention 'no editor configured', got: {msg}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn config_editor_overrides_env_vars() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .unwrap();
+
+        std::env::set_var("EDITOR", "vim");
+        std::env::set_var("VISUAL", "nano");
+        let result = resolve("my-feature", repo_dir.path(), &db, Some("code")).unwrap();
+        std::env::remove_var("EDITOR");
+        std::env::remove_var("VISUAL");
+
+        assert_eq!(result.editor, "code", "config should override env vars");
+    }
 }
