@@ -855,6 +855,33 @@ mod tests {
     }
 
     #[test]
+    fn shell_init_help_explains_eval_installation() {
+        let result = Cli::try_parse_from(["trench", "shell-init", "--help"]);
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let output = err.to_string();
+        assert!(
+            output.contains("eval"),
+            "shell-init help should explain eval installation, got:\n{output}"
+        );
+        assert!(
+            output.contains("shell-init"),
+            "shell-init help should mention the command name"
+        );
+    }
+
+    #[test]
+    fn shell_init_help_shows_shell_config_examples() {
+        let result = Cli::try_parse_from(["trench", "shell-init", "--help"]);
+        let err = result.unwrap_err();
+        let output = err.to_string();
+        assert!(
+            output.contains(".bashrc") || output.contains(".zshrc"),
+            "shell-init help should reference shell config files, got:\n{output}"
+        );
+    }
+
+    #[test]
     fn shell_init_subcommand_requires_shell_argument() {
         let result = Cli::try_parse_from(["trench", "shell-init"]);
         assert!(result.is_err(), "shell-init without shell should fail");
