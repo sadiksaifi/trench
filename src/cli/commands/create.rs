@@ -86,25 +86,14 @@ pub struct CreateJsonOutput {
 
 /// Hook execution status included in JSON output.
 #[derive(Debug, serde::Serialize)]
-pub struct HooksStatus {
-    pub status: String,
-}
-
-impl HooksStatus {
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum HooksStatus {
     /// No hooks were configured for this operation.
-    pub fn none() -> Self {
-        Self { status: "none".to_string() }
-    }
-
+    None,
     /// Hooks were configured and executed successfully.
-    pub fn ran() -> Self {
-        Self { status: "ran".to_string() }
-    }
-
+    Ran,
     /// Hooks were configured but skipped (e.g. `--no-hooks`).
-    pub fn skipped() -> Self {
-        Self { status: "skipped".to_string() }
-    }
+    Skipped,
 }
 
 fn format_hook_def(f: &mut fmt::Formatter<'_>, hook: &crate::config::HookDef) -> fmt::Result {
@@ -840,7 +829,7 @@ mod tests {
             base_branch: "main".to_string(),
         };
 
-        let hooks = HooksStatus::none();
+        let hooks = HooksStatus::None;
         let json_output = result.to_json_output(hooks);
         let json_str = format_json_value(&json_output).expect("should serialize to JSON");
         let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("should be valid JSON");
@@ -872,7 +861,7 @@ mod tests {
         )
         .expect("create should succeed");
 
-        let json_output = result.to_json_output(HooksStatus::none());
+        let json_output = result.to_json_output(HooksStatus::None);
         let json_str = format_json_value(&json_output).expect("should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("valid JSON");
 
