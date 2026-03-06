@@ -99,7 +99,11 @@ enum Commands {
         tag: Option<String>,
     },
     /// Show worktree status
-    Status,
+    Status {
+        /// Branch name or sanitized name for deep status view.
+        /// Omit for summary of all worktrees.
+        branch: Option<String>,
+    },
     /// Sync worktree with base branch
     Sync,
     /// View event log
@@ -184,6 +188,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
+        Some(Commands::Status { branch }) => run_status(branch.as_deref(), json, porcelain),
         Some(Commands::Init { force }) => run_init(force),
         Some(Commands::ShellInit { shell }) => {
             print!("{}", cli::commands::shell_init::generate(shell));
@@ -430,6 +435,26 @@ fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()
         cli::commands::list::execute_porcelain(&cwd, &db, tag)?
     } else {
         cli::commands::list::execute(&cwd, &db, tag)?
+    };
+    if output.ends_with('\n') {
+        print!("{output}");
+    } else {
+        println!("{output}");
+    }
+    Ok(())
+}
+
+fn run_status(branch: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    let output = if json {
+        cli::commands::status::execute_json(&cwd, &db, branch)?
+    } else if porcelain {
+        cli::commands::status::execute_porcelain(&cwd, &db, branch)?
+    } else {
+        cli::commands::status::execute(&cwd, &db, branch)?
     };
     if output.ends_with('\n') {
         print!("{output}");
