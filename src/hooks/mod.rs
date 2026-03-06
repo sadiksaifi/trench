@@ -1,6 +1,7 @@
 pub mod copy;
 pub mod run;
 pub mod shell;
+pub mod stream;
 
 use std::collections::HashMap;
 use std::fmt;

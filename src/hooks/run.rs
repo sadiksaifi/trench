@@ -3,7 +3,8 @@ use std::path::Path;
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncBufReadExt, BufReader};
+
+use super::stream::stream_and_collect;
 
 /// Output from a single command execution.
 #[derive(Debug, Clone)]
@@ -62,42 +63,7 @@ pub async fn execute_run_step(
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
 
-        let mut stdout_reader = BufReader::new(stdout).lines();
-        let mut stderr_reader = BufReader::new(stderr).lines();
-
-        let mut stdout_buf = String::new();
-        let mut stderr_buf = String::new();
-        let mut stdout_done = false;
-        let mut stderr_done = false;
-
-        while !stdout_done || !stderr_done {
-            tokio::select! {
-                result = stdout_reader.next_line(), if !stdout_done => {
-                    match result? {
-                        Some(line) => {
-                            println!("{line}");
-                            if !stdout_buf.is_empty() {
-                                stdout_buf.push('\n');
-                            }
-                            stdout_buf.push_str(&line);
-                        }
-                        None => stdout_done = true,
-                    }
-                }
-                result = stderr_reader.next_line(), if !stderr_done => {
-                    match result? {
-                        Some(line) => {
-                            eprintln!("{line}");
-                            if !stderr_buf.is_empty() {
-                                stderr_buf.push('\n');
-                            }
-                            stderr_buf.push_str(&line);
-                        }
-                        None => stderr_done = true,
-                    }
-                }
-            }
-        }
+        let (stdout_buf, stderr_buf) = stream_and_collect(stdout, stderr).await?;
 
         let status = child
             .wait()
