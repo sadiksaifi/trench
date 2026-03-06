@@ -129,4 +129,130 @@ mod tests {
         assert_eq!(result.stdout.trim(), "hello");
         assert_eq!(result.exit_code, 0);
     }
+
+    #[tokio::test]
+    async fn env_vars_accessible_in_script() {
+        let dir = TempDir::new().unwrap();
+        let mut env = HashMap::new();
+        env.insert("TRENCH_BRANCH".to_string(), "feature/auth".to_string());
+        env.insert("TRENCH_EVENT".to_string(), "post_create".to_string());
+
+        let result = execute_shell_step(
+            "echo $TRENCH_BRANCH; echo $TRENCH_EVENT",
+            dir.path(),
+            &env,
+        )
+        .await
+        .unwrap();
+
+        let lines: Vec<&str> = result.stdout.lines().collect();
+        assert_eq!(lines[0], "feature/auth");
+        assert_eq!(lines[1], "post_create");
+    }
+
+    #[tokio::test]
+    async fn multiline_script_executes_all_lines() {
+        let dir = TempDir::new().unwrap();
+        let env = HashMap::new();
+
+        let script = "VAR=hello\necho $VAR\necho world";
+        let result = execute_shell_step(script, dir.path(), &env)
+            .await
+            .unwrap();
+
+        let lines: Vec<&str> = result.stdout.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "hello");
+        assert_eq!(lines[1], "world");
+    }
+
+    #[tokio::test]
+    async fn cwd_set_to_specified_directory() {
+        let dir = TempDir::new().unwrap();
+        let env = HashMap::new();
+
+        let result = execute_shell_step("pwd", dir.path(), &env)
+            .await
+            .unwrap();
+
+        let expected = dir.path().canonicalize().unwrap();
+        let actual = std::path::PathBuf::from(result.stdout.trim())
+            .canonicalize()
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_returns_error_with_output() {
+        let dir = TempDir::new().unwrap();
+        let env = HashMap::new();
+
+        let err = execute_shell_step("echo before_fail; exit 42", dir.path(), &env)
+            .await
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("42"), "error should contain exit code: {msg}");
+
+        let shell_err = err.downcast_ref::<ShellStepError>().unwrap();
+        assert_eq!(shell_err.exit_code, 42);
+        assert_eq!(shell_err.output.stdout.trim(), "before_fail");
+    }
+
+    #[tokio::test]
+    async fn stderr_captured_separately_from_stdout() {
+        let dir = TempDir::new().unwrap();
+        let env = HashMap::new();
+
+        let result = execute_shell_step(
+            "echo out_msg; echo err_msg >&2",
+            dir.path(),
+            &env,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stdout.trim(), "out_msg");
+        assert_eq!(result.stderr.trim(), "err_msg");
+    }
+
+    #[tokio::test]
+    async fn integration_with_build_env_all_seven_vars() {
+        use crate::hooks::{build_env, HookEnvContext, HookEvent};
+
+        let dir = TempDir::new().unwrap();
+        let ctx = HookEnvContext {
+            worktree_path: "/tmp/wt".into(),
+            worktree_name: "feat-auth".into(),
+            branch: "feature/auth".into(),
+            repo_name: "myrepo".into(),
+            repo_path: "/tmp/repo".into(),
+            base_branch: "main".into(),
+        };
+        let env = build_env(&ctx, &HookEvent::PostCreate);
+
+        let script = r#"
+echo $TRENCH_WORKTREE_PATH
+echo $TRENCH_WORKTREE_NAME
+echo $TRENCH_BRANCH
+echo $TRENCH_REPO_NAME
+echo $TRENCH_REPO_PATH
+echo $TRENCH_BASE_BRANCH
+echo $TRENCH_EVENT
+"#;
+
+        let result = execute_shell_step(script, dir.path(), &env)
+            .await
+            .unwrap();
+
+        let lines: Vec<&str> = result.stdout.lines().collect();
+        assert_eq!(lines.len(), 7);
+        assert_eq!(lines[0], "/tmp/wt");
+        assert_eq!(lines[1], "feat-auth");
+        assert_eq!(lines[2], "feature/auth");
+        assert_eq!(lines[3], "myrepo");
+        assert_eq!(lines[4], "/tmp/repo");
+        assert_eq!(lines[5], "main");
+        assert_eq!(lines[6], "post_create");
+    }
 }
