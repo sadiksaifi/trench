@@ -249,6 +249,15 @@ fn render_deep(cwd: &Path, db: &Database, identifier: &str) -> Result<String> {
         }
     }
 
+    // Recent commits
+    let commits = git::recent_commits(wt_path, 10).unwrap_or_default();
+    if !commits.is_empty() {
+        out.push_str("\nRecent commits:\n");
+        for c in &commits {
+            out.push_str(&format!("  {} {}\n", c.hash, c.message));
+        }
+    }
+
     Ok(out)
 }
 
@@ -328,6 +337,11 @@ fn build_deep_json(entry: &StatusEntry, status: GitStatus) -> DeepJson {
         .into_iter()
         .map(|f| format!("{} {}", f.status, f.path))
         .collect();
+    let commits = git::recent_commits(wt_path, 10)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| format!("{} {}", c.hash, c.message))
+        .collect();
 
     DeepJson {
         name: entry.name.clone(),
@@ -340,7 +354,7 @@ fn build_deep_json(entry: &StatusEntry, status: GitStatus) -> DeepJson {
         status: format_dirty(status.dirty),
         managed: entry.managed,
         changed_files: changed,
-        recent_commits: Vec::new(),
+        recent_commits: commits,
         hook_history: Vec::new(),
     }
 }
@@ -536,6 +550,82 @@ mod tests {
         assert!(
             output.contains("new-file.txt"),
             "should list the changed file, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn deep_view_includes_recent_commits() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+
+        // Create a branch with an extra commit
+        let wt_parent = tempfile::tempdir().unwrap();
+        let wt_path = wt_parent.path().join("test-commits");
+        let head = repo.head().unwrap().shorthand().unwrap().to_string();
+        let head_commit = repo
+            .find_branch(&head, git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
+        repo.branch("test-commits", &head_commit, false).unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        let branch_ref = repo
+            .find_branch("test-commits", git2::BranchType::Local)
+            .unwrap();
+        opts.reference(Some(branch_ref.get()));
+        repo.worktree("test-commits", &wt_path, Some(&opts))
+            .unwrap();
+
+        // Make a commit in the worktree
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        std::fs::write(wt_path.join("file.txt"), "content").unwrap();
+        let mut index = wt_repo.index().unwrap();
+        index
+            .add_path(std::path::Path::new("file.txt"))
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = wt_repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let parent = wt_repo.head().unwrap().peel_to_commit().unwrap();
+        wt_repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "add file.txt for testing",
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+
+        let db = Database::open_in_memory().unwrap();
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some(&head))
+            .unwrap();
+        let wt_canonical = wt_path.canonicalize().unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "test-commits",
+            "test-commits",
+            wt_canonical.to_str().unwrap(),
+            Some(&head),
+        )
+        .unwrap();
+
+        let output =
+            render_deep(repo_dir.path(), &db, "test-commits").expect("deep should succeed");
+
+        assert!(
+            output.contains("Recent commits"),
+            "should have Recent commits section, got:\n{output}"
+        );
+        assert!(
+            output.contains("add file.txt for testing"),
+            "should show commit message, got:\n{output}"
         );
     }
 
