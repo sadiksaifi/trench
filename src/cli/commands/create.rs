@@ -48,6 +48,54 @@ impl fmt::Display for DryRunPlan {
     }
 }
 
+/// Result of a successful `trench create` operation.
+#[derive(Debug)]
+pub struct CreateResult {
+    /// Sanitized worktree name (e.g. `feature-auth` for branch `feature/auth`).
+    pub name: String,
+    /// Original branch name as provided by the user.
+    pub branch: String,
+    /// Absolute path to the created worktree on disk.
+    pub path: PathBuf,
+    /// Base branch the worktree was created from.
+    pub base_branch: String,
+}
+
+impl CreateResult {
+    /// Convert to a JSON-serializable output struct.
+    pub fn to_json_output(self, hooks: HooksStatus) -> CreateJsonOutput {
+        CreateJsonOutput {
+            worktree: self.name,
+            branch: self.branch,
+            path: self.path.to_string_lossy().to_string(),
+            base_branch: self.base_branch,
+            hooks,
+        }
+    }
+}
+
+/// JSON-serializable output for `trench create --json` (FR-35, US-4).
+#[derive(Debug, serde::Serialize)]
+pub struct CreateJsonOutput {
+    pub worktree: String,
+    pub branch: String,
+    pub path: String,
+    pub base_branch: String,
+    pub hooks: HooksStatus,
+}
+
+/// Hook execution status included in JSON output.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum HooksStatus {
+    /// No hooks were configured for this operation.
+    None,
+    /// Hooks were configured and executed successfully.
+    Ran,
+    /// Hooks were configured but skipped (e.g. `--no-hooks`).
+    Skipped,
+}
+
 fn format_hook_def(f: &mut fmt::Formatter<'_>, hook: &crate::config::HookDef) -> fmt::Result {
     if let Some(copy) = &hook.copy {
         writeln!(f, "      copy: {}", copy.join(", "))?;
@@ -107,7 +155,7 @@ pub fn execute(
     worktree_root: &Path,
     template: &str,
     db: &Database,
-) -> Result<PathBuf> {
+) -> Result<CreateResult> {
     let repo_info = git::discover_repo(cwd)?;
     let relative_path = paths::render_worktree_path(template, &repo_info.name, branch)?;
     let worktree_path = worktree_root.join(relative_path);
@@ -132,7 +180,12 @@ pub fn execute(
 
     db.insert_event(repo.id, Some(wt.id), "created", None)?;
 
-    Ok(worktree_path)
+    Ok(CreateResult {
+        name: sanitized_name,
+        branch: branch.to_string(),
+        path: worktree_path,
+        base_branch: base.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -183,7 +236,7 @@ mod tests {
         let db_dir = tempfile::tempdir().unwrap();
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
 
-        let path = execute(
+        let result = execute(
             "my-feature",
             None,
             repo_dir.path(),
@@ -192,6 +245,8 @@ mod tests {
             &db,
         )
         .expect("create should succeed");
+
+        let path = &result.path;
 
         // Worktree exists on disk
         assert!(path.exists(), "worktree directory should exist on disk");
@@ -208,7 +263,7 @@ mod tests {
             .unwrap()
             .to_string();
         let expected_path = wt_root.path().join(&repo_name).join("my-feature");
-        assert_eq!(path, expected_path);
+        assert_eq!(*path, expected_path);
 
         // DB: repo record exists
         let repo_path_str = repo_dir
@@ -390,7 +445,7 @@ mod tests {
             .unwrap()
         };
 
-        let path = execute(
+        let result = execute(
             "my-feature",
             Some("develop"),
             repo_dir.path(),
@@ -401,7 +456,7 @@ mod tests {
         .expect("create with --from develop should succeed");
 
         // Open the worktree as a repo and verify its HEAD commit matches develop's tip
-        let wt_repo = git2::Repository::open(&path).unwrap();
+        let wt_repo = git2::Repository::open(&result.path).unwrap();
         let wt_head_oid = wt_repo.head().unwrap().peel_to_commit().unwrap().id();
         assert_eq!(
             wt_head_oid, develop_oid,
@@ -740,6 +795,90 @@ mod tests {
     }
 
     #[test]
+    fn execute_returns_create_result_with_correct_fields() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let result = execute(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        assert_eq!(result.branch, "my-feature");
+        assert_eq!(result.name, "my-feature");
+        assert!(result.path.exists(), "worktree path should exist on disk");
+        assert!(!result.base_branch.is_empty(), "base_branch should be set");
+    }
+
+    #[test]
+    fn create_result_serializes_to_json_with_all_required_fields() {
+        use crate::output::json::format_json_value;
+
+        let result = CreateResult {
+            name: "my-feature".to_string(),
+            branch: "my-feature".to_string(),
+            path: std::path::PathBuf::from("/home/.worktrees/repo/my-feature"),
+            base_branch: "main".to_string(),
+        };
+
+        let hooks = HooksStatus::None;
+        let json_output = result.to_json_output(hooks);
+        let json_str = format_json_value(&json_output).expect("should serialize to JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("should be valid JSON");
+
+        assert_eq!(parsed["worktree"], "my-feature");
+        assert_eq!(parsed["branch"], "my-feature");
+        assert_eq!(parsed["path"], "/home/.worktrees/repo/my-feature");
+        assert_eq!(parsed["base_branch"], "main");
+        assert_eq!(parsed["hooks"]["status"], "none");
+    }
+
+    #[test]
+    fn integration_create_json_output_matches_real_worktree() {
+        use crate::output::json::format_json_value;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let result = execute(
+            "json-test",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let json_output = result.to_json_output(HooksStatus::None);
+        let json_str = format_json_value(&json_output).expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("valid JSON");
+
+        // worktree name is the sanitized branch name
+        assert_eq!(parsed["worktree"], "json-test");
+        // branch is the original branch name
+        assert_eq!(parsed["branch"], "json-test");
+        // path is a real path on disk that exists
+        let path_str = parsed["path"].as_str().unwrap();
+        assert!(std::path::Path::new(path_str).exists(), "path should exist on disk");
+        // base_branch is set to the repo's default
+        assert!(!parsed["base_branch"].as_str().unwrap().is_empty());
+        // hooks status reflects no hooks configured
+        assert_eq!(parsed["hooks"]["status"], "none");
+    }
+
+    #[test]
     fn dry_run_with_from_shows_custom_base() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());
@@ -777,7 +916,7 @@ mod tests {
         let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
         repo.branch("develop", &head_commit, false).unwrap();
 
-        let _path = execute(
+        let _result = execute(
             "my-feature",
             Some("develop"),
             repo_dir.path(),

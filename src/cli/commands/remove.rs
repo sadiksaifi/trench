@@ -125,7 +125,7 @@ mod tests {
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
 
         // Create a worktree first
-        let path = crate::cli::commands::create::execute(
+        let create_result = crate::cli::commands::create::execute(
             "my-feature",
             None,
             repo_dir.path(),
@@ -134,7 +134,7 @@ mod tests {
             &db,
         )
         .expect("create should succeed");
-        assert!(path.exists(), "worktree should exist after create");
+        assert!(create_result.path.exists(), "worktree should exist after create");
 
         // Capture the worktree ID before removal
         let repo_path_str = repo_dir.path().canonicalize().unwrap();
@@ -154,7 +154,7 @@ mod tests {
         assert_eq!(result.name, "my-feature");
 
         // Verify: directory is gone
-        assert!(!path.exists(), "worktree directory should be deleted");
+        assert!(!create_result.path.exists(), "worktree directory should be deleted");
 
         // Verify: DB record has removed_at set
         let wt = db
@@ -187,7 +187,7 @@ mod tests {
 
         // Create a simple worktree (no slashes) then rename its DB record
         // to simulate a worktree with a slashed branch name
-        let path = crate::cli::commands::create::execute(
+        let create_result = crate::cli::commands::create::execute(
             "feature-auth",
             None,
             repo_dir.path(),
@@ -211,7 +211,7 @@ mod tests {
         let result = execute("feature/auth", repo_dir.path(), &db, false)
             .expect("remove by branch name should succeed");
         assert_eq!(result.name, "feature-auth");
-        assert!(!path.exists(), "worktree directory should be deleted");
+        assert!(!create_result.path.exists(), "worktree directory should be deleted");
     }
 
     #[test]
@@ -222,7 +222,7 @@ mod tests {
         let db_dir = tempfile::tempdir().unwrap();
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
 
-        let path = crate::cli::commands::create::execute(
+        let create_result = crate::cli::commands::create::execute(
             "feature-auth",
             None,
             repo_dir.path(),
@@ -236,7 +236,7 @@ mod tests {
         let result = execute("feature-auth", repo_dir.path(), &db, false)
             .expect("remove by sanitized name should succeed");
         assert_eq!(result.name, "feature-auth");
-        assert!(!path.exists(), "worktree directory should be deleted");
+        assert!(!create_result.path.exists(), "worktree directory should be deleted");
     }
 
     /// Helper: create a bare remote, clone it, and return (clone_path, remote_dir).
@@ -267,7 +267,7 @@ mod tests {
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
 
         // Create a worktree
-        let path = crate::cli::commands::create::execute(
+        let create_result = crate::cli::commands::create::execute(
             "prune-me",
             None,
             clone_dir.path(),
@@ -276,7 +276,7 @@ mod tests {
             &db,
         )
         .expect("create should succeed");
-        assert!(path.exists());
+        assert!(create_result.path.exists());
 
         // Push the branch to the remote
         let clone = git2::Repository::open(clone_dir.path()).unwrap();
@@ -309,7 +309,7 @@ mod tests {
         assert!(result.pruned_remote, "should have pruned remote branch");
 
         // Verify: worktree directory is gone
-        assert!(!path.exists(), "worktree directory should be deleted");
+        assert!(!create_result.path.exists(), "worktree directory should be deleted");
 
         // Verify: remote branch is gone
         // Reopen the bare remote to get fresh state
@@ -328,7 +328,7 @@ mod tests {
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
 
         // Create a worktree (but DON'T push the branch to remote)
-        let path = crate::cli::commands::create::execute(
+        let create_result = crate::cli::commands::create::execute(
             "no-remote",
             None,
             clone_dir.path(),
@@ -337,7 +337,7 @@ mod tests {
             &db,
         )
         .expect("create should succeed");
-        assert!(path.exists());
+        assert!(create_result.path.exists());
 
         // Remove with prune — remote branch doesn't exist, should warn but succeed
         let result = execute("no-remote", clone_dir.path(), &db, true)
@@ -346,7 +346,7 @@ mod tests {
         assert!(!result.pruned_remote, "should NOT have pruned remote branch");
 
         // Verify: worktree directory is gone
-        assert!(!path.exists(), "worktree directory should be deleted");
+        assert!(!create_result.path.exists(), "worktree directory should be deleted");
     }
 
     #[test]

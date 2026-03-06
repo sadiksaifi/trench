@@ -246,8 +246,14 @@ fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> an
         &resolved.worktrees.root,
         &db,
     ) {
-        Ok(path) => {
-            println!("{}", path.display());
+        Ok(result) => {
+            if json {
+                let hooks_status = cli::commands::create::HooksStatus::None;
+                let json_output = result.to_json_output(hooks_status);
+                println!("{}", output::json::format_json_value(&json_output)?);
+            } else {
+                println!("{}", result.path.display());
+            }
             Ok(())
         }
         Err(e) => {
