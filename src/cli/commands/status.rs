@@ -168,15 +168,86 @@ fn render_summary_table(
     Ok(out)
 }
 
-pub fn execute(cwd: &Path, db: &Database, branch: Option<&str>) -> Result<String> {
-    if branch.is_some() {
-        todo!("deep status not yet implemented")
+/// Resolve a worktree by identifier (sanitized name or branch) from the DB.
+/// Falls back to git-discovered worktrees for unmanaged entries.
+fn resolve_worktree(
+    cwd: &Path,
+    db: &Database,
+    identifier: &str,
+) -> Result<(PathBuf, StatusEntry)> {
+    let repo_info = git::discover_repo(cwd)?;
+    let repo_path_str = repo_info
+        .path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
+
+    // Try DB first
+    if let Some(repo) = db.get_repo_by_path(repo_path_str)? {
+        if let Some(wt) = db.find_worktree_by_identifier(repo.id, identifier)? {
+            return Ok((
+                repo_info.path,
+                StatusEntry {
+                    name: wt.name,
+                    branch: wt.branch,
+                    path: wt.path,
+                    base_branch: wt.base_branch,
+                    managed: true,
+                },
+            ));
+        }
     }
-    render_summary_table(
-        cwd,
-        db,
-        crossterm::terminal::size().ok().map(|(c, _)| c as usize),
-    )
+
+    // Fall back to git-discovered worktrees
+    let git_worktrees = git::list_worktrees(&repo_info.path)?;
+    for gw in git_worktrees {
+        let branch_match = gw.branch.as_deref() == Some(identifier);
+        let name_match = gw.name == identifier;
+        if branch_match || name_match {
+            return Ok((
+                repo_info.path,
+                StatusEntry {
+                    name: gw.name,
+                    branch: gw.branch.unwrap_or_else(|| "(detached)".to_string()),
+                    path: gw.path.to_string_lossy().into_owned(),
+                    base_branch: None,
+                    managed: false,
+                },
+            ));
+        }
+    }
+
+    anyhow::bail!("worktree not found: {identifier}")
+}
+
+fn render_deep(cwd: &Path, db: &Database, identifier: &str) -> Result<String> {
+    let (repo_path, entry) = resolve_worktree(cwd, db, identifier)?;
+    let status = compute_git_status(&repo_path, &entry);
+
+    let mut out = String::new();
+    out.push_str(&format!("Branch:       {}\n", entry.branch));
+    out.push_str(&format!("Path:         {}\n", entry.path));
+    if let Some(ref base) = entry.base_branch {
+        out.push_str(&format!("Base:         {base}\n"));
+    }
+    let ab = format_ahead_behind(status.ahead, status.behind);
+    out.push_str(&format!("Ahead/Behind: {ab}\n"));
+    out.push_str(&format!("Status:       {}\n", format_dirty(status.dirty)));
+    if !entry.managed {
+        out.push_str("Managed:      no [unmanaged]\n");
+    }
+
+    Ok(out)
+}
+
+pub fn execute(cwd: &Path, db: &Database, branch: Option<&str>) -> Result<String> {
+    match branch {
+        Some(id) => render_deep(cwd, db, id),
+        None => render_summary_table(
+            cwd,
+            db,
+            crossterm::terminal::size().ok().map(|(c, _)| c as usize),
+        ),
+    }
 }
 
 pub fn execute_json(_cwd: &Path, _db: &Database, _branch: Option<&str>) -> Result<String> {
@@ -240,5 +311,57 @@ mod tests {
         assert!(output.contains("Branch"), "should have Branch header");
         assert!(output.contains("feature-auth"), "should show first worktree");
         assert!(output.contains("fix-bug"), "should show second worktree");
+    }
+
+    #[test]
+    fn deep_mode_errors_for_nonexistent_worktree() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        db.insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        let result = render_deep(repo_dir.path(), &db, "nonexistent");
+        assert!(result.is_err(), "should error for nonexistent worktree");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not found"),
+            "error should mention 'not found', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn deep_mode_shows_detail_for_managed_worktree() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        db.insert_worktree(
+            db_repo.id,
+            "feature-auth",
+            "feature/auth",
+            "/tmp/wt/feature-auth",
+            Some("main"),
+        )
+        .unwrap();
+
+        let output =
+            render_deep(repo_dir.path(), &db, "feature-auth").expect("deep should succeed");
+
+        assert!(output.contains("Branch:"), "should show Branch label");
+        assert!(output.contains("feature/auth"), "should show branch name");
+        assert!(output.contains("Path:"), "should show Path label");
+        assert!(output.contains("/tmp/wt/feature-auth"), "should show path");
+        assert!(output.contains("Base:"), "should show Base label");
+        assert!(output.contains("main"), "should show base branch");
     }
 }

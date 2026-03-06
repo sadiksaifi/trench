@@ -449,19 +449,32 @@ fn run_status(branch: Option<&str>, json: bool, porcelain: bool) -> anyhow::Resu
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
-    let output = if json {
-        cli::commands::status::execute_json(&cwd, &db, branch)?
+    let result = if json {
+        cli::commands::status::execute_json(&cwd, &db, branch)
     } else if porcelain {
-        cli::commands::status::execute_porcelain(&cwd, &db, branch)?
+        cli::commands::status::execute_porcelain(&cwd, &db, branch)
     } else {
-        cli::commands::status::execute(&cwd, &db, branch)?
+        cli::commands::status::execute(&cwd, &db, branch)
     };
-    if output.ends_with('\n') {
-        print!("{output}");
-    } else {
-        println!("{output}");
+
+    match result {
+        Ok(output) => {
+            if output.ends_with('\n') {
+                print!("{output}");
+            } else {
+                println!("{output}");
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 fn run_init(force: bool) -> anyhow::Result<()> {
