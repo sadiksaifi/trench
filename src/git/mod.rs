@@ -27,6 +27,54 @@ pub fn dirty_count(worktree_path: &Path) -> Result<usize, GitError> {
     Ok(statuses.len())
 }
 
+/// A file with changed status in a worktree.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChangedFile {
+    pub path: String,
+    pub status: &'static str,
+}
+
+/// List changed files in a worktree with their status labels.
+///
+/// Returns files that are modified, staged, new, deleted, renamed, or
+/// typechanged. Each entry includes the file path and a human-readable
+/// status string.
+pub fn changed_files(worktree_path: &Path) -> Result<Vec<ChangedFile>, GitError> {
+    let repo = git2::Repository::open(worktree_path)
+        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+
+    let statuses = repo.statuses(Some(
+        git2::StatusOptions::new()
+            .include_untracked(true)
+            .recurse_untracked_dirs(true),
+    ))?;
+
+    let mut files = Vec::with_capacity(statuses.len());
+    for entry in statuses.iter() {
+        let path = entry.path().unwrap_or("(unknown)").to_string();
+        let s = entry.status();
+        let label = if s.is_index_new() || s.is_wt_new() {
+            "new"
+        } else if s.is_index_deleted() || s.is_wt_deleted() {
+            "deleted"
+        } else if s.is_index_renamed() || s.is_wt_renamed() {
+            "renamed"
+        } else if s.is_index_modified() || s.is_wt_modified() {
+            "modified"
+        } else if s.is_index_typechange() || s.is_wt_typechange() {
+            "typechange"
+        } else {
+            "unknown"
+        };
+        files.push(ChangedFile {
+            path,
+            status: label,
+        });
+    }
+
+    Ok(files)
+}
+
 /// Calculate commits ahead/behind for a branch relative to its upstream.
 ///
 /// Checks for an upstream tracking branch first, then falls back to

@@ -239,6 +239,16 @@ fn render_deep(cwd: &Path, db: &Database, identifier: &str) -> Result<String> {
         out.push_str("Managed:      no [unmanaged]\n");
     }
 
+    // Changed files
+    let wt_path = Path::new(&entry.path);
+    let changed = git::changed_files(wt_path).unwrap_or_default();
+    if !changed.is_empty() {
+        out.push_str("\nChanged files:\n");
+        for f in &changed {
+            out.push_str(&format!("  {} {}\n", f.status, f.path));
+        }
+    }
+
     Ok(out)
 }
 
@@ -312,6 +322,13 @@ struct DeepJson {
 }
 
 fn build_deep_json(entry: &StatusEntry, status: GitStatus) -> DeepJson {
+    let wt_path = Path::new(&entry.path);
+    let changed = git::changed_files(wt_path)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| format!("{} {}", f.status, f.path))
+        .collect();
+
     DeepJson {
         name: entry.name.clone(),
         branch: entry.branch.clone(),
@@ -322,7 +339,7 @@ fn build_deep_json(entry: &StatusEntry, status: GitStatus) -> DeepJson {
         dirty: status.dirty,
         status: format_dirty(status.dirty),
         managed: entry.managed,
-        changed_files: Vec::new(),
+        changed_files: changed,
         recent_commits: Vec::new(),
         hook_history: Vec::new(),
     }
@@ -464,6 +481,62 @@ mod tests {
         assert_eq!(wt["branch"], "feature/auth");
         assert_eq!(wt["managed"], true);
         assert!(wt["path"].is_string());
+    }
+
+    #[test]
+    fn deep_view_includes_changed_files() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+
+        // Create a worktree with a modified file
+        let wt_parent = tempfile::tempdir().unwrap();
+        let wt_path = wt_parent.path().join("test-changes");
+        let head = repo.head().unwrap().shorthand().unwrap().to_string();
+        let head_commit = repo
+            .find_branch(&head, git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
+        repo.branch("test-changes", &head_commit, false).unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        let branch_ref = repo
+            .find_branch("test-changes", git2::BranchType::Local)
+            .unwrap();
+        opts.reference(Some(branch_ref.get()));
+        repo.worktree("test-changes", &wt_path, Some(&opts))
+            .unwrap();
+
+        // Create a new file in the worktree
+        std::fs::write(wt_path.join("new-file.txt"), "hello").unwrap();
+
+        let db = Database::open_in_memory().unwrap();
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some(&head))
+            .unwrap();
+        let wt_canonical = wt_path.canonicalize().unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "test-changes",
+            "test-changes",
+            wt_canonical.to_str().unwrap(),
+            Some(&head),
+        )
+        .unwrap();
+
+        let output =
+            render_deep(repo_dir.path(), &db, "test-changes").expect("deep should succeed");
+
+        assert!(
+            output.contains("Changed files"),
+            "should have Changed files section, got:\n{output}"
+        );
+        assert!(
+            output.contains("new-file.txt"),
+            "should list the changed file, got:\n{output}"
+        );
     }
 
     #[test]
