@@ -17,6 +17,8 @@ struct StatusEntry {
     path: String,
     base_branch: Option<String>,
     managed: bool,
+    /// DB worktree ID (None for unmanaged worktrees).
+    db_id: Option<i64>,
 }
 
 /// Fetch all worktrees (managed + unmanaged) for the repo at `cwd`.
@@ -47,6 +49,7 @@ fn fetch_all_worktrees(cwd: &Path, db: &Database) -> Result<(PathBuf, Vec<Status
             path: wt.path.clone(),
             base_branch: wt.base_branch.clone(),
             managed: true,
+            db_id: Some(wt.id),
         });
     }
 
@@ -59,6 +62,7 @@ fn fetch_all_worktrees(cwd: &Path, db: &Database) -> Result<(PathBuf, Vec<Status
                 path: gw.path.to_string_lossy().into_owned(),
                 base_branch: None,
                 managed: false,
+                db_id: None,
             });
         }
     }
@@ -195,6 +199,7 @@ fn resolve_worktree(
                     path: wt.path,
                     base_branch: wt.base_branch,
                     managed: true,
+                    db_id: Some(wt.id),
                 },
             ));
         }
@@ -214,6 +219,7 @@ fn resolve_worktree(
                     path: gw.path.to_string_lossy().into_owned(),
                     base_branch: None,
                     managed: false,
+                    db_id: None,
                 },
             ));
         }
@@ -255,6 +261,17 @@ fn render_deep(cwd: &Path, db: &Database, identifier: &str) -> Result<String> {
         out.push_str("\nRecent commits:\n");
         for c in &commits {
             out.push_str(&format!("  {} {}\n", c.hash, c.message));
+        }
+    }
+
+    // Hook history
+    if let Some(wt_id) = entry.db_id {
+        let events = db.list_events(wt_id, 10).unwrap_or_default();
+        if !events.is_empty() {
+            out.push_str("\nHook history:\n");
+            for ev in &events {
+                out.push_str(&format!("  {}\n", ev.event_type));
+            }
         }
     }
 
@@ -330,7 +347,7 @@ struct DeepJson {
     hook_history: Vec<String>,
 }
 
-fn build_deep_json(entry: &StatusEntry, status: GitStatus) -> DeepJson {
+fn build_deep_json(entry: &StatusEntry, status: GitStatus, db: &Database) -> DeepJson {
     let wt_path = Path::new(&entry.path);
     let changed = git::changed_files(wt_path)
         .unwrap_or_default()
@@ -341,6 +358,13 @@ fn build_deep_json(entry: &StatusEntry, status: GitStatus) -> DeepJson {
         .unwrap_or_default()
         .into_iter()
         .map(|c| format!("{} {}", c.hash, c.message))
+        .collect();
+    let hook_history = entry
+        .db_id
+        .and_then(|id| db.list_events(id, 10).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|ev| ev.event_type)
         .collect();
 
     DeepJson {
@@ -355,7 +379,7 @@ fn build_deep_json(entry: &StatusEntry, status: GitStatus) -> DeepJson {
         managed: entry.managed,
         changed_files: changed,
         recent_commits: commits,
-        hook_history: Vec::new(),
+        hook_history,
     }
 }
 
@@ -364,7 +388,7 @@ pub fn execute_json(cwd: &Path, db: &Database, branch: Option<&str>) -> Result<S
         Some(id) => {
             let (repo_path, entry) = resolve_worktree(cwd, db, id)?;
             let status = compute_git_status(&repo_path, &entry);
-            let json_obj = build_deep_json(&entry, status);
+            let json_obj = build_deep_json(&entry, status, db);
             format_json_value(&json_obj)
         }
         None => {
@@ -626,6 +650,52 @@ mod tests {
         assert!(
             output.contains("add file.txt for testing"),
             "should show commit message, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn deep_view_includes_hook_history() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        let wt = db
+            .insert_worktree(
+                db_repo.id,
+                "feature-auth",
+                "feature/auth",
+                "/tmp/wt/feature-auth",
+                Some("main"),
+            )
+            .unwrap();
+
+        // Insert some events
+        let payload = serde_json::json!({"status": "success"});
+        db.insert_event(db_repo.id, Some(wt.id), "post_create", Some(&payload))
+            .unwrap();
+        db.insert_event(db_repo.id, Some(wt.id), "post_sync", None)
+            .unwrap();
+
+        let output =
+            render_deep(repo_dir.path(), &db, "feature-auth").expect("deep should succeed");
+
+        assert!(
+            output.contains("Hook history"),
+            "should have Hook history section, got:\n{output}"
+        );
+        assert!(
+            output.contains("post_create"),
+            "should show post_create event, got:\n{output}"
+        );
+        assert!(
+            output.contains("post_sync"),
+            "should show post_sync event, got:\n{output}"
         );
     }
 
