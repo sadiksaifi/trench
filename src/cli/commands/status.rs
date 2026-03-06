@@ -2,8 +2,11 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::git;
+use crate::output::json::{format_json, format_json_value};
+use crate::output::porcelain::{format_porcelain, PorcelainRecord};
 use crate::output::table::Table;
 use crate::state::{Database, Worktree};
 
@@ -250,12 +253,123 @@ pub fn execute(cwd: &Path, db: &Database, branch: Option<&str>) -> Result<String
     }
 }
 
-pub fn execute_json(_cwd: &Path, _db: &Database, _branch: Option<&str>) -> Result<String> {
-    todo!()
+/// JSON output for summary mode.
+#[derive(Serialize)]
+struct SummaryJson {
+    name: String,
+    branch: String,
+    path: String,
+    status: String,
+    ahead: Option<usize>,
+    behind: Option<usize>,
+    dirty: usize,
+    managed: bool,
 }
 
-pub fn execute_porcelain(_cwd: &Path, _db: &Database, _branch: Option<&str>) -> Result<String> {
-    todo!()
+impl PorcelainRecord for SummaryJson {
+    fn porcelain_fields(&self) -> Vec<String> {
+        vec![
+            self.name.clone(),
+            self.branch.clone(),
+            self.path.clone(),
+            self.status.clone(),
+            self.ahead.map_or("-".to_string(), |v| v.to_string()),
+            self.behind.map_or("-".to_string(), |v| v.to_string()),
+            self.dirty.to_string(),
+            self.managed.to_string(),
+        ]
+    }
+}
+
+fn build_summary_json(entry: &StatusEntry, status: GitStatus) -> SummaryJson {
+    SummaryJson {
+        name: entry.name.clone(),
+        branch: entry.branch.clone(),
+        path: entry.path.clone(),
+        status: format_dirty(status.dirty),
+        ahead: status.ahead,
+        behind: status.behind,
+        dirty: status.dirty,
+        managed: entry.managed,
+    }
+}
+
+/// JSON output for deep mode.
+#[derive(Serialize)]
+struct DeepJson {
+    name: String,
+    branch: String,
+    path: String,
+    base_branch: Option<String>,
+    ahead: Option<usize>,
+    behind: Option<usize>,
+    dirty: usize,
+    status: String,
+    managed: bool,
+    changed_files: Vec<String>,
+    recent_commits: Vec<String>,
+    hook_history: Vec<String>,
+}
+
+fn build_deep_json(entry: &StatusEntry, status: GitStatus) -> DeepJson {
+    DeepJson {
+        name: entry.name.clone(),
+        branch: entry.branch.clone(),
+        path: entry.path.clone(),
+        base_branch: entry.base_branch.clone(),
+        ahead: status.ahead,
+        behind: status.behind,
+        dirty: status.dirty,
+        status: format_dirty(status.dirty),
+        managed: entry.managed,
+        changed_files: Vec::new(),
+        recent_commits: Vec::new(),
+        hook_history: Vec::new(),
+    }
+}
+
+pub fn execute_json(cwd: &Path, db: &Database, branch: Option<&str>) -> Result<String> {
+    match branch {
+        Some(id) => {
+            let (repo_path, entry) = resolve_worktree(cwd, db, id)?;
+            let status = compute_git_status(&repo_path, &entry);
+            let json_obj = build_deep_json(&entry, status);
+            format_json_value(&json_obj)
+        }
+        None => {
+            let (repo_path, entries) = fetch_all_worktrees(cwd, db)?;
+            let items: Vec<SummaryJson> = entries
+                .iter()
+                .map(|e| {
+                    let status = compute_git_status(&repo_path, e);
+                    build_summary_json(e, status)
+                })
+                .collect();
+            format_json(&items)
+        }
+    }
+}
+
+pub fn execute_porcelain(cwd: &Path, db: &Database, branch: Option<&str>) -> Result<String> {
+    match branch {
+        Some(id) => {
+            let (repo_path, entry) = resolve_worktree(cwd, db, id)?;
+            let status = compute_git_status(&repo_path, &entry);
+            let item = build_summary_json(&entry, status);
+            Ok(format_porcelain(&[item]))
+        }
+        None => {
+            let (repo_path, entries) = fetch_all_worktrees(cwd, db)?;
+            let items: Vec<SummaryJson> = entries
+                .iter()
+                .map(|e| {
+                    let status = compute_git_status(&repo_path, e);
+                    build_summary_json(e, status)
+                })
+                .collect();
+            Ok(format_porcelain(&items))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -311,6 +425,80 @@ mod tests {
         assert!(output.contains("Branch"), "should have Branch header");
         assert!(output.contains("feature-auth"), "should show first worktree");
         assert!(output.contains("fix-bug"), "should show second worktree");
+    }
+
+    #[test]
+    fn summary_json_returns_array_of_worktrees() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        db.insert_worktree(
+            db_repo.id,
+            "feature-auth",
+            "feature/auth",
+            "/tmp/wt/feature-auth",
+            Some("main"),
+        )
+        .unwrap();
+
+        let output =
+            execute_json(repo_dir.path(), &db, None).expect("summary json should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let arr = parsed.as_array().expect("should be array");
+
+        // At least the managed worktree + main worktree
+        assert!(arr.len() >= 2, "should have at least 2 entries, got {}", arr.len());
+
+        // Find the managed worktree
+        let wt = arr
+            .iter()
+            .find(|v| v["name"] == "feature-auth")
+            .expect("should contain feature-auth");
+        assert_eq!(wt["branch"], "feature/auth");
+        assert_eq!(wt["managed"], true);
+        assert!(wt["path"].is_string());
+    }
+
+    #[test]
+    fn deep_json_returns_single_object() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        db.insert_worktree(
+            db_repo.id,
+            "feature-auth",
+            "feature/auth",
+            "/tmp/wt/feature-auth",
+            Some("main"),
+        )
+        .unwrap();
+
+        let output = execute_json(repo_dir.path(), &db, Some("feature-auth"))
+            .expect("deep json should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert!(parsed.is_object(), "should be a single JSON object");
+        assert_eq!(parsed["name"], "feature-auth");
+        assert_eq!(parsed["branch"], "feature/auth");
+        assert_eq!(parsed["base_branch"], "main");
+        assert_eq!(parsed["managed"], true);
+        assert!(parsed["changed_files"].is_array());
+        assert!(parsed["recent_commits"].is_array());
+        assert!(parsed["hook_history"].is_array());
     }
 
     #[test]
