@@ -616,6 +616,27 @@ mod tests {
     }
 
     #[test]
+    fn status_subcommand_accepts_optional_branch() {
+        // No branch → summary mode
+        let cli = Cli::try_parse_from(["trench", "status"])
+            .expect("status without branch should succeed");
+        match cli.command {
+            Some(Commands::Status { branch }) => assert!(branch.is_none()),
+            _ => panic!("expected Commands::Status"),
+        }
+
+        // With branch → deep mode
+        let cli = Cli::try_parse_from(["trench", "status", "my-feature"])
+            .expect("status with branch should succeed");
+        match cli.command {
+            Some(Commands::Status { branch }) => {
+                assert_eq!(branch.as_deref(), Some("my-feature"));
+            }
+            _ => panic!("expected Commands::Status"),
+        }
+    }
+
+    #[test]
     fn create_subcommand_requires_branch() {
         let result = Cli::try_parse_from(["trench", "create"]);
         assert!(result.is_err(), "create without branch should fail");
