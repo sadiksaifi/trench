@@ -124,6 +124,7 @@ fn render_summary_table(
     cwd: &Path,
     db: &Database,
     max_width: Option<usize>,
+    use_color: bool,
 ) -> Result<String> {
     let (repo_path, entries) = fetch_all_worktrees(cwd, db)?;
 
@@ -162,7 +163,7 @@ fn render_summary_table(
         out.push('\n');
     }
     for (i, line) in lines.iter().skip(1).enumerate() {
-        if i < unmanaged_rows.len() && unmanaged_rows[i] {
+        if use_color && i < unmanaged_rows.len() && unmanaged_rows[i] {
             out.push_str("\x1b[2m");
             out.push_str(line);
             out.push_str("\x1b[0m");
@@ -278,13 +279,14 @@ fn render_deep(cwd: &Path, db: &Database, identifier: &str) -> Result<String> {
     Ok(out)
 }
 
-pub fn execute(cwd: &Path, db: &Database, branch: Option<&str>) -> Result<String> {
+pub fn execute(cwd: &Path, db: &Database, branch: Option<&str>, use_color: bool) -> Result<String> {
     match branch {
         Some(id) => render_deep(cwd, db, id),
         None => render_summary_table(
             cwd,
             db,
             crossterm::terminal::size().ok().map(|(c, _)| c as usize),
+            use_color,
         ),
     }
 }
@@ -474,12 +476,28 @@ mod tests {
         .unwrap();
 
         let output =
-            render_summary_table(repo_dir.path(), &db, None).expect("summary should succeed");
+            render_summary_table(repo_dir.path(), &db, None, false).expect("summary should succeed");
 
         assert!(output.contains("Name"), "should have Name header");
         assert!(output.contains("Branch"), "should have Branch header");
         assert!(output.contains("feature-auth"), "should show first worktree");
         assert!(output.contains("fix-bug"), "should show second worktree");
+    }
+
+    #[test]
+    fn summary_table_no_ansi_when_color_disabled() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        // The main worktree is unmanaged (no DB entry), so it will be dimmed
+        // only when color is enabled.
+        let output =
+            render_summary_table(repo_dir.path(), &db, None, false).expect("should succeed");
+        assert!(
+            !output.contains("\x1b"),
+            "should not contain ANSI escape codes when color is disabled, got:\n{output}"
+        );
     }
 
     #[test]

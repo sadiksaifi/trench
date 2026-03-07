@@ -166,7 +166,7 @@ impl Cli {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let _output_config = cli.output_config();
+    let output_config = cli.output_config();
 
     if cli.should_launch_tui(
         std::io::stdin().is_terminal(),
@@ -188,7 +188,9 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
-        Some(Commands::Status { branch }) => run_status(branch.as_deref(), json, porcelain),
+        Some(Commands::Status { branch }) => {
+            run_status(branch.as_deref(), json, porcelain, output_config.should_color())
+        }
         Some(Commands::Init { force }) => run_init(force),
         Some(Commands::ShellInit { shell }) => {
             print!("{}", cli::commands::shell_init::generate(shell));
@@ -444,7 +446,12 @@ fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()
     Ok(())
 }
 
-fn run_status(branch: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()> {
+fn run_status(
+    branch: Option<&str>,
+    json: bool,
+    porcelain: bool,
+    use_color: bool,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
@@ -454,7 +461,7 @@ fn run_status(branch: Option<&str>, json: bool, porcelain: bool) -> anyhow::Resu
     } else if porcelain {
         cli::commands::status::execute_porcelain(&cwd, &db, branch)
     } else {
-        cli::commands::status::execute(&cwd, &db, branch)
+        cli::commands::status::execute(&cwd, &db, branch, use_color)
     };
 
     match result {
