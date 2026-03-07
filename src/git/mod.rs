@@ -110,7 +110,8 @@ pub fn recent_commits(worktree_path: &Path, limit: usize) -> Result<Vec<CommitIn
         }
         let rev_oid = rev_oid?;
         let commit = repo.find_commit(rev_oid)?;
-        let short_hash = &rev_oid.to_string()[..7];
+        let oid_str = rev_oid.to_string();
+        let short_hash = &oid_str[..oid_str.len().min(7)];
         let message = commit
             .summary()
             .unwrap_or("(no message)")
