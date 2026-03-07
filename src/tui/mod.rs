@@ -134,6 +134,8 @@ impl App {
             KeyCode::Char('n') => self.push_screen(Screen::Create),
             KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
+            KeyCode::Char('s') => {} // TODO: trigger sync
+            KeyCode::Char('D') => {} // TODO: trigger delete with confirmation
             _ => {}
         }
     }
@@ -398,6 +400,24 @@ mod tests {
         app.list_state.selected = 1;
         app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(app.list_state.selected, 0);
+    }
+
+    #[test]
+    fn s_on_list_is_handled() {
+        let mut app = app_with_rows();
+        // s should not crash and should not quit or push a screen
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(app.is_running());
+        assert_eq!(app.active_screen(), Screen::List);
+    }
+
+    #[test]
+    fn shift_d_on_list_is_handled() {
+        let mut app = app_with_rows();
+        // D (shift+d) should not crash and should not quit or push a screen
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        assert!(app.is_running());
+        assert_eq!(app.active_screen(), Screen::List);
     }
 
     #[test]
