@@ -62,6 +62,7 @@ fn restore_panic_hook() {
 pub struct App {
     running: bool,
     nav_stack: Vec<Screen>,
+    pub list_state: screens::list::ListState,
 }
 
 impl App {
@@ -69,6 +70,7 @@ impl App {
         Self {
             running: true,
             nav_stack: vec![Screen::List],
+            list_state: screens::list::ListState::new(vec![]),
         }
     }
 
@@ -127,6 +129,8 @@ impl App {
         match key.code {
             KeyCode::Enter => self.push_screen(Screen::Detail),
             KeyCode::Char('n') => self.push_screen(Screen::Create),
+            KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
             _ => {}
         }
     }
@@ -331,6 +335,66 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Help);
         assert_eq!(app.nav_stack_depth(), 3);
+    }
+
+    fn app_with_rows() -> App {
+        use screens::list::WorktreeRow;
+        let mut app = App::new();
+        app.list_state = screens::list::ListState::new(vec![
+            WorktreeRow {
+                name: "feat-a".into(),
+                branch: "feat/a".into(),
+                status: "clean".into(),
+                ahead_behind: "+0/-0".into(),
+                managed: true,
+            },
+            WorktreeRow {
+                name: "feat-b".into(),
+                branch: "feat/b".into(),
+                status: "~2".into(),
+                ahead_behind: "+1/-0".into(),
+                managed: true,
+            },
+            WorktreeRow {
+                name: "main".into(),
+                branch: "main".into(),
+                status: "clean".into(),
+                ahead_behind: "-".into(),
+                managed: false,
+            },
+        ]);
+        app
+    }
+
+    #[test]
+    fn j_key_moves_selection_down() {
+        let mut app = app_with_rows();
+        assert_eq!(app.list_state.selected, 0);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.list_state.selected, 1);
+    }
+
+    #[test]
+    fn k_key_moves_selection_up() {
+        let mut app = app_with_rows();
+        app.list_state.selected = 2;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.list_state.selected, 1);
+    }
+
+    #[test]
+    fn arrow_down_moves_selection_down() {
+        let mut app = app_with_rows();
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.list_state.selected, 1);
+    }
+
+    #[test]
+    fn arrow_up_moves_selection_up() {
+        let mut app = app_with_rows();
+        app.list_state.selected = 1;
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.list_state.selected, 0);
     }
 
     #[test]
