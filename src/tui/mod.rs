@@ -6,6 +6,9 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{layout::Alignment, widgets::Paragraph, Frame};
 
+use crate::paths;
+use crate::state::Database;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     List,
@@ -24,6 +27,9 @@ pub fn run() -> Result<()> {
     install_panic_hook();
     let mut terminal = ratatui::init();
     let mut app = App::new();
+
+    // Load worktree data before entering the event loop
+    app.refresh_list();
 
     let result = (|| -> Result<()> {
         while app.is_running() {
@@ -104,8 +110,34 @@ impl App {
     pub fn pop_screen(&mut self) {
         if self.nav_stack.len() > 1 {
             self.nav_stack.pop();
+            if self.active_screen() == Screen::List {
+                self.refresh_list();
+            }
         } else {
             self.running = false;
+        }
+    }
+
+    /// Reload worktree data from git + DB for the list screen.
+    pub fn refresh_list(&mut self) {
+        let cwd = match std::env::current_dir() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let db_path = match paths::data_dir() {
+            Ok(p) => p.join("trench.db"),
+            Err(_) => return,
+        };
+        let db = match Database::open(&db_path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        if let Ok(rows) = screens::list::load_worktrees(&cwd, &db) {
+            let prev_selected = self.list_state.selected;
+            self.list_state = screens::list::ListState::new(rows);
+            if self.list_state.rows.len() > prev_selected {
+                self.list_state.selected = prev_selected;
+            }
         }
     }
 

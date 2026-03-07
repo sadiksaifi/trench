@@ -1,7 +1,15 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+
+use crate::git;
+use crate::state::Database;
+
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
-    text::{Line, Span},
+    text::Line,
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
     Frame,
 };
@@ -36,6 +44,82 @@ impl ListState {
     pub fn select_previous(&mut self) {
         self.selected = self.selected.saturating_sub(1);
     }
+}
+
+/// Load worktree data from the database and git, returning rows for the list view.
+pub fn load_worktrees(cwd: &Path, db: &Database) -> Result<Vec<WorktreeRow>> {
+    let repo_info = git::discover_repo(cwd)?;
+    let repo_path = &repo_info.path;
+    let repo_path_str = repo_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
+
+    let repo = db.get_repo_by_path(repo_path_str)?;
+    let db_worktrees = match repo {
+        Some(ref r) => db.list_worktrees(r.id)?,
+        None => Vec::new(),
+    };
+
+    let managed_paths: HashSet<PathBuf> = db_worktrees
+        .iter()
+        .filter_map(|wt| Path::new(&wt.path).canonicalize().ok())
+        .collect();
+
+    let mut rows = Vec::new();
+
+    for wt in &db_worktrees {
+        let status = compute_status(repo_path, &wt.branch, wt.base_branch.as_deref(), &wt.path);
+        rows.push(WorktreeRow {
+            name: wt.name.clone(),
+            branch: wt.branch.clone(),
+            status: status.0,
+            ahead_behind: status.1,
+            managed: true,
+        });
+    }
+
+    let git_worktrees = git::list_worktrees(repo_path)?;
+    for gw in git_worktrees {
+        if !managed_paths.contains(&gw.path) {
+            let branch = gw.branch.clone().unwrap_or_else(|| "(detached)".to_string());
+            let status = compute_status(
+                repo_path,
+                &branch,
+                None,
+                &gw.path.to_string_lossy(),
+            );
+            rows.push(WorktreeRow {
+                name: gw.name.clone(),
+                branch,
+                status: status.0,
+                ahead_behind: status.1,
+                managed: false,
+            });
+        }
+    }
+
+    Ok(rows)
+}
+
+fn compute_status(
+    repo_path: &Path,
+    branch: &str,
+    base_branch: Option<&str>,
+    wt_path: &str,
+) -> (String, String) {
+    let dirty = git::dirty_count(Path::new(wt_path)).unwrap_or(0);
+    let status = if dirty == 0 {
+        "clean".to_string()
+    } else {
+        format!("~{dirty}")
+    };
+
+    let ab = match git::ahead_behind(repo_path, branch, base_branch) {
+        Ok(Some((a, b))) => format!("+{a}/-{b}"),
+        _ => "-".to_string(),
+    };
+
+    (status, ab)
 }
 
 const FOOTER_KEYS: &str = " n create  s sync  D delete  Enter detail  q quit ";
@@ -91,7 +175,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect) {
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::NONE))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
     let mut table_state = TableState::default();
     table_state.select(Some(state.selected));
