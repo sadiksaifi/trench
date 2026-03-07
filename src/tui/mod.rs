@@ -91,11 +91,14 @@ impl App {
     }
 
     pub fn ui(&self, frame: &mut Frame) {
-        // Intentional for early navigation UAT: every screen renders the same placeholder.
-        // Only the navigation stack/state changes (verified via key handling + tests).
-        let placeholder = Paragraph::new("trench TUI — press q to quit")
-            .alignment(Alignment::Center);
-        frame.render_widget(placeholder, frame.area());
+        match self.active_screen() {
+            Screen::List => screens::list::render(&self.list_state, frame, frame.area()),
+            _ => {
+                let placeholder = Paragraph::new("trench TUI — press q to quit")
+                    .alignment(Alignment::Center);
+                frame.render_widget(placeholder, frame.area());
+            }
+        }
     }
 
     pub fn pop_screen(&mut self) {
@@ -435,13 +438,31 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_ui_renders_trench_tui() {
+    fn list_screen_renders_empty_state_by_default() {
         let app = App::new();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| app.ui(frame))
-            .unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            content.contains("No worktrees"),
+            "empty list should show 'No worktrees' message, got: {:?}",
+            content.trim()
+        );
+    }
+
+    #[test]
+    fn non_list_screen_renders_placeholder() {
+        let mut app = App::new();
+        app.push_screen(Screen::Help);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let content: String = buffer
             .content()
@@ -450,7 +471,7 @@ mod tests {
             .collect();
         assert!(
             content.contains("trench TUI"),
-            "placeholder screen should contain 'trench TUI', got: {:?}",
+            "non-list screens should show placeholder, got: {:?}",
             content.trim()
         );
     }
