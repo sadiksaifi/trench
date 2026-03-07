@@ -99,7 +99,11 @@ enum Commands {
         tag: Option<String>,
     },
     /// Show worktree status
-    Status,
+    Status {
+        /// Branch name or sanitized name for deep status view.
+        /// Omit for summary of all worktrees.
+        branch: Option<String>,
+    },
     /// Sync worktree with base branch
     Sync,
     /// View event log
@@ -162,7 +166,7 @@ impl Cli {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let _output_config = cli.output_config();
+    let output_config = cli.output_config();
 
     if cli.should_launch_tui(
         std::io::stdin().is_terminal(),
@@ -184,6 +188,9 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
+        Some(Commands::Status { branch }) => {
+            run_status(branch.as_deref(), json, porcelain, output_config.should_color())
+        }
         Some(Commands::Init { force }) => run_init(force),
         Some(Commands::ShellInit { shell }) => {
             print!("{}", cli::commands::shell_init::generate(shell));
@@ -439,6 +446,44 @@ fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()
     Ok(())
 }
 
+fn run_status(
+    branch: Option<&str>,
+    json: bool,
+    porcelain: bool,
+    use_color: bool,
+) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    let result = if json {
+        cli::commands::status::execute_json(&cwd, &db, branch)
+    } else if porcelain {
+        cli::commands::status::execute_porcelain(&cwd, &db, branch)
+    } else {
+        cli::commands::status::execute(&cwd, &db, branch, use_color)
+    };
+
+    match result {
+        Ok(output) => {
+            if output.ends_with('\n') {
+                print!("{output}");
+            } else {
+                println!("{output}");
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+            Err(e)
+        }
+    }
+}
+
 fn run_init(force: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let repo_info = git::discover_repo(&cwd)?;
@@ -574,6 +619,27 @@ mod tests {
                 assert_eq!(branch, "my-feature");
             }
             _ => panic!("expected Commands::Open"),
+        }
+    }
+
+    #[test]
+    fn status_subcommand_accepts_optional_branch() {
+        // No branch → summary mode
+        let cli = Cli::try_parse_from(["trench", "status"])
+            .expect("status without branch should succeed");
+        match cli.command {
+            Some(Commands::Status { branch }) => assert!(branch.is_none()),
+            _ => panic!("expected Commands::Status"),
+        }
+
+        // With branch → deep mode
+        let cli = Cli::try_parse_from(["trench", "status", "my-feature"])
+            .expect("status with branch should succeed");
+        match cli.command {
+            Some(Commands::Status { branch }) => {
+                assert_eq!(branch.as_deref(), Some("my-feature"));
+            }
+            _ => panic!("expected Commands::Status"),
         }
     }
 

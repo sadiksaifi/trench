@@ -60,6 +60,15 @@ pub struct WorktreeUpdate {
     pub removed_at: Option<Option<i64>>,
 }
 
+/// An event record from the events table.
+#[derive(Debug, Clone)]
+pub struct Event {
+    pub id: i64,
+    pub event_type: String,
+    pub payload: Option<String>,
+    pub created_at: i64,
+}
+
 /// Core database handle wrapping a SQLite connection with migrations applied.
 #[derive(Debug)]
 pub struct Database {

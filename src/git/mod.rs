@@ -27,6 +27,104 @@ pub fn dirty_count(worktree_path: &Path) -> Result<usize, GitError> {
     Ok(statuses.len())
 }
 
+/// A file with changed status in a worktree.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChangedFile {
+    pub path: String,
+    pub status: &'static str,
+}
+
+/// List changed files in a worktree with their status labels.
+///
+/// Returns files that are modified, staged, new, deleted, renamed, or
+/// typechanged. Each entry includes the file path and a human-readable
+/// status string.
+pub fn changed_files(worktree_path: &Path) -> Result<Vec<ChangedFile>, GitError> {
+    let repo = git2::Repository::open(worktree_path)
+        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+
+    let statuses = repo.statuses(Some(
+        git2::StatusOptions::new()
+            .include_untracked(true)
+            .recurse_untracked_dirs(true),
+    ))?;
+
+    let mut files = Vec::with_capacity(statuses.len());
+    for entry in statuses.iter() {
+        let path = entry.path().unwrap_or("(unknown)").to_string();
+        let s = entry.status();
+        let label = if s.is_index_new() || s.is_wt_new() {
+            "new"
+        } else if s.is_index_deleted() || s.is_wt_deleted() {
+            "deleted"
+        } else if s.is_index_renamed() || s.is_wt_renamed() {
+            "renamed"
+        } else if s.is_index_modified() || s.is_wt_modified() {
+            "modified"
+        } else if s.is_index_typechange() || s.is_wt_typechange() {
+            "typechange"
+        } else {
+            "unknown"
+        };
+        files.push(ChangedFile {
+            path,
+            status: label,
+        });
+    }
+
+    Ok(files)
+}
+
+/// A recent commit entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommitInfo {
+    pub hash: String,
+    pub message: String,
+}
+
+/// List recent commits on a branch, most recent first.
+///
+/// Opens the repository at `worktree_path` and walks HEAD to collect
+/// up to `limit` commits.
+pub fn recent_commits(worktree_path: &Path, limit: usize) -> Result<Vec<CommitInfo>, GitError> {
+    let repo = git2::Repository::open(worktree_path)
+        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+
+    let head = match repo.head() {
+        Ok(h) => h,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let oid = match head.target() {
+        Some(oid) => oid,
+        None => return Ok(Vec::new()),
+    };
+
+    let mut revwalk = repo.revwalk()?;
+    revwalk.push(oid)?;
+    revwalk.set_sorting(git2::Sort::TIME)?;
+
+    let mut commits = Vec::new();
+    for (i, rev_oid) in revwalk.enumerate() {
+        if i >= limit {
+            break;
+        }
+        let rev_oid = rev_oid?;
+        let commit = repo.find_commit(rev_oid)?;
+        let oid_str = rev_oid.to_string();
+        let short_hash = &oid_str[..oid_str.len().min(7)];
+        let message = commit
+            .summary()
+            .unwrap_or("(no message)")
+            .to_string();
+        commits.push(CommitInfo {
+            hash: short_hash.to_string(),
+            message,
+        });
+    }
+
+    Ok(commits)
+}
+
 /// Calculate commits ahead/behind for a branch relative to its upstream.
 ///
 /// Checks for an upstream tracking branch first, then falls back to
