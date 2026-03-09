@@ -749,6 +749,34 @@ mod tests {
     }
 
     #[test]
+    fn adopt_worktree_sets_adopted_at_and_managed() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", Some("main")).unwrap();
+
+        let wt = db
+            .adopt_worktree(repo.id, "ext-wt", "ext-branch", "/ext/wt", None)
+            .expect("adopt_worktree should succeed");
+
+        assert!(wt.managed, "adopted worktree should be managed");
+        assert!(
+            wt.adopted_at.is_some(),
+            "adopted_at should be set on adoption"
+        );
+        assert!(
+            wt.adopted_at.unwrap() > 0,
+            "adopted_at should be a positive timestamp"
+        );
+        assert_eq!(wt.name, "ext-wt");
+        assert_eq!(wt.branch, "ext-branch");
+        assert_eq!(wt.path, "/ext/wt");
+
+        // Verify round-trip from DB
+        let fetched = db.get_worktree(wt.id).unwrap().unwrap();
+        assert_eq!(fetched.adopted_at, wt.adopted_at);
+        assert!(fetched.managed);
+    }
+
+    #[test]
     fn get_repo_by_path_returns_existing_repo() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("my-project", "/home/user/my-project", Some("main")).unwrap();

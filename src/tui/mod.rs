@@ -51,7 +51,10 @@ pub fn run() -> Result<()> {
 
 fn install_panic_hook() {
     let original: Arc<PanicHook> = Arc::from(std::panic::take_hook());
-    PREV_PANIC_HOOK.lock().unwrap().replace(Arc::clone(&original));
+    PREV_PANIC_HOOK
+        .lock()
+        .unwrap()
+        .replace(Arc::clone(&original));
     std::panic::set_hook(Box::new(move |info| {
         ratatui::restore();
         original(info);
@@ -85,7 +88,10 @@ impl App {
     }
 
     pub fn active_screen(&self) -> Screen {
-        *self.nav_stack.last().expect("nav stack must never be empty")
+        *self
+            .nav_stack
+            .last()
+            .expect("nav stack must never be empty")
     }
 
     pub fn nav_stack_depth(&self) -> usize {
@@ -100,8 +106,8 @@ impl App {
         match self.active_screen() {
             Screen::List => screens::list::render(&self.list_state, frame, frame.area()),
             _ => {
-                let placeholder = Paragraph::new("trench TUI — press q to quit")
-                    .alignment(Alignment::Center);
+                let placeholder =
+                    Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
                 frame.render_widget(placeholder, frame.area());
             }
         }
@@ -160,9 +166,54 @@ impl App {
         }
     }
 
+    /// If the selected worktree is unmanaged, silently adopt it into the DB.
+    fn adopt_selected_if_unmanaged(&mut self) {
+        let row = match self.list_state.rows.get(self.list_state.selected) {
+            Some(r) if !r.managed => r,
+            _ => return,
+        };
+        let identifier = if row.branch == "(detached)" {
+            row.name.clone()
+        } else {
+            row.branch.clone()
+        };
+
+        let cwd = match std::env::current_dir() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let db_path = match paths::data_dir() {
+            Ok(p) => p.join("trench.db"),
+            Err(_) => return,
+        };
+        let db = match Database::open(&db_path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let repo_info = match crate::git::discover_repo(&cwd) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let _ = crate::adopt::resolve_or_adopt(&identifier, &repo_info, &db);
+        self.refresh_list();
+    }
+
     fn handle_list_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter => self.push_screen(Screen::Detail),
+            KeyCode::Enter => {
+                let identity = self
+                    .list_state
+                    .rows
+                    .get(self.list_state.selected)
+                    .map(|r| r.name.clone());
+                self.adopt_selected_if_unmanaged();
+                if let Some(name) = identity {
+                    if let Some(idx) = self.list_state.rows.iter().position(|r| r.name == name) {
+                        self.list_state.selected = idx;
+                    }
+                }
+                self.push_screen(Screen::Detail);
+            }
             KeyCode::Char('n') => self.push_screen(Screen::Create),
             KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
@@ -240,7 +291,10 @@ mod tests {
             "Esc should pop back to List"
         );
         assert_eq!(app.nav_stack_depth(), 1);
-        assert!(app.is_running(), "app should still be running after popping");
+        assert!(
+            app.is_running(),
+            "app should still be running after popping"
+        );
     }
 
     #[test]
@@ -275,10 +329,7 @@ mod tests {
             Screen::List,
             "q on non-root should pop back to List"
         );
-        assert!(
-            app.is_running(),
-            "q on non-root should not quit the app"
-        );
+        assert!(app.is_running(), "q on non-root should not quit the app");
     }
 
     #[test]
@@ -496,11 +547,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.ui(frame)).unwrap();
         let buffer = terminal.backend().buffer().clone();
-        let content: String = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
         assert!(
             content.contains("No worktrees"),
             "empty list should show 'No worktrees' message, got: {:?}",
@@ -516,11 +563,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.ui(frame)).unwrap();
         let buffer = terminal.backend().buffer().clone();
-        let content: String = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
         assert!(
             content.contains("trench TUI"),
             "non-list screens should show placeholder, got: {:?}",

@@ -79,6 +79,44 @@ impl Database {
         Ok(repo)
     }
 
+    /// Adopt an externally-created worktree by inserting it with `adopted_at` set.
+    ///
+    /// Like `insert_worktree`, but marks the worktree as adopted (sets
+    /// `adopted_at` to the current timestamp). Used for lazy adoption of
+    /// unmanaged worktrees on first interaction.
+    pub fn adopt_worktree(
+        &self,
+        repo_id: i64,
+        name: &str,
+        branch: &str,
+        path: &str,
+        base_branch: Option<&str>,
+    ) -> Result<Worktree> {
+        let created_at = now();
+        self.conn
+            .execute(
+                "INSERT INTO worktrees (repo_id, name, branch, path, base_branch, managed, adopted_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
+                rusqlite::params![repo_id, name, branch, path, base_branch, created_at],
+            )
+            .context("failed to adopt worktree")?;
+
+        let id = self.conn.last_insert_rowid();
+        Ok(Worktree {
+            id,
+            repo_id,
+            name: name.to_string(),
+            branch: branch.to_string(),
+            path: path.to_string(),
+            base_branch: base_branch.map(String::from),
+            managed: true,
+            adopted_at: Some(created_at),
+            last_accessed: None,
+            removed_at: None,
+            created_at,
+        })
+    }
+
     /// Insert a new worktree and return the populated struct.
     pub fn insert_worktree(
         &self,

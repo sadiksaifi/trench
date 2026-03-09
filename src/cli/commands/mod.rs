@@ -7,4 +7,5 @@ pub mod remove;
 pub mod shell_init;
 pub mod status;
 pub mod switch;
+pub mod sync;
 pub mod tag;
