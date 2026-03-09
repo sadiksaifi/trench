@@ -228,7 +228,7 @@ pub fn sync_rebase(
         None,
     )?;
 
-    let sig = git2::Signature::now("trench", "trench@localhost")?;
+    let sig = repo.signature()?;
 
     let mut last_commit_oid = None;
     while let Some(op) = rebase.next() {
@@ -300,7 +300,7 @@ pub fn sync_merge(
     }
 
     // Create merge commit
-    let sig = git2::Signature::now("trench", "trench@localhost")?;
+    let sig = repo.signature()?;
     let tree_oid = repo.index()?.write_tree()?;
     let tree = repo.find_tree(tree_oid)?;
     let head_commit = repo.head()?.peel_to_commit()?;

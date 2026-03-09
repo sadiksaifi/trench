@@ -138,6 +138,9 @@ mod tests {
     fn init_repo_with_commit(dir: &Path) -> git2::Repository {
         let repo = git2::Repository::init(dir).expect("failed to init repo");
         {
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "Test").unwrap();
+            config.set_str("user.email", "test@test.com").unwrap();
             let sig = git2::Signature::now("Test", "test@test.com").unwrap();
             let tree_id = repo.index().unwrap().write_tree().unwrap();
             let tree = repo.find_tree(tree_id).unwrap();
@@ -748,6 +751,34 @@ mod tests {
         assert_eq!(
             result.after_behind, 0,
             "should be 0 behind after rebase onto discovered default branch"
+        );
+    }
+
+    #[test]
+    fn sync_rebase_uses_repo_configured_identity() {
+        let (_git_repo, wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+
+        // Set custom user identity in repo config
+        let main_repo = git2::Repository::open(repo_dir.path()).unwrap();
+        let mut config = main_repo.config().unwrap();
+        config.set_str("user.name", "Custom User").unwrap();
+        config.set_str("user.email", "custom@example.com").unwrap();
+
+        let _result = execute("feature", repo_dir.path(), &db, Strategy::Rebase)
+            .expect("rebase sync should succeed");
+
+        // The HEAD commit in the worktree should use the repo-configured identity
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        let head = wt_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.committer().name().unwrap(),
+            "Custom User",
+            "committer name should match repo config"
+        );
+        assert_eq!(
+            head.committer().email().unwrap(),
+            "custom@example.com",
+            "committer email should match repo config"
         );
     }
 }
