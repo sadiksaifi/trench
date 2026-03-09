@@ -411,6 +411,57 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeEntry>, GitErro
     Ok(entries)
 }
 
+/// Scan additional directory paths for git worktrees (FR-30).
+///
+/// Each path in `scan_paths` is treated as a directory that may contain
+/// subdirectories that are git worktrees. Non-existent or unreadable paths
+/// are silently skipped with a warning to stderr.
+pub fn scan_directories(scan_paths: &[String]) -> Vec<GitWorktreeEntry> {
+    let mut entries = Vec::new();
+
+    for scan_path in scan_paths {
+        let dir = Path::new(scan_path);
+        if !dir.exists() {
+            eprintln!("warning: scan path does not exist: {scan_path}");
+            continue;
+        }
+        let read_dir = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                eprintln!("warning: cannot read scan path {scan_path}: {e}");
+                continue;
+            }
+        };
+
+        for entry in read_dir.flatten() {
+            let child = entry.path();
+            if !child.is_dir() {
+                continue;
+            }
+            // Try to open as a git repository
+            if let Ok(repo) = git2::Repository::open(&child) {
+                let canonical = child.canonicalize().unwrap_or_else(|_| child.clone());
+                let branch = repo
+                    .head()
+                    .ok()
+                    .and_then(|r| r.shorthand().map(String::from));
+                let name = canonical
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "unknown".to_string());
+                entries.push(GitWorktreeEntry {
+                    name,
+                    path: canonical,
+                    branch,
+                    is_main: false,
+                });
+            }
+        }
+    }
+
+    entries
+}
+
 /// Remove a git worktree at the given path.
 ///
 /// Removes the worktree directory from disk, then prunes stale worktree
@@ -1284,5 +1335,37 @@ mod tests {
             !target.exists(),
             "worktree directory should NOT be created"
         );
+    }
+
+    #[test]
+    fn scan_directories_discovers_worktree_in_scan_path() {
+        // Create a main repo with a commit
+        let main_repo_dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(main_repo_dir.path()).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a worktree in a "scan" directory (outside default location)
+        let scan_dir = tempfile::tempdir().unwrap();
+        let wt_path = scan_dir.path().join("my-feature");
+        create_worktree(main_repo_dir.path(), "my-feature", &base, &wt_path)
+            .expect("should create worktree");
+
+        // scan_directories should find it
+        let scan_paths = vec![scan_dir.path().to_string_lossy().into_owned()];
+        let entries = scan_directories(&scan_paths);
+
+        assert!(
+            entries.iter().any(|e| e.name == "my-feature"),
+            "should discover worktree in scan path, got: {entries:?}"
+        );
+        // Should not be marked as main
+        let entry = entries.iter().find(|e| e.name == "my-feature").unwrap();
+        assert!(!entry.is_main);
+        assert_eq!(entry.branch.as_deref(), Some("my-feature"));
     }
 }
