@@ -128,4 +128,52 @@ mod tests {
         assert_eq!(wt.id, inserted.id);
         assert!(wt.adopted_at.is_none(), "existing worktree should not be adopted");
     }
+
+    #[test]
+    fn resolve_or_adopt_adopts_unmanaged_git_worktree() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        // Register repo in DB but NOT the worktree
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        db.insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
+
+        // Create a git worktree manually (not via trench)
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("ext-feature");
+        git_repo
+            .branch(
+                "ext-feature",
+                &git_repo.head().unwrap().peel_to_commit().unwrap(),
+                false,
+            )
+            .unwrap();
+        let branch_ref = git_repo
+            .find_branch("ext-feature", git2::BranchType::Local)
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch_ref.get()));
+        git_repo
+            .worktree("ext-feature", &wt_path, Some(&opts))
+            .unwrap();
+
+        // resolve_or_adopt should find via git and adopt
+        let repo_info = git::discover_repo(repo_dir.path()).unwrap();
+        let (_, wt) =
+            resolve_or_adopt("ext-feature", &repo_info, &db).expect("should adopt unmanaged");
+
+        assert!(wt.adopted_at.is_some(), "should have adopted_at set");
+        assert!(wt.managed, "should be marked as managed");
+        assert_eq!(wt.branch, "ext-feature");
+
+        // Verify it's now in the DB
+        let db_repo = db.get_repo_by_path(repo_path_str).unwrap().unwrap();
+        let found = db
+            .find_worktree_by_identifier(db_repo.id, "ext-feature")
+            .unwrap();
+        assert!(found.is_some(), "adopted worktree should be findable in DB");
+    }
 }
