@@ -8,6 +8,17 @@ use std::fmt;
 
 use crate::config::{HookDef, HooksConfig};
 
+/// How a hook failure should be treated by the calling operation (FR-24).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureSeverity {
+    /// Operation must be cancelled (pre_create, pre_sync, pre_remove, post_create).
+    HardStop,
+    /// Error reported but operation already completed (post_sync).
+    Report,
+    /// Warning only, operation already completed (post_remove).
+    WarnOnly,
+}
+
 /// Re-export HookDef as HookConfig for the hooks module public API.
 /// This is the per-hook configuration with copy, run, shell, timeout_secs fields.
 pub type HookConfig = HookDef;
@@ -32,6 +43,19 @@ impl HookEvent {
             Self::PostSync => "post_sync",
             Self::PreRemove => "pre_remove",
             Self::PostRemove => "post_remove",
+        }
+    }
+}
+
+impl HookEvent {
+    /// Return the failure severity for this hook event per FR-24.
+    pub fn failure_severity(&self) -> FailureSeverity {
+        match self {
+            Self::PreCreate | Self::PreSync | Self::PreRemove | Self::PostCreate => {
+                FailureSeverity::HardStop
+            }
+            Self::PostSync => FailureSeverity::Report,
+            Self::PostRemove => FailureSeverity::WarnOnly,
         }
     }
 }
@@ -204,6 +228,39 @@ timeout_secs = 60
         assert!(get_hook_config(&hooks, &HookEvent::PreSync).is_none());
         assert!(get_hook_config(&hooks, &HookEvent::PostSync).is_none());
         assert!(get_hook_config(&hooks, &HookEvent::PostRemove).is_none());
+    }
+
+    #[test]
+    fn failure_severity_matches_fr24() {
+        // pre_create / pre_sync / pre_remove / post_create → HardStop
+        assert_eq!(
+            HookEvent::PreCreate.failure_severity(),
+            FailureSeverity::HardStop
+        );
+        assert_eq!(
+            HookEvent::PostCreate.failure_severity(),
+            FailureSeverity::HardStop
+        );
+        assert_eq!(
+            HookEvent::PreSync.failure_severity(),
+            FailureSeverity::HardStop
+        );
+        assert_eq!(
+            HookEvent::PreRemove.failure_severity(),
+            FailureSeverity::HardStop
+        );
+
+        // post_sync → Report
+        assert_eq!(
+            HookEvent::PostSync.failure_severity(),
+            FailureSeverity::Report
+        );
+
+        // post_remove → WarnOnly
+        assert_eq!(
+            HookEvent::PostRemove.failure_severity(),
+            FailureSeverity::WarnOnly
+        );
     }
 
     #[test]
