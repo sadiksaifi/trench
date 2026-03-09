@@ -450,11 +450,11 @@ fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()
     let db = state::Database::open(&db_path)?;
 
     let output = if json {
-        cli::commands::list::execute_json(&cwd, &db, tag)?
+        cli::commands::list::execute_json(&cwd, &db, tag, &[])?
     } else if porcelain {
-        cli::commands::list::execute_porcelain(&cwd, &db, tag)?
+        cli::commands::list::execute_porcelain(&cwd, &db, tag, &[])?
     } else {
-        cli::commands::list::execute(&cwd, &db, tag)?
+        cli::commands::list::execute(&cwd, &db, tag, &[])?
     };
     if output.ends_with('\n') {
         print!("{output}");

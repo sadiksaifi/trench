@@ -138,7 +138,7 @@ impl App {
             Ok(d) => d,
             Err(_) => return,
         };
-        if let Ok(rows) = screens::list::load_worktrees(&cwd, &db) {
+        if let Ok(rows) = screens::list::load_worktrees(&cwd, &db, &[]) {
             let prev_selected = self.list_state.selected;
             self.list_state = screens::list::ListState::new(rows);
             if self.list_state.rows.len() > prev_selected {
