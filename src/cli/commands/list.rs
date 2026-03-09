@@ -53,10 +53,14 @@ fn fetch_worktrees(
 /// found via git but not in the DB are marked as unmanaged. When a `tag`
 /// filter is active, only managed worktrees matching the tag are returned
 /// (unmanaged worktrees cannot have tags).
+///
+/// Additional directories in `scan_paths` are scanned for worktrees that
+/// may live outside the default location (FR-30).
 fn fetch_all_worktrees(
     cwd: &Path,
     db: &Database,
     tag: Option<&str>,
+    scan_paths: &[String],
 ) -> Result<(PathBuf, Vec<ListEntry>)> {
     let (repo_path, db_worktrees) = fetch_worktrees(cwd, db, tag)?;
 
@@ -104,16 +108,40 @@ fn fetch_all_worktrees(
 
     // Discover git worktrees and add unmanaged ones
     let git_worktrees = git::list_worktrees(&repo_path)?;
-    for gw in git_worktrees {
+    for gw in &git_worktrees {
         if !managed_paths.contains(&gw.path) {
             entries.push(ListEntry {
                 name: gw.name.clone(),
-                branch: gw.branch.unwrap_or_else(|| "(detached)".to_string()),
+                branch: gw.branch.clone().unwrap_or_else(|| "(detached)".to_string()),
                 path: gw.path.to_string_lossy().into_owned(),
                 base_branch: None,
                 managed: false,
                 tags: Vec::new(),
             });
+        }
+    }
+
+    // Scan additional directories for worktrees (FR-30)
+    if !scan_paths.is_empty() {
+        // Build set of all known paths to deduplicate scan results
+        let mut seen_paths: HashSet<PathBuf> = managed_paths;
+        for gw in &git_worktrees {
+            seen_paths.insert(gw.path.clone());
+        }
+
+        let scanned = git::scan_directories(scan_paths);
+        for sw in scanned {
+            if !seen_paths.contains(&sw.path) {
+                seen_paths.insert(sw.path.clone());
+                entries.push(ListEntry {
+                    name: sw.name.clone(),
+                    branch: sw.branch.unwrap_or_else(|| "(detached)".to_string()),
+                    path: sw.path.to_string_lossy().into_owned(),
+                    base_branch: None,
+                    managed: false,
+                    tags: Vec::new(),
+                });
+            }
         }
     }
 
@@ -207,11 +235,16 @@ impl PorcelainRecord for WorktreeJson {
 /// Discovers the git repo from `cwd`, queries managed worktrees from the DB,
 /// merges with git-discovered unmanaged worktrees, and returns a formatted
 /// string for display. Optionally filters by tag.
-pub fn execute(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
+pub fn execute(
+    cwd: &Path,
+    db: &Database,
+    tag: Option<&str>,
+    scan_paths: &[String],
+) -> Result<String> {
     let max_width = crossterm::terminal::size()
         .ok()
         .map(|(cols, _)| cols as usize);
-    render_table(cwd, db, tag, max_width)
+    render_table(cwd, db, tag, max_width, scan_paths)
 }
 
 fn render_table(
@@ -219,8 +252,9 @@ fn render_table(
     db: &Database,
     tag: Option<&str>,
     max_width: Option<usize>,
+    scan_paths: &[String],
 ) -> Result<String> {
-    let (repo_path, entries) = fetch_all_worktrees(cwd, db, tag)?;
+    let (repo_path, entries) = fetch_all_worktrees(cwd, db, tag, scan_paths)?;
 
     if entries.is_empty() {
         return Ok("No worktrees. Use `trench create` to get started.\n".to_string());
@@ -301,8 +335,13 @@ fn build_worktree_json(entry: &ListEntry, status: GitStatus) -> WorktreeJson {
 /// Execute the `trench list --json` command.
 ///
 /// Returns JSON array of worktree objects including tags.
-pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let (repo_path, entries) = fetch_all_worktrees(cwd, db, tag)?;
+pub fn execute_json(
+    cwd: &Path,
+    db: &Database,
+    tag: Option<&str>,
+    scan_paths: &[String],
+) -> Result<String> {
+    let (repo_path, entries) = fetch_all_worktrees(cwd, db, tag, scan_paths)?;
 
     let mut json_items = Vec::new();
     for entry in &entries {
@@ -316,8 +355,13 @@ pub fn execute_json(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<Stri
 /// Execute the `trench list --porcelain` command.
 ///
 /// Returns colon-separated lines: `name:branch:path:status:ahead:behind:dirty:managed`.
-pub fn execute_porcelain(cwd: &Path, db: &Database, tag: Option<&str>) -> Result<String> {
-    let (repo_path, entries) = fetch_all_worktrees(cwd, db, tag)?;
+pub fn execute_porcelain(
+    cwd: &Path,
+    db: &Database,
+    tag: Option<&str>,
+    scan_paths: &[String],
+) -> Result<String> {
+    let (repo_path, entries) = fetch_all_worktrees(cwd, db, tag, scan_paths)?;
 
     let items: Vec<WorktreeJson> = entries
         .iter()
@@ -376,7 +420,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         // Should contain column headers
         assert!(output.contains("Name"), "output should have Name header");
@@ -429,7 +473,7 @@ mod tests {
         )
         .expect("second create should succeed");
 
-        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         assert!(
             output.contains("feature-one"),
@@ -452,7 +496,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         // With no managed worktrees, the main worktree still appears
-        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         assert!(
             output.contains("[unmanaged]"),
@@ -507,7 +551,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         assert!(
             output.contains("active-feature"),
@@ -546,7 +590,7 @@ mod tests {
         remove::execute("ephemeral", repo_dir.path(), &db, false)
             .expect("remove should succeed");
 
-        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         // After removing all managed worktrees, the main worktree still appears
         assert!(
@@ -587,7 +631,7 @@ mod tests {
 
         db.add_tag(wt1.id, "wip").unwrap();
 
-        let output = execute(repo_dir.path(), &db, Some("wip")).unwrap();
+        let output = execute(repo_dir.path(), &db, Some("wip"), &[]).unwrap();
 
         assert!(
             output.contains("tagged-wt"),
@@ -613,7 +657,7 @@ mod tests {
         db.insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
             .unwrap();
 
-        let output = execute(repo_dir.path(), &db, Some("nonexistent")).unwrap();
+        let output = execute(repo_dir.path(), &db, Some("nonexistent"), &[]).unwrap();
         assert!(output.contains("No worktrees"));
     }
 
@@ -642,7 +686,7 @@ mod tests {
         db.add_tag(wt.id, "wip").unwrap();
         db.add_tag(wt.id, "review").unwrap();
 
-        let output = execute(repo_dir.path(), &db, None).unwrap();
+        let output = execute(repo_dir.path(), &db, None, &[]).unwrap();
 
         assert!(output.contains("Tags"), "output should have Tags header");
         assert!(
@@ -675,7 +719,7 @@ mod tests {
 
         db.add_tag(wt.id, "wip").unwrap();
 
-        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
         let worktrees = parsed.as_array().expect("should be an array");
@@ -734,18 +778,18 @@ mod tests {
         .unwrap();
 
         // List all — both should appear with tags
-        let all_output = execute(repo_dir.path(), &db, None).unwrap();
+        let all_output = execute(repo_dir.path(), &db, None, &[]).unwrap();
         assert!(all_output.contains("feature-alpha"));
         assert!(all_output.contains("feature-beta"));
         assert!(all_output.contains("Tags"), "should have Tags header");
 
         // Filter by wip — both should appear
-        let wip_output = execute(repo_dir.path(), &db, Some("wip")).unwrap();
+        let wip_output = execute(repo_dir.path(), &db, Some("wip"), &[]).unwrap();
         assert!(wip_output.contains("feature-alpha"));
         assert!(wip_output.contains("feature-beta"));
 
         // Filter by review — only alpha
-        let review_output = execute(repo_dir.path(), &db, Some("review")).unwrap();
+        let review_output = execute(repo_dir.path(), &db, Some("review"), &[]).unwrap();
         assert!(review_output.contains("feature-alpha"));
         assert!(!review_output.contains("feature-beta"));
 
@@ -759,12 +803,12 @@ mod tests {
         .unwrap();
 
         // Filter by wip — only beta now
-        let wip_after = execute(repo_dir.path(), &db, Some("wip")).unwrap();
+        let wip_after = execute(repo_dir.path(), &db, Some("wip"), &[]).unwrap();
         assert!(!wip_after.contains("feature-alpha"));
         assert!(wip_after.contains("feature-beta"));
 
         // JSON output should include tags (includes main worktree too)
-        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
         let items = parsed.as_array().unwrap();
         // 2 managed + 1 main worktree + 2 git worktrees for the created branches
@@ -807,7 +851,7 @@ mod tests {
         )
         .expect("create should succeed");
 
-        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
         let items = parsed.as_array().expect("should be an array");
@@ -877,7 +921,7 @@ mod tests {
         // Create an untracked file in the worktree (makes it dirty)
         std::fs::write(wt_path.join("untracked.txt"), "dirty").unwrap();
 
-        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
         let wt_json = parsed.as_array().unwrap().iter()
             .find(|i| i["name"] == "feature-e2e")
@@ -915,7 +959,7 @@ mod tests {
         )
         .unwrap();
 
-        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
         let wt = parsed.as_array().unwrap().iter()
@@ -958,7 +1002,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+        let output = execute(repo_dir.path(), &db, None, &[]).expect("list should succeed");
 
         // The Ahead/Behind column should show "-" for no upstream
         let row = output
@@ -991,7 +1035,7 @@ mod tests {
         )
         .expect("create should succeed");
 
-        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+        let output = execute(repo_dir.path(), &db, None, &[]).expect("list should succeed");
 
         assert!(
             output.contains("Ahead/Behind"),
@@ -1032,7 +1076,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
+        let output = execute_porcelain(repo_dir.path(), &db, None, &[]).unwrap();
         let lines: Vec<&str> = output.lines().collect();
 
         // 2 managed + 1 main worktree
@@ -1060,7 +1104,7 @@ mod tests {
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
 
-        let output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
+        let output = execute_porcelain(repo_dir.path(), &db, None, &[]).unwrap();
         let lines: Vec<&str> = output.lines().collect();
         // Main worktree should appear
         assert_eq!(lines.len(), 1, "should have 1 line for main worktree");
@@ -1092,7 +1136,7 @@ mod tests {
         )
         .unwrap();
 
-        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
         let worktrees = parsed.as_array().expect("should be an array");
@@ -1123,7 +1167,7 @@ mod tests {
             .expect("should create worktree via git");
 
         // Table output should include the manual worktree with badge
-        let table_output = render_table(repo_dir.path(), &db, None, None)
+        let table_output = render_table(repo_dir.path(), &db, None, None, &[])
             .expect("table list should succeed");
         assert!(
             table_output.contains("manually-added"),
@@ -1135,7 +1179,7 @@ mod tests {
         );
 
         // JSON output should include with managed=false
-        let json_output = execute_json(repo_dir.path(), &db, None)
+        let json_output = execute_json(repo_dir.path(), &db, None, &[])
             .expect("json list should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
         let items = parsed.as_array().unwrap();
@@ -1149,7 +1193,7 @@ mod tests {
         assert!(manual_wt.get("status").is_some());
 
         // Porcelain output should include with managed=false
-        let porcelain_output = execute_porcelain(repo_dir.path(), &db, None)
+        let porcelain_output = execute_porcelain(repo_dir.path(), &db, None, &[])
             .expect("porcelain list should succeed");
         let manual_line = porcelain_output.lines()
             .find(|l| l.starts_with("manually-added:"))
@@ -1200,7 +1244,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         // Unmanaged rows (main worktree) should have ANSI dim codes
         let lines: Vec<&str> = output.lines().collect();
@@ -1246,7 +1290,7 @@ mod tests {
         git::create_worktree(repo_dir.path(), "porcelain-external", &base, &target)
             .expect("should create worktree via git");
 
-        let output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
+        let output = execute_porcelain(repo_dir.path(), &db, None, &[]).unwrap();
         let lines: Vec<&str> = output.lines().collect();
 
         // Should have at least 2 entries (main + the external worktree)
@@ -1282,7 +1326,7 @@ mod tests {
         git::create_worktree(repo_dir.path(), "git-only-wt", &base, &target)
             .expect("should create worktree via git");
 
-        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
         let items = parsed.as_array().expect("should be an array");
 
@@ -1322,7 +1366,7 @@ mod tests {
             .expect("should create worktree via git");
 
         // Use render_table with no max_width to avoid terminal truncation
-        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         assert!(
             output.contains("external-wt"),
@@ -1341,7 +1385,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         // Use render_table with no max_width to avoid terminal truncation
-        let output = render_table(repo_dir.path(), &db, None, None).expect("list should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         // Main worktree should appear (it's unmanaged by trench)
         let repo_name = repo_dir.path().canonicalize().unwrap()
@@ -1362,7 +1406,7 @@ mod tests {
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
 
-        let output = execute(repo_dir.path(), &db, None).expect("list should succeed");
+        let output = execute(repo_dir.path(), &db, None, &[]).expect("list should succeed");
 
         assert!(
             output.ends_with('\n'),
@@ -1401,7 +1445,7 @@ mod tests {
         .expect("second create should succeed");
 
         // Verify JSON output
-        let json_output = execute_json(repo_dir.path(), &db, None).unwrap();
+        let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output)
             .expect("JSON output must be valid JSON");
 
@@ -1424,7 +1468,7 @@ mod tests {
         assert_eq!(first["managed"], serde_json::json!(true));
 
         // Verify porcelain output
-        let porcelain_output = execute_porcelain(repo_dir.path(), &db, None).unwrap();
+        let porcelain_output = execute_porcelain(repo_dir.path(), &db, None, &[]).unwrap();
         let lines: Vec<&str> = porcelain_output.lines().collect();
         assert!(lines.len() >= 3, "should have at least 3 porcelain lines");
 
@@ -1471,7 +1515,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         // JSON output: branch should be "(detached)", not ""
-        let json_output = execute_json(repo_dir.path(), &db, None)
+        let json_output = execute_json(repo_dir.path(), &db, None, &[])
             .expect("json list should succeed for unborn repo");
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
         let items = parsed.as_array().expect("should be an array");
@@ -1484,11 +1528,152 @@ mod tests {
         );
 
         // Table output: should also show "(detached)"
-        let table_output = render_table(repo_dir.path(), &db, None, None)
+        let table_output = render_table(repo_dir.path(), &db, None, None, &[])
             .expect("table list should succeed for unborn repo");
         assert!(
             table_output.contains("(detached)"),
             "table should show (detached) for unborn HEAD, got: {table_output}"
         );
+    }
+
+    #[test]
+    fn scan_paths_worktrees_appear_as_unmanaged_in_list() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a worktree in a custom scan directory (outside default root)
+        let scan_dir = tempfile::tempdir().unwrap();
+        let wt_path = scan_dir.path().join("scan-feature");
+        git::create_worktree(repo_dir.path(), "scan-feature", &base, &wt_path)
+            .expect("should create worktree");
+
+        let scan_paths = vec![scan_dir.path().to_string_lossy().into_owned()];
+
+        let output = render_table(
+            repo_dir.path(),
+            &db,
+            None,
+            None,
+            &scan_paths,
+        )
+        .expect("list with scan paths should succeed");
+
+        assert!(
+            output.contains("scan-feature"),
+            "list should include worktree from scan path, got: {output}"
+        );
+        assert!(
+            output.contains("[unmanaged]"),
+            "scanned worktree should show [unmanaged] badge, got: {output}"
+        );
+    }
+
+    #[test]
+    fn integration_scan_paths_discovered_in_all_formats() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create worktrees in a scan directory (simulating custom scan path)
+        let scan_dir = tempfile::tempdir().unwrap();
+        let wt_a = scan_dir.path().join("feature-alpha");
+        let wt_b = scan_dir.path().join("feature-beta");
+        git::create_worktree(repo_dir.path(), "feature-alpha", &base, &wt_a)
+            .expect("create alpha");
+        git::create_worktree(repo_dir.path(), "feature-beta", &base, &wt_b)
+            .expect("create beta");
+
+        let scan_paths = vec![scan_dir.path().to_string_lossy().into_owned()];
+
+        // Table output should include both scanned worktrees
+        let table_output = render_table(repo_dir.path(), &db, None, None, &scan_paths)
+            .expect("table with scan paths should succeed");
+        assert!(
+            table_output.contains("feature-alpha"),
+            "table should contain feature-alpha, got: {table_output}"
+        );
+        assert!(
+            table_output.contains("feature-beta"),
+            "table should contain feature-beta, got: {table_output}"
+        );
+
+        // JSON output should include scanned worktrees with managed=false
+        let json_output = execute_json(repo_dir.path(), &db, None, &scan_paths)
+            .expect("json with scan paths should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let items = parsed.as_array().unwrap();
+
+        let alpha = items.iter().find(|i| i["name"] == "feature-alpha")
+            .expect("JSON should contain feature-alpha");
+        assert_eq!(alpha["managed"], serde_json::json!(false));
+        assert!(alpha["branch"].is_string());
+
+        let beta = items.iter().find(|i| i["name"] == "feature-beta")
+            .expect("JSON should contain feature-beta");
+        assert_eq!(beta["managed"], serde_json::json!(false));
+
+        // Porcelain output should include scanned worktrees
+        let porcelain_output = execute_porcelain(repo_dir.path(), &db, None, &scan_paths)
+            .expect("porcelain with scan paths should succeed");
+        assert!(
+            porcelain_output.contains("feature-alpha"),
+            "porcelain should contain feature-alpha"
+        );
+        assert!(
+            porcelain_output.contains("feature-beta"),
+            "porcelain should contain feature-beta"
+        );
+        // Verify managed=false in porcelain
+        let alpha_line = porcelain_output.lines()
+            .find(|l| l.starts_with("feature-alpha:"))
+            .expect("should find feature-alpha in porcelain");
+        assert!(
+            alpha_line.ends_with(":false"),
+            "scanned worktree should have managed=false, got: {alpha_line}"
+        );
+    }
+
+    #[test]
+    fn scan_paths_deduplicates_with_git_discovered_worktrees() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a worktree in a scan dir — this is ALSO known to git
+        let scan_dir = tempfile::tempdir().unwrap();
+        let wt_path = scan_dir.path().join("known-wt");
+        git::create_worktree(repo_dir.path(), "known-wt", &base, &wt_path)
+            .expect("create known-wt");
+
+        let scan_paths = vec![scan_dir.path().to_string_lossy().into_owned()];
+
+        let json_output = execute_json(repo_dir.path(), &db, None, &scan_paths)
+            .expect("json should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let items = parsed.as_array().unwrap();
+
+        // Count how many times known-wt appears
+        let count = items.iter().filter(|i| i["name"] == "known-wt").count();
+        assert_eq!(
+            count, 1,
+            "known-wt should appear exactly once (deduplicated), found: {count}"
+        );
+    }
+
+    #[test]
+    fn scan_paths_nonexistent_does_not_error() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let scan_paths = vec!["/nonexistent/scan/path/xyz".to_string()];
+
+        // Should not error — non-existent paths are warnings
+        let result = render_table(repo_dir.path(), &db, None, None, &scan_paths);
+        assert!(result.is_ok(), "non-existent scan path should not cause error");
     }
 }

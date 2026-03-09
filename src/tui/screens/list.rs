@@ -47,7 +47,10 @@ impl ListState {
 }
 
 /// Load worktree data from the database and git, returning rows for the list view.
-pub fn load_worktrees(cwd: &Path, db: &Database) -> Result<Vec<WorktreeRow>> {
+///
+/// Additional directories in `scan_paths` are scanned for worktrees that
+/// may live outside the default location (FR-30).
+pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Result<Vec<WorktreeRow>> {
     let repo_info = git::discover_repo(cwd)?;
     let repo_path = &repo_info.path;
     let repo_path_str = repo_path
@@ -79,7 +82,7 @@ pub fn load_worktrees(cwd: &Path, db: &Database) -> Result<Vec<WorktreeRow>> {
     }
 
     let git_worktrees = git::list_worktrees(repo_path)?;
-    for gw in git_worktrees {
+    for gw in &git_worktrees {
         if !managed_paths.contains(&gw.path) {
             let branch = gw.branch.clone().unwrap_or_else(|| "(detached)".to_string());
             let status = compute_status(
@@ -95,6 +98,35 @@ pub fn load_worktrees(cwd: &Path, db: &Database) -> Result<Vec<WorktreeRow>> {
                 ahead_behind: status.1,
                 managed: false,
             });
+        }
+    }
+
+    // Scan additional directories for worktrees (FR-30)
+    if !scan_paths.is_empty() {
+        let mut seen_paths: HashSet<PathBuf> = managed_paths;
+        for gw in &git_worktrees {
+            seen_paths.insert(gw.path.clone());
+        }
+
+        let scanned = git::scan_directories(scan_paths);
+        for sw in scanned {
+            if !seen_paths.contains(&sw.path) {
+                seen_paths.insert(sw.path.clone());
+                let branch = sw.branch.clone().unwrap_or_else(|| "(detached)".to_string());
+                let status = compute_status(
+                    repo_path,
+                    &branch,
+                    None,
+                    &sw.path.to_string_lossy(),
+                );
+                rows.push(WorktreeRow {
+                    name: sw.name.clone(),
+                    branch,
+                    status: status.0,
+                    ahead_behind: status.1,
+                    managed: false,
+                });
+            }
         }
     }
 

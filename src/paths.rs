@@ -109,6 +109,22 @@ pub fn render_worktree_path(template: &str, repo: &str, branch: &str) -> Result<
     Ok(path)
 }
 
+/// Expand a leading `~` or `~/` in a path string to the user's home directory.
+///
+/// Returns the original string unchanged if it doesn't start with `~` or if
+/// the home directory cannot be determined.
+pub fn expand_tilde(path: &str) -> String {
+    if path == "~" || path.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            if path == "~" {
+                return home.to_string_lossy().into_owned();
+            }
+            return home.join(&path[2..]).to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
 /// Sanitize a branch name for use as a filesystem directory name.
 ///
 /// Rules (FR-15, FR-16):
@@ -301,5 +317,29 @@ mod tests {
         assert_eq!(sanitize_branch(".."), "");
         // Nested double dots with other chars
         assert_eq!(sanitize_branch("feature/..secret/auth"), "feature-secret-auth");
+    }
+
+    #[test]
+    fn expand_tilde_replaces_home_prefix() {
+        let expanded = expand_tilde("~/projects");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expanded, home.join("projects").to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn expand_tilde_leaves_absolute_paths_unchanged() {
+        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
+    }
+
+    #[test]
+    fn expand_tilde_leaves_relative_paths_unchanged() {
+        assert_eq!(expand_tilde("relative/path"), "relative/path");
+    }
+
+    #[test]
+    fn expand_tilde_bare_tilde_expands_to_home() {
+        let expanded = expand_tilde("~");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expanded, home.to_string_lossy().to_string());
     }
 }
