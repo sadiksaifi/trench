@@ -229,4 +229,73 @@ mod tests {
         assert!(stdout_lines.contains(&"run_output"));
         assert!(stdout_lines.contains(&"shell_output"));
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_configured_steps_execute() {
+        let source = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let (db, repo_id, wt_id) = setup_db();
+
+        // Config with only run — no copy, no shell
+        let config = HookDef {
+            copy: None,
+            run: Some(vec!["echo only_run".to_string()]),
+            shell: None,
+            timeout_secs: Some(30),
+        };
+
+        let env_ctx = test_env_ctx(source.path(), work.path());
+
+        let result = execute_hook(
+            &HookEvent::PostCreate,
+            &config,
+            &env_ctx,
+            source.path(),
+            work.path(),
+            &db,
+            repo_id,
+            Some(wt_id),
+        )
+        .await
+        .expect("hook should succeed");
+
+        // Only run output should be in logs
+        let logs = db.get_logs(result.event_id).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].0, "stdout");
+        assert_eq!(logs[0].1, "only_run");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_config_succeeds_with_no_output() {
+        let source = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let (db, repo_id, wt_id) = setup_db();
+
+        // All steps None
+        let config = HookDef {
+            copy: None,
+            run: None,
+            shell: None,
+            timeout_secs: Some(30),
+        };
+
+        let env_ctx = test_env_ctx(source.path(), work.path());
+
+        let result = execute_hook(
+            &HookEvent::PostCreate,
+            &config,
+            &env_ctx,
+            source.path(),
+            work.path(),
+            &db,
+            repo_id,
+            Some(wt_id),
+        )
+        .await
+        .expect("hook should succeed");
+
+        let logs = db.get_logs(result.event_id).unwrap();
+        assert!(logs.is_empty());
+    }
 }
