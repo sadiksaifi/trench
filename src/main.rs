@@ -15,7 +15,11 @@ use std::io::IsTerminal;
 use output::OutputConfig;
 
 #[derive(Parser, Debug)]
-#[command(name = "trench", version, about = "A fast, ergonomic, headless-first Git worktree manager")]
+#[command(
+    name = "trench",
+    version,
+    about = "A fast, ergonomic, headless-first Git worktree manager"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -108,7 +112,7 @@ enum Commands {
     /// Sync worktree with base branch
     Sync {
         /// Branch name or sanitized name of the worktree to sync
-        branch: Option<String>,
+        branch: String,
     },
     /// View event log
     Log,
@@ -156,7 +160,6 @@ pub(crate) enum ShellType {
     Fish,
 }
 
-
 impl Cli {
     fn output_config(&self) -> OutputConfig {
         let is_tty = std::io::stdout().is_terminal();
@@ -187,14 +190,21 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Create { branch, from }) => {
             run_create(&branch, from.as_deref(), dry_run, json)
         }
-        Some(Commands::Remove { branch, force, prune }) => run_remove(&branch, force, prune),
+        Some(Commands::Remove {
+            branch,
+            force,
+            prune,
+        }) => run_remove(&branch, force, prune),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
-        Some(Commands::Status { branch }) => {
-            run_status(branch.as_deref(), json, porcelain, output_config.should_color())
-        }
+        Some(Commands::Status { branch }) => run_status(
+            branch.as_deref(),
+            json,
+            porcelain,
+            output_config.should_color(),
+        ),
         Some(Commands::Init { force }) => run_init(force),
         Some(Commands::ShellInit { shell }) => {
             print!("{}", cli::commands::shell_init::generate(shell));
@@ -204,7 +214,7 @@ fn main() -> anyhow::Result<()> {
             cli::commands::completions::generate::<Cli>(shell, &mut std::io::stdout());
             Ok(())
         }
-        Some(Commands::Sync { branch }) => run_sync(branch.as_deref()),
+        Some(Commands::Sync { branch }) => run_sync(&branch),
         Some(Commands::Log) => {
             // Log command not yet implemented
             Ok(())
@@ -379,12 +389,7 @@ fn run_open(identifier: &str) -> anyhow::Result<()> {
     let global_config = config::load_global_config()?;
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
 
-    match cli::commands::open::resolve(
-        identifier,
-        &cwd,
-        &db,
-        resolved.editor_command.as_deref(),
-    ) {
+    match cli::commands::open::resolve(identifier, &cwd, &db, resolved.editor_command.as_deref()) {
         Ok(result) => {
             let parts = shell_words::split(&result.editor)
                 .with_context(|| format!("invalid editor command: '{}'", result.editor))?;
@@ -486,21 +491,17 @@ fn run_status(
     }
 }
 
-fn run_sync(branch: Option<&str>) -> anyhow::Result<()> {
-    let identifier = match branch {
-        Some(b) => b,
-        None => {
-            eprintln!("error: sync requires a branch argument (or --all, not yet implemented)");
-            std::process::exit(8);
-        }
-    };
+fn run_sync(identifier: &str) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
     match cli::commands::sync::execute(identifier, &cwd, &db) {
         Ok(result) => {
-            eprintln!("Resolved worktree '{}' (sync not yet implemented)", result.name);
+            eprintln!(
+                "Resolved worktree '{}' (sync not yet implemented)",
+                result.name
+            );
             Ok(())
         }
         Err(e) => {
@@ -554,7 +555,12 @@ mod tests {
     #[test]
     fn global_flags_are_accepted() {
         let cli = Cli::try_parse_from([
-            "trench", "--json", "--no-color", "--quiet", "--verbose", "--dry-run",
+            "trench",
+            "--json",
+            "--no-color",
+            "--quiet",
+            "--verbose",
+            "--dry-run",
         ])
         .expect("all global flags should be accepted");
 
@@ -604,9 +610,7 @@ mod tests {
     #[test]
     fn all_subcommands_are_accepted() {
         // open, switch, and remove require a branch argument, so test them separately
-        let subcommands = [
-            "list", "status", "sync", "log", "init",
-        ];
+        let subcommands = ["list", "status", "log", "init"];
         // shell-init and completions require a shell argument
         for sub in ["shell-init", "completions"] {
             let result = Cli::try_parse_from(["trench", sub, "bash"]);
@@ -632,6 +636,8 @@ mod tests {
         assert!(result.is_ok(), "remove with branch should be accepted");
         let result = Cli::try_parse_from(["trench", "switch", "my-feature"]);
         assert!(result.is_ok(), "switch with branch should be accepted");
+        let result = Cli::try_parse_from(["trench", "sync", "my-feature"]);
+        assert!(result.is_ok(), "sync with branch should be accepted");
     }
 
     #[test]
@@ -769,9 +775,8 @@ mod tests {
 
     #[test]
     fn dry_run_and_json_flags_work_together_with_create() {
-        let cli =
-            Cli::try_parse_from(["trench", "--dry-run", "--json", "create", "my-feature"])
-                .expect("--dry-run --json with create should parse");
+        let cli = Cli::try_parse_from(["trench", "--dry-run", "--json", "create", "my-feature"])
+            .expect("--dry-run --json with create should parse");
         assert!(cli.dry_run);
         assert!(cli.json);
     }
@@ -787,7 +792,11 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "remove", "my-feature"])
             .expect("remove with branch should succeed");
         match cli.command {
-            Some(Commands::Remove { branch, force, prune }) => {
+            Some(Commands::Remove {
+                branch,
+                force,
+                prune,
+            }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(!force);
                 assert!(!prune);
@@ -801,7 +810,11 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "remove", "my-feature", "--force"])
             .expect("remove with --force should succeed");
         match cli.command {
-            Some(Commands::Remove { branch, force, prune }) => {
+            Some(Commands::Remove {
+                branch,
+                force,
+                prune,
+            }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(force);
                 assert!(!prune);
@@ -888,8 +901,7 @@ mod tests {
 
     #[test]
     fn init_subcommand_defaults_force_to_false() {
-        let cli = Cli::try_parse_from(["trench", "init"])
-            .expect("init should parse");
+        let cli = Cli::try_parse_from(["trench", "init"]).expect("init should parse");
         match cli.command {
             Some(Commands::Init { force }) => {
                 assert!(!force, "force should default to false");
@@ -900,8 +912,8 @@ mod tests {
 
     #[test]
     fn init_subcommand_accepts_force_flag() {
-        let cli = Cli::try_parse_from(["trench", "init", "--force"])
-            .expect("init --force should parse");
+        let cli =
+            Cli::try_parse_from(["trench", "init", "--force"]).expect("init --force should parse");
         match cli.command {
             Some(Commands::Init { force }) => {
                 assert!(force, "force should be true");
@@ -915,7 +927,11 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "remove", "my-feature", "--prune"])
             .expect("remove with --prune should succeed");
         match cli.command {
-            Some(Commands::Remove { branch, force, prune }) => {
+            Some(Commands::Remove {
+                branch,
+                force,
+                prune,
+            }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(!force);
                 assert!(prune);
@@ -929,7 +945,11 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "remove", "my-feature", "--force", "--prune"])
             .expect("remove with --force --prune should succeed");
         match cli.command {
-            Some(Commands::Remove { branch, force, prune }) => {
+            Some(Commands::Remove {
+                branch,
+                force,
+                prune,
+            }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(force);
                 assert!(prune);
@@ -1064,8 +1084,8 @@ mod tests {
 
     #[test]
     fn cli_produces_output_config() {
-        let cli = Cli::try_parse_from(["trench", "--no-color", "--quiet"])
-            .expect("flags should parse");
+        let cli =
+            Cli::try_parse_from(["trench", "--no-color", "--quiet"]).expect("flags should parse");
         let config = cli.output_config();
         assert!(!config.should_color());
         assert!(config.is_quiet());
