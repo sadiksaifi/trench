@@ -109,7 +109,7 @@ enum Commands {
         /// Omit for summary of all worktrees.
         branch: Option<String>,
     },
-    /// Sync worktree with base branch
+    /// Resolve/adopt a worktree (sync not yet implemented)
     Sync {
         /// Branch name or sanitized name of the worktree to sync
         branch: String,
