@@ -313,6 +313,36 @@ mod tests {
     }
 
     #[test]
+    fn sync_writes_synced_event_to_db() {
+        let (_git_repo, _wt_path, db, repo_dir, _wt_dir, repo_path_str) = setup_diverged_repo();
+
+        execute("feature", repo_dir.path(), &db, Strategy::Rebase)
+            .expect("sync should succeed");
+
+        // Find the worktree and check for "synced" event
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().unwrap();
+        let wt = db
+            .find_worktree_by_identifier(db_repo.id, "feature")
+            .unwrap()
+            .unwrap();
+
+        let events = db.list_events(wt.id, 10).unwrap();
+        assert!(
+            events.iter().any(|e| e.event_type == "synced"),
+            "should have a 'synced' event in DB"
+        );
+
+        // Verify payload contains strategy and counts
+        let synced_event = events.iter().find(|e| e.event_type == "synced").unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(synced_event.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["strategy"], "rebase");
+        assert_eq!(payload["base_branch"], "main");
+        assert!(payload["before"].is_object());
+        assert!(payload["after"].is_object());
+    }
+
+    #[test]
     fn sync_adopts_unmanaged_worktree() {
         let repo_dir = tempfile::tempdir().unwrap();
         let git_repo = init_repo_with_commit(repo_dir.path());
