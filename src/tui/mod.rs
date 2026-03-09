@@ -6,6 +6,9 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{layout::Alignment, widgets::Paragraph, Frame};
 
+use crate::paths;
+use crate::state::Database;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     List,
@@ -24,6 +27,9 @@ pub fn run() -> Result<()> {
     install_panic_hook();
     let mut terminal = ratatui::init();
     let mut app = App::new();
+
+    // Load worktree data before entering the event loop
+    app.refresh_list();
 
     let result = (|| -> Result<()> {
         while app.is_running() {
@@ -62,6 +68,7 @@ fn restore_panic_hook() {
 pub struct App {
     running: bool,
     nav_stack: Vec<Screen>,
+    pub list_state: screens::list::ListState,
 }
 
 impl App {
@@ -69,6 +76,7 @@ impl App {
         Self {
             running: true,
             nav_stack: vec![Screen::List],
+            list_state: screens::list::ListState::new(vec![]),
         }
     }
 
@@ -89,18 +97,47 @@ impl App {
     }
 
     pub fn ui(&self, frame: &mut Frame) {
-        // Intentional for early navigation UAT: every screen renders the same placeholder.
-        // Only the navigation stack/state changes (verified via key handling + tests).
-        let placeholder = Paragraph::new("trench TUI — press q to quit")
-            .alignment(Alignment::Center);
-        frame.render_widget(placeholder, frame.area());
+        match self.active_screen() {
+            Screen::List => screens::list::render(&self.list_state, frame, frame.area()),
+            _ => {
+                let placeholder = Paragraph::new("trench TUI — press q to quit")
+                    .alignment(Alignment::Center);
+                frame.render_widget(placeholder, frame.area());
+            }
+        }
     }
 
     pub fn pop_screen(&mut self) {
         if self.nav_stack.len() > 1 {
             self.nav_stack.pop();
+            if self.active_screen() == Screen::List {
+                self.refresh_list();
+            }
         } else {
             self.running = false;
+        }
+    }
+
+    /// Reload worktree data from git + DB for the list screen.
+    pub fn refresh_list(&mut self) {
+        let cwd = match std::env::current_dir() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let db_path = match paths::data_dir() {
+            Ok(p) => p.join("trench.db"),
+            Err(_) => return,
+        };
+        let db = match Database::open(&db_path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        if let Ok(rows) = screens::list::load_worktrees(&cwd, &db) {
+            let prev_selected = self.list_state.selected;
+            self.list_state = screens::list::ListState::new(rows);
+            if self.list_state.rows.len() > prev_selected {
+                self.list_state.selected = prev_selected;
+            }
         }
     }
 
@@ -127,6 +164,10 @@ impl App {
         match key.code {
             KeyCode::Enter => self.push_screen(Screen::Detail),
             KeyCode::Char('n') => self.push_screen(Screen::Create),
+            KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
+            KeyCode::Char('s') => {} // TODO: trigger sync
+            KeyCode::Char('D') => {} // TODO: trigger delete with confirmation
             _ => {}
         }
     }
@@ -333,6 +374,84 @@ mod tests {
         assert_eq!(app.nav_stack_depth(), 3);
     }
 
+    fn app_with_rows() -> App {
+        use screens::list::WorktreeRow;
+        let mut app = App::new();
+        app.list_state = screens::list::ListState::new(vec![
+            WorktreeRow {
+                name: "feat-a".into(),
+                branch: "feat/a".into(),
+                status: "clean".into(),
+                ahead_behind: "+0/-0".into(),
+                managed: true,
+            },
+            WorktreeRow {
+                name: "feat-b".into(),
+                branch: "feat/b".into(),
+                status: "~2".into(),
+                ahead_behind: "+1/-0".into(),
+                managed: true,
+            },
+            WorktreeRow {
+                name: "main".into(),
+                branch: "main".into(),
+                status: "clean".into(),
+                ahead_behind: "-".into(),
+                managed: false,
+            },
+        ]);
+        app
+    }
+
+    #[test]
+    fn j_key_moves_selection_down() {
+        let mut app = app_with_rows();
+        assert_eq!(app.list_state.selected, 0);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.list_state.selected, 1);
+    }
+
+    #[test]
+    fn k_key_moves_selection_up() {
+        let mut app = app_with_rows();
+        app.list_state.selected = 2;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.list_state.selected, 1);
+    }
+
+    #[test]
+    fn arrow_down_moves_selection_down() {
+        let mut app = app_with_rows();
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.list_state.selected, 1);
+    }
+
+    #[test]
+    fn arrow_up_moves_selection_up() {
+        let mut app = app_with_rows();
+        app.list_state.selected = 1;
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.list_state.selected, 0);
+    }
+
+    #[test]
+    fn s_on_list_is_handled() {
+        let mut app = app_with_rows();
+        // s should not crash and should not quit or push a screen
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(app.is_running());
+        assert_eq!(app.active_screen(), Screen::List);
+    }
+
+    #[test]
+    fn shift_d_on_list_is_handled() {
+        let mut app = app_with_rows();
+        // D (shift+d) should not crash and should not quit or push a screen
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        assert!(app.is_running());
+        assert_eq!(app.active_screen(), Screen::List);
+    }
+
     #[test]
     fn app_ignores_unbound_keys() {
         let mut app = App::new();
@@ -371,13 +490,31 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_ui_renders_trench_tui() {
+    fn list_screen_renders_empty_state_by_default() {
         let app = App::new();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| app.ui(frame))
-            .unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            content.contains("No worktrees"),
+            "empty list should show 'No worktrees' message, got: {:?}",
+            content.trim()
+        );
+    }
+
+    #[test]
+    fn non_list_screen_renders_placeholder() {
+        let mut app = App::new();
+        app.push_screen(Screen::Help);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let content: String = buffer
             .content()
@@ -386,7 +523,7 @@ mod tests {
             .collect();
         assert!(
             content.contains("trench TUI"),
-            "placeholder screen should contain 'trench TUI', got: {:?}",
+            "non-list screens should show placeholder, got: {:?}",
             content.trim()
         );
     }
