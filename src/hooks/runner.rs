@@ -515,4 +515,89 @@ mod tests {
             .expect("error should be HookTimeoutError");
         assert_eq!(timeout_err.timeout_secs, 2);
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn event_payload_contains_duration_and_exit_code() {
+        let source = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let (db, repo_id, wt_id) = setup_db();
+
+        let config = HookDef {
+            copy: None,
+            run: Some(vec!["echo hello".to_string()]),
+            shell: None,
+            timeout_secs: Some(30),
+        };
+
+        let env_ctx = test_env_ctx(source.path(), work.path());
+
+        let result = execute_hook(
+            &HookEvent::PreSync,
+            &config,
+            &env_ctx,
+            source.path(),
+            work.path(),
+            &db,
+            repo_id,
+            Some(wt_id),
+        )
+        .await
+        .unwrap();
+
+        let events = db.list_events(wt_id, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "hook:pre_sync");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(events[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["hook"], "pre_sync");
+        assert_eq!(payload["exit_code"], 0);
+        assert!(payload["duration_secs"].as_f64().unwrap() >= 0.0);
+
+        // Verify event_id matches
+        assert_eq!(result.event_id, events[0].id);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_lines_numbered_sequentially_with_stream_labels() {
+        let source = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let (db, repo_id, wt_id) = setup_db();
+
+        let config = HookDef {
+            copy: None,
+            run: Some(vec!["echo out1; echo err1 >&2".to_string()]),
+            shell: Some("echo out2; echo err2 >&2".to_string()),
+            timeout_secs: Some(30),
+        };
+
+        let env_ctx = test_env_ctx(source.path(), work.path());
+
+        let result = execute_hook(
+            &HookEvent::PostCreate,
+            &config,
+            &env_ctx,
+            source.path(),
+            work.path(),
+            &db,
+            repo_id,
+            Some(wt_id),
+        )
+        .await
+        .unwrap();
+
+        let logs = db.get_logs(result.event_id).unwrap();
+
+        // Should have 4 lines: out1, err1 from run + out2, err2 from shell
+        assert_eq!(logs.len(), 4, "expected 4 log lines, got: {logs:?}");
+
+        // Line numbers should be sequential 1-4
+        let line_numbers: Vec<i64> = logs.iter().map(|(_, _, n)| *n).collect();
+        assert_eq!(line_numbers, vec![1, 2, 3, 4]);
+
+        // Verify stream labels
+        let streams: Vec<&str> = logs.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(streams.contains(&"stdout"));
+        assert!(streams.contains(&"stderr"));
+    }
 }
