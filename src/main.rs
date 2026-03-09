@@ -293,30 +293,27 @@ fn run_remove(identifier: &str, force: bool, prune: bool) -> anyhow::Result<()> 
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
-    // If not forced, look up the worktree to show details in the confirmation prompt
+    // If not forced, resolve the worktree (adopting if unmanaged) for the prompt
     if !force {
         let repo_info = git::discover_repo(&cwd)?;
-        let repo_path_str = repo_info.path.to_str().unwrap_or("");
-        if let Some(repo) = db.get_repo_by_path(repo_path_str)? {
-            if let Some(wt) = db.find_worktree_by_identifier(repo.id, identifier)? {
-                let prune_hint = if prune {
-                    " (including remote branch)"
-                } else {
-                    ""
-                };
-                eprint!(
-                    "Remove worktree '{}' at {}{}? [y/N] ",
-                    wt.name, wt.path, prune_hint
-                );
-                let mut input = String::new();
-                if std::io::stdin().read_line(&mut input).is_err() {
-                    eprintln!("error: failed to read input");
-                    return Ok(());
-                }
-                if !input.trim().eq_ignore_ascii_case("y") {
-                    eprintln!("Cancelled.");
-                    return Ok(());
-                }
+        if let Ok((_repo, wt)) = adopt::resolve_or_adopt(identifier, &repo_info, &db) {
+            let prune_hint = if prune {
+                " (including remote branch)"
+            } else {
+                ""
+            };
+            eprint!(
+                "Remove worktree '{}' at {}{}? [y/N] ",
+                wt.name, wt.path, prune_hint
+            );
+            let mut input = String::new();
+            if std::io::stdin().read_line(&mut input).is_err() {
+                eprintln!("error: failed to read input");
+                return Ok(());
+            }
+            if !input.trim().eq_ignore_ascii_case("y") {
+                eprintln!("Cancelled.");
+                return Ok(());
             }
         }
     }

@@ -184,14 +184,10 @@ fn resolve_worktree(
     identifier: &str,
 ) -> Result<(PathBuf, StatusEntry)> {
     let repo_info = git::discover_repo(cwd)?;
-    let repo_path_str = repo_info
-        .path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
 
-    // Try DB first
-    if let Some(repo) = db.get_repo_by_path(repo_path_str)? {
-        if let Some(wt) = db.find_worktree_by_identifier(repo.id, identifier)? {
+    // Use resolve_or_adopt for lazy adoption on detail view
+    match crate::adopt::resolve_or_adopt(identifier, &repo_info, db) {
+        Ok((_repo, wt)) => {
             return Ok((
                 repo_info.path,
                 StatusEntry {
@@ -204,9 +200,13 @@ fn resolve_worktree(
                 },
             ));
         }
+        Err(_) => {
+            // Fall through to git-only lookup for edge cases
+            // (e.g. main worktree with detached HEAD)
+        }
     }
 
-    // Fall back to git-discovered worktrees
+    // Final fallback: git-discovered worktrees without adoption
     let git_worktrees = git::list_worktrees(&repo_info.path)?;
     for gw in git_worktrees {
         let branch_match = gw.branch.as_deref() == Some(identifier);
