@@ -87,7 +87,7 @@ pub fn execute(
         .base_branch
         .as_deref()
         .or(repo.default_base.as_deref())
-        .unwrap_or("main");
+        .unwrap_or(repo_info.default_branch.as_str());
 
     // Get before counts
     let (before_ahead, before_behind) =
@@ -670,5 +670,85 @@ mod tests {
             .expect("adopted worktree should be in DB");
         assert!(wt.adopted_at.is_some(), "adopted_at should be set");
         assert!(wt.managed, "should be managed after adoption");
+    }
+
+    #[test]
+    fn sync_falls_back_to_discovered_default_branch() {
+        // Create repo WITHOUT renaming to "main" — git2 defaults to "master"
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap().to_string();
+
+        // Get the actual default branch name (likely "master")
+        let default_branch = git_repo
+            .head()
+            .unwrap()
+            .shorthand()
+            .unwrap()
+            .to_string();
+
+        // Create feature branch from current HEAD
+        {
+            let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+            git_repo.branch("feat-master", &head_commit, false).unwrap();
+        }
+
+        // Create worktree
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("feat-master");
+        {
+            let branch_ref = git_repo
+                .find_branch("feat-master", git2::BranchType::Local)
+                .unwrap();
+            let mut opts = git2::WorktreeAddOptions::new();
+            opts.reference(Some(branch_ref.get()));
+            git_repo
+                .worktree("feat-master", &wt_path, Some(&opts))
+                .unwrap();
+        }
+
+        // Add a commit on the feature branch so rebase has work to do
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        commit_file(&wt_repo, "feature.txt", "feature work", "feature commit");
+
+        // Register repo WITHOUT default_base
+        db.insert_repo("test-repo", &repo_path_str, None).unwrap();
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().unwrap();
+        // Register worktree WITHOUT base_branch
+        let wt_path_str = wt_path.canonicalize().unwrap_or(wt_path.clone());
+        db.insert_worktree(
+            db_repo.id,
+            "feat-master",
+            "feat-master",
+            wt_path_str.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+
+        // Add a commit on the default branch to create divergence
+        {
+            let head_ref = format!("refs/heads/{default_branch}");
+            let main_obj = git_repo.revparse_single(&head_ref).unwrap();
+            git_repo.checkout_tree(&main_obj, None).unwrap();
+            git_repo.set_head(&head_ref).unwrap();
+        }
+        commit_file(
+            &git_repo,
+            "upstream.txt",
+            "upstream change",
+            "upstream commit",
+        );
+
+        // Should succeed using discovered default branch (not hard-coded "main")
+        let result = execute("feat-master", repo_dir.path(), &db, Strategy::Rebase)
+            .expect("sync should succeed using discovered default branch");
+        assert_eq!(result.name, "feat-master");
+        assert_eq!(
+            result.after_behind, 0,
+            "should be 0 behind after rebase onto discovered default branch"
+        );
     }
 }
