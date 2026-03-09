@@ -116,6 +116,9 @@ pub fn render_worktree_path(template: &str, repo: &str, branch: &str) -> Result<
 pub fn expand_tilde(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
+            if path == "~" {
+                return home.to_string_lossy().into_owned();
+            }
             return home.join(&path[2..]).to_string_lossy().into_owned();
         }
     }
@@ -331,5 +334,12 @@ mod tests {
     #[test]
     fn expand_tilde_leaves_relative_paths_unchanged() {
         assert_eq!(expand_tilde("relative/path"), "relative/path");
+    }
+
+    #[test]
+    fn expand_tilde_bare_tilde_expands_to_home() {
+        let expanded = expand_tilde("~");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expanded, home.to_string_lossy().to_string());
     }
 }
