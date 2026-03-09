@@ -109,10 +109,14 @@ enum Commands {
         /// Omit for summary of all worktrees.
         branch: Option<String>,
     },
-    /// Resolve/adopt a worktree (sync not yet implemented)
+    /// Sync a worktree with its base branch
     Sync {
         /// Branch name or sanitized name of the worktree to sync
         branch: String,
+
+        /// Sync strategy: rebase or merge. Prompts interactively if omitted.
+        #[arg(long)]
+        strategy: Option<SyncStrategy>,
     },
     /// View event log
     Log,
@@ -158,6 +162,13 @@ pub(crate) enum ShellType {
     Bash,
     Zsh,
     Fish,
+}
+
+/// Sync strategy for `trench sync`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum SyncStrategy {
+    Rebase,
+    Merge,
 }
 
 impl Cli {
@@ -214,7 +225,7 @@ fn main() -> anyhow::Result<()> {
             cli::commands::completions::generate::<Cli>(shell, &mut std::io::stdout());
             Ok(())
         }
-        Some(Commands::Sync { branch }) => run_sync(&branch),
+        Some(Commands::Sync { branch, strategy }) => run_sync(&branch, strategy, json),
         Some(Commands::Log) => {
             // Log command not yet implemented
             Ok(())
@@ -509,20 +520,64 @@ fn run_status(
     }
 }
 
-fn run_sync(identifier: &str) -> anyhow::Result<()> {
+fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
-    match cli::commands::sync::execute(identifier, &cwd, &db) {
+    // Determine strategy: use CLI flag, or prompt interactively
+    let resolved_strategy = match strategy {
+        Some(s) => s,
+        None => {
+            if !std::io::stdin().is_terminal() {
+                eprintln!("error: --strategy is required in non-interactive mode (use --strategy rebase or --strategy merge)");
+                std::process::exit(8);
+            }
+            eprint!("Sync strategy — (r)ebase or (m)erge? ");
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .context("failed to read strategy input")?;
+            match input.trim().to_lowercase().as_str() {
+                "r" | "rebase" => SyncStrategy::Rebase,
+                "m" | "merge" => SyncStrategy::Merge,
+                other => {
+                    eprintln!("error: unknown strategy '{other}'. Use 'rebase' or 'merge'.");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+
+    let sync_strategy = match resolved_strategy {
+        SyncStrategy::Rebase => cli::commands::sync::Strategy::Rebase,
+        SyncStrategy::Merge => cli::commands::sync::Strategy::Merge,
+    };
+
+    match cli::commands::sync::execute(identifier, &cwd, &db, sync_strategy) {
         Ok(result) => {
-            eprintln!(
-                "Resolved worktree '{}' (sync not yet implemented)",
-                result.name
-            );
+            if json {
+                println!("{}", output::json::format_json_value(&result.to_json())?);
+            } else {
+                eprintln!("Synced '{}' via {}", result.name, result.strategy);
+                eprintln!(
+                    "  before: ahead={}, behind={}",
+                    result.before_ahead, result.before_behind
+                );
+                eprintln!(
+                    "  after:  ahead={}, behind={}",
+                    result.after_ahead, result.after_behind
+                );
+            }
             Ok(())
         }
         Err(e) => {
+            if let Some(git::GitError::MergeConflict { .. }) =
+                e.downcast_ref::<git::GitError>()
+            {
+                eprintln!("error: {e}");
+                std::process::exit(5);
+            }
             let msg = e.to_string();
             if msg.contains("not found") || msg.contains("not tracked") {
                 eprintln!("error: {e}");
@@ -1108,5 +1163,50 @@ mod tests {
         assert!(!config.should_color());
         assert!(config.is_quiet());
         assert!(!config.is_verbose());
+    }
+
+    #[test]
+    fn sync_subcommand_accepts_strategy_rebase() {
+        let cli = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "rebase"])
+            .expect("sync with --strategy rebase should parse");
+        match cli.command {
+            Some(Commands::Sync { branch, strategy }) => {
+                assert_eq!(branch, "foo");
+                assert_eq!(strategy, Some(SyncStrategy::Rebase));
+            }
+            _ => panic!("expected Commands::Sync"),
+        }
+    }
+
+    #[test]
+    fn sync_subcommand_accepts_strategy_merge() {
+        let cli = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "merge"])
+            .expect("sync with --strategy merge should parse");
+        match cli.command {
+            Some(Commands::Sync { branch, strategy }) => {
+                assert_eq!(branch, "foo");
+                assert_eq!(strategy, Some(SyncStrategy::Merge));
+            }
+            _ => panic!("expected Commands::Sync"),
+        }
+    }
+
+    #[test]
+    fn sync_subcommand_strategy_defaults_to_none() {
+        let cli = Cli::try_parse_from(["trench", "sync", "foo"])
+            .expect("sync without --strategy should parse");
+        match cli.command {
+            Some(Commands::Sync { branch, strategy }) => {
+                assert_eq!(branch, "foo");
+                assert!(strategy.is_none());
+            }
+            _ => panic!("expected Commands::Sync"),
+        }
+    }
+
+    #[test]
+    fn sync_subcommand_rejects_invalid_strategy() {
+        let result = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "squash"]);
+        assert!(result.is_err(), "invalid strategy should be rejected");
     }
 }

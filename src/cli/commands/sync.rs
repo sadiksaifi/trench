@@ -1,28 +1,133 @@
 use std::path::Path;
 
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::state::Database;
+
+/// Sync strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    Rebase,
+    Merge,
+}
+
+impl std::fmt::Display for Strategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Strategy::Rebase => write!(f, "rebase"),
+            Strategy::Merge => write!(f, "merge"),
+        }
+    }
+}
 
 /// Result of a sync operation.
 #[derive(Debug)]
 pub struct SyncResult {
-    /// Name of the worktree that was resolved.
+    /// Name of the worktree that was synced.
     pub name: String,
+    /// Strategy used.
+    pub strategy: Strategy,
+    /// Ahead count before sync.
+    pub before_ahead: usize,
+    /// Behind count before sync.
+    pub before_behind: usize,
+    /// Ahead count after sync.
+    pub after_ahead: usize,
+    /// Behind count after sync.
+    pub after_behind: usize,
+}
+
+/// JSON representation of a sync result.
+#[derive(Debug, Serialize)]
+pub struct SyncResultJson {
+    pub name: String,
+    pub strategy: String,
+    pub before: AheadBehind,
+    pub after: AheadBehind,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AheadBehind {
+    pub ahead: usize,
+    pub behind: usize,
+}
+
+impl SyncResult {
+    pub fn to_json(&self) -> SyncResultJson {
+        SyncResultJson {
+            name: self.name.clone(),
+            strategy: self.strategy.to_string(),
+            before: AheadBehind {
+                ahead: self.before_ahead,
+                behind: self.before_behind,
+            },
+            after: AheadBehind {
+                ahead: self.after_ahead,
+                behind: self.after_behind,
+            },
+        }
+    }
 }
 
 /// Execute the `trench sync <identifier>` command.
 ///
-/// Resolves the worktree (adopting it if unmanaged), then reports
-/// that sync is not yet fully implemented.
-pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<SyncResult> {
+/// Resolves the worktree (adopting it if unmanaged), fetches from remote,
+/// then rebases or merges with the base branch.
+pub fn execute(
+    identifier: &str,
+    cwd: &Path,
+    db: &Database,
+    strategy: Strategy,
+) -> Result<SyncResult> {
     let repo_info = crate::git::discover_repo(cwd)?;
-    let (_repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
+    let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
 
-    // TODO: implement actual sync (rebase/merge with base branch)
+    let base_branch = wt
+        .base_branch
+        .as_deref()
+        .or(repo.default_base.as_deref())
+        .unwrap_or("main");
+
+    // Get before counts
+    let (before_ahead, before_behind) =
+        crate::git::ahead_behind(Path::new(&repo_info.path), &wt.branch, Some(base_branch))?
+            .unwrap_or((0, 0));
+
+    // Fetch from remote
+    crate::git::fetch_remote(Path::new(&repo_info.path))?;
+
+    // Perform sync
+    match strategy {
+        Strategy::Rebase => {
+            crate::git::sync_rebase(Path::new(&wt.path), &wt.branch, base_branch)?;
+        }
+        Strategy::Merge => {
+            crate::git::sync_merge(Path::new(&wt.path), &wt.branch, base_branch)?;
+        }
+    }
+
+    // Get after counts
+    let (after_ahead, after_behind) =
+        crate::git::ahead_behind(Path::new(&repo_info.path), &wt.branch, Some(base_branch))?
+            .unwrap_or((0, 0));
+
+    // Insert synced event
+    let payload = serde_json::json!({
+        "strategy": strategy.to_string(),
+        "base_branch": base_branch,
+        "before": { "ahead": before_ahead, "behind": before_behind },
+        "after": { "ahead": after_ahead, "behind": after_behind },
+    });
+    db.insert_event(repo.id, Some(wt.id), "synced", Some(&payload))?;
 
     Ok(SyncResult {
         name: wt.name.clone(),
+        strategy,
+        before_ahead,
+        before_behind,
+        after_ahead,
+        after_behind,
     })
 }
 
@@ -74,7 +179,7 @@ mod tests {
             .unwrap();
 
         // Sync the unmanaged worktree — should trigger adoption
-        let result = execute("sync-feat", repo_dir.path(), &db)
+        let result = execute("sync-feat", repo_dir.path(), &db, Strategy::Rebase)
             .expect("sync should succeed");
         assert_eq!(result.name, "sync-feat");
 

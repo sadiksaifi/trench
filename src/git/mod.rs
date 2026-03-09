@@ -173,6 +173,162 @@ pub fn ahead_behind(
     }
 }
 
+/// Fetch from the default remote (origin).
+///
+/// Best-effort: if no remote exists or the fetch fails, the error is
+/// returned so callers can decide whether to proceed.
+pub fn fetch_remote(repo_path: &Path) -> Result<(), GitError> {
+    let repo =
+        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+
+    let remote_name = "origin";
+    let mut remote = match repo.find_remote(remote_name) {
+        Ok(r) => r,
+        Err(_) => return Ok(()), // No remote — nothing to fetch
+    };
+
+    remote.fetch(&[] as &[&str], None, None)?;
+    Ok(())
+}
+
+/// Rebase a worktree branch onto its base branch.
+///
+/// Opens the repository at `worktree_path` and rebases the current branch
+/// onto `origin/<base_branch>` (or local `<base_branch>` if no remote ref).
+pub fn sync_rebase(
+    worktree_path: &Path,
+    branch: &str,
+    base_branch: &str,
+) -> Result<(), GitError> {
+    let repo = git2::Repository::open(worktree_path)
+        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+
+    let upstream_oid = resolve_upstream_oid(&repo, base_branch)?;
+    let branch_oid = repo
+        .find_branch(branch, git2::BranchType::Local)
+        .map_err(|_| GitError::WorktreeNotFound {
+            name: branch.to_string(),
+        })?
+        .get()
+        .target()
+        .ok_or_else(|| GitError::BaseBranchNotFound {
+            base: branch.to_string(),
+        })?;
+
+    let upstream_annotated = repo.find_annotated_commit(upstream_oid)?;
+    let branch_annotated = repo.find_annotated_commit(branch_oid)?;
+
+    let mut rebase = repo.rebase(
+        Some(&branch_annotated),
+        Some(&upstream_annotated),
+        None,
+        None,
+    )?;
+
+    let sig = git2::Signature::now("trench", "trench@localhost")?;
+
+    while let Some(op) = rebase.next() {
+        let _op = op?;
+        // Check for conflicts
+        let index = repo.index()?;
+        if index.has_conflicts() {
+            rebase.abort()?;
+            return Err(GitError::MergeConflict {
+                branch: branch.to_string(),
+            });
+        }
+        rebase.commit(None, &sig, None)?;
+    }
+
+    rebase.finish(None)?;
+    Ok(())
+}
+
+/// Merge the base branch into a worktree branch.
+///
+/// Opens the repository at `worktree_path` and merges
+/// `origin/<base_branch>` (or local `<base_branch>`) into the current branch.
+pub fn sync_merge(
+    worktree_path: &Path,
+    branch: &str,
+    base_branch: &str,
+) -> Result<(), GitError> {
+    let repo = git2::Repository::open(worktree_path)
+        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+
+    let upstream_oid = resolve_upstream_oid(&repo, base_branch)?;
+    let upstream_annotated = repo.find_annotated_commit(upstream_oid)?;
+
+    let (merge_analysis, _) = repo.merge_analysis(&[&upstream_annotated])?;
+
+    if merge_analysis.is_up_to_date() {
+        return Ok(());
+    }
+
+    if merge_analysis.is_fast_forward() {
+        // Fast-forward
+        let mut ref_name = format!("refs/heads/{branch}");
+        if repo.find_reference(&ref_name).is_err() {
+            ref_name = repo.head()?.name().unwrap_or("HEAD").to_string();
+        }
+        repo.find_reference(&ref_name)?
+            .set_target(upstream_oid, "trench sync: fast-forward")?;
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+        return Ok(());
+    }
+
+    // Normal merge
+    repo.merge(&[&upstream_annotated], None, None)?;
+
+    let index = repo.index()?;
+    if index.has_conflicts() {
+        let _ = repo.cleanup_state();
+        return Err(GitError::MergeConflict {
+            branch: branch.to_string(),
+        });
+    }
+
+    // Create merge commit
+    let sig = git2::Signature::now("trench", "trench@localhost")?;
+    let tree_oid = repo.index()?.write_tree()?;
+    let tree = repo.find_tree(tree_oid)?;
+    let head_commit = repo.head()?.peel_to_commit()?;
+    let upstream_commit = repo.find_commit(upstream_oid)?;
+    let msg = format!("trench sync: merge {base_branch} into {branch}");
+    repo.commit(
+        Some("HEAD"),
+        &sig,
+        &sig,
+        &msg,
+        &tree,
+        &[&head_commit, &upstream_commit],
+    )?;
+
+    let _ = repo.cleanup_state();
+    Ok(())
+}
+
+/// Resolve the OID for a base branch, preferring origin/<base> over local.
+fn resolve_upstream_oid(
+    repo: &git2::Repository,
+    base_branch: &str,
+) -> Result<git2::Oid, GitError> {
+    let remote_ref = format!("origin/{base_branch}");
+    if let Ok(branch) = repo.find_branch(&remote_ref, git2::BranchType::Remote) {
+        if let Some(oid) = branch.get().target() {
+            return Ok(oid);
+        }
+    }
+    if let Ok(branch) = repo.find_branch(base_branch, git2::BranchType::Local) {
+        if let Some(oid) = branch.get().target() {
+            return Ok(oid);
+        }
+    }
+    Err(GitError::BaseBranchNotFound {
+        base: base_branch.to_string(),
+    })
+}
+
 /// A worktree discovered via git (includes both main and additional worktrees).
 #[derive(Debug, Clone, PartialEq)]
 pub struct GitWorktreeEntry {
@@ -202,6 +358,9 @@ pub enum GitError {
 
     #[error("remote branch '{branch}' not found on {remote}")]
     RemoteBranchNotFound { branch: String, remote: String },
+
+    #[error("merge conflict while syncing '{branch}': resolve conflicts manually")]
+    MergeConflict { branch: String },
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
