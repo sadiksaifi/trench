@@ -291,7 +291,6 @@ pub fn sync_merge(
 
     let index = repo.index()?;
     if index.has_conflicts() {
-        let _ = repo.cleanup_state();
         return Err(GitError::MergeConflict {
             branch: branch.to_string(),
         });

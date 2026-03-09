@@ -521,6 +521,14 @@ mod tests {
             msg.contains("merge conflict") || msg.contains("conflict"),
             "error should mention conflict, got: {msg}"
         );
+
+        // After merge conflict error, MERGE_HEAD should be preserved so users can resolve
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        let merge_head_path = wt_repo.path().join("MERGE_HEAD");
+        assert!(
+            merge_head_path.exists(),
+            "MERGE_HEAD should be preserved after merge conflict so users can run `git merge --continue`"
+        );
     }
 
     #[test]
