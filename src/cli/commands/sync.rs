@@ -89,13 +89,12 @@ pub fn execute(
         .or(repo.default_base.as_deref())
         .unwrap_or(repo_info.default_branch.as_str());
 
-    // Get before counts
+    // Fetch from remote before capturing the baseline counts
+    crate::git::fetch_remote(Path::new(&repo_info.path))?;
+
     let (before_ahead, before_behind) =
         crate::git::ahead_behind(Path::new(&repo_info.path), &wt.branch, Some(base_branch))?
             .unwrap_or((0, 0));
-
-    // Fetch from remote
-    crate::git::fetch_remote(Path::new(&repo_info.path))?;
 
     // Perform sync
     match strategy {
