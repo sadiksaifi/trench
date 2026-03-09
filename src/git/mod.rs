@@ -1338,6 +1338,51 @@ mod tests {
     }
 
     #[test]
+    fn scan_directories_skips_nonexistent_paths_without_error() {
+        let scan_paths = vec![
+            "/nonexistent/path/abc123".to_string(),
+            "/also/does/not/exist".to_string(),
+        ];
+        let entries = scan_directories(&scan_paths);
+        assert!(
+            entries.is_empty(),
+            "non-existent scan paths should produce no entries, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn scan_directories_mixes_valid_and_invalid_paths() {
+        // Create a main repo with a worktree in a valid scan dir
+        let main_repo_dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(main_repo_dir.path()).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        let scan_dir = tempfile::tempdir().unwrap();
+        let wt_path = scan_dir.path().join("valid-wt");
+        create_worktree(main_repo_dir.path(), "valid-wt", &base, &wt_path)
+            .expect("should create worktree");
+
+        // Mix valid scan dir with non-existent path
+        let scan_paths = vec![
+            "/nonexistent/path".to_string(),
+            scan_dir.path().to_string_lossy().into_owned(),
+        ];
+        let entries = scan_directories(&scan_paths);
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "should find 1 worktree despite invalid path, got: {entries:?}"
+        );
+        assert_eq!(entries[0].name, "valid-wt");
+    }
+
+    #[test]
     fn scan_directories_discovers_worktree_in_scan_path() {
         // Create a main repo with a commit
         let main_repo_dir = tempfile::tempdir().unwrap();
