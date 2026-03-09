@@ -454,14 +454,14 @@ fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()
     let project_config = config::load_project_config(&repo_info.path)?;
     let global_config = config::load_global_config()?;
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-    let scan_paths = &resolved.worktrees.scan;
+    let scan_paths: Vec<String> = resolved.worktrees.scan.iter().map(|p| paths::expand_tilde(p)).collect();
 
     let output = if json {
-        cli::commands::list::execute_json(&cwd, &db, tag, scan_paths)?
+        cli::commands::list::execute_json(&cwd, &db, tag, &scan_paths)?
     } else if porcelain {
-        cli::commands::list::execute_porcelain(&cwd, &db, tag, scan_paths)?
+        cli::commands::list::execute_porcelain(&cwd, &db, tag, &scan_paths)?
     } else {
-        cli::commands::list::execute(&cwd, &db, tag, scan_paths)?
+        cli::commands::list::execute(&cwd, &db, tag, &scan_paths)?
     };
     if output.ends_with('\n') {
         print!("{output}");
