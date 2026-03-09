@@ -184,10 +184,13 @@ pub fn fetch_remote(repo_path: &Path) -> Result<(), GitError> {
     let remote_name = "origin";
     let mut remote = match repo.find_remote(remote_name) {
         Ok(r) => r,
-        Err(_) => return Ok(()), // No remote — nothing to fetch
+        Err(e) if e.code() == git2::ErrorCode::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
     };
 
-    remote.fetch(&[] as &[&str], None, None)?;
+    let mut fetch_opts = git2::FetchOptions::new();
+    fetch_opts.prune(git2::FetchPrune::On);
+    remote.fetch(&[] as &[&str], Some(&mut fetch_opts), None)?;
     Ok(())
 }
 
