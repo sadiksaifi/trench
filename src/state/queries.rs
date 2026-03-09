@@ -423,6 +423,48 @@ impl Database {
         Ok(())
     }
 
+    /// Insert a single log line for an event.
+    pub fn insert_log(
+        &self,
+        event_id: i64,
+        stream: &str,
+        line: &str,
+        line_number: i64,
+    ) -> Result<()> {
+        let created_at = now();
+        self.conn
+            .execute(
+                "INSERT INTO logs (event_id, stream, line, line_number, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![event_id, stream, line, line_number, created_at],
+            )
+            .context("failed to insert log line")?;
+        Ok(())
+    }
+
+    /// Retrieve log lines for an event, ordered by line number.
+    pub fn get_logs(&self, event_id: i64) -> Result<Vec<(String, String, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT stream, line, line_number FROM logs
+                 WHERE event_id = ?1 ORDER BY line_number",
+            )
+            .context("failed to prepare get_logs query")?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![event_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .context("failed to get logs")?;
+
+        let mut logs = Vec::new();
+        for row in rows {
+            logs.push(row.context("failed to read log row")?);
+        }
+        Ok(logs)
+    }
+
     /// Count events for a worktree, optionally filtered by event type.
     pub fn count_events(
         &self,

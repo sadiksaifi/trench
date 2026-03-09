@@ -777,6 +777,45 @@ mod tests {
     }
 
     #[test]
+    fn insert_and_get_logs_round_trip() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        let event_id = db
+            .insert_event(repo.id, Some(wt.id), "hook:post_create", None)
+            .unwrap();
+
+        db.insert_log(event_id, "stdout", "hello world", 1).unwrap();
+        db.insert_log(event_id, "stderr", "warning: something", 2).unwrap();
+        db.insert_log(event_id, "stdout", "done", 3).unwrap();
+
+        let logs = db.get_logs(event_id).unwrap();
+        assert_eq!(logs.len(), 3);
+        assert_eq!(logs[0], ("stdout".to_string(), "hello world".to_string(), 1));
+        assert_eq!(logs[1], ("stderr".to_string(), "warning: something".to_string(), 2));
+        assert_eq!(logs[2], ("stdout".to_string(), "done".to_string(), 3));
+    }
+
+    #[test]
+    fn get_logs_returns_empty_for_no_logs() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        let event_id = db
+            .insert_event(repo.id, Some(wt.id), "hook:post_create", None)
+            .unwrap();
+
+        let logs = db.get_logs(event_id).unwrap();
+        assert!(logs.is_empty());
+    }
+
+    #[test]
     fn get_repo_by_path_returns_existing_repo() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("my-project", "/home/user/my-project", Some("main")).unwrap();
