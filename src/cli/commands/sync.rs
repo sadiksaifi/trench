@@ -279,6 +279,40 @@ mod tests {
     }
 
     #[test]
+    fn sync_merge_merges_base_into_branch() {
+        let (_git_repo, wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+
+        let result = execute("feature", repo_dir.path(), &db, Strategy::Merge)
+            .expect("merge sync should succeed");
+
+        assert_eq!(result.name, "feature");
+        assert_eq!(result.strategy, Strategy::Merge);
+        assert_eq!(result.before_behind, 1, "should be 1 behind before sync");
+
+        // After merge, behind should be 0
+        assert_eq!(result.after_behind, 0, "should be 0 behind after merge");
+
+        // Both files should exist
+        assert!(
+            wt_path.join("upstream.txt").exists(),
+            "upstream file should exist after merge"
+        );
+        assert!(
+            wt_path.join("feature.txt").exists(),
+            "feature file should still exist after merge"
+        );
+
+        // Should have a merge commit (the HEAD commit should have 2 parents)
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        let head = wt_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.parent_count(),
+            2,
+            "merge commit should have 2 parents"
+        );
+    }
+
+    #[test]
     fn sync_adopts_unmanaged_worktree() {
         let repo_dir = tempfile::tempdir().unwrap();
         let git_repo = init_repo_with_commit(repo_dir.path());
