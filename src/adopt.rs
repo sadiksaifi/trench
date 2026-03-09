@@ -221,4 +221,67 @@ mod tests {
         assert!(wt.managed);
         assert_eq!(wt.branch, "new-feature");
     }
+
+    #[test]
+    fn resolve_or_adopt_not_found_returns_error() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        db.insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
+
+        let repo_info = git::discover_repo(repo_dir.path()).unwrap();
+        let result = resolve_or_adopt("nonexistent", &repo_info, &db);
+        let err = result.expect_err("should error for nonexistent worktree");
+        assert!(
+            err.to_string().contains("not found"),
+            "error should mention 'not found', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn resolve_or_adopt_idempotent_on_already_adopted() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        db.insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
+
+        // Create a git worktree manually
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("idempotent-wt");
+        git_repo
+            .branch(
+                "idempotent-wt",
+                &git_repo.head().unwrap().peel_to_commit().unwrap(),
+                false,
+            )
+            .unwrap();
+        let branch_ref = git_repo
+            .find_branch("idempotent-wt", git2::BranchType::Local)
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch_ref.get()));
+        git_repo
+            .worktree("idempotent-wt", &wt_path, Some(&opts))
+            .unwrap();
+
+        let repo_info = git::discover_repo(repo_dir.path()).unwrap();
+
+        // First call: adopts
+        let (_, wt1) = resolve_or_adopt("idempotent-wt", &repo_info, &db).unwrap();
+        assert!(wt1.adopted_at.is_some());
+
+        // Second call: returns same DB record (no re-adoption)
+        let (_, wt2) = resolve_or_adopt("idempotent-wt", &repo_info, &db).unwrap();
+        assert_eq!(wt2.id, wt1.id, "should return same worktree");
+        assert_eq!(wt2.adopted_at, wt1.adopted_at, "adopted_at should not change");
+    }
 }

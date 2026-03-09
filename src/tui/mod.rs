@@ -160,9 +160,40 @@ impl App {
         }
     }
 
+    /// If the selected worktree is unmanaged, silently adopt it into the DB.
+    fn adopt_selected_if_unmanaged(&mut self) {
+        let row = match self.list_state.rows.get(self.list_state.selected) {
+            Some(r) if !r.managed => r,
+            _ => return,
+        };
+        let branch = row.branch.clone();
+
+        let cwd = match std::env::current_dir() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let db_path = match paths::data_dir() {
+            Ok(p) => p.join("trench.db"),
+            Err(_) => return,
+        };
+        let db = match Database::open(&db_path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let repo_info = match crate::git::discover_repo(&cwd) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let _ = crate::adopt::resolve_or_adopt(&branch, &repo_info, &db);
+        self.refresh_list();
+    }
+
     fn handle_list_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter => self.push_screen(Screen::Detail),
+            KeyCode::Enter => {
+                self.adopt_selected_if_unmanaged();
+                self.push_screen(Screen::Detail);
+            }
             KeyCode::Char('n') => self.push_screen(Screen::Create),
             KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
