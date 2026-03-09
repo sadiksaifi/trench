@@ -343,6 +343,187 @@ mod tests {
     }
 
     #[test]
+    fn sync_rebase_conflict_returns_error() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+
+        // Rename HEAD to "main"
+        {
+            let name = git_repo
+                .head()
+                .unwrap()
+                .shorthand()
+                .unwrap()
+                .to_string();
+            git_repo
+                .find_branch(&name, git2::BranchType::Local)
+                .unwrap()
+                .rename("main", true)
+                .unwrap();
+        }
+
+        // Create feature branch
+        {
+            let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+            git_repo.branch("conflict-feat", &head_commit, false).unwrap();
+        }
+
+        // Create worktree
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("conflict-feat");
+        {
+            let branch_ref = git_repo
+                .find_branch("conflict-feat", git2::BranchType::Local)
+                .unwrap();
+            let mut opts = git2::WorktreeAddOptions::new();
+            opts.reference(Some(branch_ref.get()));
+            git_repo
+                .worktree("conflict-feat", &wt_path, Some(&opts))
+                .unwrap();
+        }
+
+        // Create conflicting changes on the SAME file in both branches
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        commit_file(
+            &wt_repo,
+            "conflict.txt",
+            "feature version",
+            "feature: edit conflict.txt",
+        );
+
+        // Switch main repo back to main and edit the same file
+        {
+            let main_obj = git_repo.revparse_single("refs/heads/main").unwrap();
+            git_repo.checkout_tree(&main_obj, None).unwrap();
+            git_repo.set_head("refs/heads/main").unwrap();
+        }
+        commit_file(
+            &git_repo,
+            "conflict.txt",
+            "main version",
+            "main: edit conflict.txt",
+        );
+
+        // Register in DB
+        db.insert_repo("test-repo", repo_path_str, Some("main"))
+            .unwrap();
+        let db_repo = db.get_repo_by_path(repo_path_str).unwrap().unwrap();
+        let wt_path_str = wt_path.canonicalize().unwrap_or(wt_path.clone());
+        db.insert_worktree(
+            db_repo.id,
+            "conflict-feat",
+            "conflict-feat",
+            wt_path_str.to_str().unwrap(),
+            Some("main"),
+        )
+        .unwrap();
+
+        // Attempt sync — should fail with merge conflict
+        let err = execute("conflict-feat", repo_dir.path(), &db, Strategy::Rebase)
+            .expect_err("sync should fail on conflict");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("merge conflict") || msg.contains("conflict"),
+            "error should mention conflict, got: {msg}"
+        );
+
+        // Verify it's a GitError::MergeConflict
+        assert!(
+            err.downcast_ref::<crate::git::GitError>().is_some(),
+            "should be a GitError"
+        );
+    }
+
+    #[test]
+    fn sync_merge_conflict_returns_error() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+
+        {
+            let name = git_repo
+                .head()
+                .unwrap()
+                .shorthand()
+                .unwrap()
+                .to_string();
+            git_repo
+                .find_branch(&name, git2::BranchType::Local)
+                .unwrap()
+                .rename("main", true)
+                .unwrap();
+        }
+
+        {
+            let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+            git_repo.branch("merge-conflict", &head_commit, false).unwrap();
+        }
+
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("merge-conflict");
+        {
+            let branch_ref = git_repo
+                .find_branch("merge-conflict", git2::BranchType::Local)
+                .unwrap();
+            let mut opts = git2::WorktreeAddOptions::new();
+            opts.reference(Some(branch_ref.get()));
+            git_repo
+                .worktree("merge-conflict", &wt_path, Some(&opts))
+                .unwrap();
+        }
+
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        commit_file(
+            &wt_repo,
+            "shared.txt",
+            "feature text",
+            "feature: edit shared.txt",
+        );
+
+        {
+            let main_obj = git_repo.revparse_single("refs/heads/main").unwrap();
+            git_repo.checkout_tree(&main_obj, None).unwrap();
+            git_repo.set_head("refs/heads/main").unwrap();
+        }
+        commit_file(
+            &git_repo,
+            "shared.txt",
+            "main text",
+            "main: edit shared.txt",
+        );
+
+        db.insert_repo("test-repo", repo_path_str, Some("main"))
+            .unwrap();
+        let db_repo = db.get_repo_by_path(repo_path_str).unwrap().unwrap();
+        let wt_path_str = wt_path.canonicalize().unwrap_or(wt_path.clone());
+        db.insert_worktree(
+            db_repo.id,
+            "merge-conflict",
+            "merge-conflict",
+            wt_path_str.to_str().unwrap(),
+            Some("main"),
+        )
+        .unwrap();
+
+        let err = execute("merge-conflict", repo_dir.path(), &db, Strategy::Merge)
+            .expect_err("merge sync should fail on conflict");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("merge conflict") || msg.contains("conflict"),
+            "error should mention conflict, got: {msg}"
+        );
+    }
+
+    #[test]
     fn sync_adopts_unmanaged_worktree() {
         let repo_dir = tempfile::tempdir().unwrap();
         let git_repo = init_repo_with_commit(repo_dir.path());
