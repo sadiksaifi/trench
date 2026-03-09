@@ -449,12 +449,19 @@ fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
+    // Load config to get scan paths (FR-30)
+    let repo_info = git::discover_repo(&cwd)?;
+    let project_config = config::load_project_config(&repo_info.path)?;
+    let global_config = config::load_global_config()?;
+    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+    let scan_paths = &resolved.worktrees.scan;
+
     let output = if json {
-        cli::commands::list::execute_json(&cwd, &db, tag, &[])?
+        cli::commands::list::execute_json(&cwd, &db, tag, scan_paths)?
     } else if porcelain {
-        cli::commands::list::execute_porcelain(&cwd, &db, tag, &[])?
+        cli::commands::list::execute_porcelain(&cwd, &db, tag, scan_paths)?
     } else {
-        cli::commands::list::execute(&cwd, &db, tag, &[])?
+        cli::commands::list::execute(&cwd, &db, tag, scan_paths)?
     };
     if output.ends_with('\n') {
         print!("{output}");
