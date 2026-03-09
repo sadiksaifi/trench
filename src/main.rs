@@ -1,3 +1,4 @@
+mod adopt;
 mod cli;
 mod config;
 mod git;
