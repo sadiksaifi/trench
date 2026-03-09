@@ -106,7 +106,10 @@ enum Commands {
         branch: Option<String>,
     },
     /// Sync worktree with base branch
-    Sync,
+    Sync {
+        /// Branch name or sanitized name of the worktree to sync
+        branch: Option<String>,
+    },
     /// View event log
     Log,
     /// Initialize .trench.toml in current directory
@@ -201,8 +204,9 @@ fn main() -> anyhow::Result<()> {
             cli::commands::completions::generate::<Cli>(shell, &mut std::io::stdout());
             Ok(())
         }
-        Some(_) => {
-            // Other commands not yet implemented
+        Some(Commands::Sync { branch }) => run_sync(branch.as_deref()),
+        Some(Commands::Log) => {
+            // Log command not yet implemented
             Ok(())
         }
         None => {
@@ -477,6 +481,34 @@ fn run_status(
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("not found") {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+            Err(e)
+        }
+    }
+}
+
+fn run_sync(branch: Option<&str>) -> anyhow::Result<()> {
+    let identifier = match branch {
+        Some(b) => b,
+        None => {
+            eprintln!("error: sync requires a branch argument (or --all, not yet implemented)");
+            std::process::exit(8);
+        }
+    };
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    match cli::commands::sync::execute(identifier, &cwd, &db) {
+        Ok(result) => {
+            eprintln!("Resolved worktree '{}' (sync not yet implemented)", result.name);
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("not tracked") {
                 eprintln!("error: {e}");
                 std::process::exit(2);
             }

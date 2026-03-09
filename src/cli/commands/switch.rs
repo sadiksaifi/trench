@@ -262,6 +262,68 @@ mod tests {
     }
 
     #[test]
+    fn integration_manual_git_worktree_add_then_switch_adopts_and_lists_managed() {
+        // Full integration test per acceptance criteria:
+        // git worktree add manually → trench switch → verify in DB → shows managed
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Step 1: Register repo in DB (as trench create would)
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
+
+        // Step 2: Manually create a git worktree (simulating `git worktree add`)
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("manual-feature");
+        git_repo
+            .branch(
+                "manual-feature",
+                &git_repo.head().unwrap().peel_to_commit().unwrap(),
+                false,
+            )
+            .unwrap();
+        let branch_ref = git_repo
+            .find_branch("manual-feature", git2::BranchType::Local)
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch_ref.get()));
+        git_repo
+            .worktree("manual-feature", &wt_path, Some(&opts))
+            .unwrap();
+
+        // Step 3: Verify it's NOT in DB yet
+        let found = db
+            .find_worktree_by_identifier(db_repo.id, "manual-feature")
+            .unwrap();
+        assert!(found.is_none(), "worktree should NOT be in DB before switch");
+
+        // Step 4: Switch to the manually-created worktree
+        let switch = execute("manual-feature", repo_dir.path(), &db)
+            .expect("switch to manually-created worktree should succeed");
+        assert_eq!(switch.name, "manual-feature");
+
+        // Step 5: Verify worktree IS in DB with adopted_at set
+        let wt = db
+            .find_worktree_by_identifier(db_repo.id, "manual-feature")
+            .unwrap()
+            .expect("worktree should be in DB after switch");
+        assert!(wt.adopted_at.is_some(), "adopted_at should be set");
+        assert!(wt.managed, "should be managed after adoption");
+        assert!(wt.last_accessed.is_some(), "last_accessed should be set");
+
+        // Step 6: Verify it appears in list_worktrees (i.e. shows as managed)
+        let worktrees = db.list_worktrees(db_repo.id).unwrap();
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].name, "manual-feature");
+        assert!(worktrees[0].managed);
+    }
+
+    #[test]
     fn create_then_switch_updates_last_accessed_and_session() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
