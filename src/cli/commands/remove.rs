@@ -1,9 +1,8 @@
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 use crate::git;
-use crate::paths;
 use crate::state::Database;
 
 /// Result of a worktree removal.
@@ -28,32 +27,7 @@ pub struct RemoveResult {
 pub fn execute(identifier: &str, cwd: &Path, db: &Database, prune: bool) -> Result<RemoveResult> {
     let repo_info = git::discover_repo(cwd)?;
 
-    let repo_path_str = repo_info
-        .path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
-
-    let repo = db
-        .get_repo_by_path(repo_path_str)?
-        .ok_or_else(|| anyhow::anyhow!("repository not tracked by trench"))?;
-
-    // Try the identifier as-is first, then try sanitizing it
-    let wt = match db.find_worktree_by_identifier(repo.id, identifier)? {
-        Some(wt) => Some(wt),
-        None => {
-            let sanitized = paths::sanitize_branch(identifier);
-            if sanitized != identifier {
-                db.find_worktree_by_identifier(repo.id, &sanitized)?
-            } else {
-                None
-            }
-        }
-    };
-
-    let wt = match wt {
-        Some(wt) => wt,
-        None => bail!("worktree not found: {identifier}"),
-    };
+    let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
 
     let worktree_path = Path::new(&wt.path);
 
@@ -347,6 +321,64 @@ mod tests {
 
         // Verify: worktree directory is gone
         assert!(!create_result.path.exists(), "worktree directory should be deleted");
+    }
+
+    #[test]
+    fn remove_adopts_unmanaged_worktree_before_removing() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Register repo in DB but NOT the worktree
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        db.insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
+
+        // Create a git worktree manually
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("unmanaged-rm");
+        git_repo
+            .branch(
+                "unmanaged-rm",
+                &git_repo.head().unwrap().peel_to_commit().unwrap(),
+                false,
+            )
+            .unwrap();
+        let branch_ref = git_repo
+            .find_branch("unmanaged-rm", git2::BranchType::Local)
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch_ref.get()));
+        git_repo
+            .worktree("unmanaged-rm", &wt_path, Some(&opts))
+            .unwrap();
+        assert!(wt_path.exists(), "worktree should exist on disk");
+
+        // Remove the unmanaged worktree — should adopt then remove
+        let result = execute("unmanaged-rm", repo_dir.path(), &db, false)
+            .expect("remove of unmanaged worktree should succeed");
+        assert_eq!(result.name, "unmanaged-rm");
+
+        // Verify worktree was adopted (has adopted_at) and removed (has removed_at)
+        let db_repo = db.get_repo_by_path(repo_path_str).unwrap().unwrap();
+        // Check via raw query since find_worktree_by_identifier excludes removed
+        let wt_count: i64 = db.conn_for_test().query_row(
+            "SELECT COUNT(*) FROM worktrees WHERE repo_id = ?1 AND name = 'unmanaged-rm'",
+            rusqlite::params![db_repo.id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(wt_count, 1, "worktree should exist in DB");
+
+        // Check adopted_at and removed_at via raw query
+        let (adopted_at, removed_at): (Option<i64>, Option<i64>) = db.conn_for_test().query_row(
+            "SELECT adopted_at, removed_at FROM worktrees WHERE repo_id = ?1 AND name = 'unmanaged-rm'",
+            rusqlite::params![db_repo.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert!(adopted_at.is_some(), "adopted_at should be set");
+        assert!(removed_at.is_some(), "removed_at should be set");
     }
 
     #[test]
