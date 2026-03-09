@@ -17,30 +17,11 @@ pub struct SwitchResult {
 ///
 /// Resolves the worktree by sanitized name or branch name, updates
 /// `last_accessed` and session state, and returns the worktree path.
+/// If the worktree is unmanaged (not in DB), it is silently adopted.
 pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<SwitchResult> {
     let repo_info = crate::git::discover_repo(cwd)?;
-    let repo_path_str = repo_info
-        .path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
 
-    let repo = db
-        .get_repo_by_path(repo_path_str)?
-        .ok_or_else(|| anyhow::anyhow!("repository not tracked by trench"))?;
-
-    // Try the identifier as-is first, then try sanitizing it
-    let wt = match db.find_worktree_by_identifier(repo.id, identifier)? {
-        Some(wt) => wt,
-        None => {
-            let sanitized = crate::paths::sanitize_branch(identifier);
-            if sanitized != identifier {
-                db.find_worktree_by_identifier(repo.id, &sanitized)?
-            } else {
-                None
-            }
-            .ok_or_else(|| anyhow::anyhow!("worktree not found: {identifier}"))?
-        }
-    };
+    let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
 
     // Update last_accessed timestamp
     let now = crate::state::unix_epoch_secs() as i64;
@@ -208,6 +189,56 @@ mod tests {
             current.as_deref(),
             Some("my-feature"),
             "session should track current worktree name"
+        );
+    }
+
+    #[test]
+    fn switch_adopts_unmanaged_worktree() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        // Register repo in DB but NOT the worktree
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
+
+        // Create a git worktree manually (not via trench)
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("unmanaged-feat");
+        git_repo
+            .branch(
+                "unmanaged-feat",
+                &git_repo.head().unwrap().peel_to_commit().unwrap(),
+                false,
+            )
+            .unwrap();
+        let branch_ref = git_repo
+            .find_branch("unmanaged-feat", git2::BranchType::Local)
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch_ref.get()));
+        git_repo
+            .worktree("unmanaged-feat", &wt_path, Some(&opts))
+            .unwrap();
+
+        // Switch to the unmanaged worktree — should trigger adoption
+        let result = execute("unmanaged-feat", repo_dir.path(), &db);
+        let switch = result.expect("switch to unmanaged worktree should succeed");
+        assert_eq!(switch.name, "unmanaged-feat");
+
+        // Verify worktree was adopted in DB
+        let wt = db
+            .find_worktree_by_identifier(db_repo.id, "unmanaged-feat")
+            .unwrap()
+            .expect("adopted worktree should be in DB");
+        assert!(wt.adopted_at.is_some(), "adopted_at should be set");
+        assert!(wt.managed, "should be managed after adoption");
+        assert!(
+            wt.last_accessed.is_some(),
+            "last_accessed should be set after switch"
         );
     }
 
