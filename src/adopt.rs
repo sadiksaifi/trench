@@ -176,4 +176,49 @@ mod tests {
             .unwrap();
         assert!(found.is_some(), "adopted worktree should be findable in DB");
     }
+
+    #[test]
+    fn resolve_or_adopt_creates_repo_when_not_in_db() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        // Do NOT insert repo into DB — repo is completely unknown to trench
+
+        // Create a git worktree manually
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("new-feature");
+        git_repo
+            .branch(
+                "new-feature",
+                &git_repo.head().unwrap().peel_to_commit().unwrap(),
+                false,
+            )
+            .unwrap();
+        let branch_ref = git_repo
+            .find_branch("new-feature", git2::BranchType::Local)
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch_ref.get()));
+        git_repo
+            .worktree("new-feature", &wt_path, Some(&opts))
+            .unwrap();
+
+        let repo_info = git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            resolve_or_adopt("new-feature", &repo_info, &db).expect("should create repo and adopt");
+
+        // Repo should now exist in DB
+        assert!(repo.id > 0);
+        let repo_path_str = repo_dir.path().canonicalize().unwrap();
+        let found_repo = db
+            .get_repo_by_path(repo_path_str.to_str().unwrap())
+            .unwrap();
+        assert!(found_repo.is_some(), "repo should be created in DB");
+
+        // Worktree should be adopted
+        assert!(wt.adopted_at.is_some());
+        assert!(wt.managed);
+        assert_eq!(wt.branch, "new-feature");
+    }
 }
