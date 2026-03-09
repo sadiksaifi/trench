@@ -572,6 +572,38 @@ mod tests {
     }
 
     #[test]
+    fn sync_rebase_shows_correct_ahead_counts() {
+        let (_git_repo, _wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+
+        let result = execute("feature", repo_dir.path(), &db, Strategy::Rebase)
+            .expect("sync should succeed");
+
+        // Feature has 1 commit ahead of main (the "feature commit")
+        assert_eq!(result.before_ahead, 1, "should be 1 ahead before sync");
+        // After rebase, still 1 ahead (the rebased feature commit)
+        assert_eq!(result.after_ahead, 1, "should still be 1 ahead after rebase");
+        // Before: 1 behind (main has upstream commit)
+        assert_eq!(result.before_behind, 1);
+        // After: 0 behind
+        assert_eq!(result.after_behind, 0);
+    }
+
+    #[test]
+    fn sync_merge_shows_correct_ahead_counts() {
+        let (_git_repo, _wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+
+        let result = execute("feature", repo_dir.path(), &db, Strategy::Merge)
+            .expect("sync should succeed");
+
+        // Before: 1 ahead (feature commit), 1 behind (upstream commit)
+        assert_eq!(result.before_ahead, 1);
+        assert_eq!(result.before_behind, 1);
+        // After merge: ahead increases (feature commit + merge commit), behind = 0
+        assert!(result.after_ahead >= 2, "should be at least 2 ahead after merge (feature + merge commit)");
+        assert_eq!(result.after_behind, 0);
+    }
+
+    #[test]
     fn sync_adopts_unmanaged_worktree() {
         let repo_dir = tempfile::tempdir().unwrap();
         let git_repo = init_repo_with_commit(repo_dir.path());
