@@ -562,6 +562,16 @@ mod tests {
     }
 
     #[test]
+    fn strategy_display_rebase() {
+        assert_eq!(Strategy::Rebase.to_string(), "rebase");
+    }
+
+    #[test]
+    fn strategy_display_merge() {
+        assert_eq!(Strategy::Merge.to_string(), "merge");
+    }
+
+    #[test]
     fn sync_adopts_unmanaged_worktree() {
         let repo_dir = tempfile::tempdir().unwrap();
         let git_repo = init_repo_with_commit(repo_dir.path());
