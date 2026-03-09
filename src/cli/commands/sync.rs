@@ -148,11 +148,156 @@ mod tests {
         repo
     }
 
+    /// Helper: create a file, stage, and commit it in the given repo.
+    fn commit_file(repo: &git2::Repository, filename: &str, content: &str, message: &str) {
+        let workdir = repo.workdir().unwrap();
+        std::fs::write(workdir.join(filename), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(filename)).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+            .unwrap();
+    }
+
+    /// Set up a test scenario with a main repo, a worktree branch behind main.
+    /// Returns (main_repo, worktree_path, db, repo_path_str).
+    fn setup_diverged_repo() -> (
+        git2::Repository,
+        std::path::PathBuf,
+        Database,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        String,
+    ) {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap().to_string();
+
+        // Rename HEAD branch to "main" for consistency
+        git_repo
+            .find_branch(
+                git_repo
+                    .head()
+                    .unwrap()
+                    .shorthand()
+                    .unwrap(),
+                git2::BranchType::Local,
+            )
+            .unwrap()
+            .rename("main", true)
+            .unwrap();
+
+        // Create feature branch at current main
+        {
+            let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+            git_repo
+                .branch("feature", &head_commit, false)
+                .unwrap();
+        }
+
+        // Create worktree for the feature branch
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("feature");
+        {
+            let branch_ref = git_repo
+                .find_branch("feature", git2::BranchType::Local)
+                .unwrap();
+            let mut opts = git2::WorktreeAddOptions::new();
+            opts.reference(Some(branch_ref.get()));
+            git_repo
+                .worktree("feature", &wt_path, Some(&opts))
+                .unwrap();
+        }
+
+        // Add a commit on the feature branch (in worktree)
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        commit_file(&wt_repo, "feature.txt", "feature work", "feature commit");
+
+        // Add a commit on main (in main repo) to create divergence
+        // First, switch main repo back to main
+        {
+            let main_obj = git_repo.revparse_single("refs/heads/main").unwrap();
+            git_repo.checkout_tree(&main_obj, None).unwrap();
+            git_repo.set_head("refs/heads/main").unwrap();
+        }
+        commit_file(&git_repo, "upstream.txt", "upstream change", "upstream commit on main");
+
+        // Register in DB
+        db.insert_repo("test-repo", &repo_path_str, Some("main"))
+            .unwrap();
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().unwrap();
+        let wt_path_str = wt_path.canonicalize().unwrap_or(wt_path.clone());
+        db.insert_worktree(
+            db_repo.id,
+            "feature",
+            "feature",
+            wt_path_str.to_str().unwrap(),
+            Some("main"),
+        )
+        .unwrap();
+
+        (git_repo, wt_path, db, repo_dir, wt_dir, repo_path_str)
+    }
+
+    #[test]
+    fn sync_rebase_rebases_branch_onto_main() {
+        let (_git_repo, wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+
+        // Before sync: feature should be 1 behind main
+        let result = execute("feature", repo_dir.path(), &db, Strategy::Rebase)
+            .expect("rebase sync should succeed");
+
+        assert_eq!(result.name, "feature");
+        assert_eq!(result.strategy, Strategy::Rebase);
+        assert_eq!(result.before_behind, 1, "should be 1 behind before sync");
+
+        // After rebase, behind should be 0
+        assert_eq!(result.after_behind, 0, "should be 0 behind after rebase");
+
+        // Feature branch should still have its commit + upstream file should exist
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        let head = wt_repo.head().unwrap().peel_to_commit().unwrap();
+        assert!(
+            head.message().unwrap().contains("feature commit"),
+            "feature commit should be on top after rebase"
+        );
+        assert!(
+            wt_path.join("upstream.txt").exists(),
+            "upstream file should exist after rebase"
+        );
+        assert!(
+            wt_path.join("feature.txt").exists(),
+            "feature file should still exist after rebase"
+        );
+    }
+
     #[test]
     fn sync_adopts_unmanaged_worktree() {
         let repo_dir = tempfile::tempdir().unwrap();
         let git_repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
+
+        // Rename HEAD branch to "main"
+        {
+            let head_branch_name = git_repo
+                .head()
+                .unwrap()
+                .shorthand()
+                .unwrap()
+                .to_string();
+            git_repo
+                .find_branch(&head_branch_name, git2::BranchType::Local)
+                .unwrap()
+                .rename("main", true)
+                .unwrap();
+        }
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
@@ -162,21 +307,22 @@ mod tests {
         // Create a git worktree manually
         let wt_dir = tempfile::tempdir().unwrap();
         let wt_path = wt_dir.path().join("sync-feat");
-        git_repo
-            .branch(
-                "sync-feat",
-                &git_repo.head().unwrap().peel_to_commit().unwrap(),
-                false,
-            )
-            .unwrap();
-        let branch_ref = git_repo
-            .find_branch("sync-feat", git2::BranchType::Local)
-            .unwrap();
-        let mut opts = git2::WorktreeAddOptions::new();
-        opts.reference(Some(branch_ref.get()));
-        git_repo
-            .worktree("sync-feat", &wt_path, Some(&opts))
-            .unwrap();
+        {
+            let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+            git_repo
+                .branch("sync-feat", &head_commit, false)
+                .unwrap();
+        }
+        {
+            let branch_ref = git_repo
+                .find_branch("sync-feat", git2::BranchType::Local)
+                .unwrap();
+            let mut opts = git2::WorktreeAddOptions::new();
+            opts.reference(Some(branch_ref.get()));
+            git_repo
+                .worktree("sync-feat", &wt_path, Some(&opts))
+                .unwrap();
+        }
 
         // Sync the unmanaged worktree — should trigger adoption
         let result = execute("sync-feat", repo_dir.path(), &db, Strategy::Rebase)

@@ -227,6 +227,7 @@ pub fn sync_rebase(
 
     let sig = git2::Signature::now("trench", "trench@localhost")?;
 
+    let mut last_commit_oid = None;
     while let Some(op) = rebase.next() {
         let _op = op?;
         // Check for conflicts
@@ -237,10 +238,18 @@ pub fn sync_rebase(
                 branch: branch.to_string(),
             });
         }
-        rebase.commit(None, &sig, None)?;
+        last_commit_oid = Some(rebase.commit(None, &sig, None)?);
     }
 
     rebase.finish(None)?;
+
+    // Explicitly update the branch ref to point to the rebased HEAD
+    if let Some(oid) = last_commit_oid {
+        let ref_name = format!("refs/heads/{branch}");
+        repo.reference(&ref_name, oid, true, "trench sync: rebase")?;
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+    }
+
     Ok(())
 }
 
