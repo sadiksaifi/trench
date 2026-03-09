@@ -304,9 +304,9 @@ fn run_remove(identifier: &str, force: bool, prune: bool) -> anyhow::Result<()> 
     let db = state::Database::open(&db_path)?;
 
     // If not forced, resolve the worktree (adopting if unmanaged) for the prompt
-    if !force {
+    let resolved = if !force {
         let repo_info = git::discover_repo(&cwd)?;
-        if let Ok((_repo, wt)) = adopt::resolve_or_adopt(identifier, &repo_info, &db) {
+        if let Ok((repo, wt)) = adopt::resolve_or_adopt(identifier, &repo_info, &db) {
             let prune_hint = if prune {
                 " (including remote branch)"
             } else {
@@ -324,10 +324,22 @@ fn run_remove(identifier: &str, force: bool, prune: bool) -> anyhow::Result<()> 
                 eprintln!("Cancelled.");
                 return Ok(());
             }
+            Some((repo, wt, repo_info))
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
-    match cli::commands::remove::execute(identifier, &cwd, &db, prune) {
+    let remove_result = match resolved {
+        Some((repo, wt, repo_info)) => {
+            cli::commands::remove::execute_resolved(&repo, &wt, &repo_info, &db, prune)
+        }
+        None => cli::commands::remove::execute(identifier, &cwd, &db, prune),
+    };
+
+    match remove_result {
         Ok(result) => {
             if result.pruned_remote {
                 eprintln!("Removed worktree '{}' and remote branch", result.name);

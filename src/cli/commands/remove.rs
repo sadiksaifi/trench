@@ -2,8 +2,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::git;
-use crate::state::Database;
+use crate::git::{self, RepoInfo};
+use crate::state::{Database, Repo, Worktree};
 
 /// Result of a worktree removal.
 #[derive(Debug)]
@@ -26,9 +26,21 @@ pub struct RemoveResult {
 /// branch was not found (non-fatal).
 pub fn execute(identifier: &str, cwd: &Path, db: &Database, prune: bool) -> Result<RemoveResult> {
     let repo_info = git::discover_repo(cwd)?;
-
     let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
+    execute_resolved(&repo, &wt, &repo_info, db, prune)
+}
 
+/// Execute removal with pre-resolved worktree data.
+///
+/// Use this when the caller has already resolved the worktree (e.g. for
+/// the confirmation prompt) to avoid a redundant DB/git round-trip.
+pub fn execute_resolved(
+    repo: &Repo,
+    wt: &Worktree,
+    repo_info: &RepoInfo,
+    db: &Database,
+    prune: bool,
+) -> Result<RemoveResult> {
     let worktree_path = Path::new(&wt.path);
 
     // Remove worktree from disk and prune git references
@@ -108,7 +120,10 @@ mod tests {
             &db,
         )
         .expect("create should succeed");
-        assert!(create_result.path.exists(), "worktree should exist after create");
+        assert!(
+            create_result.path.exists(),
+            "worktree should exist after create"
+        );
 
         // Capture the worktree ID before removal
         let repo_path_str = repo_dir.path().canonicalize().unwrap();
@@ -123,26 +138,30 @@ mod tests {
         let wt_id = wt_before.id;
 
         // Remove it
-        let result = execute("my-feature", repo_dir.path(), &db, false)
-            .expect("remove should succeed");
+        let result =
+            execute("my-feature", repo_dir.path(), &db, false).expect("remove should succeed");
         assert_eq!(result.name, "my-feature");
 
         // Verify: directory is gone
-        assert!(!create_result.path.exists(), "worktree directory should be deleted");
+        assert!(
+            !create_result.path.exists(),
+            "worktree directory should be deleted"
+        );
 
         // Verify: DB record has removed_at set
         let wt = db
             .get_worktree(wt_id)
             .unwrap()
             .expect("worktree record should still exist in DB");
-        assert!(
-            wt.removed_at.is_some(),
-            "removed_at should be set"
-        );
+        assert!(wt.removed_at.is_some(), "removed_at should be set");
 
         // list_worktrees should no longer include the removed worktree
         let worktrees = db.list_worktrees(db_repo.id).unwrap();
-        assert_eq!(worktrees.len(), 0, "removed worktree should not appear in list");
+        assert_eq!(
+            worktrees.len(),
+            0,
+            "removed worktree should not appear in list"
+        );
 
         // Verify: "removed" event was inserted
         let event_count = db.count_events(wt_id, Some("removed")).unwrap();
@@ -173,19 +192,27 @@ mod tests {
 
         // Update the DB branch to have a slash (simulating feature/auth → feature-auth mapping)
         let repo_path_str = repo_dir.path().canonicalize().unwrap();
-        let db_repo = db.get_repo_by_path(repo_path_str.to_str().unwrap()).unwrap().unwrap();
+        let db_repo = db
+            .get_repo_by_path(repo_path_str.to_str().unwrap())
+            .unwrap()
+            .unwrap();
         let worktrees = db.list_worktrees(db_repo.id).unwrap();
         // Directly update branch in DB to simulate slashed branch
-        db.conn_for_test().execute(
-            "UPDATE worktrees SET branch = 'feature/auth' WHERE id = ?1",
-            rusqlite::params![worktrees[0].id],
-        ).unwrap();
+        db.conn_for_test()
+            .execute(
+                "UPDATE worktrees SET branch = 'feature/auth' WHERE id = ?1",
+                rusqlite::params![worktrees[0].id],
+            )
+            .unwrap();
 
         // Remove using the original branch name (feature/auth)
         let result = execute("feature/auth", repo_dir.path(), &db, false)
             .expect("remove by branch name should succeed");
         assert_eq!(result.name, "feature-auth");
-        assert!(!create_result.path.exists(), "worktree directory should be deleted");
+        assert!(
+            !create_result.path.exists(),
+            "worktree directory should be deleted"
+        );
     }
 
     #[test]
@@ -210,7 +237,10 @@ mod tests {
         let result = execute("feature-auth", repo_dir.path(), &db, false)
             .expect("remove by sanitized name should succeed");
         assert_eq!(result.name, "feature-auth");
-        assert!(!create_result.path.exists(), "worktree directory should be deleted");
+        assert!(
+            !create_result.path.exists(),
+            "worktree directory should be deleted"
+        );
     }
 
     /// Helper: create a bare remote, clone it, and return (clone_path, remote_dir).
@@ -257,10 +287,7 @@ mod tests {
         {
             let mut origin = clone.find_remote("origin").unwrap();
             origin
-                .push(
-                    &["refs/heads/prune-me:refs/heads/prune-me"],
-                    None,
-                )
+                .push(&["refs/heads/prune-me:refs/heads/prune-me"], None)
                 .unwrap();
         }
         // Fetch to update remote-tracking refs
@@ -272,7 +299,9 @@ mod tests {
         // Verify the remote branch exists on the bare remote
         let remote_repo = git2::Repository::open_bare(remote_dir.path()).unwrap();
         assert!(
-            remote_repo.find_branch("prune-me", git2::BranchType::Local).is_ok(),
+            remote_repo
+                .find_branch("prune-me", git2::BranchType::Local)
+                .is_ok(),
             "branch should exist on remote before prune"
         );
 
@@ -283,13 +312,18 @@ mod tests {
         assert!(result.pruned_remote, "should have pruned remote branch");
 
         // Verify: worktree directory is gone
-        assert!(!create_result.path.exists(), "worktree directory should be deleted");
+        assert!(
+            !create_result.path.exists(),
+            "worktree directory should be deleted"
+        );
 
         // Verify: remote branch is gone
         // Reopen the bare remote to get fresh state
         let remote_repo = git2::Repository::open_bare(remote_dir.path()).unwrap();
         assert!(
-            remote_repo.find_branch("prune-me", git2::BranchType::Local).is_err(),
+            remote_repo
+                .find_branch("prune-me", git2::BranchType::Local)
+                .is_err(),
             "branch should be deleted on remote after prune"
         );
     }
@@ -317,10 +351,16 @@ mod tests {
         let result = execute("no-remote", clone_dir.path(), &db, true)
             .expect("remove with prune should succeed even without remote branch");
         assert_eq!(result.name, "no-remote");
-        assert!(!result.pruned_remote, "should NOT have pruned remote branch");
+        assert!(
+            !result.pruned_remote,
+            "should NOT have pruned remote branch"
+        );
 
         // Verify: worktree directory is gone
-        assert!(!create_result.path.exists(), "worktree directory should be deleted");
+        assert!(
+            !create_result.path.exists(),
+            "worktree directory should be deleted"
+        );
     }
 
     #[test]
@@ -364,11 +404,14 @@ mod tests {
         // Verify worktree was adopted (has adopted_at) and removed (has removed_at)
         let db_repo = db.get_repo_by_path(repo_path_str).unwrap().unwrap();
         // Check via raw query since find_worktree_by_identifier excludes removed
-        let wt_count: i64 = db.conn_for_test().query_row(
-            "SELECT COUNT(*) FROM worktrees WHERE repo_id = ?1 AND name = 'unmanaged-rm'",
-            rusqlite::params![db_repo.id],
-            |row| row.get(0),
-        ).unwrap();
+        let wt_count: i64 = db
+            .conn_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM worktrees WHERE repo_id = ?1 AND name = 'unmanaged-rm'",
+                rusqlite::params![db_repo.id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(wt_count, 1, "worktree should exist in DB");
 
         // Check adopted_at and removed_at via raw query
@@ -379,6 +422,37 @@ mod tests {
         ).unwrap();
         assert!(adopted_at.is_some(), "adopted_at should be set");
         assert!(removed_at.is_some(), "removed_at should be set");
+    }
+
+    #[test]
+    fn execute_resolved_removes_with_preresolved_data() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Create a worktree via the normal path
+        let create_result = crate::cli::commands::create::execute(
+            "pre-resolved",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+        assert!(create_result.path.exists());
+
+        // Resolve the worktree manually (simulating what run_remove does for the prompt)
+        let repo_info = git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) = crate::adopt::resolve_or_adopt("pre-resolved", &repo_info, &db).unwrap();
+
+        // Call execute_resolved with the pre-resolved data
+        let result =
+            execute_resolved(&repo, &wt, &repo_info, &db, false).expect("should succeed");
+        assert_eq!(result.name, "pre-resolved");
+        assert!(!create_result.path.exists(), "worktree dir should be gone");
     }
 
     #[test]
