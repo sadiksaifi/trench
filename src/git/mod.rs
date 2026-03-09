@@ -214,8 +214,8 @@ pub fn sync_rebase(
         })?
         .get()
         .target()
-        .ok_or_else(|| GitError::BaseBranchNotFound {
-            base: branch.to_string(),
+        .ok_or_else(|| GitError::WorktreeNotFound {
+            name: branch.to_string(),
         })?;
 
     let upstream_annotated = repo.find_annotated_commit(upstream_oid)?;
