@@ -1569,4 +1569,111 @@ mod tests {
             "scanned worktree should show [unmanaged] badge, got: {output}"
         );
     }
+
+    #[test]
+    fn integration_scan_paths_discovered_in_all_formats() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create worktrees in a scan directory (simulating custom scan path)
+        let scan_dir = tempfile::tempdir().unwrap();
+        let wt_a = scan_dir.path().join("feature-alpha");
+        let wt_b = scan_dir.path().join("feature-beta");
+        git::create_worktree(repo_dir.path(), "feature-alpha", &base, &wt_a)
+            .expect("create alpha");
+        git::create_worktree(repo_dir.path(), "feature-beta", &base, &wt_b)
+            .expect("create beta");
+
+        let scan_paths = vec![scan_dir.path().to_string_lossy().into_owned()];
+
+        // Table output should include both scanned worktrees
+        let table_output = render_table(repo_dir.path(), &db, None, None, &scan_paths)
+            .expect("table with scan paths should succeed");
+        assert!(
+            table_output.contains("feature-alpha"),
+            "table should contain feature-alpha, got: {table_output}"
+        );
+        assert!(
+            table_output.contains("feature-beta"),
+            "table should contain feature-beta, got: {table_output}"
+        );
+
+        // JSON output should include scanned worktrees with managed=false
+        let json_output = execute_json(repo_dir.path(), &db, None, &scan_paths)
+            .expect("json with scan paths should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let items = parsed.as_array().unwrap();
+
+        let alpha = items.iter().find(|i| i["name"] == "feature-alpha")
+            .expect("JSON should contain feature-alpha");
+        assert_eq!(alpha["managed"], serde_json::json!(false));
+        assert!(alpha["branch"].is_string());
+
+        let beta = items.iter().find(|i| i["name"] == "feature-beta")
+            .expect("JSON should contain feature-beta");
+        assert_eq!(beta["managed"], serde_json::json!(false));
+
+        // Porcelain output should include scanned worktrees
+        let porcelain_output = execute_porcelain(repo_dir.path(), &db, None, &scan_paths)
+            .expect("porcelain with scan paths should succeed");
+        assert!(
+            porcelain_output.contains("feature-alpha"),
+            "porcelain should contain feature-alpha"
+        );
+        assert!(
+            porcelain_output.contains("feature-beta"),
+            "porcelain should contain feature-beta"
+        );
+        // Verify managed=false in porcelain
+        let alpha_line = porcelain_output.lines()
+            .find(|l| l.starts_with("feature-alpha:"))
+            .expect("should find feature-alpha in porcelain");
+        assert!(
+            alpha_line.ends_with(":false"),
+            "scanned worktree should have managed=false, got: {alpha_line}"
+        );
+    }
+
+    #[test]
+    fn scan_paths_deduplicates_with_git_discovered_worktrees() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create a worktree in a scan dir — this is ALSO known to git
+        let scan_dir = tempfile::tempdir().unwrap();
+        let wt_path = scan_dir.path().join("known-wt");
+        git::create_worktree(repo_dir.path(), "known-wt", &base, &wt_path)
+            .expect("create known-wt");
+
+        let scan_paths = vec![scan_dir.path().to_string_lossy().into_owned()];
+
+        let json_output = execute_json(repo_dir.path(), &db, None, &scan_paths)
+            .expect("json should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+        let items = parsed.as_array().unwrap();
+
+        // Count how many times known-wt appears
+        let count = items.iter().filter(|i| i["name"] == "known-wt").count();
+        assert_eq!(
+            count, 1,
+            "known-wt should appear exactly once (deduplicated), found: {count}"
+        );
+    }
+
+    #[test]
+    fn scan_paths_nonexistent_does_not_error() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let scan_paths = vec!["/nonexistent/scan/path/xyz".to_string()];
+
+        // Should not error — non-existent paths are warnings
+        let result = render_table(repo_dir.path(), &db, None, None, &scan_paths);
+        assert!(result.is_ok(), "non-existent scan path should not cause error");
+    }
 }
