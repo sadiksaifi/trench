@@ -524,6 +524,44 @@ mod tests {
     }
 
     #[test]
+    fn sync_result_to_json_has_expected_structure() {
+        let result = SyncResult {
+            name: "my-feature".to_string(),
+            strategy: Strategy::Rebase,
+            before_ahead: 2,
+            before_behind: 3,
+            after_ahead: 2,
+            after_behind: 0,
+        };
+
+        let json = result.to_json();
+        let serialized = serde_json::to_value(&json).unwrap();
+
+        assert_eq!(serialized["name"], "my-feature");
+        assert_eq!(serialized["strategy"], "rebase");
+        assert_eq!(serialized["before"]["ahead"], 2);
+        assert_eq!(serialized["before"]["behind"], 3);
+        assert_eq!(serialized["after"]["ahead"], 2);
+        assert_eq!(serialized["after"]["behind"], 0);
+    }
+
+    #[test]
+    fn sync_result_json_strategy_merge() {
+        let result = SyncResult {
+            name: "feat".to_string(),
+            strategy: Strategy::Merge,
+            before_ahead: 1,
+            before_behind: 1,
+            after_ahead: 2,
+            after_behind: 0,
+        };
+
+        let json = result.to_json();
+        let serialized = serde_json::to_value(&json).unwrap();
+        assert_eq!(serialized["strategy"], "merge");
+    }
+
+    #[test]
     fn sync_adopts_unmanaged_worktree() {
         let repo_dir = tempfile::tempdir().unwrap();
         let git_repo = init_repo_with_commit(repo_dir.path());
