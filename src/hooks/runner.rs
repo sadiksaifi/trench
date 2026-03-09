@@ -439,4 +439,80 @@ mod tests {
         assert!(lines.contains(&"run_ok"));
         assert!(lines.contains(&"shell_before"));
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timeout_returns_hook_timeout_error() {
+        let source = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let (db, repo_id, wt_id) = setup_db();
+
+        let config = HookDef {
+            copy: None,
+            run: Some(vec!["sleep 10".to_string()]),
+            shell: None,
+            timeout_secs: Some(1),
+        };
+
+        let env_ctx = test_env_ctx(source.path(), work.path());
+
+        let err = execute_hook(
+            &HookEvent::PostCreate,
+            &config,
+            &env_ctx,
+            source.path(),
+            work.path(),
+            &db,
+            repo_id,
+            Some(wt_id),
+        )
+        .await
+        .expect_err("hook should timeout");
+
+        // Should be a HookTimeoutError
+        let timeout_err = err.downcast_ref::<HookTimeoutError>()
+            .expect("error should be HookTimeoutError");
+        assert_eq!(timeout_err.timeout_secs, 1);
+
+        // Event should be recorded with exit code 7
+        let events = db.list_events(wt_id, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        let payload: serde_json::Value =
+            serde_json::from_str(events[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["exit_code"], 7);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timeout_shared_across_run_and_shell() {
+        let source = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let (db, repo_id, wt_id) = setup_db();
+
+        // Run takes ~1s, shell takes ~10s, total timeout is 2s
+        // Shell should be killed by timeout
+        let config = HookDef {
+            copy: None,
+            run: Some(vec!["sleep 1".to_string()]),
+            shell: Some("sleep 10".to_string()),
+            timeout_secs: Some(2),
+        };
+
+        let env_ctx = test_env_ctx(source.path(), work.path());
+
+        let err = execute_hook(
+            &HookEvent::PostCreate,
+            &config,
+            &env_ctx,
+            source.path(),
+            work.path(),
+            &db,
+            repo_id,
+            Some(wt_id),
+        )
+        .await
+        .expect_err("hook should timeout on shell step");
+
+        let timeout_err = err.downcast_ref::<HookTimeoutError>()
+            .expect("error should be HookTimeoutError");
+        assert_eq!(timeout_err.timeout_secs, 2);
+    }
 }
