@@ -317,10 +317,9 @@ fn run_remove(identifier: &str, force: bool, prune: bool) -> anyhow::Result<()> 
                 wt.name, wt.path, prune_hint
             );
             let mut input = String::new();
-            if std::io::stdin().read_line(&mut input).is_err() {
-                eprintln!("error: failed to read input");
-                return Ok(());
-            }
+            std::io::stdin()
+                .read_line(&mut input)
+                .context("failed to read confirmation input")?;
             if !input.trim().eq_ignore_ascii_case("y") {
                 eprintln!("Cancelled.");
                 return Ok(());
