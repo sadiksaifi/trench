@@ -4,8 +4,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use super::copy::execute_copy_step;
-use super::run::execute_run_step;
-use super::shell::execute_shell_step;
+use super::run::{execute_run_step, RunStepError};
+use super::shell::{execute_shell_step, ShellStepError};
 use super::{build_env, HookConfig, HookEnvContext, HookEvent};
 use crate::state::Database;
 
@@ -50,8 +50,13 @@ pub async fn execute_hook(
 
     // Step 1: Copy (not subject to timeout)
     if let Some(ref patterns) = config.copy {
-        execute_copy_step(source_dir, work_dir, patterns)
-            .context("copy step failed")?;
+        if let Err(e) = execute_copy_step(source_dir, work_dir, patterns) {
+            let duration = start.elapsed();
+            record_execution(
+                db, repo_id, worktree_id, event, 1, duration.as_secs_f64(), &all_output,
+            )?;
+            return Err(e.context("copy step failed"));
+        }
     }
 
     // Step 2: Run (subject to timeout)
@@ -61,11 +66,19 @@ pub async fn execute_hook(
         match tokio::time::timeout(remaining, execute_run_step(commands, work_dir, &env_vars))
             .await
         {
-            Ok(result) => {
-                let run_result = result?;
+            Ok(Ok(run_result)) => {
                 for cmd_output in &run_result.executed {
                     collect_output(&mut all_output, &cmd_output.stdout, &cmd_output.stderr);
                 }
+            }
+            Ok(Err(e)) => {
+                // Collect partial output from the error if it's a RunStepError
+                let exit_code = extract_run_error_output(&e, &mut all_output);
+                let duration = start.elapsed();
+                record_execution(
+                    db, repo_id, worktree_id, event, exit_code, duration.as_secs_f64(), &all_output,
+                )?;
+                return Err(e);
             }
             Err(_) => {
                 let duration = start.elapsed();
@@ -83,9 +96,16 @@ pub async fn execute_hook(
         match tokio::time::timeout(remaining, execute_shell_step(script, work_dir, &env_vars))
             .await
         {
-            Ok(result) => {
-                let shell_output = result?;
+            Ok(Ok(shell_output)) => {
                 collect_output(&mut all_output, &shell_output.stdout, &shell_output.stderr);
+            }
+            Ok(Err(e)) => {
+                let exit_code = extract_shell_error_output(&e, &mut all_output);
+                let duration = start.elapsed();
+                record_execution(
+                    db, repo_id, worktree_id, event, exit_code, duration.as_secs_f64(), &all_output,
+                )?;
+                return Err(e);
             }
             Err(_) => {
                 let duration = start.elapsed();
@@ -106,6 +126,34 @@ pub async fn execute_hook(
         event_id,
         duration_secs: duration.as_secs_f64(),
     })
+}
+
+/// Extract partial output from a RunStepError and return the exit code.
+fn extract_run_error_output(
+    err: &anyhow::Error,
+    all_output: &mut Vec<(String, String)>,
+) -> i32 {
+    if let Some(run_err) = err.downcast_ref::<RunStepError>() {
+        for cmd_output in &run_err.results.executed {
+            collect_output(all_output, &cmd_output.stdout, &cmd_output.stderr);
+        }
+        run_err.exit_code
+    } else {
+        1
+    }
+}
+
+/// Extract output from a ShellStepError and return the exit code.
+fn extract_shell_error_output(
+    err: &anyhow::Error,
+    all_output: &mut Vec<(String, String)>,
+) -> i32 {
+    if let Some(shell_err) = err.downcast_ref::<ShellStepError>() {
+        collect_output(all_output, &shell_err.output.stdout, &shell_err.output.stderr);
+        shell_err.exit_code
+    } else {
+        1
+    }
 }
 
 fn collect_output(all_output: &mut Vec<(String, String)>, stdout: &str, stderr: &str) {
@@ -297,5 +345,98 @@ mod tests {
 
         let logs = db.get_logs(result.event_id).unwrap();
         assert!(logs.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_failure_stops_shell_and_records_error() {
+        let source = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let (db, repo_id, wt_id) = setup_db();
+
+        let config = HookDef {
+            copy: None,
+            run: Some(vec![
+                "echo before_fail".to_string(),
+                "exit 42".to_string(),
+            ]),
+            shell: Some("echo should_not_run".to_string()),
+            timeout_secs: Some(30),
+        };
+
+        let env_ctx = test_env_ctx(source.path(), work.path());
+
+        let err = execute_hook(
+            &HookEvent::PostCreate,
+            &config,
+            &env_ctx,
+            source.path(),
+            work.path(),
+            &db,
+            repo_id,
+            Some(wt_id),
+        )
+        .await
+        .expect_err("hook should fail");
+
+        // Error message should mention the failed command
+        let msg = err.to_string();
+        assert!(msg.contains("exit 42") || msg.contains("42"), "error: {msg}");
+
+        // Event should be recorded with non-zero exit code
+        let events = db.list_events(wt_id, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        let payload: serde_json::Value =
+            serde_json::from_str(events[0].payload.as_deref().unwrap()).unwrap();
+        assert_ne!(payload["exit_code"], 0);
+
+        // Logs should contain "before_fail" but NOT "should_not_run"
+        let event_id = events[0].id;
+        let logs = db.get_logs(event_id).unwrap();
+        let lines: Vec<&str> = logs.iter().map(|(_, l, _)| l.as_str()).collect();
+        assert!(lines.contains(&"before_fail"), "should have run output before failure");
+        assert!(
+            !lines.iter().any(|l| l.contains("should_not_run")),
+            "shell should not have run after run failure"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shell_failure_returns_error_and_records_event() {
+        let source = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let (db, repo_id, wt_id) = setup_db();
+
+        let config = HookDef {
+            copy: None,
+            run: Some(vec!["echo run_ok".to_string()]),
+            shell: Some("echo shell_before; exit 1".to_string()),
+            timeout_secs: Some(30),
+        };
+
+        let env_ctx = test_env_ctx(source.path(), work.path());
+
+        let err = execute_hook(
+            &HookEvent::PostCreate,
+            &config,
+            &env_ctx,
+            source.path(),
+            work.path(),
+            &db,
+            repo_id,
+            Some(wt_id),
+        )
+        .await
+        .expect_err("hook should fail");
+
+        assert!(err.to_string().contains("exit code"), "error: {err}");
+
+        // Both run and shell output should be logged
+        let events = db.list_events(wt_id, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        let event_id = events[0].id;
+        let logs = db.get_logs(event_id).unwrap();
+        let lines: Vec<&str> = logs.iter().map(|(_, l, _)| l.as_str()).collect();
+        assert!(lines.contains(&"run_ok"));
+        assert!(lines.contains(&"shell_before"));
     }
 }
