@@ -72,6 +72,7 @@ pub struct App {
     running: bool,
     nav_stack: Vec<Screen>,
     pub list_state: screens::list::ListState,
+    pub detail_state: Option<screens::detail::DetailState>,
 }
 
 impl App {
@@ -80,6 +81,7 @@ impl App {
             running: true,
             nav_stack: vec![Screen::List],
             list_state: screens::list::ListState::new(vec![]),
+            detail_state: None,
         }
     }
 
@@ -105,6 +107,15 @@ impl App {
     pub fn ui(&self, frame: &mut Frame) {
         match self.active_screen() {
             Screen::List => screens::list::render(&self.list_state, frame, frame.area()),
+            Screen::Detail => {
+                if let Some(ref detail) = self.detail_state {
+                    screens::detail::render(detail, frame, frame.area());
+                } else {
+                    let placeholder = Paragraph::new("trench TUI — press q to quit")
+                        .alignment(Alignment::Center);
+                    frame.render_widget(placeholder, frame.area());
+                }
+            }
             _ => {
                 let placeholder =
                     Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
@@ -124,20 +135,16 @@ impl App {
         }
     }
 
+    fn open_db() -> Option<(std::path::PathBuf, Database)> {
+        let cwd = std::env::current_dir().ok()?;
+        let db_path = paths::data_dir().ok()?.join("trench.db");
+        let db = Database::open(&db_path).ok()?;
+        Some((cwd, db))
+    }
+
     /// Reload worktree data from git + DB for the list screen.
     pub fn refresh_list(&mut self) {
-        let cwd = match std::env::current_dir() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let db_path = match paths::data_dir() {
-            Ok(p) => p.join("trench.db"),
-            Err(_) => return,
-        };
-        let db = match Database::open(&db_path) {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let Some((cwd, db)) = Self::open_db() else { return };
         if let Ok(rows) = screens::list::load_worktrees(&cwd, &db, &[]) {
             let prev_selected = self.list_state.selected;
             self.list_state = screens::list::ListState::new(rows);
@@ -160,7 +167,7 @@ impl App {
     fn handle_screen_key(&mut self, key: KeyEvent) {
         match self.active_screen() {
             Screen::List => self.handle_list_key(key),
-            Screen::Detail => {}
+            Screen::Detail => self.handle_detail_key(key),
             Screen::Create => {}
             Screen::Help => {}
         }
@@ -178,24 +185,28 @@ impl App {
             row.branch.clone()
         };
 
-        let cwd = match std::env::current_dir() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let db_path = match paths::data_dir() {
-            Ok(p) => p.join("trench.db"),
-            Err(_) => return,
-        };
-        let db = match Database::open(&db_path) {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let Some((cwd, db)) = Self::open_db() else { return };
         let repo_info = match crate::git::discover_repo(&cwd) {
             Ok(r) => r,
             Err(_) => return,
         };
         let _ = crate::adopt::resolve_or_adopt(&identifier, &repo_info, &db);
         self.refresh_list();
+    }
+
+    fn load_detail(&mut self, name: &str) -> bool {
+        self.detail_state = None;
+        let Some((cwd, db)) = Self::open_db() else { return false };
+        self.detail_state = Some(screens::detail::load_detail(name, &cwd, &db));
+        true
+    }
+
+    fn handle_detail_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('s') => {} // TODO: trigger sync
+            KeyCode::Char('o') => {} // TODO: open in $EDITOR
+            _ => {}
+        }
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) {
@@ -207,12 +218,17 @@ impl App {
                     .get(self.list_state.selected)
                     .map(|r| r.name.clone());
                 self.adopt_selected_if_unmanaged();
-                if let Some(name) = identity {
-                    if let Some(idx) = self.list_state.rows.iter().position(|r| r.name == name) {
+                if let Some(ref name) = identity {
+                    if let Some(idx) = self.list_state.rows.iter().position(|r| r.name == *name) {
                         self.list_state.selected = idx;
                     }
                 }
-                self.push_screen(Screen::Detail);
+                // Load detail data for the selected worktree
+                if let Some(name) = identity {
+                    if self.load_detail(&name) {
+                        self.push_screen(Screen::Detail);
+                    }
+                }
             }
             KeyCode::Char('n') => self.push_screen(Screen::Create),
             KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
@@ -340,15 +356,15 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_list_pushes_detail() {
-        let mut app = App::new();
+    fn enter_on_list_with_rows_pushes_detail() {
+        let mut app = app_with_rows();
         assert_eq!(app.active_screen(), Screen::List);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             app.active_screen(),
             Screen::Detail,
-            "Enter on List should push Detail screen"
+            "Enter on List with rows should push Detail screen"
         );
         assert_eq!(app.nav_stack_depth(), 2);
     }
@@ -386,7 +402,7 @@ mod tests {
 
     #[test]
     fn deep_stack_navigation_push_pop_sequence() {
-        let mut app = App::new();
+        let mut app = app_with_rows();
         // List → Detail → Help → pop → pop → List
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
@@ -414,7 +430,7 @@ mod tests {
 
     #[test]
     fn question_mark_opens_help_from_detail_screen() {
-        let mut app = App::new();
+        let mut app = app_with_rows();
         // Navigate to Detail first
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
@@ -504,6 +520,19 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_empty_list_does_not_push_detail() {
+        let mut app = App::new();
+        // Empty list — no rows
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Enter on empty list should stay on List"
+        );
+        assert!(app.detail_state.is_none());
+    }
+
+    #[test]
     fn app_ignores_unbound_keys() {
         let mut app = App::new();
         app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
@@ -569,5 +598,78 @@ mod tests {
             "non-list screens should show placeholder, got: {:?}",
             content.trim()
         );
+    }
+
+    fn sample_detail_state() -> screens::detail::DetailState {
+        screens::detail::DetailState {
+            name: "feat-a".into(),
+            branch: "feat/a".into(),
+            path: "/tmp/wt/feat-a".into(),
+            base_branch: "main".into(),
+            ahead_behind: "+0/-0".into(),
+            created: "2026-03-10".into(),
+            last_accessed: "2026-03-11".into(),
+            hook_status: "success".into(),
+            hook_timestamp: "2026-03-10".into(),
+            changed_files: vec![("file.rs".into(), "modified".into())],
+            commits: vec![("abc1234".into(), "test commit".into())],
+        }
+    }
+
+    #[test]
+    fn detail_screen_renders_detail_state_not_placeholder() {
+        let mut app = App::new();
+        app.detail_state = Some(sample_detail_state());
+        app.push_screen(Screen::Detail);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+        assert!(
+            content.contains("feat/a"),
+            "detail screen should show branch from detail_state, got: {:?}",
+            content.trim()
+        );
+        assert!(
+            !content.contains("trench TUI"),
+            "detail screen should NOT show placeholder"
+        );
+    }
+
+    #[test]
+    fn detail_screen_shows_changed_files_and_commits() {
+        let mut app = App::new();
+        app.detail_state = Some(sample_detail_state());
+        app.push_screen(Screen::Detail);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+        assert!(content.contains("file.rs"), "should show changed file");
+        assert!(content.contains("abc1234"), "should show commit hash");
+    }
+
+    #[test]
+    fn s_on_detail_is_handled_without_crash() {
+        let mut app = App::new();
+        app.push_screen(Screen::Detail);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(app.is_running(), "s on detail should not crash or quit");
+        assert_eq!(app.active_screen(), Screen::Detail);
+    }
+
+    #[test]
+    fn o_on_detail_is_handled_without_crash() {
+        let mut app = App::new();
+        app.push_screen(Screen::Detail);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert!(app.is_running(), "o on detail should not crash or quit");
+        assert_eq!(app.active_screen(), Screen::Detail);
     }
 }
