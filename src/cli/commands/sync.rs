@@ -443,10 +443,13 @@ mod tests {
             "error should mention conflict, got: {msg}"
         );
 
-        // Verify it's a GitError::MergeConflict
+        // Verify it's the exact GitError::MergeConflict variant
         assert!(
-            err.downcast_ref::<crate::git::GitError>().is_some(),
-            "should be a GitError"
+            matches!(
+                err.downcast_ref::<crate::git::GitError>(),
+                Some(crate::git::GitError::MergeConflict { branch }) if branch == "conflict-feat"
+            ),
+            "should be GitError::MergeConflict for 'conflict-feat'"
         );
     }
 
@@ -528,6 +531,15 @@ mod tests {
         assert!(
             msg.contains("merge conflict") || msg.contains("conflict"),
             "error should mention conflict, got: {msg}"
+        );
+
+        // Verify it's the exact GitError::MergeConflict variant
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::git::GitError>(),
+                Some(crate::git::GitError::MergeConflict { branch }) if branch == "merge-conflict"
+            ),
+            "should be GitError::MergeConflict for 'merge-conflict'"
         );
 
         // After merge conflict error, MERGE_HEAD should be preserved so users can resolve
