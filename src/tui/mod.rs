@@ -72,6 +72,7 @@ pub struct App {
     running: bool,
     nav_stack: Vec<Screen>,
     pub list_state: screens::list::ListState,
+    pub detail_state: Option<screens::detail::DetailState>,
 }
 
 impl App {
@@ -80,6 +81,7 @@ impl App {
             running: true,
             nav_stack: vec![Screen::List],
             list_state: screens::list::ListState::new(vec![]),
+            detail_state: None,
         }
     }
 
@@ -105,6 +107,15 @@ impl App {
     pub fn ui(&self, frame: &mut Frame) {
         match self.active_screen() {
             Screen::List => screens::list::render(&self.list_state, frame, frame.area()),
+            Screen::Detail => {
+                if let Some(ref detail) = self.detail_state {
+                    screens::detail::render(detail, frame, frame.area());
+                } else {
+                    let placeholder = Paragraph::new("trench TUI — press q to quit")
+                        .alignment(Alignment::Center);
+                    frame.render_widget(placeholder, frame.area());
+                }
+            }
             _ => {
                 let placeholder =
                     Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
@@ -198,6 +209,22 @@ impl App {
         self.refresh_list();
     }
 
+    fn load_detail(&mut self, name: &str) {
+        let cwd = match std::env::current_dir() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let db_path = match paths::data_dir() {
+            Ok(p) => p.join("trench.db"),
+            Err(_) => return,
+        };
+        let db = match Database::open(&db_path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        self.detail_state = Some(screens::detail::load_detail(name, &cwd, &db));
+    }
+
     fn handle_detail_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('s') => {} // TODO: trigger sync
@@ -215,10 +242,14 @@ impl App {
                     .get(self.list_state.selected)
                     .map(|r| r.name.clone());
                 self.adopt_selected_if_unmanaged();
-                if let Some(name) = identity {
-                    if let Some(idx) = self.list_state.rows.iter().position(|r| r.name == name) {
+                if let Some(ref name) = identity {
+                    if let Some(idx) = self.list_state.rows.iter().position(|r| r.name == *name) {
                         self.list_state.selected = idx;
                     }
+                }
+                // Load detail data for the selected worktree
+                if let Some(name) = identity {
+                    self.load_detail(&name);
                 }
                 self.push_screen(Screen::Detail);
             }
@@ -577,6 +608,61 @@ mod tests {
             "non-list screens should show placeholder, got: {:?}",
             content.trim()
         );
+    }
+
+    fn sample_detail_state() -> screens::detail::DetailState {
+        screens::detail::DetailState {
+            name: "feat-a".into(),
+            branch: "feat/a".into(),
+            path: "/tmp/wt/feat-a".into(),
+            base_branch: "main".into(),
+            ahead_behind: "+0/-0".into(),
+            created: "2026-03-10".into(),
+            last_accessed: "2026-03-11".into(),
+            hook_status: "success".into(),
+            hook_timestamp: "2026-03-10".into(),
+            changed_files: vec![("file.rs".into(), "modified".into())],
+            commits: vec![("abc1234".into(), "test commit".into())],
+        }
+    }
+
+    #[test]
+    fn detail_screen_renders_detail_state_not_placeholder() {
+        let mut app = App::new();
+        app.detail_state = Some(sample_detail_state());
+        app.push_screen(Screen::Detail);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+        assert!(
+            content.contains("feat/a"),
+            "detail screen should show branch from detail_state, got: {:?}",
+            content.trim()
+        );
+        assert!(
+            !content.contains("trench TUI"),
+            "detail screen should NOT show placeholder"
+        );
+    }
+
+    #[test]
+    fn detail_screen_shows_changed_files_and_commits() {
+        let mut app = App::new();
+        app.detail_state = Some(sample_detail_state());
+        app.push_screen(Screen::Detail);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+        assert!(content.contains("file.rs"), "should show changed file");
+        assert!(content.contains("abc1234"), "should show commit hash");
     }
 
     #[test]
