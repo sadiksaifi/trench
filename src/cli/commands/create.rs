@@ -1018,4 +1018,44 @@ mod tests {
         assert!(result.result.path.exists(), "worktree should be created");
         assert!(result.post_create_error.is_none());
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_flag_returns_skipped_status() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let hooks = HooksConfig {
+            post_create: Some(HookDef {
+                run: Some(vec!["echo should-not-run".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let result = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            true, // no_hooks = true → skip
+        )
+        .await
+        .expect("should succeed");
+
+        assert!(matches!(result.hooks_status, HooksStatus::Skipped));
+        assert!(result.result.path.exists(), "worktree should still be created");
+
+        // Verify no hook events were logged
+        let repo_path_str = repo_dir.path().canonicalize().unwrap().to_str().unwrap().to_string();
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().expect("repo in DB");
+        let wts = db.list_worktrees(db_repo.id).unwrap();
+        let hook_events = db.count_events(wts[0].id, Some("hook:post_create")).unwrap();
+        assert_eq!(hook_events, 0, "no hook events should be logged when --no-hooks");
+    }
 }
