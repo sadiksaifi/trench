@@ -1,5 +1,8 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
     Frame,
 };
 
@@ -19,13 +22,58 @@ pub struct DetailState {
     pub commits: Vec<(String, String)>,
 }
 
-pub fn render(_state: &DetailState, _frame: &mut Frame, _area: Rect) {
-    // TODO: implement
+pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+
+    let metadata_lines = vec![
+        Line::from(vec![
+            Span::styled("Branch: ", bold),
+            Span::raw(&state.branch),
+            Span::raw("  "),
+            Span::styled("Name: ", bold),
+            Span::raw(&state.name),
+        ]),
+        Line::from(vec![
+            Span::styled("Path:   ", bold),
+            Span::raw(&state.path),
+        ]),
+        Line::from(vec![
+            Span::styled("Base:   ", bold),
+            Span::raw(&state.base_branch),
+            Span::raw("  "),
+            Span::styled("Ahead/Behind: ", bold),
+            Span::raw(&state.ahead_behind),
+        ]),
+        Line::from(vec![
+            Span::styled("Created: ", bold),
+            Span::raw(&state.created),
+            Span::raw("  "),
+            Span::styled("Last Accessed: ", bold),
+            Span::raw(&state.last_accessed),
+        ]),
+    ];
+
+    let metadata = Paragraph::new(metadata_lines);
+    frame.render_widget(metadata, area);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn render_to_buffer(state: &DetailState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(state, frame, frame.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        buf.content().iter().map(|cell| cell.symbol()).collect()
+    }
 
     fn sample_detail() -> DetailState {
         DetailState {
@@ -99,5 +147,32 @@ mod tests {
         };
         assert!(state.changed_files.is_empty());
         assert!(state.commits.is_empty());
+    }
+
+    #[test]
+    fn renders_metadata_section_with_branch_and_path() {
+        let state = sample_detail();
+        let buf = render_to_buffer(&state, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("feature/auth"), "should show branch, got: {text}");
+        assert!(text.contains("feature-auth"), "should show worktree name");
+    }
+
+    #[test]
+    fn renders_metadata_with_base_branch_and_ahead_behind() {
+        let state = sample_detail();
+        let buf = render_to_buffer(&state, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("main"), "should show base branch");
+        assert!(text.contains("+1/-0"), "should show ahead/behind");
+    }
+
+    #[test]
+    fn renders_metadata_with_created_and_last_accessed() {
+        let state = sample_detail();
+        let buf = render_to_buffer(&state, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("2026-03-10 14:30"), "should show created date");
+        assert!(text.contains("2026-03-11 09:15"), "should show last accessed");
     }
 }
