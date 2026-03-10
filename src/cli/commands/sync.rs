@@ -87,7 +87,8 @@ pub fn execute(
     if dirty > 0 {
         anyhow::bail!(
             "worktree '{}' has {} uncommitted change(s); commit or stash before syncing",
-            wt.name, dirty
+            wt.name,
+            dirty
         );
     }
 
@@ -173,16 +174,17 @@ mod tests {
             .unwrap();
     }
 
+    struct DivergentRepoFixture {
+        _git_repo: git2::Repository,
+        wt_path: std::path::PathBuf,
+        db: Database,
+        _repo_dir: tempfile::TempDir,
+        _wt_dir: tempfile::TempDir,
+        repo_path_str: String,
+    }
+
     /// Set up a test scenario with a main repo, a worktree branch behind main.
-    /// Returns (main_repo, worktree_path, db, repo_path_str).
-    fn setup_diverged_repo() -> (
-        git2::Repository,
-        std::path::PathBuf,
-        Database,
-        tempfile::TempDir,
-        tempfile::TempDir,
-        String,
-    ) {
+    fn setup_diverged_repo() -> DivergentRepoFixture {
         let repo_dir = tempfile::tempdir().unwrap();
         let git_repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
@@ -193,11 +195,7 @@ mod tests {
         // Rename HEAD branch to "main" for consistency
         git_repo
             .find_branch(
-                git_repo
-                    .head()
-                    .unwrap()
-                    .shorthand()
-                    .unwrap(),
+                git_repo.head().unwrap().shorthand().unwrap(),
                 git2::BranchType::Local,
             )
             .unwrap()
@@ -207,9 +205,7 @@ mod tests {
         // Create feature branch at current main
         {
             let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
-            git_repo
-                .branch("feature", &head_commit, false)
-                .unwrap();
+            git_repo.branch("feature", &head_commit, false).unwrap();
         }
 
         // Create worktree for the feature branch
@@ -221,9 +217,7 @@ mod tests {
                 .unwrap();
             let mut opts = git2::WorktreeAddOptions::new();
             opts.reference(Some(branch_ref.get()));
-            git_repo
-                .worktree("feature", &wt_path, Some(&opts))
-                .unwrap();
+            git_repo.worktree("feature", &wt_path, Some(&opts)).unwrap();
         }
 
         // Add a commit on the feature branch (in worktree)
@@ -237,7 +231,12 @@ mod tests {
             git_repo.checkout_tree(&main_obj, None).unwrap();
             git_repo.set_head("refs/heads/main").unwrap();
         }
-        commit_file(&git_repo, "upstream.txt", "upstream change", "upstream commit on main");
+        commit_file(
+            &git_repo,
+            "upstream.txt",
+            "upstream change",
+            "upstream commit on main",
+        );
 
         // Register in DB
         db.insert_repo("test-repo", &repo_path_str, Some("main"))
@@ -253,15 +252,22 @@ mod tests {
         )
         .unwrap();
 
-        (git_repo, wt_path, db, repo_dir, wt_dir, repo_path_str)
+        DivergentRepoFixture {
+            _git_repo: git_repo,
+            wt_path,
+            db,
+            _repo_dir: repo_dir,
+            _wt_dir: wt_dir,
+            repo_path_str,
+        }
     }
 
     #[test]
     fn sync_rebase_rebases_branch_onto_main() {
-        let (_git_repo, wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+        let f = setup_diverged_repo();
 
         // Before sync: feature should be 1 behind main
-        let result = execute("feature", repo_dir.path(), &db, Strategy::Rebase)
+        let result = execute("feature", f._repo_dir.path(), &f.db, Strategy::Rebase)
             .expect("rebase sync should succeed");
 
         assert_eq!(result.name, "feature");
@@ -272,27 +278,27 @@ mod tests {
         assert_eq!(result.after_behind, 0, "should be 0 behind after rebase");
 
         // Feature branch should still have its commit + upstream file should exist
-        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        let wt_repo = git2::Repository::open(&f.wt_path).unwrap();
         let head = wt_repo.head().unwrap().peel_to_commit().unwrap();
         assert!(
             head.message().unwrap().contains("feature commit"),
             "feature commit should be on top after rebase"
         );
         assert!(
-            wt_path.join("upstream.txt").exists(),
+            f.wt_path.join("upstream.txt").exists(),
             "upstream file should exist after rebase"
         );
         assert!(
-            wt_path.join("feature.txt").exists(),
+            f.wt_path.join("feature.txt").exists(),
             "feature file should still exist after rebase"
         );
     }
 
     #[test]
     fn sync_merge_merges_base_into_branch() {
-        let (_git_repo, wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+        let f = setup_diverged_repo();
 
-        let result = execute("feature", repo_dir.path(), &db, Strategy::Merge)
+        let result = execute("feature", f._repo_dir.path(), &f.db, Strategy::Merge)
             .expect("merge sync should succeed");
 
         assert_eq!(result.name, "feature");
@@ -304,39 +310,35 @@ mod tests {
 
         // Both files should exist
         assert!(
-            wt_path.join("upstream.txt").exists(),
+            f.wt_path.join("upstream.txt").exists(),
             "upstream file should exist after merge"
         );
         assert!(
-            wt_path.join("feature.txt").exists(),
+            f.wt_path.join("feature.txt").exists(),
             "feature file should still exist after merge"
         );
 
         // Should have a merge commit (the HEAD commit should have 2 parents)
-        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        let wt_repo = git2::Repository::open(&f.wt_path).unwrap();
         let head = wt_repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(
-            head.parent_count(),
-            2,
-            "merge commit should have 2 parents"
-        );
+        assert_eq!(head.parent_count(), 2, "merge commit should have 2 parents");
     }
 
     #[test]
     fn sync_writes_synced_event_to_db() {
-        let (_git_repo, _wt_path, db, repo_dir, _wt_dir, repo_path_str) = setup_diverged_repo();
+        let f = setup_diverged_repo();
 
-        execute("feature", repo_dir.path(), &db, Strategy::Rebase)
+        execute("feature", f._repo_dir.path(), &f.db, Strategy::Rebase)
             .expect("sync should succeed");
 
         // Find the worktree and check for "synced" event
-        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().unwrap();
-        let wt = db
-            .find_worktree_by_identifier(db_repo.id, "feature")
-            .unwrap()
-            .unwrap();
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt =
+            f.db.find_worktree_by_identifier(db_repo.id, "feature")
+                .unwrap()
+                .unwrap();
 
-        let events = db.list_events(wt.id, 10).unwrap();
+        let events = f.db.list_events(wt.id, 10).unwrap();
         assert!(
             events.iter().any(|e| e.event_type == "synced"),
             "should have a 'synced' event in DB"
@@ -363,12 +365,7 @@ mod tests {
 
         // Rename HEAD to "main"
         {
-            let name = git_repo
-                .head()
-                .unwrap()
-                .shorthand()
-                .unwrap()
-                .to_string();
+            let name = git_repo.head().unwrap().shorthand().unwrap().to_string();
             git_repo
                 .find_branch(&name, git2::BranchType::Local)
                 .unwrap()
@@ -379,7 +376,9 @@ mod tests {
         // Create feature branch
         {
             let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
-            git_repo.branch("conflict-feat", &head_commit, false).unwrap();
+            git_repo
+                .branch("conflict-feat", &head_commit, false)
+                .unwrap();
         }
 
         // Create worktree
@@ -459,12 +458,7 @@ mod tests {
         let repo_path_str = repo_path.to_str().unwrap();
 
         {
-            let name = git_repo
-                .head()
-                .unwrap()
-                .shorthand()
-                .unwrap()
-                .to_string();
+            let name = git_repo.head().unwrap().shorthand().unwrap().to_string();
             git_repo
                 .find_branch(&name, git2::BranchType::Local)
                 .unwrap()
@@ -474,7 +468,9 @@ mod tests {
 
         {
             let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
-            git_repo.branch("merge-conflict", &head_commit, false).unwrap();
+            git_repo
+                .branch("merge-conflict", &head_commit, false)
+                .unwrap();
         }
 
         let wt_dir = tempfile::tempdir().unwrap();
@@ -591,15 +587,18 @@ mod tests {
 
     #[test]
     fn sync_rebase_shows_correct_ahead_counts() {
-        let (_git_repo, _wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+        let f = setup_diverged_repo();
 
-        let result = execute("feature", repo_dir.path(), &db, Strategy::Rebase)
+        let result = execute("feature", f._repo_dir.path(), &f.db, Strategy::Rebase)
             .expect("sync should succeed");
 
         // Feature has 1 commit ahead of main (the "feature commit")
         assert_eq!(result.before_ahead, 1, "should be 1 ahead before sync");
         // After rebase, still 1 ahead (the rebased feature commit)
-        assert_eq!(result.after_ahead, 1, "should still be 1 ahead after rebase");
+        assert_eq!(
+            result.after_ahead, 1,
+            "should still be 1 ahead after rebase"
+        );
         // Before: 1 behind (main has upstream commit)
         assert_eq!(result.before_behind, 1);
         // After: 0 behind
@@ -608,16 +607,19 @@ mod tests {
 
     #[test]
     fn sync_merge_shows_correct_ahead_counts() {
-        let (_git_repo, _wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+        let f = setup_diverged_repo();
 
-        let result = execute("feature", repo_dir.path(), &db, Strategy::Merge)
+        let result = execute("feature", f._repo_dir.path(), &f.db, Strategy::Merge)
             .expect("sync should succeed");
 
         // Before: 1 ahead (feature commit), 1 behind (upstream commit)
         assert_eq!(result.before_ahead, 1);
         assert_eq!(result.before_behind, 1);
         // After merge: ahead increases (feature commit + merge commit), behind = 0
-        assert!(result.after_ahead >= 2, "should be at least 2 ahead after merge (feature + merge commit)");
+        assert!(
+            result.after_ahead >= 2,
+            "should be at least 2 ahead after merge (feature + merge commit)"
+        );
         assert_eq!(result.after_behind, 0);
     }
 
@@ -629,12 +631,7 @@ mod tests {
 
         // Rename HEAD branch to "main"
         {
-            let head_branch_name = git_repo
-                .head()
-                .unwrap()
-                .shorthand()
-                .unwrap()
-                .to_string();
+            let head_branch_name = git_repo.head().unwrap().shorthand().unwrap().to_string();
             git_repo
                 .find_branch(&head_branch_name, git2::BranchType::Local)
                 .unwrap()
@@ -652,9 +649,7 @@ mod tests {
         let wt_path = wt_dir.path().join("sync-feat");
         {
             let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
-            git_repo
-                .branch("sync-feat", &head_commit, false)
-                .unwrap();
+            git_repo.branch("sync-feat", &head_commit, false).unwrap();
         }
         {
             let branch_ref = git_repo
@@ -693,12 +688,7 @@ mod tests {
         let repo_path_str = repo_path.to_str().unwrap().to_string();
 
         // Get the actual default branch name (likely "master")
-        let default_branch = git_repo
-            .head()
-            .unwrap()
-            .shorthand()
-            .unwrap()
-            .to_string();
+        let default_branch = git_repo.head().unwrap().shorthand().unwrap().to_string();
 
         // Create feature branch from current HEAD
         {
@@ -764,12 +754,12 @@ mod tests {
 
     #[test]
     fn sync_rebase_rejects_dirty_worktree() {
-        let (_git_repo, wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+        let f = setup_diverged_repo();
 
         // Write an uncommitted file to the worktree
-        std::fs::write(wt_path.join("dirty.txt"), "uncommitted change").unwrap();
+        std::fs::write(f.wt_path.join("dirty.txt"), "uncommitted change").unwrap();
 
-        let err = execute("feature", repo_dir.path(), &db, Strategy::Rebase)
+        let err = execute("feature", f._repo_dir.path(), &f.db, Strategy::Rebase)
             .expect_err("sync should reject dirty worktree");
 
         let msg = err.to_string();
@@ -781,19 +771,19 @@ mod tests {
 
     #[test]
     fn sync_rebase_uses_repo_configured_identity() {
-        let (_git_repo, wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+        let f = setup_diverged_repo();
 
         // Set custom user identity in repo config
-        let main_repo = git2::Repository::open(repo_dir.path()).unwrap();
+        let main_repo = git2::Repository::open(f._repo_dir.path()).unwrap();
         let mut config = main_repo.config().unwrap();
         config.set_str("user.name", "Custom User").unwrap();
         config.set_str("user.email", "custom@example.com").unwrap();
 
-        let _result = execute("feature", repo_dir.path(), &db, Strategy::Rebase)
+        let _result = execute("feature", f._repo_dir.path(), &f.db, Strategy::Rebase)
             .expect("rebase sync should succeed");
 
         // The HEAD commit in the worktree should use the repo-configured identity
-        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        let wt_repo = git2::Repository::open(&f.wt_path).unwrap();
         let head = wt_repo.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(
             head.committer().name().unwrap(),
