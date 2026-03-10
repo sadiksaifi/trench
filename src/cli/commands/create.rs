@@ -1318,4 +1318,82 @@ mod tests {
 
         assert!(matches!(result.hooks_status, HooksStatus::Ran));
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn integration_create_with_hooks_copies_files_and_runs_commands() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Create files in repo that should be copied by post_create
+        std::fs::write(repo_dir.path().join(".env"), "DATABASE_URL=postgres://localhost/mydb").unwrap();
+        std::fs::write(repo_dir.path().join(".env.local"), "SECRET=abc123").unwrap();
+        std::fs::write(repo_dir.path().join(".env.example"), "DATABASE_URL=").unwrap();
+        std::fs::write(repo_dir.path().join("README.md"), "# readme").unwrap();
+
+        let hooks = HooksConfig {
+            pre_create: Some(HookDef {
+                run: Some(vec!["echo pre_create_ok".to_string()]),
+                ..HookDef::default()
+            }),
+            post_create: Some(HookDef {
+                copy: Some(vec![".env*".to_string(), "!.env.example".to_string()]),
+                run: Some(vec!["echo post_create_ok".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let result = execute_with_hooks(
+            "integration-test",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("should succeed");
+
+        let wt_path = &result.result.path;
+
+        // Worktree created
+        assert!(wt_path.exists(), "worktree should exist");
+        assert!(wt_path.join(".git").exists(), "worktree should have .git");
+
+        // Copy: .env and .env.local copied, .env.example excluded, README.md not matched
+        assert!(
+            wt_path.join(".env").exists(),
+            ".env should be copied to worktree"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt_path.join(".env")).unwrap(),
+            "DATABASE_URL=postgres://localhost/mydb"
+        );
+        assert!(
+            wt_path.join(".env.local").exists(),
+            ".env.local should be copied to worktree"
+        );
+        assert!(
+            !wt_path.join(".env.example").exists(),
+            ".env.example should be excluded by !.env.example pattern"
+        );
+        // README.md doesn't match .env* so it shouldn't be copied as an extra file
+        // (it may exist from git checkout, which is fine — we just verify the copy step)
+
+        // Status
+        assert!(matches!(result.hooks_status, HooksStatus::Ran));
+        assert!(result.post_create_error.is_none());
+
+        // DB: hook events logged
+        let repo_path_str = repo_dir.path().canonicalize().unwrap().to_str().unwrap().to_string();
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().expect("repo in DB");
+        let wts = db.list_worktrees(db_repo.id).unwrap();
+        let post_hook_count = db.count_events(wts[0].id, Some("hook:post_create")).unwrap();
+        assert_eq!(post_hook_count, 1, "post_create hook event should be logged");
+    }
 }
