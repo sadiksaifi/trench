@@ -160,7 +160,7 @@ impl App {
     fn handle_screen_key(&mut self, key: KeyEvent) {
         match self.active_screen() {
             Screen::List => self.handle_list_key(key),
-            Screen::Detail => {}
+            Screen::Detail => self.handle_detail_key(key),
             Screen::Create => {}
             Screen::Help => {}
         }
@@ -196,6 +196,14 @@ impl App {
         };
         let _ = crate::adopt::resolve_or_adopt(&identifier, &repo_info, &db);
         self.refresh_list();
+    }
+
+    fn handle_detail_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('s') => {} // TODO: trigger sync
+            KeyCode::Char('o') => {} // TODO: open in $EDITOR
+            _ => {}
+        }
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) {
@@ -569,5 +577,23 @@ mod tests {
             "non-list screens should show placeholder, got: {:?}",
             content.trim()
         );
+    }
+
+    #[test]
+    fn s_on_detail_is_handled_without_crash() {
+        let mut app = App::new();
+        app.push_screen(Screen::Detail);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(app.is_running(), "s on detail should not crash or quit");
+        assert_eq!(app.active_screen(), Screen::Detail);
+    }
+
+    #[test]
+    fn o_on_detail_is_handled_without_crash() {
+        let mut app = App::new();
+        app.push_screen(Screen::Detail);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert!(app.is_running(), "o on detail should not crash or quit");
+        assert_eq!(app.active_screen(), Screen::Detail);
     }
 }
