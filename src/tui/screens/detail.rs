@@ -49,7 +49,7 @@ pub fn load_detail(
         .as_ref()
         .and_then(|r| db.find_worktree_by_identifier(r.id, name).ok().flatten());
 
-    let wt_path = db_wt.as_ref().map(|w| w.path.clone()).unwrap_or_default();
+    let wt_path = db_wt.as_ref().map(|w| w.path.clone());
     let branch = db_wt
         .as_ref()
         .map(|w| w.branch.clone())
@@ -90,8 +90,8 @@ pub fn load_detail(
         .unwrap_or_else(|| ("none".to_string(), "-".to_string()));
 
     // Git data
-    let changed_files = if !wt_path.is_empty() {
-        git::changed_files(Path::new(&wt_path))
+    let changed_files = if let Some(ref wt_path) = wt_path {
+        git::changed_files(Path::new(wt_path))
             .unwrap_or_default()
             .into_iter()
             .map(|f| (f.path, f.status.to_string()))
@@ -100,8 +100,8 @@ pub fn load_detail(
         vec![]
     };
 
-    let commits = if !wt_path.is_empty() {
-        git::recent_commits(Path::new(&wt_path), 10)
+    let commits = if let Some(ref wt_path) = wt_path {
+        git::recent_commits(Path::new(wt_path), 10)
             .unwrap_or_default()
             .into_iter()
             .map(|c| (c.hash, c.message))
@@ -113,7 +113,7 @@ pub fn load_detail(
     DetailState {
         name: name.to_string(),
         branch,
-        path: wt_path,
+        path: wt_path.unwrap_or_else(|| "-".to_string()),
         base_branch,
         ahead_behind,
         created,
@@ -471,6 +471,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = load_detail("nonexistent", tmp.path(), &db);
         assert_eq!(state.name, "nonexistent");
+        assert_eq!(state.path, "-", "missing path should show dash fallback");
         assert_eq!(state.hook_status, "none");
         assert_eq!(state.hook_timestamp, "-");
         assert!(state.changed_files.is_empty());
