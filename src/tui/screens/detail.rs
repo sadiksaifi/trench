@@ -126,6 +126,9 @@ pub fn load_detail(
 }
 
 fn format_timestamp(ts: i64) -> String {
+    if ts < 0 {
+        return "-".to_string();
+    }
     // Simple formatting: seconds since epoch to YYYY-MM-DD HH:MM
     let secs = ts;
     let days = secs / 86400;
@@ -442,6 +445,12 @@ mod tests {
             last_line.push_str(buf.cell((col, last_row)).unwrap().symbol());
         }
         assert!(last_line.contains("s sync"), "last line should contain keybindings, got: {last_line}");
+    }
+
+    #[test]
+    fn format_timestamp_returns_dash_for_negative_input() {
+        let result = super::format_timestamp(-3600);
+        assert_eq!(result, "-", "negative timestamps should return dash");
     }
 
     #[test]
