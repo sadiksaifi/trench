@@ -24,6 +24,8 @@ pub struct DetailState {
 
 const METADATA_HEIGHT: u16 = 5;
 
+const DETAIL_FOOTER_KEYS: &str = " s sync  o open  Esc back ";
+
 pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
     let bold = Style::default().add_modifier(Modifier::BOLD);
 
@@ -31,6 +33,7 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
         Constraint::Length(METADATA_HEIGHT),
         Constraint::Length(1), // separator
         Constraint::Min(1),   // body (files + commits)
+        Constraint::Length(1), // footer
     ])
     .split(area);
 
@@ -99,6 +102,11 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
         }
     }
     frame.render_widget(Paragraph::new(commit_lines), body_chunks[1]);
+
+    // — Footer —
+    let footer = Paragraph::new(Line::from(DETAIL_FOOTER_KEYS))
+        .style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_widget(footer, chunks[3]);
 }
 
 #[cfg(test)]
@@ -279,5 +287,29 @@ mod tests {
         let buf = render_to_buffer(&state, 100, 30);
         let text = buffer_text(&buf);
         assert!(text.contains("none"), "should show 'none' for no hooks");
+    }
+
+    #[test]
+    fn renders_detail_footer_with_keybindings() {
+        let state = sample_detail();
+        let buf = render_to_buffer(&state, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("s sync"), "footer should show s sync");
+        assert!(text.contains("o open"), "footer should show o open");
+        assert!(text.contains("Esc back"), "footer should show Esc back");
+    }
+
+    #[test]
+    fn footer_is_on_last_line() {
+        let state = sample_detail();
+        let height: u16 = 20;
+        let buf = render_to_buffer(&state, 100, height);
+        // Extract last line text
+        let last_row = height - 1;
+        let mut last_line = String::new();
+        for col in 0..100 {
+            last_line.push_str(buf.cell((col, last_row)).unwrap().symbol());
+        }
+        assert!(last_line.contains("s sync"), "last line should contain keybindings, got: {last_line}");
     }
 }
