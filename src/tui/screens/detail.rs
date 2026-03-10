@@ -64,6 +64,13 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
     ];
     frame.render_widget(Paragraph::new(metadata_lines), chunks[0]);
 
+    // Split body into files and commits
+    let body_chunks = Layout::vertical([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ])
+    .split(chunks[2]);
+
     // — Changed files section —
     let mut file_lines: Vec<Line> = vec![Line::from(Span::styled("Changed Files", bold))];
     if state.changed_files.is_empty() {
@@ -73,7 +80,18 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
             file_lines.push(Line::from(format!("  {status:>10}  {path}")));
         }
     }
-    frame.render_widget(Paragraph::new(file_lines), chunks[2]);
+    frame.render_widget(Paragraph::new(file_lines), body_chunks[0]);
+
+    // — Recent commits section —
+    let mut commit_lines: Vec<Line> = vec![Line::from(Span::styled("Recent Commits", bold))];
+    if state.commits.is_empty() {
+        commit_lines.push(Line::from("  No commits"));
+    } else {
+        for (hash, message) in &state.commits {
+            commit_lines.push(Line::from(format!("  {hash}  {message}")));
+        }
+    }
+    frame.render_widget(Paragraph::new(commit_lines), body_chunks[1]);
 }
 
 #[cfg(test)]
@@ -214,5 +232,25 @@ mod tests {
         let buf = render_to_buffer(&state, 100, 30);
         let text = buffer_text(&buf);
         assert!(text.contains("No changes"), "should show empty state message");
+    }
+
+    #[test]
+    fn renders_recent_commits_section() {
+        let state = sample_detail();
+        let buf = render_to_buffer(&state, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Recent Commits"), "should show commits header");
+        assert!(text.contains("abc1234"), "should show first commit hash");
+        assert!(text.contains("feat: add auth module"), "should show first commit message");
+        assert!(text.contains("def5678"), "should show second commit hash");
+    }
+
+    #[test]
+    fn renders_no_commits_when_empty() {
+        let mut state = sample_detail();
+        state.commits = vec![];
+        let buf = render_to_buffer(&state, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("No commits"), "should show empty commits message");
     }
 }
