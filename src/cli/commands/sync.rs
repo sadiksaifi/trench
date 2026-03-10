@@ -83,6 +83,14 @@ pub fn execute(
     let repo_info = crate::git::discover_repo(cwd)?;
     let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
 
+    let dirty = crate::git::dirty_count(Path::new(&wt.path))?;
+    if dirty > 0 {
+        anyhow::bail!(
+            "worktree '{}' has {} uncommitted change(s); commit or stash before syncing",
+            wt.name, dirty
+        );
+    }
+
     let base_branch = wt
         .base_branch
         .as_deref()
@@ -751,6 +759,23 @@ mod tests {
         assert_eq!(
             result.after_behind, 0,
             "should be 0 behind after rebase onto discovered default branch"
+        );
+    }
+
+    #[test]
+    fn sync_rebase_rejects_dirty_worktree() {
+        let (_git_repo, wt_path, db, repo_dir, _wt_dir, _repo_path_str) = setup_diverged_repo();
+
+        // Write an uncommitted file to the worktree
+        std::fs::write(wt_path.join("dirty.txt"), "uncommitted change").unwrap();
+
+        let err = execute("feature", repo_dir.path(), &db, Strategy::Rebase)
+            .expect_err("sync should reject dirty worktree");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("uncommitted"),
+            "error should mention uncommitted changes, got: {msg}"
         );
     }
 
