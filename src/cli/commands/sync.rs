@@ -99,7 +99,9 @@ pub fn execute(
         .unwrap_or(repo_info.default_branch.as_str());
 
     // Fetch from remote before capturing the baseline counts
-    crate::git::fetch_remote(Path::new(&repo_info.path))?;
+    if let Err(e) = crate::git::fetch_remote(Path::new(&repo_info.path)) {
+        eprintln!("warning: fetch failed, using local refs: {e}");
+    }
 
     let (before_ahead, before_behind) =
         crate::git::ahead_behind(Path::new(&repo_info.path), &wt.branch, Some(base_branch))?
@@ -795,5 +797,23 @@ mod tests {
             "custom@example.com",
             "committer email should match repo config"
         );
+    }
+
+    #[test]
+    fn sync_continues_when_fetch_fails() {
+        let f = setup_diverged_repo();
+
+        // Add a broken remote so fetch_remote will fail
+        let main_repo = git2::Repository::open(f._repo_dir.path()).unwrap();
+        main_repo
+            .remote("origin", "https://invalid.example.com/nonexistent.git")
+            .unwrap();
+
+        // Sync should still succeed despite the fetch failure
+        let result = execute("feature", f._repo_dir.path(), &f.db, Strategy::Rebase)
+            .expect("sync should succeed even when fetch fails");
+
+        assert_eq!(result.name, "feature");
+        assert_eq!(result.after_behind, 0, "should still rebase successfully");
     }
 }
