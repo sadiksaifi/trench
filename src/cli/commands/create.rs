@@ -147,6 +147,7 @@ fn path_to_utf8(path: &Path) -> Result<&str> {
 
 /// Result of `execute_with_hooks` — includes the create result, hooks status,
 /// and any post_create hook error (worktree stays on post_create failure).
+#[derive(Debug)]
 pub struct CreateWithHooksResult {
     pub result: CreateResult,
     pub hooks_status: HooksStatus,
@@ -1146,5 +1147,58 @@ mod tests {
         // Worktree should also exist
         assert!(result.result.path.exists(), "worktree should be created");
         assert!(matches!(result.hooks_status, HooksStatus::Ran));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_create_failure_cancels_worktree_creation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let hooks = HooksConfig {
+            pre_create: Some(HookDef {
+                run: Some(vec!["exit 1".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let err = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect_err("should fail when pre_create hook fails");
+
+        // Error should mention pre_create
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pre_create"),
+            "error should mention pre_create, got: {msg}"
+        );
+
+        // Worktree should NOT exist on disk
+        let repo_name = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let expected_wt_path = wt_root.path().join(&repo_name).join("my-feature");
+        assert!(
+            !expected_wt_path.exists(),
+            "worktree should NOT be created when pre_create fails"
+        );
     }
 }
