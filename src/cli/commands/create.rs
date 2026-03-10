@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 
 use crate::config::HooksConfig;
 use crate::git;
+use crate::hooks::{self, HookEnvContext, HookEvent};
 use crate::paths;
 use crate::state::Database;
 
@@ -167,26 +168,75 @@ pub async fn execute_with_hooks(
     worktree_root: &Path,
     template: &str,
     db: &Database,
-    hooks: Option<&HooksConfig>,
+    hooks_config: Option<&HooksConfig>,
     no_hooks: bool,
 ) -> Result<CreateWithHooksResult> {
-    let has_hooks = hooks
+    let has_hooks = hooks_config
         .map(|h| h.pre_create.is_some() || h.post_create.is_some())
         .unwrap_or(false);
 
-    let hooks_status = if no_hooks && has_hooks {
-        HooksStatus::Skipped
-    } else if !has_hooks {
-        HooksStatus::None
-    } else {
-        HooksStatus::Ran
+    // Fast path: no hooks to run
+    if no_hooks || !has_hooks {
+        let hooks_status = if no_hooks && has_hooks {
+            HooksStatus::Skipped
+        } else {
+            HooksStatus::None
+        };
+        let result = execute(branch, from, cwd, worktree_root, template, db)?;
+        return Ok(CreateWithHooksResult {
+            result,
+            hooks_status,
+            post_create_error: None,
+        });
+    }
+
+    let hooks = hooks_config.unwrap(); // safe: has_hooks is true
+
+    // Pre-compute info needed for hooks
+    let repo_info = git::discover_repo(cwd)?;
+    let relative_path = paths::render_worktree_path(template, &repo_info.name, branch)?;
+    let worktree_path = worktree_root.join(relative_path);
+    let base = from.unwrap_or(&repo_info.default_branch);
+    let sanitized_name = paths::sanitize_branch(branch);
+
+    // Ensure repo in DB for hook event logging
+    let repo_path_str = path_to_utf8(&repo_info.path)?;
+    let repo = match db.get_repo_by_path(repo_path_str)? {
+        Some(r) => r,
+        None => db.insert_repo(&repo_info.name, repo_path_str, Some(&repo_info.default_branch))?,
     };
 
+    let env_ctx = HookEnvContext {
+        worktree_path: worktree_path.to_string_lossy().to_string(),
+        worktree_name: sanitized_name,
+        branch: branch.to_string(),
+        repo_name: repo_info.name.clone(),
+        repo_path: repo_info.path.to_string_lossy().to_string(),
+        base_branch: base.to_string(),
+    };
+
+    // Step 1: pre_create hook (cwd = repo path, no worktree_id yet)
+    if let Some(pre_create) = &hooks.pre_create {
+        hooks::runner::execute_hook(
+            &HookEvent::PreCreate,
+            pre_create,
+            &env_ctx,
+            &repo_info.path,
+            &repo_info.path,
+            db,
+            repo.id,
+            None,
+        )
+        .await
+        .context("pre_create hook failed")?;
+    }
+
+    // Step 2: create worktree
     let result = execute(branch, from, cwd, worktree_root, template, db)?;
 
     Ok(CreateWithHooksResult {
         result,
-        hooks_status,
+        hooks_status: HooksStatus::Ran,
         post_create_error: None,
     })
 }
@@ -1057,5 +1107,44 @@ mod tests {
         let wts = db.list_worktrees(db_repo.id).unwrap();
         let hook_events = db.count_events(wts[0].id, Some("hook:post_create")).unwrap();
         assert_eq!(hook_events, 0, "no hook events should be logged when --no-hooks");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_create_hook_runs_before_worktree_creation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // pre_create hook creates a marker file in repo dir
+        let marker = repo_dir.path().join("pre_create_ran.marker");
+        let hooks = HooksConfig {
+            pre_create: Some(HookDef {
+                run: Some(vec![format!("touch {}", marker.display())]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let result = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("should succeed");
+
+        // Marker file should exist (pre_create hook ran)
+        assert!(marker.exists(), "pre_create hook should have run");
+
+        // Worktree should also exist
+        assert!(result.result.path.exists(), "worktree should be created");
+        assert!(matches!(result.hooks_status, HooksStatus::Ran));
     }
 }
