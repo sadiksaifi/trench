@@ -135,20 +135,16 @@ impl App {
         }
     }
 
+    fn open_db() -> Option<(std::path::PathBuf, Database)> {
+        let cwd = std::env::current_dir().ok()?;
+        let db_path = paths::data_dir().ok()?.join("trench.db");
+        let db = Database::open(&db_path).ok()?;
+        Some((cwd, db))
+    }
+
     /// Reload worktree data from git + DB for the list screen.
     pub fn refresh_list(&mut self) {
-        let cwd = match std::env::current_dir() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let db_path = match paths::data_dir() {
-            Ok(p) => p.join("trench.db"),
-            Err(_) => return,
-        };
-        let db = match Database::open(&db_path) {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let Some((cwd, db)) = Self::open_db() else { return };
         if let Ok(rows) = screens::list::load_worktrees(&cwd, &db, &[]) {
             let prev_selected = self.list_state.selected;
             self.list_state = screens::list::ListState::new(rows);
@@ -189,18 +185,7 @@ impl App {
             row.branch.clone()
         };
 
-        let cwd = match std::env::current_dir() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let db_path = match paths::data_dir() {
-            Ok(p) => p.join("trench.db"),
-            Err(_) => return,
-        };
-        let db = match Database::open(&db_path) {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let Some((cwd, db)) = Self::open_db() else { return };
         let repo_info = match crate::git::discover_repo(&cwd) {
             Ok(r) => r,
             Err(_) => return,
@@ -210,18 +195,7 @@ impl App {
     }
 
     fn load_detail(&mut self, name: &str) {
-        let cwd = match std::env::current_dir() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let db_path = match paths::data_dir() {
-            Ok(p) => p.join("trench.db"),
-            Err(_) => return,
-        };
-        let db = match Database::open(&db_path) {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let Some((cwd, db)) = Self::open_db() else { return };
         self.detail_state = Some(screens::detail::load_detail(name, &cwd, &db));
     }
 
