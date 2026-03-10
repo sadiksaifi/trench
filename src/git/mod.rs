@@ -327,15 +327,23 @@ fn resolve_upstream_oid(
     base_branch: &str,
 ) -> Result<git2::Oid, GitError> {
     let remote_ref = format!("origin/{base_branch}");
-    if let Ok(branch) = repo.find_branch(&remote_ref, git2::BranchType::Remote) {
-        if let Some(oid) = branch.get().target() {
-            return Ok(oid);
+    match repo.find_branch(&remote_ref, git2::BranchType::Remote) {
+        Ok(branch) => {
+            if let Some(oid) = branch.get().target() {
+                return Ok(oid);
+            }
         }
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {}
+        Err(e) => return Err(GitError::Git(e)),
     }
-    if let Ok(branch) = repo.find_branch(base_branch, git2::BranchType::Local) {
-        if let Some(oid) = branch.get().target() {
-            return Ok(oid);
+    match repo.find_branch(base_branch, git2::BranchType::Local) {
+        Ok(branch) => {
+            if let Some(oid) = branch.get().target() {
+                return Ok(oid);
+            }
         }
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {}
+        Err(e) => return Err(GitError::Git(e)),
     }
     Err(GitError::BaseBranchNotFound {
         base: base_branch.to_string(),
