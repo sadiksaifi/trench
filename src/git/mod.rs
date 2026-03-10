@@ -268,6 +268,12 @@ pub fn sync_merge(
     let repo = git2::Repository::open(worktree_path)
         .map_err(|e| map_repo_open_error(e, worktree_path))?;
 
+    let _branch_ref = repo
+        .find_branch(branch, git2::BranchType::Local)
+        .map_err(|_| GitError::WorktreeNotFound {
+            name: branch.to_string(),
+        })?;
+
     let upstream_oid = resolve_upstream_oid(&repo, base_branch)?;
     let upstream_annotated = repo.find_annotated_commit(upstream_oid)?;
 
@@ -278,11 +284,7 @@ pub fn sync_merge(
     }
 
     if merge_analysis.is_fast_forward() {
-        // Fast-forward
-        let mut ref_name = format!("refs/heads/{branch}");
-        if repo.find_reference(&ref_name).is_err() {
-            ref_name = repo.head()?.name().unwrap_or("HEAD").to_string();
-        }
+        let ref_name = format!("refs/heads/{branch}");
         repo.find_reference(&ref_name)?
             .set_target(upstream_oid, "trench sync: fast-forward")?;
         repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
@@ -1550,6 +1552,22 @@ mod tests {
             "should find 1 worktree despite invalid path, got: {entries:?}"
         );
         assert_eq!(entries[0].name, "valid-wt");
+    }
+
+    #[test]
+    fn sync_merge_rejects_nonexistent_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        let base = head_branch(&repo);
+
+        let result = sync_merge(tmp.path(), "nonexistent-branch", &base);
+
+        assert!(result.is_err(), "should reject nonexistent branch");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, GitError::WorktreeNotFound { ref name } if name == "nonexistent-branch"),
+            "expected WorktreeNotFound, got: {err:?}"
+        );
     }
 
     #[test]
