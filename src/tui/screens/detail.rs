@@ -22,7 +22,7 @@ pub struct DetailState {
     pub commits: Vec<(String, String)>,
 }
 
-const METADATA_HEIGHT: u16 = 4;
+const METADATA_HEIGHT: u16 = 5;
 
 pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
     let bold = Style::default().add_modifier(Modifier::BOLD);
@@ -60,6 +60,13 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
             Span::raw("  "),
             Span::styled("Last Accessed: ", bold),
             Span::raw(&state.last_accessed),
+        ]),
+        Line::from(vec![
+            Span::styled("Hook:    ", bold),
+            Span::raw(&state.hook_status),
+            Span::raw("  "),
+            Span::styled("At: ", bold),
+            Span::raw(&state.hook_timestamp),
         ]),
     ];
     frame.render_widget(Paragraph::new(metadata_lines), chunks[0]);
@@ -252,5 +259,25 @@ mod tests {
         let buf = render_to_buffer(&state, 100, 30);
         let text = buffer_text(&buf);
         assert!(text.contains("No commits"), "should show empty commits message");
+    }
+
+    #[test]
+    fn renders_hook_status_in_metadata() {
+        let state = sample_detail();
+        let buf = render_to_buffer(&state, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Hook"), "should show hook label");
+        assert!(text.contains("success"), "should show hook status value");
+        assert!(text.contains("2026-03-10 14:31"), "should show hook timestamp");
+    }
+
+    #[test]
+    fn renders_hook_status_none() {
+        let mut state = sample_detail();
+        state.hook_status = "none".into();
+        state.hook_timestamp = "-".into();
+        let buf = render_to_buffer(&state, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("none"), "should show 'none' for no hooks");
     }
 }
