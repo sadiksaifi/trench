@@ -194,9 +194,11 @@ impl App {
         self.refresh_list();
     }
 
-    fn load_detail(&mut self, name: &str) {
-        let Some((cwd, db)) = Self::open_db() else { return };
+    fn load_detail(&mut self, name: &str) -> bool {
+        self.detail_state = None;
+        let Some((cwd, db)) = Self::open_db() else { return false };
         self.detail_state = Some(screens::detail::load_detail(name, &cwd, &db));
+        true
     }
 
     fn handle_detail_key(&mut self, key: KeyEvent) {
@@ -223,9 +225,10 @@ impl App {
                 }
                 // Load detail data for the selected worktree
                 if let Some(name) = identity {
-                    self.load_detail(&name);
+                    if self.load_detail(&name) {
+                        self.push_screen(Screen::Detail);
+                    }
                 }
-                self.push_screen(Screen::Detail);
             }
             KeyCode::Char('n') => self.push_screen(Screen::Create),
             KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
@@ -353,15 +356,15 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_list_pushes_detail() {
-        let mut app = App::new();
+    fn enter_on_list_with_rows_pushes_detail() {
+        let mut app = app_with_rows();
         assert_eq!(app.active_screen(), Screen::List);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             app.active_screen(),
             Screen::Detail,
-            "Enter on List should push Detail screen"
+            "Enter on List with rows should push Detail screen"
         );
         assert_eq!(app.nav_stack_depth(), 2);
     }
@@ -399,7 +402,7 @@ mod tests {
 
     #[test]
     fn deep_stack_navigation_push_pop_sequence() {
-        let mut app = App::new();
+        let mut app = app_with_rows();
         // List → Detail → Help → pop → pop → List
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
@@ -427,7 +430,7 @@ mod tests {
 
     #[test]
     fn question_mark_opens_help_from_detail_screen() {
-        let mut app = App::new();
+        let mut app = app_with_rows();
         // Navigate to Detail first
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
@@ -514,6 +517,19 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
         assert!(app.is_running());
         assert_eq!(app.active_screen(), Screen::List);
+    }
+
+    #[test]
+    fn enter_on_empty_list_does_not_push_detail() {
+        let mut app = App::new();
+        // Empty list — no rows
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Enter on empty list should stay on List"
+        );
+        assert!(app.detail_state.is_none());
     }
 
     #[test]
