@@ -1274,4 +1274,48 @@ mod tests {
         let hook_events = db.count_events(wts[0].id, Some("hook:post_create")).unwrap();
         assert_eq!(hook_events, 1, "post_create hook event should be logged");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_create_failure_keeps_worktree_and_reports_error() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let hooks = HooksConfig {
+            post_create: Some(HookDef {
+                run: Some(vec!["exit 1".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let result = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("should succeed (worktree stays despite hook failure)");
+
+        // Worktree should still exist on disk
+        assert!(
+            result.result.path.exists(),
+            "worktree should exist despite post_create failure"
+        );
+
+        // post_create_error should be set
+        assert!(
+            result.post_create_error.is_some(),
+            "post_create_error should contain the hook failure"
+        );
+
+        assert!(matches!(result.hooks_status, HooksStatus::Ran));
+    }
 }
