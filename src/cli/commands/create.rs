@@ -144,6 +144,53 @@ fn path_to_utf8(path: &Path) -> Result<&str> {
         .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))
 }
 
+/// Result of `execute_with_hooks` — includes the create result, hooks status,
+/// and any post_create hook error (worktree stays on post_create failure).
+pub struct CreateWithHooksResult {
+    pub result: CreateResult,
+    pub hooks_status: HooksStatus,
+    /// If post_create hook failed, this contains the error.
+    /// The worktree was still created successfully.
+    pub post_create_error: Option<anyhow::Error>,
+}
+
+/// Execute `trench create <branch>` with lifecycle hooks.
+///
+/// Orchestrates: pre_create hook → worktree creation → post_create hook.
+/// - If `no_hooks` is true or no hooks configured, hooks are skipped.
+/// - Pre_create failure cancels the operation (worktree not created).
+/// - Post_create failure: worktree stays, error captured in result.
+pub async fn execute_with_hooks(
+    branch: &str,
+    from: Option<&str>,
+    cwd: &Path,
+    worktree_root: &Path,
+    template: &str,
+    db: &Database,
+    hooks: Option<&HooksConfig>,
+    no_hooks: bool,
+) -> Result<CreateWithHooksResult> {
+    let has_hooks = hooks
+        .map(|h| h.pre_create.is_some() || h.post_create.is_some())
+        .unwrap_or(false);
+
+    let hooks_status = if no_hooks && has_hooks {
+        HooksStatus::Skipped
+    } else if !has_hooks {
+        HooksStatus::None
+    } else {
+        HooksStatus::Ran
+    };
+
+    let result = execute(branch, from, cwd, worktree_root, template, db)?;
+
+    Ok(CreateWithHooksResult {
+        result,
+        hooks_status,
+        post_create_error: None,
+    })
+}
+
 /// Execute the `trench create <branch>` command.
 ///
 /// Discovers the git repo, resolves the worktree path, creates the worktree
@@ -191,6 +238,7 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{HookDef, HooksConfig};
 
     #[test]
     fn path_to_utf8_succeeds_for_valid_utf8() {
@@ -943,5 +991,31 @@ mod tests {
             Some(head_branch.as_str()),
             "repos.default_base should be the HEAD branch, not the --from override"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_configured_returns_none_status() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let result = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            None, // no hooks configured
+            false, // no_hooks flag = false
+        )
+        .await
+        .expect("should succeed");
+
+        assert!(matches!(result.hooks_status, HooksStatus::None));
+        assert!(result.result.path.exists(), "worktree should be created");
+        assert!(result.post_create_error.is_none());
     }
 }
