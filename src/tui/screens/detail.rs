@@ -22,9 +22,19 @@ pub struct DetailState {
     pub commits: Vec<(String, String)>,
 }
 
+const METADATA_HEIGHT: u16 = 4;
+
 pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
     let bold = Style::default().add_modifier(Modifier::BOLD);
 
+    let chunks = Layout::vertical([
+        Constraint::Length(METADATA_HEIGHT),
+        Constraint::Length(1), // separator
+        Constraint::Min(1),   // body (files + commits)
+    ])
+    .split(area);
+
+    // — Metadata section —
     let metadata_lines = vec![
         Line::from(vec![
             Span::styled("Branch: ", bold),
@@ -52,9 +62,18 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
             Span::raw(&state.last_accessed),
         ]),
     ];
+    frame.render_widget(Paragraph::new(metadata_lines), chunks[0]);
 
-    let metadata = Paragraph::new(metadata_lines);
-    frame.render_widget(metadata, area);
+    // — Changed files section —
+    let mut file_lines: Vec<Line> = vec![Line::from(Span::styled("Changed Files", bold))];
+    if state.changed_files.is_empty() {
+        file_lines.push(Line::from("  No changes"));
+    } else {
+        for (path, status) in &state.changed_files {
+            file_lines.push(Line::from(format!("  {status:>10}  {path}")));
+        }
+    }
+    frame.render_widget(Paragraph::new(file_lines), chunks[2]);
 }
 
 #[cfg(test)]
@@ -174,5 +193,26 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("2026-03-10 14:30"), "should show created date");
         assert!(text.contains("2026-03-11 09:15"), "should show last accessed");
+    }
+
+    #[test]
+    fn renders_changed_files_section() {
+        let state = sample_detail();
+        let buf = render_to_buffer(&state, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Changed Files"), "should show section header");
+        assert!(text.contains("src/auth.rs"), "should show first changed file");
+        assert!(text.contains("modified"), "should show file status");
+        assert!(text.contains("tests/auth_test.rs"), "should show second file");
+        assert!(text.contains("new"), "should show second file status");
+    }
+
+    #[test]
+    fn renders_no_changes_when_files_empty() {
+        let mut state = sample_detail();
+        state.changed_files = vec![];
+        let buf = render_to_buffer(&state, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("No changes"), "should show empty state message");
     }
 }
