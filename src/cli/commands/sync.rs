@@ -4,8 +4,9 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::config::HooksConfig;
+use crate::git::RepoInfo;
 use crate::hooks::{self, HookEnvContext, HookEvent};
-use crate::state::Database;
+use crate::state::{Database, Repo, Worktree};
 
 /// Typed errors for the `sync` command.
 #[derive(Debug, thiserror::Error)]
@@ -113,7 +114,20 @@ pub fn execute(
 ) -> Result<SyncResult> {
     let repo_info = crate::git::discover_repo(cwd)?;
     let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
+    execute_resolved(&repo, &wt, &repo_info, db, strategy)
+}
 
+/// Execute sync with pre-resolved worktree data.
+///
+/// Use this when the caller has already resolved the worktree (e.g. for
+/// hook context) to avoid a redundant DB/git round-trip.
+pub fn execute_resolved(
+    repo: &Repo,
+    wt: &Worktree,
+    repo_info: &RepoInfo,
+    db: &Database,
+    strategy: Strategy,
+) -> Result<SyncResult> {
     let dirty = crate::git::dirty_count(Path::new(&wt.path))?;
     if dirty > 0 {
         anyhow::bail!(
@@ -242,8 +256,8 @@ pub async fn execute_with_hooks(
         .map_err(SyncError::PreSyncHookFailed)?;
     }
 
-    // Step 2: perform sync
-    let result = execute(identifier, cwd, db, strategy)?;
+    // Step 2: perform sync (reuse already-resolved data)
+    let result = execute_resolved(&repo, &wt, &repo_info, db, strategy)?;
 
     // Step 3: post_sync hook (cwd = worktree path)
     let post_sync_error = if let Some(post_sync) = &hooks.post_sync {
@@ -1224,6 +1238,22 @@ mod tests {
             f.wt_path.join("upstream.txt").exists(),
             "upstream file should exist after sync (sync was not undone)"
         );
+    }
+
+    #[test]
+    fn execute_resolved_syncs_with_preresolved_data() {
+        let f = setup_diverged_repo();
+
+        // Resolve the worktree manually (simulating what execute_with_hooks does)
+        let repo_info = crate::git::discover_repo(f._repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("feature", &repo_info, &f.db).unwrap();
+
+        // Call execute_resolved with the pre-resolved data
+        let result = execute_resolved(&repo, &wt, &repo_info, &f.db, Strategy::Rebase)
+            .expect("should succeed");
+        assert_eq!(result.name, "feature");
+        assert_eq!(result.after_behind, 0, "should be 0 behind after sync");
     }
 
     #[tokio::test(flavor = "current_thread")]
