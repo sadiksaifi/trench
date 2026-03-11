@@ -558,6 +558,24 @@ mod tests {
 
     // ── Hook integration tests ──────────────────────────────────────────
 
+    fn sample_hooks_config() -> crate::config::HooksConfig {
+        crate::config::HooksConfig {
+            pre_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo pre_remove_ran".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            post_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo post_remove_ran".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn execute_with_hooks_no_hooks_configured_returns_none_status() {
         let repo_dir = tempfile::tempdir().unwrap();
@@ -600,5 +618,53 @@ mod tests {
         assert_eq!(outcome.hooks_status, RemoveHooksStatus::None);
         assert!(outcome.post_remove_warning.is_none());
         assert!(!create_result.path.exists(), "worktree dir should be deleted");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_flag_skips_hooks() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "skip-hooks",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("skip-hooks", &repo_info, &db).unwrap();
+
+        let hooks = sample_hooks_config();
+
+        // Remove with --no-hooks
+        let outcome = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            Some(&hooks),
+            true, // no_hooks = true
+        )
+        .await
+        .expect("remove should succeed");
+
+        assert_eq!(outcome.result.name, "skip-hooks");
+        assert_eq!(outcome.hooks_status, RemoveHooksStatus::Skipped);
+        assert!(outcome.post_remove_warning.is_none());
+        assert!(!create_result.path.exists(), "worktree dir should be deleted");
+
+        // Verify no hook events were recorded
+        let wt_record = db.get_worktree(wt.id).unwrap().unwrap();
+        let hook_events = db.count_events(wt_record.id, Some("hook:pre_remove")).unwrap();
+        assert_eq!(hook_events, 0, "no hook events should be recorded when --no-hooks");
     }
 }
