@@ -205,7 +205,72 @@ pub async fn execute_with_hooks(
         });
     }
 
-    todo!("hook execution not yet implemented")
+    let hooks = hooks_config.unwrap(); // safe: has_hooks is true
+
+    // Resolve worktree info for hooks (before sync modifies state)
+    let repo_info = crate::git::discover_repo(cwd)?;
+    let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
+
+    let base_branch = wt
+        .base_branch
+        .as_deref()
+        .or(repo.default_base.as_deref())
+        .unwrap_or(repo_info.default_branch.as_str());
+
+    let env_ctx = HookEnvContext {
+        worktree_path: wt.path.clone(),
+        worktree_name: wt.name.clone(),
+        branch: wt.branch.clone(),
+        repo_name: repo.name.clone(),
+        repo_path: repo_info.path.to_string_lossy().to_string(),
+        base_branch: base_branch.to_string(),
+    };
+
+    // Step 1: pre_sync hook (cwd = worktree path)
+    if let Some(pre_sync) = &hooks.pre_sync {
+        hooks::runner::execute_hook(
+            &HookEvent::PreSync,
+            pre_sync,
+            &env_ctx,
+            &repo_info.path,
+            Path::new(&wt.path),
+            db,
+            repo.id,
+            Some(wt.id),
+        )
+        .await
+        .map_err(SyncError::PreSyncHookFailed)?;
+    }
+
+    // Step 2: perform sync
+    let result = execute(identifier, cwd, db, strategy)?;
+
+    // Step 3: post_sync hook (cwd = worktree path)
+    let post_sync_error = if let Some(post_sync) = &hooks.post_sync {
+        match hooks::runner::execute_hook(
+            &HookEvent::PostSync,
+            post_sync,
+            &env_ctx,
+            &repo_info.path,
+            Path::new(&wt.path),
+            db,
+            repo.id,
+            Some(wt.id),
+        )
+        .await
+        {
+            Ok(_) => None,
+            Err(e) => Some(e),
+        }
+    } else {
+        None
+    };
+
+    Ok(SyncWithHooksResult {
+        result,
+        hooks_status: SyncHooksStatus::Ran,
+        post_sync_error,
+    })
 }
 
 #[cfg(test)]
@@ -965,5 +1030,56 @@ mod tests {
         let post_hook_events = f.db.count_events(wt.id, Some("hook:post_sync")).unwrap();
         assert_eq!(pre_hook_events, 0, "no pre_sync hook events should be recorded");
         assert_eq!(post_hook_events, 0, "no post_sync hook events should be recorded");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_sync_hook_runs_before_sync_operation() {
+        let f = setup_diverged_repo();
+
+        // Only pre_sync hook
+        let hooks = crate::config::HooksConfig {
+            pre_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo pre_sync_executed".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let outcome = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("sync should succeed");
+
+        assert_eq!(outcome.hooks_status, SyncHooksStatus::Ran);
+        assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
+        assert!(outcome.post_sync_error.is_none());
+
+        // Verify pre_sync hook event was logged
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let hook_events = f.db.count_events(wt.id, Some("hook:pre_sync")).unwrap();
+        assert_eq!(hook_events, 1, "pre_sync hook event should be logged");
+
+        // Verify hook output was captured in logs
+        let events = f.db.list_events(wt.id, 10).unwrap();
+        let hook_event = events.iter().find(|e| e.event_type == "hook:pre_sync").unwrap();
+        let logs = f.db.get_logs(hook_event.id).unwrap();
+        let stdout_lines: Vec<&str> = logs
+            .iter()
+            .filter(|(s, _, _)| s == "stdout")
+            .map(|(_, l, _)| l.as_str())
+            .collect();
+        assert!(
+            stdout_lines.contains(&"pre_sync_executed"),
+            "pre_sync output should be logged: {stdout_lines:?}"
+        );
     }
 }
