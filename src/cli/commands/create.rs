@@ -5,8 +5,16 @@ use anyhow::{Context, Result};
 
 use crate::config::HooksConfig;
 use crate::git;
+use crate::hooks::{self, HookEnvContext, HookEvent};
 use crate::paths;
 use crate::state::Database;
+
+/// Typed errors for the `create` command.
+#[derive(Debug, thiserror::Error)]
+pub enum CreateError {
+    #[error("pre_create hook failed")]
+    PreCreateHookFailed(#[source] anyhow::Error),
+}
 
 /// Plan produced by `--dry-run` showing what `trench create` would do.
 #[derive(Debug, serde::Serialize)]
@@ -144,6 +152,128 @@ fn path_to_utf8(path: &Path) -> Result<&str> {
         .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))
 }
 
+/// Result of `execute_with_hooks` — includes the create result, hooks status,
+/// and any post_create hook error (worktree stays on post_create failure).
+#[derive(Debug)]
+pub struct CreateWithHooksResult {
+    pub result: CreateResult,
+    pub hooks_status: HooksStatus,
+    /// If post_create hook failed, this contains the error.
+    /// The worktree was still created successfully.
+    pub post_create_error: Option<anyhow::Error>,
+}
+
+/// Execute `trench create <branch>` with lifecycle hooks.
+///
+/// Orchestrates: pre_create hook → worktree creation → post_create hook.
+/// - If `no_hooks` is true or no hooks configured, hooks are skipped.
+/// - Pre_create failure cancels the operation (worktree not created).
+/// - Post_create failure: worktree stays, error captured in result.
+pub async fn execute_with_hooks(
+    branch: &str,
+    from: Option<&str>,
+    cwd: &Path,
+    worktree_root: &Path,
+    template: &str,
+    db: &Database,
+    hooks_config: Option<&HooksConfig>,
+    no_hooks: bool,
+) -> Result<CreateWithHooksResult> {
+    let has_hooks = hooks_config
+        .map(|h| h.pre_create.is_some() || h.post_create.is_some())
+        .unwrap_or(false);
+
+    // Fast path: no hooks to run
+    if no_hooks || !has_hooks {
+        let hooks_status = if no_hooks && has_hooks {
+            HooksStatus::Skipped
+        } else {
+            HooksStatus::None
+        };
+        let result = execute(branch, from, cwd, worktree_root, template, db)?;
+        return Ok(CreateWithHooksResult {
+            result,
+            hooks_status,
+            post_create_error: None,
+        });
+    }
+
+    let hooks = hooks_config.unwrap(); // safe: has_hooks is true
+
+    // Pre-compute info needed for hooks
+    let repo_info = git::discover_repo(cwd)?;
+    let relative_path = paths::render_worktree_path(template, &repo_info.name, branch)?;
+    let worktree_path = worktree_root.join(relative_path);
+    let base = from.unwrap_or(&repo_info.default_branch);
+    let sanitized_name = paths::sanitize_branch(branch);
+
+    // Ensure repo in DB for hook event logging
+    let repo_path_str = path_to_utf8(&repo_info.path)?;
+    let repo = match db.get_repo_by_path(repo_path_str)? {
+        Some(r) => r,
+        None => db.insert_repo(&repo_info.name, repo_path_str, Some(&repo_info.default_branch))?,
+    };
+
+    let env_ctx = HookEnvContext {
+        worktree_path: worktree_path.to_string_lossy().to_string(),
+        worktree_name: sanitized_name,
+        branch: branch.to_string(),
+        repo_name: repo_info.name.clone(),
+        repo_path: repo_info.path.to_string_lossy().to_string(),
+        base_branch: base.to_string(),
+    };
+
+    // Step 1: pre_create hook (cwd = repo path, no worktree_id yet)
+    if let Some(pre_create) = &hooks.pre_create {
+        hooks::runner::execute_hook(
+            &HookEvent::PreCreate,
+            pre_create,
+            &env_ctx,
+            &repo_info.path,
+            &repo_info.path,
+            db,
+            repo.id,
+            None,
+        )
+        .await
+        .map_err(CreateError::PreCreateHookFailed)?;
+    }
+
+    // Step 2: create worktree
+    let result = execute(branch, from, cwd, worktree_root, template, db)?;
+
+    // Step 3: post_create hook (cwd = worktree path)
+    let post_create_error = if let Some(post_create) = &hooks.post_create {
+        // Look up worktree_id for DB logging
+        let wt = db.find_worktree_by_identifier(repo.id, branch)?;
+        let worktree_id = wt.map(|w| w.id);
+
+        match hooks::runner::execute_hook(
+            &HookEvent::PostCreate,
+            post_create,
+            &env_ctx,
+            &repo_info.path,
+            &result.path,
+            db,
+            repo.id,
+            worktree_id,
+        )
+        .await
+        {
+            Ok(_) => None,
+            Err(e) => Some(e),
+        }
+    } else {
+        None
+    };
+
+    Ok(CreateWithHooksResult {
+        result,
+        hooks_status: HooksStatus::Ran,
+        post_create_error,
+    })
+}
+
 /// Execute the `trench create <branch>` command.
 ///
 /// Discovers the git repo, resolves the worktree path, creates the worktree
@@ -191,6 +321,7 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{HookDef, HooksConfig};
 
     #[test]
     fn path_to_utf8_succeeds_for_valid_utf8() {
@@ -942,6 +1073,369 @@ mod tests {
             db_repo.default_base.as_deref(),
             Some(head_branch.as_str()),
             "repos.default_base should be the HEAD branch, not the --from override"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_configured_returns_none_status() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let result = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            None, // no hooks configured
+            false, // no_hooks flag = false
+        )
+        .await
+        .expect("should succeed");
+
+        assert!(matches!(result.hooks_status, HooksStatus::None));
+        assert!(result.result.path.exists(), "worktree should be created");
+        assert!(result.post_create_error.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_flag_returns_skipped_status() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let hooks = HooksConfig {
+            post_create: Some(HookDef {
+                run: Some(vec!["echo should-not-run".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let result = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            true, // no_hooks = true → skip
+        )
+        .await
+        .expect("should succeed");
+
+        assert!(matches!(result.hooks_status, HooksStatus::Skipped));
+        assert!(result.result.path.exists(), "worktree should still be created");
+
+        // Verify no hook events were logged
+        let repo_path_str = repo_dir.path().canonicalize().unwrap().to_str().unwrap().to_string();
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().expect("repo in DB");
+        let wts = db.list_worktrees(db_repo.id).unwrap();
+        let hook_events = db.count_events(wts[0].id, Some("hook:post_create")).unwrap();
+        assert_eq!(hook_events, 0, "no hook events should be logged when --no-hooks");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_create_hook_runs_before_worktree_creation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // pre_create hook creates a marker file in repo dir
+        let marker = repo_dir.path().join("pre_create_ran.marker");
+        let hooks = HooksConfig {
+            pre_create: Some(HookDef {
+                run: Some(vec![format!("touch {}", marker.display())]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let result = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("should succeed");
+
+        // Marker file should exist (pre_create hook ran)
+        assert!(marker.exists(), "pre_create hook should have run");
+
+        // Worktree should also exist
+        assert!(result.result.path.exists(), "worktree should be created");
+        assert!(matches!(result.hooks_status, HooksStatus::Ran));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_create_failure_cancels_worktree_creation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let hooks = HooksConfig {
+            pre_create: Some(HookDef {
+                run: Some(vec!["exit 1".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let err = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect_err("should fail when pre_create hook fails");
+
+        // Error should be a typed CreateError::PreCreateHookFailed
+        assert!(
+            err.downcast_ref::<CreateError>().is_some(),
+            "expected CreateError::PreCreateHookFailed, got: {err:?}"
+        );
+
+        // Worktree should NOT exist on disk
+        let repo_name = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let expected_wt_path = wt_root.path().join(&repo_name).join("my-feature");
+        assert!(
+            !expected_wt_path.exists(),
+            "worktree should NOT be created when pre_create fails"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_create_hook_runs_after_worktree_creation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // post_create hook creates a marker file in the worktree dir
+        let hooks = HooksConfig {
+            post_create: Some(HookDef {
+                run: Some(vec!["touch post_create_ran.marker".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let result = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("should succeed");
+
+        // Worktree exists
+        assert!(result.result.path.exists(), "worktree should be created");
+
+        // Marker file in worktree dir proves post_create ran with cwd = worktree
+        let marker = result.result.path.join("post_create_ran.marker");
+        assert!(marker.exists(), "post_create hook should have run in worktree dir");
+
+        assert!(matches!(result.hooks_status, HooksStatus::Ran));
+        assert!(result.post_create_error.is_none());
+
+        // Hook event logged to DB
+        let repo_path_str = repo_dir.path().canonicalize().unwrap().to_str().unwrap().to_string();
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().expect("repo in DB");
+        let wts = db.list_worktrees(db_repo.id).unwrap();
+        let hook_events = db.count_events(wts[0].id, Some("hook:post_create")).unwrap();
+        assert_eq!(hook_events, 1, "post_create hook event should be logged");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_create_failure_keeps_worktree_and_reports_error() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let hooks = HooksConfig {
+            post_create: Some(HookDef {
+                run: Some(vec!["exit 1".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let result = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("should succeed (worktree stays despite hook failure)");
+
+        // Worktree should still exist on disk
+        assert!(
+            result.result.path.exists(),
+            "worktree should exist despite post_create failure"
+        );
+
+        // post_create_error should be set
+        assert!(
+            result.post_create_error.is_some(),
+            "post_create_error should contain the hook failure"
+        );
+
+        assert!(matches!(result.hooks_status, HooksStatus::Ran));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn integration_create_with_hooks_copies_files_and_runs_commands() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Create files in repo that should be copied by post_create
+        std::fs::write(repo_dir.path().join(".env"), "DATABASE_URL=postgres://localhost/mydb").unwrap();
+        std::fs::write(repo_dir.path().join(".env.local"), "SECRET=abc123").unwrap();
+        std::fs::write(repo_dir.path().join(".env.example"), "DATABASE_URL=").unwrap();
+        std::fs::write(repo_dir.path().join("README.md"), "# readme").unwrap();
+
+        let hooks = HooksConfig {
+            pre_create: Some(HookDef {
+                run: Some(vec!["echo pre_create_ok".to_string()]),
+                ..HookDef::default()
+            }),
+            post_create: Some(HookDef {
+                copy: Some(vec![".env*".to_string(), "!.env.example".to_string()]),
+                run: Some(vec!["echo post_create_ok".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let result = execute_with_hooks(
+            "integration-test",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("should succeed");
+
+        let wt_path = &result.result.path;
+
+        // Worktree created
+        assert!(wt_path.exists(), "worktree should exist");
+        assert!(wt_path.join(".git").exists(), "worktree should have .git");
+
+        // Copy: .env and .env.local copied, .env.example excluded, README.md not matched
+        assert!(
+            wt_path.join(".env").exists(),
+            ".env should be copied to worktree"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt_path.join(".env")).unwrap(),
+            "DATABASE_URL=postgres://localhost/mydb"
+        );
+        assert!(
+            wt_path.join(".env.local").exists(),
+            ".env.local should be copied to worktree"
+        );
+        assert!(
+            !wt_path.join(".env.example").exists(),
+            ".env.example should be excluded by !.env.example pattern"
+        );
+        // README.md doesn't match .env* so it shouldn't be copied as an extra file
+        // (it may exist from git checkout, which is fine — we just verify the copy step)
+
+        // Status
+        assert!(matches!(result.hooks_status, HooksStatus::Ran));
+        assert!(result.post_create_error.is_none());
+
+        // DB: hook events logged
+        let repo_path_str = repo_dir.path().canonicalize().unwrap().to_str().unwrap().to_string();
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().expect("repo in DB");
+        let wts = db.list_worktrees(db_repo.id).unwrap();
+        let post_hook_count = db.count_events(wts[0].id, Some("hook:post_create")).unwrap();
+        assert_eq!(post_hook_count, 1, "post_create hook event should be logged");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_create_failure_returns_typed_error() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let hooks = HooksConfig {
+            pre_create: Some(HookDef {
+                run: Some(vec!["exit 1".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let err = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect_err("should fail when pre_create hook fails");
+
+        // The error must be a typed CreateError::PreCreateHookFailed, not a string
+        assert!(
+            err.downcast_ref::<CreateError>().is_some(),
+            "expected CreateError::PreCreateHookFailed, got: {err:?}"
         );
     }
 }

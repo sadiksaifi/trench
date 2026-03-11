@@ -60,6 +60,10 @@ enum Commands {
         /// Falls back to origin/<base> if not found locally.
         #[arg(long)]
         from: Option<String>,
+
+        /// Skip all lifecycle hooks (pre_create, post_create)
+        #[arg(long)]
+        no_hooks: bool,
     },
     /// Remove a worktree
     Remove {
@@ -198,9 +202,11 @@ fn main() -> anyhow::Result<()> {
     let porcelain = cli.porcelain;
 
     match cli.command {
-        Some(Commands::Create { branch, from }) => {
-            run_create(&branch, from.as_deref(), dry_run, json)
-        }
+        Some(Commands::Create {
+            branch,
+            from,
+            no_hooks,
+        }) => run_create(&branch, from.as_deref(), dry_run, json, no_hooks),
         Some(Commands::Remove {
             branch,
             force,
@@ -236,7 +242,13 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> anyhow::Result<()> {
+fn run_create(
+    branch: &str,
+    from: Option<&str>,
+    dry_run: bool,
+    json: bool,
+    no_hooks: bool,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
 
     // Load config once so both dry-run and actual execution use the same
@@ -271,25 +283,43 @@ fn run_create(branch: &str, from: Option<&str>, dry_run: bool, json: bool) -> an
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
-    match cli::commands::create::execute(
+    let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
+
+    match rt.block_on(cli::commands::create::execute_with_hooks(
         branch,
         from,
         &cwd,
         &worktree_root,
         &resolved.worktrees.root,
         &db,
-    ) {
-        Ok(result) => {
+        resolved.hooks.as_ref(),
+        no_hooks,
+    )) {
+        Ok(outcome) => {
+            // Report post_create hook failure to stderr
+            if let Some(ref hook_err) = outcome.post_create_error {
+                eprintln!("error: post_create hook failed: {hook_err:#}");
+            }
+
             if json {
-                let hooks_status = cli::commands::create::HooksStatus::None;
-                let json_output = result.to_json_output(hooks_status);
+                let json_output = outcome.result.to_json_output(outcome.hooks_status);
                 println!("{}", output::json::format_json_value(&json_output)?);
             } else {
-                println!("{}", result.path.display());
+                println!("{}", outcome.result.path.display());
+            }
+
+            // Exit 4 if post_create hook failed (FR-24: hard stop)
+            if outcome.post_create_error.is_some() {
+                std::process::exit(4);
             }
             Ok(())
         }
         Err(e) => {
+            // Check for hook failure (pre_create) via typed error
+            if e.downcast_ref::<cli::commands::create::CreateError>().is_some() {
+                eprintln!("error: {e:#}");
+                std::process::exit(4);
+            }
             if let Some(git_err) = e.downcast_ref::<git::GitError>() {
                 match git_err {
                     git::GitError::BranchAlreadyExists { .. }
@@ -763,7 +793,7 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "create", "my-feature"])
             .expect("create with branch should succeed");
         match cli.command {
-            Some(Commands::Create { branch, from }) => {
+            Some(Commands::Create { branch, from, .. }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(from.is_none());
             }
@@ -776,7 +806,7 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "create", "my-feature", "--from", "develop"])
             .expect("create with --from should succeed");
         match cli.command {
-            Some(Commands::Create { branch, from }) => {
+            Some(Commands::Create { branch, from, .. }) => {
                 assert_eq!(branch, "my-feature");
                 assert_eq!(from.as_deref(), Some("develop"));
             }
@@ -852,6 +882,33 @@ mod tests {
             .expect("--dry-run --json with create should parse");
         assert!(cli.dry_run);
         assert!(cli.json);
+    }
+
+    #[test]
+    fn create_subcommand_accepts_no_hooks_flag() {
+        let cli = Cli::try_parse_from(["trench", "create", "my-feature", "--no-hooks"])
+            .expect("create with --no-hooks should succeed");
+        match cli.command {
+            Some(Commands::Create {
+                branch, no_hooks, ..
+            }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(no_hooks);
+            }
+            _ => panic!("expected Commands::Create"),
+        }
+    }
+
+    #[test]
+    fn create_subcommand_no_hooks_defaults_to_false() {
+        let cli = Cli::try_parse_from(["trench", "create", "my-feature"])
+            .expect("create without --no-hooks should succeed");
+        match cli.command {
+            Some(Commands::Create { no_hooks, .. }) => {
+                assert!(!no_hooks, "no_hooks should default to false");
+            }
+            _ => panic!("expected Commands::Create"),
+        }
     }
 
     #[test]
