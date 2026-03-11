@@ -2,8 +2,39 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::config::HooksConfig;
 use crate::git::{self, RepoInfo};
+use crate::hooks::{self, HookEnvContext, HookEvent};
 use crate::state::{Database, Repo, Worktree};
+
+/// Typed errors for the `remove` command.
+#[derive(Debug, thiserror::Error)]
+pub enum RemoveError {
+    #[error("pre_remove hook failed")]
+    PreRemoveHookFailed(#[source] anyhow::Error),
+}
+
+/// Hook execution status for the remove operation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RemoveHooksStatus {
+    /// No hooks were configured.
+    None,
+    /// Hooks executed successfully.
+    Ran,
+    /// Hooks were configured but skipped (`--no-hooks`).
+    Skipped,
+}
+
+/// Result of `execute_resolved_with_hooks` — includes remove result, hooks
+/// status, and any post_remove hook warning.
+#[derive(Debug)]
+pub struct RemoveWithHooksResult {
+    pub result: RemoveResult,
+    pub hooks_status: RemoveHooksStatus,
+    /// If post_remove hook failed, this contains the error.
+    /// The worktree was already removed — this is a warning only (FR-24).
+    pub post_remove_warning: Option<anyhow::Error>,
+}
 
 /// Result of a worktree removal.
 #[derive(Debug)]
@@ -81,6 +112,141 @@ pub fn execute_resolved(
     Ok(RemoveResult {
         name: wt.name.clone(),
         pruned_remote,
+    })
+}
+
+/// Execute `trench remove` with lifecycle hooks.
+///
+/// Orchestrates: pre_remove hook → removal → post_remove hook.
+/// - If `no_hooks` is true or no hooks configured, hooks are skipped.
+/// - Pre_remove failure cancels the operation (worktree not removed).
+/// - Post_remove failure: worktree already gone, warning only (FR-24).
+pub async fn execute_resolved_with_hooks(
+    repo: &Repo,
+    wt: &Worktree,
+    repo_info: &RepoInfo,
+    db: &Database,
+    prune: bool,
+    hooks_config: Option<&HooksConfig>,
+    no_hooks: bool,
+) -> Result<RemoveWithHooksResult> {
+    let has_hooks = hooks_config
+        .map(|h| h.pre_remove.is_some() || h.post_remove.is_some())
+        .unwrap_or(false);
+
+    // Fast path: no hooks to run
+    if no_hooks || !has_hooks {
+        let hooks_status = if no_hooks && has_hooks {
+            RemoveHooksStatus::Skipped
+        } else {
+            RemoveHooksStatus::None
+        };
+        let result = execute_resolved(repo, wt, repo_info, db, prune)?;
+        return Ok(RemoveWithHooksResult {
+            result,
+            hooks_status,
+            post_remove_warning: None,
+        });
+    }
+
+    let hooks = hooks_config.unwrap(); // safe: has_hooks is true
+
+    let env_ctx = HookEnvContext {
+        worktree_path: wt.path.clone(),
+        worktree_name: wt.name.clone(),
+        branch: wt.branch.clone(),
+        repo_name: repo.name.clone(),
+        repo_path: repo_info.path.to_string_lossy().to_string(),
+        base_branch: wt.base_branch.clone().unwrap_or_default(),
+    };
+
+    // Step 1: pre_remove hook (cwd = worktree path, FR-22)
+    if let Some(pre_remove) = &hooks.pre_remove {
+        let worktree_path = Path::new(&wt.path);
+        if worktree_path.exists() {
+            hooks::runner::execute_hook(
+                &HookEvent::PreRemove,
+                pre_remove,
+                &env_ctx,
+                &repo_info.path,
+                worktree_path,
+                db,
+                repo.id,
+                Some(wt.id),
+            )
+            .await
+            .map_err(RemoveError::PreRemoveHookFailed)?;
+        } else {
+            eprintln!(
+                "warning: skipping pre_remove hook because the worktree directory is already gone"
+            );
+        }
+    }
+
+    // Step 2: remove worktree from disk
+    // Inlined from execute_resolved so that post_remove fires immediately after
+    // disk deletion, regardless of whether DB bookkeeping succeeds.
+    let worktree_path = Path::new(&wt.path);
+    if worktree_path.exists() {
+        git::remove_worktree(&repo_info.path, worktree_path)?;
+    } else {
+        eprintln!("warning: worktree directory already removed from disk");
+    }
+
+    // Step 3: post_remove hook fires IMMEDIATELY after disk deletion (FR-22)
+    let post_remove_warning = if let Some(post_remove) = &hooks.post_remove {
+        match hooks::runner::execute_hook(
+            &HookEvent::PostRemove,
+            post_remove,
+            &env_ctx,
+            &repo_info.path,
+            &repo_info.path, // cwd = repo path (worktree is gone)
+            db,
+            repo.id,
+            Some(wt.id),
+        )
+        .await
+        {
+            Ok(_) => None,
+            Err(e) => Some(e),
+        }
+    } else {
+        None
+    };
+
+    // Step 4: DB bookkeeping — cannot prevent post_remove from running
+    let now = crate::state::unix_epoch_secs() as i64;
+    db.update_worktree(
+        wt.id,
+        &crate::state::WorktreeUpdate {
+            removed_at: Some(Some(now)),
+            ..Default::default()
+        },
+    )
+    .context("failed to update worktree record")?;
+
+    db.insert_event(repo.id, Some(wt.id), "removed", None)
+        .context("failed to insert removed event")?;
+
+    // Optionally delete the remote branch
+    let mut pruned_remote = false;
+    if prune {
+        match git::delete_remote_branch(&repo_info.path, "origin", &wt.branch) {
+            Ok(()) => pruned_remote = true,
+            Err(git::GitError::RemoteBranchNotFound { branch, remote }) => {
+                eprintln!("warning: remote branch '{branch}' not found on {remote}");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(RemoveWithHooksResult {
+        result: RemoveResult {
+            name: wt.name.clone(),
+            pruned_remote,
+        },
+        hooks_status: RemoveHooksStatus::Ran,
+        post_remove_warning,
     })
 }
 
@@ -480,5 +646,432 @@ mod tests {
             msg.contains("not found"),
             "error should mention 'not found', got: {msg}"
         );
+    }
+
+    // ── Hook integration tests ──────────────────────────────────────────
+
+    fn sample_hooks_config() -> crate::config::HooksConfig {
+        crate::config::HooksConfig {
+            pre_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo pre_remove_ran".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            post_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo post_remove_ran".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_configured_returns_none_status() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Create a worktree first
+        let create_result = crate::cli::commands::create::execute(
+            "hooks-none",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+        assert!(create_result.path.exists());
+
+        // Resolve worktree for the hooks variant
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("hooks-none", &repo_info, &db).unwrap();
+
+        // Remove with no hooks configured
+        let outcome = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            None,  // no hooks
+            false, // no_hooks flag irrelevant
+        )
+        .await
+        .expect("remove should succeed");
+
+        assert_eq!(outcome.result.name, "hooks-none");
+        assert_eq!(outcome.hooks_status, RemoveHooksStatus::None);
+        assert!(outcome.post_remove_warning.is_none());
+        assert!(!create_result.path.exists(), "worktree dir should be deleted");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_flag_skips_hooks() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "skip-hooks",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("skip-hooks", &repo_info, &db).unwrap();
+
+        let hooks = sample_hooks_config();
+
+        // Remove with --no-hooks
+        let outcome = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            Some(&hooks),
+            true, // no_hooks = true
+        )
+        .await
+        .expect("remove should succeed");
+
+        assert_eq!(outcome.result.name, "skip-hooks");
+        assert_eq!(outcome.hooks_status, RemoveHooksStatus::Skipped);
+        assert!(outcome.post_remove_warning.is_none());
+        assert!(!create_result.path.exists(), "worktree dir should be deleted");
+
+        // Verify no hook events were recorded
+        let wt_record = db.get_worktree(wt.id).unwrap().unwrap();
+        let hook_events = db.count_events(wt_record.id, Some("hook:pre_remove")).unwrap();
+        assert_eq!(hook_events, 0, "no hook events should be recorded when --no-hooks");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_remove_hook_runs_before_worktree_deletion() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "pre-rm-test",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("pre-rm-test", &repo_info, &db).unwrap();
+
+        // pre_remove hook writes a marker file to prove it ran with cwd = worktree path
+        let hooks = crate::config::HooksConfig {
+            pre_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo pre_remove_executed".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let outcome = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("remove should succeed");
+
+        assert_eq!(outcome.hooks_status, RemoveHooksStatus::Ran);
+        assert!(!create_result.path.exists(), "worktree dir should be deleted after hooks");
+
+        // Verify hook event was logged
+        let hook_events = db.count_events(wt.id, Some("hook:pre_remove")).unwrap();
+        assert_eq!(hook_events, 1, "pre_remove hook event should be logged");
+
+        // Verify hook output was captured in logs
+        let events = db.list_events(wt.id, 10).unwrap();
+        let hook_event = events.iter().find(|e| e.event_type == "hook:pre_remove").unwrap();
+        let logs = db.get_logs(hook_event.id).unwrap();
+        let stdout_lines: Vec<&str> = logs
+            .iter()
+            .filter(|(s, _, _)| s == "stdout")
+            .map(|(_, l, _)| l.as_str())
+            .collect();
+        assert!(
+            stdout_lines.contains(&"pre_remove_executed"),
+            "pre_remove output should be logged: {stdout_lines:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_remove_failure_cancels_removal() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "fail-pre-rm",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("fail-pre-rm", &repo_info, &db).unwrap();
+
+        // pre_remove hook that fails
+        let hooks = crate::config::HooksConfig {
+            pre_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["exit 1".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let err = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect_err("should fail when pre_remove hook fails");
+
+        // Verify error is a RemoveError::PreRemoveHookFailed
+        assert!(
+            err.downcast_ref::<RemoveError>().is_some(),
+            "error should be RemoveError, got: {err:#}"
+        );
+
+        // Verify worktree was NOT deleted
+        assert!(
+            create_result.path.exists(),
+            "worktree directory should still exist after pre_remove failure"
+        );
+
+        // Verify DB record was NOT marked as removed
+        let wt_record = db.get_worktree(wt.id).unwrap().unwrap();
+        assert!(
+            wt_record.removed_at.is_none(),
+            "removed_at should be None after pre_remove failure"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_remove_hook_runs_after_deletion_with_repo_cwd() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "post-rm-test",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("post-rm-test", &repo_info, &db).unwrap();
+
+        // post_remove hook creates a marker file in repo dir to prove cwd = repo path
+        let marker = repo_dir.path().join("post_remove_marker.txt");
+        let hooks = crate::config::HooksConfig {
+            post_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec![format!("echo done > {}", marker.display())]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let outcome = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("remove should succeed");
+
+        assert_eq!(outcome.hooks_status, RemoveHooksStatus::Ran);
+        assert!(!create_result.path.exists(), "worktree dir should be deleted");
+        assert!(outcome.post_remove_warning.is_none());
+
+        // Verify post_remove hook ran with cwd = repo path
+        assert!(
+            marker.exists(),
+            "post_remove marker should exist (proves cwd = repo path)"
+        );
+
+        // Verify hook event logged
+        let hook_events = db.count_events(wt.id, Some("hook:post_remove")).unwrap();
+        assert_eq!(hook_events, 1, "post_remove hook event should be logged");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_remove_hook_skipped_when_worktree_dir_missing() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "gone-dir",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("gone-dir", &repo_info, &db).unwrap();
+
+        // Manually delete the worktree directory to simulate user deletion
+        std::fs::remove_dir_all(&create_result.path).unwrap();
+        assert!(!create_result.path.exists());
+
+        // pre_remove hook configured — should be skipped, not error
+        let hooks = crate::config::HooksConfig {
+            pre_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo should_not_run".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let outcome = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("remove should succeed even when worktree dir is gone");
+
+        assert_eq!(outcome.result.name, "gone-dir");
+        assert_eq!(outcome.hooks_status, RemoveHooksStatus::Ran);
+
+        // DB record should have removed_at set
+        let wt_record = db.get_worktree(wt.id).unwrap().unwrap();
+        assert!(wt_record.removed_at.is_some(), "removed_at should be set");
+
+        // No pre_remove hook event should be logged (hook was skipped)
+        let hook_events = db.count_events(wt.id, Some("hook:pre_remove")).unwrap();
+        assert_eq!(hook_events, 0, "pre_remove hook should not have run");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_remove_failure_is_warning_only() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "post-fail",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("post-fail", &repo_info, &db).unwrap();
+
+        // post_remove hook that fails
+        let hooks = crate::config::HooksConfig {
+            post_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["exit 42".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        // Should succeed despite post_remove failure (FR-24: WarnOnly)
+        let outcome = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("remove should succeed even if post_remove fails");
+
+        assert_eq!(outcome.result.name, "post-fail");
+        assert_eq!(outcome.hooks_status, RemoveHooksStatus::Ran);
+        assert!(!create_result.path.exists(), "worktree should be deleted");
+
+        // Post_remove failure should be captured as warning
+        assert!(
+            outcome.post_remove_warning.is_some(),
+            "post_remove warning should be captured"
+        );
+
+        // DB should still have removed_at set
+        let wt_record = db.get_worktree(wt.id).unwrap().unwrap();
+        assert!(wt_record.removed_at.is_some(), "removed_at should be set");
     }
 }

@@ -77,6 +77,10 @@ enum Commands {
         /// Also delete the corresponding remote branch
         #[arg(long)]
         prune: bool,
+
+        /// Skip all lifecycle hooks (pre_remove, post_remove)
+        #[arg(long)]
+        no_hooks: bool,
     },
     /// Switch to a worktree
     Switch {
@@ -211,7 +215,8 @@ fn main() -> anyhow::Result<()> {
             branch,
             force,
             prune,
-        }) => run_remove(&branch, force, prune),
+            no_hooks,
+        }) => run_remove(&branch, force, prune, no_hooks),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::Open { branch }) => run_open(&branch),
@@ -339,14 +344,24 @@ fn run_create(
     }
 }
 
-fn run_remove(identifier: &str, force: bool, prune: bool) -> anyhow::Result<()> {
+fn run_remove(identifier: &str, force: bool, prune: bool, no_hooks: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
+    let repo_info = git::discover_repo(&cwd)?;
+
+    // Skip config I/O when --no-hooks is set (escape hatch)
+    let hooks_config = if no_hooks {
+        None
+    } else {
+        let project_config = config::load_project_config(&repo_info.path)?;
+        let global_config = config::load_global_config()?;
+        config::resolve_config(None, project_config.as_ref(), &global_config).hooks
+    };
+
     // If not forced, resolve the worktree (adopting if unmanaged) for the prompt
     let resolved = if !force {
-        let repo_info = git::discover_repo(&cwd)?;
         if let Ok((repo, wt)) = adopt::resolve_or_adopt(identifier, &repo_info, &db) {
             let prune_hint = if prune {
                 " (including remote branch)"
@@ -365,7 +380,7 @@ fn run_remove(identifier: &str, force: bool, prune: bool) -> anyhow::Result<()> 
                 eprintln!("Cancelled.");
                 return Ok(());
             }
-            Some((repo, wt, repo_info))
+            Some((repo, wt))
         } else {
             None
         }
@@ -373,23 +388,42 @@ fn run_remove(identifier: &str, force: bool, prune: bool) -> anyhow::Result<()> 
         None
     };
 
-    let remove_result = match resolved {
-        Some((repo, wt, repo_info)) => {
-            cli::commands::remove::execute_resolved(&repo, &wt, &repo_info, &db, prune)
-        }
-        None => cli::commands::remove::execute(identifier, &cwd, &db, prune),
+    // Resolve worktree if not already done by the prompt flow
+    let (repo, wt) = match resolved {
+        Some((repo, wt)) => (repo, wt),
+        None => adopt::resolve_or_adopt(identifier, &repo_info, &db)?,
     };
 
-    match remove_result {
-        Ok(result) => {
-            if result.pruned_remote {
-                eprintln!("Removed worktree '{}' and remote branch", result.name);
+    let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
+
+    match rt.block_on(cli::commands::remove::execute_resolved_with_hooks(
+        &repo,
+        &wt,
+        &repo_info,
+        &db,
+        prune,
+        hooks_config.as_ref(),
+        no_hooks,
+    )) {
+        Ok(outcome) => {
+            // Report post_remove hook failure as warning (FR-24: WarnOnly)
+            if let Some(ref hook_err) = outcome.post_remove_warning {
+                eprintln!("warning: post_remove hook failed: {hook_err:#}");
+            }
+
+            if outcome.result.pruned_remote {
+                eprintln!("Removed worktree '{}' and remote branch", outcome.result.name);
             } else {
-                eprintln!("Removed worktree '{}'", result.name);
+                eprintln!("Removed worktree '{}'", outcome.result.name);
             }
             Ok(())
         }
         Err(e) => {
+            // Check for pre_remove hook failure → exit code 4
+            if e.downcast_ref::<cli::commands::remove::RemoveError>().is_some() {
+                eprintln!("error: {e:#}");
+                std::process::exit(4);
+            }
             if let Some(git_err) = e.downcast_ref::<git::GitError>() {
                 if matches!(git_err, git::GitError::WorktreeNotFound { .. }) {
                     eprintln!("error: {e}");
@@ -926,10 +960,12 @@ mod tests {
                 branch,
                 force,
                 prune,
+                no_hooks,
             }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(!force);
                 assert!(!prune);
+                assert!(!no_hooks);
             }
             _ => panic!("expected Commands::Remove"),
         }
@@ -944,10 +980,12 @@ mod tests {
                 branch,
                 force,
                 prune,
+                no_hooks,
             }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(force);
                 assert!(!prune);
+                assert!(!no_hooks);
             }
             _ => panic!("expected Commands::Remove"),
         }
@@ -1061,10 +1099,12 @@ mod tests {
                 branch,
                 force,
                 prune,
+                no_hooks,
             }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(!force);
                 assert!(prune);
+                assert!(!no_hooks);
             }
             _ => panic!("expected Commands::Remove"),
         }
@@ -1079,10 +1119,12 @@ mod tests {
                 branch,
                 force,
                 prune,
+                no_hooks,
             }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(force);
                 assert!(prune);
+                assert!(!no_hooks);
             }
             _ => panic!("expected Commands::Remove"),
         }
@@ -1095,6 +1137,18 @@ mod tests {
         match cli.command {
             Some(Commands::Remove { prune, .. }) => {
                 assert!(!prune);
+            }
+            _ => panic!("expected Commands::Remove"),
+        }
+    }
+
+    #[test]
+    fn remove_subcommand_accepts_no_hooks_flag() {
+        let cli = Cli::try_parse_from(["trench", "remove", "my-feature", "--no-hooks"])
+            .expect("remove with --no-hooks should succeed");
+        match cli.command {
+            Some(Commands::Remove { no_hooks, .. }) => {
+                assert!(no_hooks);
             }
             _ => panic!("expected Commands::Remove"),
         }
