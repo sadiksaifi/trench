@@ -125,6 +125,10 @@ enum Commands {
         /// Sync strategy: rebase or merge. Prompts interactively if omitted.
         #[arg(long)]
         strategy: Option<SyncStrategy>,
+
+        /// Skip all lifecycle hooks (pre_sync, post_sync)
+        #[arg(long)]
+        no_hooks: bool,
     },
     /// View event log
     Log,
@@ -236,7 +240,7 @@ fn main() -> anyhow::Result<()> {
             cli::commands::completions::generate::<Cli>(shell, &mut std::io::stdout());
             Ok(())
         }
-        Some(Commands::Sync { branch, strategy }) => run_sync(&branch, strategy, json),
+        Some(Commands::Sync { branch, strategy, no_hooks }) => run_sync(&branch, strategy, json, no_hooks),
         Some(Commands::Log) => {
             // Log command not yet implemented
             Ok(())
@@ -584,7 +588,7 @@ fn run_status(
     }
 }
 
-fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool) -> anyhow::Result<()> {
+fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, no_hooks: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
@@ -618,24 +622,58 @@ fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool) -> any
         SyncStrategy::Merge => cli::commands::sync::Strategy::Merge,
     };
 
-    match cli::commands::sync::execute(identifier, &cwd, &db, sync_strategy) {
-        Ok(result) => {
+    // Skip config I/O when --no-hooks is set (escape hatch)
+    let hooks_config = if no_hooks {
+        None
+    } else {
+        let repo_info = git::discover_repo(&cwd)?;
+        let project_config = config::load_project_config(&repo_info.path)?;
+        let global_config = config::load_global_config()?;
+        config::resolve_config(None, project_config.as_ref(), &global_config).hooks
+    };
+
+    let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
+
+    match rt.block_on(cli::commands::sync::execute_with_hooks(
+        identifier,
+        &cwd,
+        &db,
+        sync_strategy,
+        hooks_config.as_ref(),
+        no_hooks,
+    )) {
+        Ok(outcome) => {
+            // Report post_sync hook failure to stderr (FR-24: Report)
+            if let Some(ref hook_err) = outcome.post_sync_error {
+                eprintln!("error: post_sync hook failed: {hook_err:#}");
+            }
+
             if json {
-                println!("{}", output::json::format_json_value(&result.to_json())?);
+                println!("{}", output::json::format_json_value(&outcome.result.to_json())?);
             } else {
-                eprintln!("Synced '{}' via {}", result.name, result.strategy);
+                eprintln!("Synced '{}' via {}", outcome.result.name, outcome.result.strategy);
                 eprintln!(
                     "  before: ahead={}, behind={}",
-                    result.before_ahead, result.before_behind
+                    outcome.result.before_ahead, outcome.result.before_behind
                 );
                 eprintln!(
                     "  after:  ahead={}, behind={}",
-                    result.after_ahead, result.after_behind
+                    outcome.result.after_ahead, outcome.result.after_behind
                 );
+            }
+
+            // Exit 4 if post_sync hook failed (FR-24: Report — non-zero exit but sync completed)
+            if outcome.post_sync_error.is_some() {
+                std::process::exit(4);
             }
             Ok(())
         }
         Err(e) => {
+            // Check for hook failure (pre_sync) via typed error
+            if e.downcast_ref::<cli::commands::sync::SyncError>().is_some() {
+                eprintln!("error: {e:#}");
+                std::process::exit(4);
+            }
             if let Some(git::GitError::MergeConflict { .. }) =
                 e.downcast_ref::<git::GitError>()
             {
@@ -1281,7 +1319,7 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "rebase"])
             .expect("sync with --strategy rebase should parse");
         match cli.command {
-            Some(Commands::Sync { branch, strategy }) => {
+            Some(Commands::Sync { branch, strategy, .. }) => {
                 assert_eq!(branch, "foo");
                 assert_eq!(strategy, Some(SyncStrategy::Rebase));
             }
@@ -1294,7 +1332,7 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "merge"])
             .expect("sync with --strategy merge should parse");
         match cli.command {
-            Some(Commands::Sync { branch, strategy }) => {
+            Some(Commands::Sync { branch, strategy, .. }) => {
                 assert_eq!(branch, "foo");
                 assert_eq!(strategy, Some(SyncStrategy::Merge));
             }
@@ -1307,7 +1345,7 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "sync", "foo"])
             .expect("sync without --strategy should parse");
         match cli.command {
-            Some(Commands::Sync { branch, strategy }) => {
+            Some(Commands::Sync { branch, strategy, .. }) => {
                 assert_eq!(branch, "foo");
                 assert!(strategy.is_none());
             }
@@ -1319,5 +1357,30 @@ mod tests {
     fn sync_subcommand_rejects_invalid_strategy() {
         let result = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "squash"]);
         assert!(result.is_err(), "invalid strategy should be rejected");
+    }
+
+    #[test]
+    fn sync_subcommand_accepts_no_hooks_flag() {
+        let cli = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "rebase", "--no-hooks"])
+            .expect("sync with --no-hooks should parse");
+        match cli.command {
+            Some(Commands::Sync { branch, no_hooks, .. }) => {
+                assert_eq!(branch, "foo");
+                assert!(no_hooks, "--no-hooks should be true");
+            }
+            _ => panic!("expected Commands::Sync"),
+        }
+    }
+
+    #[test]
+    fn sync_subcommand_no_hooks_defaults_to_false() {
+        let cli = Cli::try_parse_from(["trench", "sync", "foo"])
+            .expect("sync without --no-hooks should parse");
+        match cli.command {
+            Some(Commands::Sync { no_hooks, .. }) => {
+                assert!(!no_hooks, "--no-hooks should default to false");
+            }
+            _ => panic!("expected Commands::Sync"),
+        }
     }
 }
