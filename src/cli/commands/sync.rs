@@ -102,6 +102,11 @@ impl SyncResult {
     }
 }
 
+/// Error returned when `--all` is used without `--strategy`.
+#[derive(Debug, thiserror::Error)]
+#[error("Batch sync requires an explicit strategy. Use --strategy rebase or --strategy merge.")]
+pub struct BatchSyncMissingStrategy;
+
 /// Execute the `trench sync <identifier>` command.
 ///
 /// Resolves the worktree (adopting it if unmanaged), fetches from remote,
@@ -1324,6 +1329,20 @@ mod tests {
         assert!(
             synced_id < post_id,
             "synced event (id={synced_id}) should come before post_sync event (id={post_id})"
+        );
+    }
+
+    #[test]
+    fn batch_sync_missing_strategy_error_has_correct_message() {
+        let err = BatchSyncMissingStrategy;
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Batch sync requires an explicit strategy"),
+            "error should contain hint, got: {msg}"
+        );
+        assert!(
+            msg.contains("--strategy rebase") && msg.contains("--strategy merge"),
+            "error should mention both strategies, got: {msg}"
         );
     }
 }

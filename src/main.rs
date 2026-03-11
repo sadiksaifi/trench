@@ -247,6 +247,10 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Sync { branch, all, strategy, no_hooks }) => {
             if all {
+                if strategy.is_none() {
+                    eprintln!("error: {}", cli::commands::sync::BatchSyncMissingStrategy);
+                    std::process::exit(8);
+                }
                 // TODO: implement batch sync
                 todo!("batch sync not yet implemented")
             } else {
@@ -1436,6 +1440,20 @@ mod tests {
             Some(Commands::Sync { branch, all, .. }) => {
                 assert_eq!(branch, Some("my-feature".to_string()));
                 assert!(!all, "--all should default to false");
+            }
+            _ => panic!("expected Commands::Sync"),
+        }
+    }
+
+    #[test]
+    fn sync_all_without_strategy_parses_but_strategy_is_none() {
+        // CLI parsing succeeds — the exit-code-8 validation happens at runtime
+        let cli = Cli::try_parse_from(["trench", "sync", "--all"])
+            .expect("sync --all without --strategy should still parse");
+        match cli.command {
+            Some(Commands::Sync { all, strategy, .. }) => {
+                assert!(all);
+                assert!(strategy.is_none(), "--strategy should be None");
             }
             _ => panic!("expected Commands::Sync"),
         }
