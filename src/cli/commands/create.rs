@@ -9,6 +9,13 @@ use crate::hooks::{self, HookEnvContext, HookEvent};
 use crate::paths;
 use crate::state::Database;
 
+/// Typed errors for the `create` command.
+#[derive(Debug, thiserror::Error)]
+pub enum CreateError {
+    #[error("pre_create hook failed")]
+    PreCreateHookFailed(#[source] anyhow::Error),
+}
+
 /// Plan produced by `--dry-run` showing what `trench create` would do.
 #[derive(Debug, serde::Serialize)]
 pub struct DryRunPlan {
@@ -229,7 +236,7 @@ pub async fn execute_with_hooks(
             None,
         )
         .await
-        .context("pre_create hook failed")?;
+        .map_err(CreateError::PreCreateHookFailed)?;
     }
 
     // Step 2: create worktree
@@ -1203,11 +1210,10 @@ mod tests {
         .await
         .expect_err("should fail when pre_create hook fails");
 
-        // Error should mention pre_create
-        let msg = err.to_string();
+        // Error should be a typed CreateError::PreCreateHookFailed
         assert!(
-            msg.contains("pre_create"),
-            "error should mention pre_create, got: {msg}"
+            err.downcast_ref::<CreateError>().is_some(),
+            "expected CreateError::PreCreateHookFailed, got: {err:?}"
         );
 
         // Worktree should NOT exist on disk
@@ -1395,5 +1401,41 @@ mod tests {
         let wts = db.list_worktrees(db_repo.id).unwrap();
         let post_hook_count = db.count_events(wts[0].id, Some("hook:post_create")).unwrap();
         assert_eq!(post_hook_count, 1, "post_create hook event should be logged");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_create_failure_returns_typed_error() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let hooks = HooksConfig {
+            pre_create: Some(HookDef {
+                run: Some(vec!["exit 1".to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+
+        let err = execute_with_hooks(
+            "my-feature",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect_err("should fail when pre_create hook fails");
+
+        // The error must be a typed CreateError::PreCreateHookFailed, not a string
+        assert!(
+            err.downcast_ref::<CreateError>().is_some(),
+            "expected CreateError::PreCreateHookFailed, got: {err:?}"
+        );
     }
 }

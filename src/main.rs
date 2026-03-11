@@ -315,8 +315,8 @@ fn run_create(
             Ok(())
         }
         Err(e) => {
-            // Check for hook failure (pre_create)
-            if e.to_string().contains("pre_create hook failed") {
+            // Check for hook failure (pre_create) via typed error
+            if e.downcast_ref::<cli::commands::create::CreateError>().is_some() {
                 eprintln!("error: {e:#}");
                 std::process::exit(4);
             }
