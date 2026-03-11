@@ -107,6 +107,49 @@ impl SyncResult {
 #[error("Batch sync requires an explicit strategy. Use --strategy rebase or --strategy merge.")]
 pub struct BatchSyncMissingStrategy;
 
+/// Per-worktree result from a batch sync operation.
+#[derive(Debug)]
+pub struct BatchSyncEntry {
+    /// Worktree name.
+    pub name: String,
+    /// Sync result on success.
+    pub result: Option<SyncResult>,
+    /// Error message on failure.
+    pub error: Option<String>,
+}
+
+/// Execute `trench sync --all`: sync every worktree in the list.
+///
+/// Continues on failure — a failing worktree does not block others.
+pub fn execute_all(
+    worktrees: &[crate::state::Worktree],
+    repo: &Repo,
+    repo_info: &RepoInfo,
+    db: &Database,
+    strategy: Strategy,
+) -> Vec<BatchSyncEntry> {
+    let mut results = Vec::new();
+    for wt in worktrees {
+        match execute_resolved(repo, wt, repo_info, db, strategy) {
+            Ok(sync_result) => {
+                results.push(BatchSyncEntry {
+                    name: wt.name.clone(),
+                    result: Some(sync_result),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                results.push(BatchSyncEntry {
+                    name: wt.name.clone(),
+                    result: None,
+                    error: Some(format!("{e:#}")),
+                });
+            }
+        }
+    }
+    results
+}
+
 /// Execute the `trench sync <identifier>` command.
 ///
 /// Resolves the worktree (adopting it if unmanaged), fetches from remote,
@@ -1330,6 +1373,140 @@ mod tests {
             synced_id < post_id,
             "synced event (id={synced_id}) should come before post_sync event (id={post_id})"
         );
+    }
+
+    struct MultiWorktreeFixture {
+        _git_repo: git2::Repository,
+        wt_paths: Vec<std::path::PathBuf>,
+        db: Database,
+        _repo_dir: tempfile::TempDir,
+        _wt_dirs: Vec<tempfile::TempDir>,
+        repo_path_str: String,
+    }
+
+    /// Set up a repo with two diverged feature worktrees.
+    fn setup_multi_worktree_repo() -> MultiWorktreeFixture {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap().to_string();
+
+        // Rename HEAD to "main"
+        git_repo
+            .find_branch(
+                git_repo.head().unwrap().shorthand().unwrap(),
+                git2::BranchType::Local,
+            )
+            .unwrap()
+            .rename("main", true)
+            .unwrap();
+
+        let mut wt_paths = Vec::new();
+        let mut wt_dirs = Vec::new();
+
+        for branch_name in &["feat-a", "feat-b"] {
+            // Create branch at current main
+            {
+                let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+                git_repo.branch(branch_name, &head_commit, false).unwrap();
+            }
+
+            // Create worktree
+            let wt_dir = tempfile::tempdir().unwrap();
+            let wt_path = wt_dir.path().join(branch_name);
+            {
+                let branch_ref = git_repo
+                    .find_branch(branch_name, git2::BranchType::Local)
+                    .unwrap();
+                let mut opts = git2::WorktreeAddOptions::new();
+                opts.reference(Some(branch_ref.get()));
+                git_repo.worktree(branch_name, &wt_path, Some(&opts)).unwrap();
+            }
+
+            // Add a commit on the feature branch
+            let wt_repo = git2::Repository::open(&wt_path).unwrap();
+            commit_file(
+                &wt_repo,
+                &format!("{branch_name}.txt"),
+                &format!("{branch_name} work"),
+                &format!("{branch_name} commit"),
+            );
+
+            wt_paths.push(wt_path);
+            wt_dirs.push(wt_dir);
+        }
+
+        // Switch back to main and add upstream commit to create divergence
+        {
+            let main_obj = git_repo.revparse_single("refs/heads/main").unwrap();
+            git_repo.checkout_tree(&main_obj, None).unwrap();
+            git_repo.set_head("refs/heads/main").unwrap();
+        }
+        commit_file(
+            &git_repo,
+            "upstream.txt",
+            "upstream change",
+            "upstream commit on main",
+        );
+
+        // Register in DB
+        db.insert_repo("test-repo", &repo_path_str, Some("main"))
+            .unwrap();
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().unwrap();
+        for (i, branch_name) in ["feat-a", "feat-b"].iter().enumerate() {
+            let wt_path_str = wt_paths[i].canonicalize().unwrap_or(wt_paths[i].clone());
+            db.insert_worktree(
+                db_repo.id,
+                branch_name,
+                branch_name,
+                wt_path_str.to_str().unwrap(),
+                Some("main"),
+            )
+            .unwrap();
+        }
+
+        MultiWorktreeFixture {
+            _git_repo: git_repo,
+            wt_paths,
+            db,
+            _repo_dir: repo_dir,
+            _wt_dirs: wt_dirs,
+            repo_path_str,
+        }
+    }
+
+    #[test]
+    fn batch_sync_syncs_all_worktrees() {
+        let f = setup_multi_worktree_repo();
+        let repo_info = crate::git::RepoInfo {
+            name: "test-repo".to_string(),
+            path: std::path::PathBuf::from(&f.repo_path_str),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let worktrees = f.db.list_worktrees(db_repo.id).unwrap();
+
+        let results = execute_all(&worktrees, &db_repo, &repo_info, &f.db, Strategy::Rebase);
+
+        assert_eq!(results.len(), 2, "should have results for both worktrees");
+        for entry in &results {
+            assert!(
+                entry.error.is_none(),
+                "worktree '{}' should succeed, got: {:?}",
+                entry.name,
+                entry.error
+            );
+            let result = entry.result.as_ref().unwrap();
+            assert_eq!(result.after_behind, 0, "'{}' should be 0 behind after sync", entry.name);
+        }
+
+        // Verify upstream.txt exists in both worktrees
+        for wt_path in &f.wt_paths {
+            assert!(wt_path.join("upstream.txt").exists(), "upstream.txt should exist in {}", wt_path.display());
+        }
     }
 
     #[test]
