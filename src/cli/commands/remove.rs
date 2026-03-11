@@ -2,8 +2,39 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::config::HooksConfig;
 use crate::git::{self, RepoInfo};
+use crate::hooks::{self, HookEnvContext, HookEvent};
 use crate::state::{Database, Repo, Worktree};
+
+/// Typed errors for the `remove` command.
+#[derive(Debug, thiserror::Error)]
+pub enum RemoveError {
+    #[error("pre_remove hook failed")]
+    PreRemoveHookFailed(#[source] anyhow::Error),
+}
+
+/// Hook execution status for the remove operation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RemoveHooksStatus {
+    /// No hooks were configured.
+    None,
+    /// Hooks executed successfully.
+    Ran,
+    /// Hooks were configured but skipped (`--no-hooks`).
+    Skipped,
+}
+
+/// Result of `execute_resolved_with_hooks` — includes remove result, hooks
+/// status, and any post_remove hook warning.
+#[derive(Debug)]
+pub struct RemoveWithHooksResult {
+    pub result: RemoveResult,
+    pub hooks_status: RemoveHooksStatus,
+    /// If post_remove hook failed, this contains the error.
+    /// The worktree was already removed — this is a warning only (FR-24).
+    pub post_remove_warning: Option<anyhow::Error>,
+}
 
 /// Result of a worktree removal.
 #[derive(Debug)]
@@ -81,6 +112,49 @@ pub fn execute_resolved(
     Ok(RemoveResult {
         name: wt.name.clone(),
         pruned_remote,
+    })
+}
+
+/// Execute `trench remove` with lifecycle hooks.
+///
+/// Orchestrates: pre_remove hook → removal → post_remove hook.
+/// - If `no_hooks` is true or no hooks configured, hooks are skipped.
+/// - Pre_remove failure cancels the operation (worktree not removed).
+/// - Post_remove failure: worktree already gone, warning only (FR-24).
+pub async fn execute_resolved_with_hooks(
+    repo: &Repo,
+    wt: &Worktree,
+    repo_info: &RepoInfo,
+    db: &Database,
+    prune: bool,
+    hooks_config: Option<&HooksConfig>,
+    no_hooks: bool,
+) -> Result<RemoveWithHooksResult> {
+    let has_hooks = hooks_config
+        .map(|h| h.pre_remove.is_some() || h.post_remove.is_some())
+        .unwrap_or(false);
+
+    // Fast path: no hooks to run
+    if no_hooks || !has_hooks {
+        let hooks_status = if no_hooks && has_hooks {
+            RemoveHooksStatus::Skipped
+        } else {
+            RemoveHooksStatus::None
+        };
+        let result = execute_resolved(repo, wt, repo_info, db, prune)?;
+        return Ok(RemoveWithHooksResult {
+            result,
+            hooks_status,
+            post_remove_warning: None,
+        });
+    }
+
+    // TODO: hook execution will be added in subsequent cycles
+    let result = execute_resolved(repo, wt, repo_info, db, prune)?;
+    Ok(RemoveWithHooksResult {
+        result,
+        hooks_status: RemoveHooksStatus::Ran,
+        post_remove_warning: None,
     })
 }
 
@@ -480,5 +554,51 @@ mod tests {
             msg.contains("not found"),
             "error should mention 'not found', got: {msg}"
         );
+    }
+
+    // ── Hook integration tests ──────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_configured_returns_none_status() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Create a worktree first
+        let create_result = crate::cli::commands::create::execute(
+            "hooks-none",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+        assert!(create_result.path.exists());
+
+        // Resolve worktree for the hooks variant
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("hooks-none", &repo_info, &db).unwrap();
+
+        // Remove with no hooks configured
+        let outcome = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            None,  // no hooks
+            false, // no_hooks flag irrelevant
+        )
+        .await
+        .expect("remove should succeed");
+
+        assert_eq!(outcome.result.name, "hooks-none");
+        assert_eq!(outcome.hooks_status, RemoveHooksStatus::None);
+        assert!(outcome.post_remove_warning.is_none());
+        assert!(!create_result.path.exists(), "worktree dir should be deleted");
     }
 }
