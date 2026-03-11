@@ -183,10 +183,17 @@ pub async fn execute_resolved_with_hooks(
         }
     }
 
-    // Step 2: remove worktree
-    let result = execute_resolved(repo, wt, repo_info, db, prune)?;
+    // Step 2: remove worktree from disk
+    // Inlined from execute_resolved so that post_remove fires immediately after
+    // disk deletion, regardless of whether DB bookkeeping succeeds.
+    let worktree_path = Path::new(&wt.path);
+    if worktree_path.exists() {
+        git::remove_worktree(&repo_info.path, worktree_path)?;
+    } else {
+        eprintln!("warning: worktree directory already removed from disk");
+    }
 
-    // Step 3: post_remove hook (cwd = repo path, FR-22)
+    // Step 3: post_remove hook fires IMMEDIATELY after disk deletion (FR-22)
     let post_remove_warning = if let Some(post_remove) = &hooks.post_remove {
         match hooks::runner::execute_hook(
             &HookEvent::PostRemove,
@@ -207,8 +214,37 @@ pub async fn execute_resolved_with_hooks(
         None
     };
 
+    // Step 4: DB bookkeeping — cannot prevent post_remove from running
+    let now = crate::state::unix_epoch_secs() as i64;
+    db.update_worktree(
+        wt.id,
+        &crate::state::WorktreeUpdate {
+            removed_at: Some(Some(now)),
+            ..Default::default()
+        },
+    )
+    .context("failed to update worktree record")?;
+
+    db.insert_event(repo.id, Some(wt.id), "removed", None)
+        .context("failed to insert removed event")?;
+
+    // Optionally delete the remote branch
+    let mut pruned_remote = false;
+    if prune {
+        match git::delete_remote_branch(&repo_info.path, "origin", &wt.branch) {
+            Ok(()) => pruned_remote = true,
+            Err(git::GitError::RemoteBranchNotFound { branch, remote }) => {
+                eprintln!("warning: remote branch '{branch}' not found on {remote}");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
     Ok(RemoveWithHooksResult {
-        result,
+        result: RemoveResult {
+            name: wt.name.clone(),
+            pruned_remote,
+        },
         hooks_status: RemoveHooksStatus::Ran,
         post_remove_warning,
     })
