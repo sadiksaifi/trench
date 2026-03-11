@@ -1176,4 +1176,53 @@ mod tests {
         let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
         assert_eq!(synced_events, 1, "synced event should be recorded");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_sync_failure_reports_error_but_sync_not_undone() {
+        let f = setup_diverged_repo();
+
+        // post_sync hook that fails
+        let hooks = crate::config::HooksConfig {
+            post_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["exit 42".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        // Should succeed despite post_sync failure (FR-24: Report)
+        let outcome = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("sync should succeed even if post_sync fails");
+
+        assert_eq!(outcome.hooks_status, SyncHooksStatus::Ran);
+        assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
+
+        // post_sync failure captured as error
+        assert!(
+            outcome.post_sync_error.is_some(),
+            "post_sync error should be captured"
+        );
+
+        // Verify sync DID happen (synced event recorded)
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
+        assert_eq!(synced_events, 1, "synced event should be recorded (sync completed)");
+
+        // Verify upstream file exists (sync applied)
+        assert!(
+            f.wt_path.join("upstream.txt").exists(),
+            "upstream file should exist after sync (sync was not undone)"
+        );
+    }
 }
