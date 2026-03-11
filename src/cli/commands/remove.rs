@@ -149,8 +149,37 @@ pub async fn execute_resolved_with_hooks(
         });
     }
 
-    // TODO: hook execution will be added in subsequent cycles
+    let hooks = hooks_config.unwrap(); // safe: has_hooks is true
+
+    let env_ctx = HookEnvContext {
+        worktree_path: wt.path.clone(),
+        worktree_name: wt.name.clone(),
+        branch: wt.branch.clone(),
+        repo_name: repo.name.clone(),
+        repo_path: repo_info.path.to_string_lossy().to_string(),
+        base_branch: wt.base_branch.clone().unwrap_or_default(),
+    };
+
+    // Step 1: pre_remove hook (cwd = worktree path, FR-22)
+    if let Some(pre_remove) = &hooks.pre_remove {
+        let worktree_path = Path::new(&wt.path);
+        hooks::runner::execute_hook(
+            &HookEvent::PreRemove,
+            pre_remove,
+            &env_ctx,
+            &repo_info.path,
+            worktree_path,
+            db,
+            repo.id,
+            Some(wt.id),
+        )
+        .await
+        .map_err(RemoveError::PreRemoveHookFailed)?;
+    }
+
+    // Step 2: remove worktree
     let result = execute_resolved(repo, wt, repo_info, db, prune)?;
+
     Ok(RemoveWithHooksResult {
         result,
         hooks_status: RemoveHooksStatus::Ran,
@@ -666,5 +695,72 @@ mod tests {
         let wt_record = db.get_worktree(wt.id).unwrap().unwrap();
         let hook_events = db.count_events(wt_record.id, Some("hook:pre_remove")).unwrap();
         assert_eq!(hook_events, 0, "no hook events should be recorded when --no-hooks");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_remove_hook_runs_before_worktree_deletion() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "pre-rm-test",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("pre-rm-test", &repo_info, &db).unwrap();
+
+        // pre_remove hook writes a marker file to prove it ran with cwd = worktree path
+        let hooks = crate::config::HooksConfig {
+            pre_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo pre_remove_executed".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let outcome = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("remove should succeed");
+
+        assert_eq!(outcome.hooks_status, RemoveHooksStatus::Ran);
+        assert!(!create_result.path.exists(), "worktree dir should be deleted after hooks");
+
+        // Verify hook event was logged
+        let hook_events = db.count_events(wt.id, Some("hook:pre_remove")).unwrap();
+        assert_eq!(hook_events, 1, "pre_remove hook event should be logged");
+
+        // Verify hook output was captured in logs
+        let events = db.list_events(wt.id, 10).unwrap();
+        let hook_event = events.iter().find(|e| e.event_type == "hook:pre_remove").unwrap();
+        let logs = db.get_logs(hook_event.id).unwrap();
+        let stdout_lines: Vec<&str> = logs
+            .iter()
+            .filter(|(s, _, _)| s == "stdout")
+            .map(|(_, l, _)| l.as_str())
+            .collect();
+        assert!(
+            stdout_lines.contains(&"pre_remove_executed"),
+            "pre_remove output should be logged: {stdout_lines:?}"
+        );
     }
 }
