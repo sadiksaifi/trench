@@ -3,7 +3,38 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 
+use crate::config::HooksConfig;
+use crate::hooks::{self, HookEnvContext, HookEvent};
 use crate::state::Database;
+
+/// Typed errors for the `sync` command.
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error("pre_sync hook failed")]
+    PreSyncHookFailed(#[source] anyhow::Error),
+}
+
+/// Hook execution status for the sync operation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SyncHooksStatus {
+    /// No hooks were configured.
+    None,
+    /// Hooks executed successfully.
+    Ran,
+    /// Hooks were configured but skipped (`--no-hooks`).
+    Skipped,
+}
+
+/// Result of `execute_with_hooks` — includes sync result, hooks status,
+/// and any post_sync hook error (sync already done, FR-24: Report).
+#[derive(Debug)]
+pub struct SyncWithHooksResult {
+    pub result: SyncResult,
+    pub hooks_status: SyncHooksStatus,
+    /// If post_sync hook failed, this contains the error.
+    /// The sync was already completed — this is an error report only (FR-24).
+    pub post_sync_error: Option<anyhow::Error>,
+}
 
 /// Sync strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +170,42 @@ pub fn execute(
         after_ahead,
         after_behind,
     })
+}
+
+/// Execute `trench sync <identifier>` with lifecycle hooks.
+///
+/// Orchestrates: pre_sync hook → sync → post_sync hook.
+/// - If `no_hooks` is true or no hooks configured, hooks are skipped.
+/// - Pre_sync failure cancels the operation (exit code 4, FR-24: HardStop).
+/// - Post_sync failure: sync already done, error reported (FR-24: Report).
+pub async fn execute_with_hooks(
+    identifier: &str,
+    cwd: &Path,
+    db: &Database,
+    strategy: Strategy,
+    hooks_config: Option<&HooksConfig>,
+    no_hooks: bool,
+) -> Result<SyncWithHooksResult> {
+    let has_hooks = hooks_config
+        .map(|h| h.pre_sync.is_some() || h.post_sync.is_some())
+        .unwrap_or(false);
+
+    // Fast path: no hooks to run
+    if no_hooks || !has_hooks {
+        let hooks_status = if no_hooks && has_hooks {
+            SyncHooksStatus::Skipped
+        } else {
+            SyncHooksStatus::None
+        };
+        let result = execute(identifier, cwd, db, strategy)?;
+        return Ok(SyncWithHooksResult {
+            result,
+            hooks_status,
+            post_sync_error: None,
+        });
+    }
+
+    todo!("hook execution not yet implemented")
 }
 
 #[cfg(test)]
@@ -827,5 +894,28 @@ mod tests {
 
         assert_eq!(result.name, "feature");
         assert_eq!(result.after_behind, 0, "should still rebase successfully");
+    }
+
+    // ── Hook integration tests ──────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_configured_returns_none_status() {
+        let f = setup_diverged_repo();
+
+        let outcome = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            None,  // no hooks config
+            false, // no_hooks flag
+        )
+        .await
+        .expect("sync should succeed");
+
+        assert_eq!(outcome.result.name, "feature");
+        assert_eq!(outcome.hooks_status, SyncHooksStatus::None);
+        assert!(outcome.post_sync_error.is_none());
+        assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
     }
 }
