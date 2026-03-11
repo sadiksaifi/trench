@@ -349,11 +349,16 @@ fn run_remove(identifier: &str, force: bool, prune: bool, no_hooks: bool) -> any
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
-    // Load config for hooks
     let repo_info = git::discover_repo(&cwd)?;
-    let project_config = config::load_project_config(&repo_info.path)?;
-    let global_config = config::load_global_config()?;
-    let resolved_config = config::resolve_config(None, project_config.as_ref(), &global_config);
+
+    // Skip config I/O when --no-hooks is set (escape hatch)
+    let hooks_config = if no_hooks {
+        None
+    } else {
+        let project_config = config::load_project_config(&repo_info.path)?;
+        let global_config = config::load_global_config()?;
+        config::resolve_config(None, project_config.as_ref(), &global_config).hooks
+    };
 
     // If not forced, resolve the worktree (adopting if unmanaged) for the prompt
     let resolved = if !force {
@@ -397,7 +402,7 @@ fn run_remove(identifier: &str, force: bool, prune: bool, no_hooks: bool) -> any
         &repo_info,
         &db,
         prune,
-        resolved_config.hooks.as_ref(),
+        hooks_config.as_ref(),
         no_hooks,
     )) {
         Ok(outcome) => {
