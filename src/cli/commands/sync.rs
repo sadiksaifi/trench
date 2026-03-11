@@ -1510,6 +1510,37 @@ mod tests {
     }
 
     #[test]
+    fn batch_sync_continues_on_failure() {
+        let f = setup_multi_worktree_repo();
+        let repo_info = crate::git::RepoInfo {
+            name: "test-repo".to_string(),
+            path: std::path::PathBuf::from(&f.repo_path_str),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let worktrees = f.db.list_worktrees(db_repo.id).unwrap();
+
+        // Make feat-a dirty so it fails sync
+        std::fs::write(f.wt_paths[0].join("dirty.txt"), "uncommitted").unwrap();
+
+        let results = execute_all(&worktrees, &db_repo, &repo_info, &f.db, Strategy::Rebase);
+
+        assert_eq!(results.len(), 2, "should have results for both worktrees");
+
+        // feat-a should fail (dirty)
+        let feat_a = results.iter().find(|r| r.name == "feat-a").unwrap();
+        assert!(feat_a.error.is_some(), "feat-a should have an error (dirty worktree)");
+        assert!(feat_a.result.is_none());
+
+        // feat-b should succeed despite feat-a failure
+        let feat_b = results.iter().find(|r| r.name == "feat-b").unwrap();
+        assert!(feat_b.error.is_none(), "feat-b should succeed");
+        assert!(feat_b.result.is_some());
+        assert_eq!(feat_b.result.as_ref().unwrap().after_behind, 0);
+    }
+
+    #[test]
     fn batch_sync_missing_strategy_error_has_correct_message() {
         let err = BatchSyncMissingStrategy;
         let msg = err.to_string();
