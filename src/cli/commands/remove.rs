@@ -180,10 +180,31 @@ pub async fn execute_resolved_with_hooks(
     // Step 2: remove worktree
     let result = execute_resolved(repo, wt, repo_info, db, prune)?;
 
+    // Step 3: post_remove hook (cwd = repo path, FR-22)
+    let post_remove_warning = if let Some(post_remove) = &hooks.post_remove {
+        match hooks::runner::execute_hook(
+            &HookEvent::PostRemove,
+            post_remove,
+            &env_ctx,
+            &repo_info.path,
+            &repo_info.path, // cwd = repo path (worktree is gone)
+            db,
+            repo.id,
+            Some(wt.id),
+        )
+        .await
+        {
+            Ok(_) => None,
+            Err(e) => Some(e),
+        }
+    } else {
+        None
+    };
+
     Ok(RemoveWithHooksResult {
         result,
         hooks_status: RemoveHooksStatus::Ran,
-        post_remove_warning: None,
+        post_remove_warning,
     })
 }
 
@@ -827,5 +848,66 @@ mod tests {
             wt_record.removed_at.is_none(),
             "removed_at should be None after pre_remove failure"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_remove_hook_runs_after_deletion_with_repo_cwd() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "post-rm-test",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("post-rm-test", &repo_info, &db).unwrap();
+
+        // post_remove hook creates a marker file in repo dir to prove cwd = repo path
+        let marker = repo_dir.path().join("post_remove_marker.txt");
+        let hooks = crate::config::HooksConfig {
+            post_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec![format!("echo done > {}", marker.display())]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let outcome = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("remove should succeed");
+
+        assert_eq!(outcome.hooks_status, RemoveHooksStatus::Ran);
+        assert!(!create_result.path.exists(), "worktree dir should be deleted");
+        assert!(outcome.post_remove_warning.is_none());
+
+        // Verify post_remove hook ran with cwd = repo path
+        assert!(
+            marker.exists(),
+            "post_remove marker should exist (proves cwd = repo path)"
+        );
+
+        // Verify hook event logged
+        let hook_events = db.count_events(wt.id, Some("hook:post_remove")).unwrap();
+        assert_eq!(hook_events, 1, "post_remove hook event should be logged");
     }
 }
