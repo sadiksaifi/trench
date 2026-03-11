@@ -898,6 +898,24 @@ mod tests {
 
     // ── Hook integration tests ──────────────────────────────────────────
 
+    fn sample_sync_hooks_config() -> crate::config::HooksConfig {
+        crate::config::HooksConfig {
+            pre_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo pre_sync_ran".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            post_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo post_sync_ran".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn execute_with_hooks_no_hooks_configured_returns_none_status() {
         let f = setup_diverged_repo();
@@ -917,5 +935,35 @@ mod tests {
         assert_eq!(outcome.hooks_status, SyncHooksStatus::None);
         assert!(outcome.post_sync_error.is_none());
         assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_flag_skips_hooks() {
+        let f = setup_diverged_repo();
+        let hooks = sample_sync_hooks_config();
+
+        let outcome = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            true, // no_hooks = true
+        )
+        .await
+        .expect("sync should succeed");
+
+        assert_eq!(outcome.result.name, "feature");
+        assert_eq!(outcome.hooks_status, SyncHooksStatus::Skipped);
+        assert!(outcome.post_sync_error.is_none());
+        assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
+
+        // Verify no hook events were recorded
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let pre_hook_events = f.db.count_events(wt.id, Some("hook:pre_sync")).unwrap();
+        let post_hook_events = f.db.count_events(wt.id, Some("hook:post_sync")).unwrap();
+        assert_eq!(pre_hook_events, 0, "no pre_sync hook events should be recorded");
+        assert_eq!(post_hook_events, 0, "no post_sync hook events should be recorded");
     }
 }
