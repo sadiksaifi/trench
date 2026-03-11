@@ -3,7 +3,39 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::state::Database;
+use crate::config::HooksConfig;
+use crate::git::RepoInfo;
+use crate::hooks::{self, HookEnvContext, HookEvent};
+use crate::state::{Database, Repo, Worktree};
+
+/// Typed errors for the `sync` command.
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error("pre_sync hook failed")]
+    PreSyncHookFailed(#[source] anyhow::Error),
+}
+
+/// Hook execution status for the sync operation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SyncHooksStatus {
+    /// No hooks were configured.
+    None,
+    /// Hooks executed successfully.
+    Ran,
+    /// Hooks were configured but skipped (`--no-hooks`).
+    Skipped,
+}
+
+/// Result of `execute_with_hooks` — includes sync result, hooks status,
+/// and any post_sync hook error (sync already done, FR-24: Report).
+#[derive(Debug)]
+pub struct SyncWithHooksResult {
+    pub result: SyncResult,
+    pub hooks_status: SyncHooksStatus,
+    /// If post_sync hook failed, this contains the error.
+    /// The sync was already completed — this is an error report only (FR-24).
+    pub post_sync_error: Option<anyhow::Error>,
+}
 
 /// Sync strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +114,20 @@ pub fn execute(
 ) -> Result<SyncResult> {
     let repo_info = crate::git::discover_repo(cwd)?;
     let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
+    execute_resolved(&repo, &wt, &repo_info, db, strategy)
+}
 
+/// Execute sync with pre-resolved worktree data.
+///
+/// Use this when the caller has already resolved the worktree (e.g. for
+/// hook context) to avoid a redundant DB/git round-trip.
+pub fn execute_resolved(
+    repo: &Repo,
+    wt: &Worktree,
+    repo_info: &RepoInfo,
+    db: &Database,
+    strategy: Strategy,
+) -> Result<SyncResult> {
     let dirty = crate::git::dirty_count(Path::new(&wt.path))?;
     if dirty > 0 {
         anyhow::bail!(
@@ -138,6 +183,107 @@ pub fn execute(
         before_behind,
         after_ahead,
         after_behind,
+    })
+}
+
+/// Execute `trench sync <identifier>` with lifecycle hooks.
+///
+/// Orchestrates: pre_sync hook → sync → post_sync hook.
+/// - If `no_hooks` is true or no hooks configured, hooks are skipped.
+/// - Pre_sync failure cancels the operation (exit code 4, FR-24: HardStop).
+/// - Post_sync failure: sync already done, error reported (FR-24: Report).
+pub async fn execute_with_hooks(
+    identifier: &str,
+    cwd: &Path,
+    db: &Database,
+    strategy: Strategy,
+    hooks_config: Option<&HooksConfig>,
+    no_hooks: bool,
+) -> Result<SyncWithHooksResult> {
+    let has_hooks = hooks_config
+        .map(|h| h.pre_sync.is_some() || h.post_sync.is_some())
+        .unwrap_or(false);
+
+    // Fast path: no hooks to run
+    if no_hooks || !has_hooks {
+        let hooks_status = if no_hooks && has_hooks {
+            SyncHooksStatus::Skipped
+        } else {
+            SyncHooksStatus::None
+        };
+        let result = execute(identifier, cwd, db, strategy)?;
+        return Ok(SyncWithHooksResult {
+            result,
+            hooks_status,
+            post_sync_error: None,
+        });
+    }
+
+    let hooks = hooks_config.unwrap(); // safe: has_hooks is true
+
+    // Resolve worktree info for hooks (before sync modifies state)
+    let repo_info = crate::git::discover_repo(cwd)?;
+    let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
+
+    let base_branch = wt
+        .base_branch
+        .as_deref()
+        .or(repo.default_base.as_deref())
+        .unwrap_or(repo_info.default_branch.as_str());
+
+    let env_ctx = HookEnvContext {
+        worktree_path: wt.path.clone(),
+        worktree_name: wt.name.clone(),
+        branch: wt.branch.clone(),
+        repo_name: repo.name.clone(),
+        repo_path: repo_info.path.to_string_lossy().to_string(),
+        base_branch: base_branch.to_string(),
+    };
+
+    // Step 1: pre_sync hook (cwd = worktree path)
+    if let Some(pre_sync) = &hooks.pre_sync {
+        hooks::runner::execute_hook(
+            &HookEvent::PreSync,
+            pre_sync,
+            &env_ctx,
+            &repo_info.path,
+            Path::new(&wt.path),
+            db,
+            repo.id,
+            Some(wt.id),
+        )
+        .await
+        .map_err(SyncError::PreSyncHookFailed)?;
+    }
+
+    // Step 2: perform sync (reuse already-resolved data)
+    let result = execute_resolved(&repo, &wt, &repo_info, db, strategy)?;
+
+    // Step 3: post_sync hook (cwd = worktree path)
+    let post_sync_error = if let Some(post_sync) = &hooks.post_sync {
+        match hooks::runner::execute_hook(
+            &HookEvent::PostSync,
+            post_sync,
+            &env_ctx,
+            &repo_info.path,
+            Path::new(&wt.path),
+            db,
+            repo.id,
+            Some(wt.id),
+        )
+        .await
+        {
+            Ok(_) => None,
+            Err(e) => Some(e),
+        }
+    } else {
+        None
+    };
+
+    Ok(SyncWithHooksResult {
+        result,
+        hooks_status: SyncHooksStatus::Ran,
+        post_sync_error,
     })
 }
 
@@ -827,5 +973,357 @@ mod tests {
 
         assert_eq!(result.name, "feature");
         assert_eq!(result.after_behind, 0, "should still rebase successfully");
+    }
+
+    // ── Hook integration tests ──────────────────────────────────────────
+
+    fn sample_sync_hooks_config() -> crate::config::HooksConfig {
+        crate::config::HooksConfig {
+            pre_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo pre_sync_ran".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            post_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo post_sync_ran".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_configured_returns_none_status() {
+        let f = setup_diverged_repo();
+
+        let outcome = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            None,  // no hooks config
+            false, // no_hooks flag
+        )
+        .await
+        .expect("sync should succeed");
+
+        assert_eq!(outcome.result.name, "feature");
+        assert_eq!(outcome.hooks_status, SyncHooksStatus::None);
+        assert!(outcome.post_sync_error.is_none());
+        assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_hooks_no_hooks_flag_skips_hooks() {
+        let f = setup_diverged_repo();
+        let hooks = sample_sync_hooks_config();
+
+        let outcome = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            true, // no_hooks = true
+        )
+        .await
+        .expect("sync should succeed");
+
+        assert_eq!(outcome.result.name, "feature");
+        assert_eq!(outcome.hooks_status, SyncHooksStatus::Skipped);
+        assert!(outcome.post_sync_error.is_none());
+        assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
+
+        // Verify no hook events were recorded
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let pre_hook_events = f.db.count_events(wt.id, Some("hook:pre_sync")).unwrap();
+        let post_hook_events = f.db.count_events(wt.id, Some("hook:post_sync")).unwrap();
+        assert_eq!(pre_hook_events, 0, "no pre_sync hook events should be recorded");
+        assert_eq!(post_hook_events, 0, "no post_sync hook events should be recorded");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_sync_hook_runs_before_sync_operation() {
+        let f = setup_diverged_repo();
+
+        // Only pre_sync hook
+        let hooks = crate::config::HooksConfig {
+            pre_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["echo pre_sync_executed".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let outcome = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("sync should succeed");
+
+        assert_eq!(outcome.hooks_status, SyncHooksStatus::Ran);
+        assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
+        assert!(outcome.post_sync_error.is_none());
+
+        // Verify pre_sync hook event was logged
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let hook_events = f.db.count_events(wt.id, Some("hook:pre_sync")).unwrap();
+        assert_eq!(hook_events, 1, "pre_sync hook event should be logged");
+
+        // Verify hook output was captured in logs
+        let events = f.db.list_events(wt.id, 10).unwrap();
+        let hook_event = events.iter().find(|e| e.event_type == "hook:pre_sync").unwrap();
+        let logs = f.db.get_logs(hook_event.id).unwrap();
+        let stdout_lines: Vec<&str> = logs
+            .iter()
+            .filter(|(s, _, _)| s == "stdout")
+            .map(|(_, l, _)| l.as_str())
+            .collect();
+        assert!(
+            stdout_lines.contains(&"pre_sync_executed"),
+            "pre_sync output should be logged: {stdout_lines:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_sync_failure_cancels_sync() {
+        let f = setup_diverged_repo();
+
+        // pre_sync hook that fails
+        let hooks = crate::config::HooksConfig {
+            pre_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["exit 1".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let err = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect_err("should fail when pre_sync hook fails");
+
+        // Verify error is a SyncError::PreSyncHookFailed
+        assert!(
+            err.downcast_ref::<SyncError>().is_some(),
+            "error should be SyncError, got: {err:#}"
+        );
+
+        // Verify sync did NOT happen — feature branch should still be behind
+        let (_, behind) = crate::git::ahead_behind(
+            Path::new(&f.repo_path_str),
+            "feature",
+            Some("main"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(behind, 1, "feature should still be 1 behind main (sync cancelled)");
+
+        // Verify no "synced" event was recorded
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
+        assert_eq!(synced_events, 0, "no synced event should be recorded when pre_sync fails");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_sync_hook_runs_after_sync_completes() {
+        let f = setup_diverged_repo();
+
+        // Only post_sync hook — writes a marker to prove it ran after sync
+        let marker = f._repo_dir.path().join("post_sync_marker.txt");
+        let hooks = crate::config::HooksConfig {
+            post_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec![format!("echo done > {}", marker.display())]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let outcome = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("sync should succeed");
+
+        assert_eq!(outcome.hooks_status, SyncHooksStatus::Ran);
+        assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
+        assert!(outcome.post_sync_error.is_none());
+
+        // Verify post_sync hook ran
+        assert!(marker.exists(), "post_sync marker should exist (proves hook ran)");
+
+        // Verify hook event logged
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let hook_events = f.db.count_events(wt.id, Some("hook:post_sync")).unwrap();
+        assert_eq!(hook_events, 1, "post_sync hook event should be logged");
+
+        // Verify synced event also recorded (sync did happen)
+        let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
+        assert_eq!(synced_events, 1, "synced event should be recorded");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_sync_failure_reports_error_but_sync_not_undone() {
+        let f = setup_diverged_repo();
+
+        // post_sync hook that fails
+        let hooks = crate::config::HooksConfig {
+            post_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["exit 42".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        // Should succeed despite post_sync failure (FR-24: Report)
+        let outcome = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("sync should succeed even if post_sync fails");
+
+        assert_eq!(outcome.hooks_status, SyncHooksStatus::Ran);
+        assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
+
+        // post_sync failure captured as error
+        assert!(
+            outcome.post_sync_error.is_some(),
+            "post_sync error should be captured"
+        );
+
+        // Verify sync DID happen (synced event recorded)
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
+        assert_eq!(synced_events, 1, "synced event should be recorded (sync completed)");
+
+        // Verify upstream file exists (sync applied)
+        assert!(
+            f.wt_path.join("upstream.txt").exists(),
+            "upstream file should exist after sync (sync was not undone)"
+        );
+    }
+
+    #[test]
+    fn execute_resolved_syncs_with_preresolved_data() {
+        let f = setup_diverged_repo();
+
+        // Resolve the worktree manually (simulating what execute_with_hooks does)
+        let repo_info = crate::git::discover_repo(f._repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("feature", &repo_info, &f.db).unwrap();
+
+        // Call execute_resolved with the pre-resolved data
+        let result = execute_resolved(&repo, &wt, &repo_info, &f.db, Strategy::Rebase)
+            .expect("should succeed");
+        assert_eq!(result.name, "feature");
+        assert_eq!(result.after_behind, 0, "should be 0 behind after sync");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_with_both_hooks_verifies_execution_order() {
+        let f = setup_diverged_repo();
+
+        // Both hooks write timestamps to a shared file to verify ordering:
+        // pre_sync runs BEFORE sync, post_sync runs AFTER sync
+        let order_file = f._repo_dir.path().join("hook_order.txt");
+        let hooks = crate::config::HooksConfig {
+            pre_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec![format!("echo pre_sync >> {}", order_file.display())]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            post_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec![format!("echo post_sync >> {}", order_file.display())]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let outcome = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("sync should succeed");
+
+        assert_eq!(outcome.hooks_status, SyncHooksStatus::Ran);
+        assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
+        assert!(outcome.post_sync_error.is_none());
+
+        // Verify execution order: pre_sync before post_sync
+        let order = std::fs::read_to_string(&order_file)
+            .expect("order file should exist");
+        let lines: Vec<&str> = order.lines().collect();
+        assert_eq!(lines.len(), 2, "should have exactly 2 lines");
+        assert_eq!(lines[0], "pre_sync", "pre_sync should run first");
+        assert_eq!(lines[1], "post_sync", "post_sync should run second");
+
+        // Verify both hook events logged
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let pre_events = f.db.count_events(wt.id, Some("hook:pre_sync")).unwrap();
+        let post_events = f.db.count_events(wt.id, Some("hook:post_sync")).unwrap();
+        let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
+        assert_eq!(pre_events, 1, "pre_sync hook event should be logged");
+        assert_eq!(post_events, 1, "post_sync hook event should be logged");
+        assert_eq!(synced_events, 1, "synced event should be logged");
+
+        // Verify event ordering in DB: hook:pre_sync < synced < hook:post_sync
+        let events = f.db.list_events(wt.id, 10).unwrap();
+        let pre_id = events.iter().find(|e| e.event_type == "hook:pre_sync").unwrap().id;
+        let synced_id = events.iter().find(|e| e.event_type == "synced").unwrap().id;
+        let post_id = events.iter().find(|e| e.event_type == "hook:post_sync").unwrap().id;
+        assert!(
+            pre_id < synced_id,
+            "pre_sync event (id={pre_id}) should come before synced event (id={synced_id})"
+        );
+        assert!(
+            synced_id < post_id,
+            "synced event (id={synced_id}) should come before post_sync event (id={post_id})"
+        );
     }
 }
