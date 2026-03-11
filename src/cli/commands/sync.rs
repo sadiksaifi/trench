@@ -1131,4 +1131,49 @@ mod tests {
         let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
         assert_eq!(synced_events, 0, "no synced event should be recorded when pre_sync fails");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_sync_hook_runs_after_sync_completes() {
+        let f = setup_diverged_repo();
+
+        // Only post_sync hook — writes a marker to prove it ran after sync
+        let marker = f._repo_dir.path().join("post_sync_marker.txt");
+        let hooks = crate::config::HooksConfig {
+            post_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec![format!("echo done > {}", marker.display())]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let outcome = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("sync should succeed");
+
+        assert_eq!(outcome.hooks_status, SyncHooksStatus::Ran);
+        assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
+        assert!(outcome.post_sync_error.is_none());
+
+        // Verify post_sync hook ran
+        assert!(marker.exists(), "post_sync marker should exist (proves hook ran)");
+
+        // Verify hook event logged
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let hook_events = f.db.count_events(wt.id, Some("hook:post_sync")).unwrap();
+        assert_eq!(hook_events, 1, "post_sync hook event should be logged");
+
+        // Verify synced event also recorded (sync did happen)
+        let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
+        assert_eq!(synced_events, 1, "synced event should be recorded");
+    }
 }
