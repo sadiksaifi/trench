@@ -763,4 +763,69 @@ mod tests {
             "pre_remove output should be logged: {stdout_lines:?}"
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_remove_failure_cancels_removal() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "fail-pre-rm",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("fail-pre-rm", &repo_info, &db).unwrap();
+
+        // pre_remove hook that fails
+        let hooks = crate::config::HooksConfig {
+            pre_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["exit 1".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let err = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect_err("should fail when pre_remove hook fails");
+
+        // Verify error is a RemoveError::PreRemoveHookFailed
+        assert!(
+            err.downcast_ref::<RemoveError>().is_some(),
+            "error should be RemoveError, got: {err:#}"
+        );
+
+        // Verify worktree was NOT deleted
+        assert!(
+            create_result.path.exists(),
+            "worktree directory should still exist after pre_remove failure"
+        );
+
+        // Verify DB record was NOT marked as removed
+        let wt_record = db.get_worktree(wt.id).unwrap().unwrap();
+        assert!(
+            wt_record.removed_at.is_none(),
+            "removed_at should be None after pre_remove failure"
+        );
+    }
 }
