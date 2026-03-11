@@ -910,4 +910,65 @@ mod tests {
         let hook_events = db.count_events(wt.id, Some("hook:post_remove")).unwrap();
         assert_eq!(hook_events, 1, "post_remove hook event should be logged");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_remove_failure_is_warning_only() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "post-fail",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            crate::adopt::resolve_or_adopt("post-fail", &repo_info, &db).unwrap();
+
+        // post_remove hook that fails
+        let hooks = crate::config::HooksConfig {
+            post_remove: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["exit 42".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        // Should succeed despite post_remove failure (FR-24: WarnOnly)
+        let outcome = execute_resolved_with_hooks(
+            &repo,
+            &wt,
+            &repo_info,
+            &db,
+            false,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect("remove should succeed even if post_remove fails");
+
+        assert_eq!(outcome.result.name, "post-fail");
+        assert_eq!(outcome.hooks_status, RemoveHooksStatus::Ran);
+        assert!(!create_result.path.exists(), "worktree should be deleted");
+
+        // Post_remove failure should be captured as warning
+        assert!(
+            outcome.post_remove_warning.is_some(),
+            "post_remove warning should be captured"
+        );
+
+        // DB should still have removed_at set
+        let wt_record = db.get_worktree(wt.id).unwrap().unwrap();
+        assert!(wt_record.removed_at.is_some(), "removed_at should be set");
+    }
 }
