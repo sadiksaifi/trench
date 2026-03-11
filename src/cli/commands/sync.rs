@@ -118,6 +118,32 @@ pub struct BatchSyncEntry {
     pub error: Option<String>,
 }
 
+/// JSON representation of a batch sync entry.
+#[derive(Debug, Serialize)]
+pub struct BatchSyncEntryJson {
+    pub name: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<SyncResultJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl BatchSyncEntry {
+    pub fn to_json(&self) -> BatchSyncEntryJson {
+        BatchSyncEntryJson {
+            name: self.name.clone(),
+            status: if self.result.is_some() {
+                "success".to_string()
+            } else {
+                "failure".to_string()
+            },
+            result: self.result.as_ref().map(|r| r.to_json()),
+            error: self.error.clone(),
+        }
+    }
+}
+
 /// Execute `trench sync --all`: sync every worktree in the list.
 ///
 /// Continues on failure — a failing worktree does not block others.
@@ -1538,6 +1564,45 @@ mod tests {
         assert!(feat_b.error.is_none(), "feat-b should succeed");
         assert!(feat_b.result.is_some());
         assert_eq!(feat_b.result.as_ref().unwrap().after_behind, 0);
+    }
+
+    #[test]
+    fn batch_sync_json_output_includes_per_worktree_results() {
+        let f = setup_multi_worktree_repo();
+        let repo_info = crate::git::RepoInfo {
+            name: "test-repo".to_string(),
+            path: std::path::PathBuf::from(&f.repo_path_str),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let worktrees = f.db.list_worktrees(db_repo.id).unwrap();
+
+        // Make feat-a dirty
+        std::fs::write(f.wt_paths[0].join("dirty.txt"), "uncommitted").unwrap();
+
+        let results = execute_all(&worktrees, &db_repo, &repo_info, &f.db, Strategy::Rebase);
+        let json_results: Vec<BatchSyncEntryJson> = results.iter().map(|e| e.to_json()).collect();
+
+        let json_str = crate::output::json::format_json(&json_results).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(parsed.is_array());
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+
+        // feat-a should be "failure"
+        let feat_a = arr.iter().find(|v| v["name"] == "feat-a").unwrap();
+        assert_eq!(feat_a["status"], "failure");
+        assert!(feat_a["error"].is_string());
+        assert!(feat_a["result"].is_null());
+
+        // feat-b should be "success"
+        let feat_b = arr.iter().find(|v| v["name"] == "feat-b").unwrap();
+        assert_eq!(feat_b["status"], "success");
+        assert!(feat_b["error"].is_null());
+        assert!(feat_b["result"].is_object());
+        assert_eq!(feat_b["result"]["strategy"], "rebase");
     }
 
     #[test]
