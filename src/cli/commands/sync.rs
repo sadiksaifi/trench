@@ -1082,4 +1082,53 @@ mod tests {
             "pre_sync output should be logged: {stdout_lines:?}"
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_sync_failure_cancels_sync() {
+        let f = setup_diverged_repo();
+
+        // pre_sync hook that fails
+        let hooks = crate::config::HooksConfig {
+            pre_sync: Some(crate::config::HookDef {
+                copy: None,
+                run: Some(vec!["exit 1".to_string()]),
+                shell: None,
+                timeout_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+
+        let err = execute_with_hooks(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            false,
+        )
+        .await
+        .expect_err("should fail when pre_sync hook fails");
+
+        // Verify error is a SyncError::PreSyncHookFailed
+        assert!(
+            err.downcast_ref::<SyncError>().is_some(),
+            "error should be SyncError, got: {err:#}"
+        );
+
+        // Verify sync did NOT happen — feature branch should still be behind
+        let (_, behind) = crate::git::ahead_behind(
+            Path::new(&f.repo_path_str),
+            "feature",
+            Some("main"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(behind, 1, "feature should still be 1 behind main (sync cancelled)");
+
+        // Verify no "synced" event was recorded
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
+        assert_eq!(synced_events, 0, "no synced event should be recorded when pre_sync fails");
+    }
 }
