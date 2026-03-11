@@ -1606,6 +1606,82 @@ mod tests {
     }
 
     #[test]
+    fn batch_sync_with_merge_strategy() {
+        let f = setup_multi_worktree_repo();
+        let repo_info = crate::git::RepoInfo {
+            name: "test-repo".to_string(),
+            path: std::path::PathBuf::from(&f.repo_path_str),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let worktrees = f.db.list_worktrees(db_repo.id).unwrap();
+
+        let results = execute_all(&worktrees, &db_repo, &repo_info, &f.db, Strategy::Merge);
+
+        assert_eq!(results.len(), 2);
+        for entry in &results {
+            assert!(entry.error.is_none(), "'{}' should succeed", entry.name);
+            let result = entry.result.as_ref().unwrap();
+            assert_eq!(result.strategy, Strategy::Merge);
+            assert_eq!(result.after_behind, 0);
+        }
+
+        // Verify merge commits exist (2 parents)
+        for wt_path in &f.wt_paths {
+            let wt_repo = git2::Repository::open(wt_path).unwrap();
+            let head = wt_repo.head().unwrap().peel_to_commit().unwrap();
+            assert_eq!(head.parent_count(), 2, "merge commit should have 2 parents in {}", wt_path.display());
+        }
+    }
+
+    #[test]
+    fn batch_sync_writes_events_for_each_worktree() {
+        let f = setup_multi_worktree_repo();
+        let repo_info = crate::git::RepoInfo {
+            name: "test-repo".to_string(),
+            path: std::path::PathBuf::from(&f.repo_path_str),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let worktrees = f.db.list_worktrees(db_repo.id).unwrap();
+
+        execute_all(&worktrees, &db_repo, &repo_info, &f.db, Strategy::Rebase);
+
+        // Each worktree should have a "synced" event
+        for wt in &worktrees {
+            let events = f.db.list_events(wt.id, 10).unwrap();
+            assert!(
+                events.iter().any(|e| e.event_type == "synced"),
+                "worktree '{}' should have a 'synced' event",
+                wt.name
+            );
+        }
+    }
+
+    #[test]
+    fn batch_sync_empty_worktree_list_returns_empty() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = crate::state::Repo {
+            id: 1,
+            name: "test".to_string(),
+            path: "/tmp/test".to_string(),
+            default_base: Some("main".to_string()),
+            created_at: 0,
+        };
+        let repo_info = crate::git::RepoInfo {
+            name: "test".to_string(),
+            path: std::path::PathBuf::from("/tmp/test"),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+
+        let results = execute_all(&[], &repo, &repo_info, &db, Strategy::Rebase);
+        assert!(results.is_empty(), "empty input should produce empty output");
+    }
+
+    #[test]
     fn batch_sync_missing_strategy_error_has_correct_message() {
         let err = BatchSyncMissingStrategy;
         let msg = err.to_string();
