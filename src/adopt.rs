@@ -53,6 +53,13 @@ pub fn resolve_only(
         }
     }
 
+    // Check DB for the repo (read-only) before git fallback — preserves stored defaults
+    let db_repo = if let Some(db) = db {
+        db.get_repo_by_path(repo_path_str)?
+    } else {
+        None
+    };
+
     // Fall back to git worktrees — construct virtual structs (no writes)
     let git_worktrees = git::list_worktrees(&repo_info.path)?;
     let sanitized = paths::sanitize_branch(identifier);
@@ -69,16 +76,19 @@ pub fn resolve_only(
             let branch = gw.branch.clone().unwrap_or_else(|| identifier.to_string());
             let name = paths::sanitize_branch(&branch);
 
-            let repo = Repo {
-                id: 0,
-                name: repo_info.name.clone(),
-                path: repo_path_str.to_string(),
-                default_base: Some(repo_info.default_branch.clone()),
-                created_at: 0,
+            let repo = match db_repo {
+                Some(ref r) => r.clone(),
+                None => Repo {
+                    id: 0,
+                    name: repo_info.name.clone(),
+                    path: repo_path_str.to_string(),
+                    default_base: Some(repo_info.default_branch.clone()),
+                    created_at: 0,
+                },
             };
             let wt = Worktree {
                 id: 0,
-                repo_id: 0,
+                repo_id: repo.id,
                 name,
                 branch,
                 path: gw.path.to_string_lossy().to_string(),
@@ -432,6 +442,67 @@ mod tests {
         assert_eq!(repo.id, 0);
         assert_eq!(wt.id, 0);
         assert_eq!(wt.branch, "no-db-feat");
+    }
+
+    #[test]
+    fn resolve_only_reuses_db_repo_defaults_in_git_fallback() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        // Insert repo in DB with a non-default base branch
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("develop"))
+            .unwrap();
+
+        // Create a git worktree NOT registered in DB
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("db-base-feat");
+        git_repo
+            .branch(
+                "db-base-feat",
+                &git_repo.head().unwrap().peel_to_commit().unwrap(),
+                false,
+            )
+            .unwrap();
+        let branch_ref = git_repo
+            .find_branch("db-base-feat", git2::BranchType::Local)
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch_ref.get()));
+        git_repo
+            .worktree("db-base-feat", &wt_path, Some(&opts))
+            .unwrap();
+
+        let repo_info = git::discover_repo(repo_dir.path()).unwrap();
+
+        // resolve_only should use DB repo (with default_base = "develop")
+        let (repo, wt) =
+            resolve_only("db-base-feat", &repo_info, Some(&db)).expect("should resolve");
+
+        // Should get the DB repo's default_base, not git's default branch
+        assert_eq!(
+            repo.default_base.as_deref(),
+            Some("develop"),
+            "should preserve DB-stored default_base"
+        );
+        assert_eq!(repo.id, db_repo.id, "should use DB repo (id > 0)");
+
+        // Worktree should still be virtual (not in DB)
+        assert_eq!(wt.id, 0, "worktree should be virtual");
+        assert_eq!(wt.repo_id, db_repo.id, "worktree should reference DB repo");
+        assert_eq!(wt.branch, "db-base-feat");
+
+        // DB must NOT have a worktree row (resolve_only doesn't write)
+        let found_wt = db
+            .find_worktree_by_identifier(db_repo.id, "db-base-feat")
+            .unwrap();
+        assert!(
+            found_wt.is_none(),
+            "resolve_only must not insert worktree into DB"
+        );
     }
 
     #[test]
