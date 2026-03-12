@@ -273,6 +273,67 @@ pub fn execute_resolved(
     })
 }
 
+/// Plan produced by `--dry-run` showing what `trench sync` would do.
+#[derive(Debug, Serialize)]
+pub struct SyncDryRunPlan {
+    /// Always `true` — signals this is a preview, not a real operation.
+    pub dry_run: bool,
+    pub name: String,
+    pub branch: String,
+    pub base_branch: String,
+    pub strategy: String,
+    pub hooks: Option<SyncDryRunHooks>,
+}
+
+/// Hook definitions included in a dry-run plan.
+#[derive(Debug, Serialize)]
+pub struct SyncDryRunHooks {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_sync: Option<crate::config::HookDef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_sync: Option<crate::config::HookDef>,
+}
+
+/// Execute a dry-run of `trench sync <identifier>`.
+///
+/// Resolves the worktree and builds a plan, but performs no git operations,
+/// no DB writes, and no hook execution.
+pub fn execute_dry_run(
+    identifier: &str,
+    cwd: &Path,
+    db: &Database,
+    strategy: Strategy,
+    hooks_config: Option<&HooksConfig>,
+    no_hooks: bool,
+) -> Result<SyncDryRunPlan> {
+    let repo_info = crate::git::discover_repo(cwd)?;
+    let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
+
+    let base_branch = wt
+        .base_branch
+        .as_deref()
+        .or(repo.default_base.as_deref())
+        .unwrap_or(repo_info.default_branch.as_str());
+
+    let hooks = if no_hooks {
+        None
+    } else {
+        hooks_config.map(|h| SyncDryRunHooks {
+            pre_sync: h.pre_sync.clone(),
+            post_sync: h.post_sync.clone(),
+        })
+    };
+
+    Ok(SyncDryRunPlan {
+        dry_run: true,
+        name: wt.name.clone(),
+        branch: wt.branch.clone(),
+        base_branch: base_branch.to_string(),
+        strategy: strategy.to_string(),
+        hooks,
+    })
+}
+
 /// Execute `trench sync <identifier>` with lifecycle hooks.
 ///
 /// Orchestrates: pre_sync hook → sync → post_sync hook.
@@ -1766,5 +1827,28 @@ mod tests {
             msg.contains("--strategy rebase") && msg.contains("--strategy merge"),
             "error should mention both strategies, got: {msg}"
         );
+    }
+
+    // ── dry-run tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn dry_run_returns_plan_with_correct_fields() {
+        let f = setup_diverged_repo();
+
+        let plan = execute_dry_run(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            None,
+            false,
+        )
+        .expect("dry-run should succeed");
+
+        assert!(plan.dry_run, "plan should have dry_run=true");
+        assert_eq!(plan.name, "feature");
+        assert_eq!(plan.branch, "feature");
+        assert_eq!(plan.base_branch, "main");
+        assert_eq!(plan.strategy, "rebase");
     }
 }
