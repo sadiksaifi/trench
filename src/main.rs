@@ -245,7 +245,12 @@ fn main() -> anyhow::Result<()> {
             cli::commands::completions::generate::<Cli>(shell, &mut std::io::stdout());
             Ok(())
         }
-        Some(Commands::Sync { branch, all, strategy, no_hooks }) => {
+        Some(Commands::Sync {
+            branch,
+            all,
+            strategy,
+            no_hooks,
+        }) => {
             if all && branch.is_some() {
                 eprintln!("error: <BRANCH> cannot be used with --all");
                 std::process::exit(1);
@@ -348,7 +353,9 @@ fn run_create(
         }
         Err(e) => {
             // Check for hook failure (pre_create) via typed error
-            if e.downcast_ref::<cli::commands::create::CreateError>().is_some() {
+            if e.downcast_ref::<cli::commands::create::CreateError>()
+                .is_some()
+            {
                 eprintln!("error: {e:#}");
                 std::process::exit(4);
             }
@@ -439,7 +446,10 @@ fn run_remove(identifier: &str, force: bool, prune: bool, no_hooks: bool) -> any
             }
 
             if outcome.result.pruned_remote {
-                eprintln!("Removed worktree '{}' and remote branch", outcome.result.name);
+                eprintln!(
+                    "Removed worktree '{}' and remote branch",
+                    outcome.result.name
+                );
             } else {
                 eprintln!("Removed worktree '{}'", outcome.result.name);
             }
@@ -447,7 +457,9 @@ fn run_remove(identifier: &str, force: bool, prune: bool, no_hooks: bool) -> any
         }
         Err(e) => {
             // Check for pre_remove hook failure → exit code 4
-            if e.downcast_ref::<cli::commands::remove::RemoveError>().is_some() {
+            if e.downcast_ref::<cli::commands::remove::RemoveError>()
+                .is_some()
+            {
                 eprintln!("error: {e:#}");
                 std::process::exit(4);
             }
@@ -556,7 +568,12 @@ fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()
     let project_config = config::load_project_config(&repo_info.path)?;
     let global_config = config::load_global_config()?;
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-    let scan_paths: Vec<String> = resolved.worktrees.scan.iter().map(|p| paths::expand_tilde(p)).collect();
+    let scan_paths: Vec<String> = resolved
+        .worktrees
+        .scan
+        .iter()
+        .map(|p| paths::expand_tilde(p))
+        .collect();
 
     let output = if json {
         cli::commands::list::execute_json(&cwd, &db, tag, &scan_paths)?
@@ -611,7 +628,13 @@ fn run_status(
     }
 }
 
-fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, dry_run: bool, no_hooks: bool) -> anyhow::Result<()> {
+fn run_sync(
+    identifier: &str,
+    strategy: Option<SyncStrategy>,
+    json: bool,
+    dry_run: bool,
+    no_hooks: bool,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
@@ -660,7 +683,7 @@ fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, dry_ru
         let plan = cli::commands::sync::execute_dry_run(
             identifier,
             &cwd,
-            &db,
+            Some(&db),
             sync_strategy,
             hooks_config.as_ref(),
             no_hooks,
@@ -690,9 +713,15 @@ fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, dry_ru
             }
 
             if json {
-                println!("{}", output::json::format_json_value(&outcome.result.to_json())?);
+                println!(
+                    "{}",
+                    output::json::format_json_value(&outcome.result.to_json())?
+                );
             } else {
-                eprintln!("Synced '{}' via {}", outcome.result.name, outcome.result.strategy);
+                eprintln!(
+                    "Synced '{}' via {}",
+                    outcome.result.name, outcome.result.strategy
+                );
                 eprintln!(
                     "  before: ahead={}, behind={}",
                     outcome.result.before_ahead, outcome.result.before_behind
@@ -715,9 +744,7 @@ fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, dry_ru
                 eprintln!("error: {e:#}");
                 std::process::exit(4);
             }
-            if let Some(git::GitError::MergeConflict { .. }) =
-                e.downcast_ref::<git::GitError>()
-            {
+            if let Some(git::GitError::MergeConflict { .. }) = e.downcast_ref::<git::GitError>() {
                 eprintln!("error: {e}");
                 std::process::exit(5);
             }
@@ -731,7 +758,12 @@ fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, dry_ru
     }
 }
 
-fn run_sync_all(strategy: SyncStrategy, json: bool, dry_run: bool, no_hooks: bool) -> anyhow::Result<()> {
+fn run_sync_all(
+    strategy: SyncStrategy,
+    json: bool,
+    dry_run: bool,
+    no_hooks: bool,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
@@ -876,7 +908,10 @@ fn run_sync_all(strategy: SyncStrategy, json: bool, dry_run: bool, no_hooks: boo
             .iter()
             .filter(|r| r.status == cli::commands::sync::BatchSyncStatus::Failure)
             .count();
-        eprintln!("\nBatch sync: {success} succeeded, {failed} failed ({} total)", results.len());
+        eprintln!(
+            "\nBatch sync: {success} succeeded, {failed} failed ({} total)",
+            results.len()
+        );
     }
 
     if has_failures {
@@ -1515,7 +1550,9 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "rebase"])
             .expect("sync with --strategy rebase should parse");
         match cli.command {
-            Some(Commands::Sync { branch, strategy, .. }) => {
+            Some(Commands::Sync {
+                branch, strategy, ..
+            }) => {
                 assert_eq!(branch, Some("foo".to_string()));
                 assert_eq!(strategy, Some(SyncStrategy::Rebase));
             }
@@ -1528,7 +1565,9 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "merge"])
             .expect("sync with --strategy merge should parse");
         match cli.command {
-            Some(Commands::Sync { branch, strategy, .. }) => {
+            Some(Commands::Sync {
+                branch, strategy, ..
+            }) => {
                 assert_eq!(branch, Some("foo".to_string()));
                 assert_eq!(strategy, Some(SyncStrategy::Merge));
             }
@@ -1541,7 +1580,9 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "sync", "foo"])
             .expect("sync without --strategy should parse");
         match cli.command {
-            Some(Commands::Sync { branch, strategy, .. }) => {
+            Some(Commands::Sync {
+                branch, strategy, ..
+            }) => {
                 assert_eq!(branch, Some("foo".to_string()));
                 assert!(strategy.is_none());
             }
@@ -1557,10 +1598,19 @@ mod tests {
 
     #[test]
     fn sync_subcommand_accepts_no_hooks_flag() {
-        let cli = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "rebase", "--no-hooks"])
-            .expect("sync with --no-hooks should parse");
+        let cli = Cli::try_parse_from([
+            "trench",
+            "sync",
+            "foo",
+            "--strategy",
+            "rebase",
+            "--no-hooks",
+        ])
+        .expect("sync with --no-hooks should parse");
         match cli.command {
-            Some(Commands::Sync { branch, no_hooks, .. }) => {
+            Some(Commands::Sync {
+                branch, no_hooks, ..
+            }) => {
                 assert_eq!(branch, Some("foo".to_string()));
                 assert!(no_hooks, "--no-hooks should be true");
             }
@@ -1585,7 +1635,12 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "sync", "--all", "--strategy", "rebase"])
             .expect("sync --all --strategy rebase should parse");
         match cli.command {
-            Some(Commands::Sync { branch, all, strategy, .. }) => {
+            Some(Commands::Sync {
+                branch,
+                all,
+                strategy,
+                ..
+            }) => {
                 assert!(branch.is_none(), "branch should be None when --all is used");
                 assert!(all, "--all should be true");
                 assert_eq!(strategy, Some(SyncStrategy::Rebase));
@@ -1599,7 +1654,12 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "sync", "--all", "--strategy", "merge"])
             .expect("sync --all --strategy merge should parse");
         match cli.command {
-            Some(Commands::Sync { branch, all, strategy, .. }) => {
+            Some(Commands::Sync {
+                branch,
+                all,
+                strategy,
+                ..
+            }) => {
                 assert!(branch.is_none());
                 assert!(all);
                 assert_eq!(strategy, Some(SyncStrategy::Merge));

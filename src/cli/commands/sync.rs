@@ -347,13 +347,13 @@ fn format_hook_def(f: &mut fmt::Formatter<'_>, hook: &crate::config::HookDef) ->
 pub fn execute_dry_run(
     identifier: &str,
     cwd: &Path,
-    db: &Database,
+    db: Option<&Database>,
     strategy: Strategy,
     hooks_config: Option<&HooksConfig>,
     no_hooks: bool,
 ) -> Result<SyncDryRunPlan> {
     let repo_info = crate::git::discover_repo(cwd)?;
-    let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
+    let (repo, wt) = crate::adopt::resolve_only(identifier, &repo_info, db)?;
 
     let base_branch = wt
         .base_branch
@@ -1274,11 +1274,20 @@ mod tests {
 
         // Verify no hook events were recorded
         let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
-        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let wt =
+            f.db.find_worktree_by_identifier(db_repo.id, "feature")
+                .unwrap()
+                .unwrap();
         let pre_hook_events = f.db.count_events(wt.id, Some("hook:pre_sync")).unwrap();
         let post_hook_events = f.db.count_events(wt.id, Some("hook:post_sync")).unwrap();
-        assert_eq!(pre_hook_events, 0, "no pre_sync hook events should be recorded");
-        assert_eq!(post_hook_events, 0, "no post_sync hook events should be recorded");
+        assert_eq!(
+            pre_hook_events, 0,
+            "no pre_sync hook events should be recorded"
+        );
+        assert_eq!(
+            post_hook_events, 0,
+            "no post_sync hook events should be recorded"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1313,13 +1322,19 @@ mod tests {
 
         // Verify pre_sync hook event was logged
         let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
-        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let wt =
+            f.db.find_worktree_by_identifier(db_repo.id, "feature")
+                .unwrap()
+                .unwrap();
         let hook_events = f.db.count_events(wt.id, Some("hook:pre_sync")).unwrap();
         assert_eq!(hook_events, 1, "pre_sync hook event should be logged");
 
         // Verify hook output was captured in logs
         let events = f.db.list_events(wt.id, 10).unwrap();
-        let hook_event = events.iter().find(|e| e.event_type == "hook:pre_sync").unwrap();
+        let hook_event = events
+            .iter()
+            .find(|e| e.event_type == "hook:pre_sync")
+            .unwrap();
         let logs = f.db.get_logs(hook_event.id).unwrap();
         let stdout_lines: Vec<&str> = logs
             .iter()
@@ -1365,20 +1380,26 @@ mod tests {
         );
 
         // Verify sync did NOT happen — feature branch should still be behind
-        let (_, behind) = crate::git::ahead_behind(
-            Path::new(&f.repo_path_str),
-            "feature",
-            Some("main"),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(behind, 1, "feature should still be 1 behind main (sync cancelled)");
+        let (_, behind) =
+            crate::git::ahead_behind(Path::new(&f.repo_path_str), "feature", Some("main"))
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            behind, 1,
+            "feature should still be 1 behind main (sync cancelled)"
+        );
 
         // Verify no "synced" event was recorded
         let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
-        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let wt =
+            f.db.find_worktree_by_identifier(db_repo.id, "feature")
+                .unwrap()
+                .unwrap();
         let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
-        assert_eq!(synced_events, 0, "no synced event should be recorded when pre_sync fails");
+        assert_eq!(
+            synced_events, 0,
+            "no synced event should be recorded when pre_sync fails"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1413,11 +1434,17 @@ mod tests {
         assert!(outcome.post_sync_error.is_none());
 
         // Verify post_sync hook ran
-        assert!(marker.exists(), "post_sync marker should exist (proves hook ran)");
+        assert!(
+            marker.exists(),
+            "post_sync marker should exist (proves hook ran)"
+        );
 
         // Verify hook event logged
         let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
-        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let wt =
+            f.db.find_worktree_by_identifier(db_repo.id, "feature")
+                .unwrap()
+                .unwrap();
         let hook_events = f.db.count_events(wt.id, Some("hook:post_sync")).unwrap();
         assert_eq!(hook_events, 1, "post_sync hook event should be logged");
 
@@ -1464,9 +1491,15 @@ mod tests {
 
         // Verify sync DID happen (synced event recorded)
         let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
-        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let wt =
+            f.db.find_worktree_by_identifier(db_repo.id, "feature")
+                .unwrap()
+                .unwrap();
         let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
-        assert_eq!(synced_events, 1, "synced event should be recorded (sync completed)");
+        assert_eq!(
+            synced_events, 1,
+            "synced event should be recorded (sync completed)"
+        );
 
         // Verify upstream file exists (sync applied)
         assert!(
@@ -1481,8 +1514,7 @@ mod tests {
 
         // Resolve the worktree manually (simulating what execute_with_hooks does)
         let repo_info = crate::git::discover_repo(f._repo_dir.path()).unwrap();
-        let (repo, wt) =
-            crate::adopt::resolve_or_adopt("feature", &repo_info, &f.db).unwrap();
+        let (repo, wt) = crate::adopt::resolve_or_adopt("feature", &repo_info, &f.db).unwrap();
 
         // Call execute_resolved with the pre-resolved data
         let result = execute_resolved(&repo, &wt, &repo_info, &f.db, Strategy::Rebase)
@@ -1530,8 +1562,7 @@ mod tests {
         assert!(outcome.post_sync_error.is_none());
 
         // Verify execution order: pre_sync before post_sync
-        let order = std::fs::read_to_string(&order_file)
-            .expect("order file should exist");
+        let order = std::fs::read_to_string(&order_file).expect("order file should exist");
         let lines: Vec<&str> = order.lines().collect();
         assert_eq!(lines.len(), 2, "should have exactly 2 lines");
         assert_eq!(lines[0], "pre_sync", "pre_sync should run first");
@@ -1539,7 +1570,10 @@ mod tests {
 
         // Verify both hook events logged
         let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
-        let wt = f.db.find_worktree_by_identifier(db_repo.id, "feature").unwrap().unwrap();
+        let wt =
+            f.db.find_worktree_by_identifier(db_repo.id, "feature")
+                .unwrap()
+                .unwrap();
         let pre_events = f.db.count_events(wt.id, Some("hook:pre_sync")).unwrap();
         let post_events = f.db.count_events(wt.id, Some("hook:post_sync")).unwrap();
         let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
@@ -1549,9 +1583,17 @@ mod tests {
 
         // Verify event ordering in DB: hook:pre_sync < synced < hook:post_sync
         let events = f.db.list_events(wt.id, 10).unwrap();
-        let pre_id = events.iter().find(|e| e.event_type == "hook:pre_sync").unwrap().id;
+        let pre_id = events
+            .iter()
+            .find(|e| e.event_type == "hook:pre_sync")
+            .unwrap()
+            .id;
         let synced_id = events.iter().find(|e| e.event_type == "synced").unwrap().id;
-        let post_id = events.iter().find(|e| e.event_type == "hook:post_sync").unwrap().id;
+        let post_id = events
+            .iter()
+            .find(|e| e.event_type == "hook:post_sync")
+            .unwrap()
+            .id;
         assert!(
             pre_id < synced_id,
             "pre_sync event (id={pre_id}) should come before synced event (id={synced_id})"
@@ -1609,7 +1651,9 @@ mod tests {
                     .unwrap();
                 let mut opts = git2::WorktreeAddOptions::new();
                 opts.reference(Some(branch_ref.get()));
-                git_repo.worktree(branch_name, &wt_path, Some(&opts)).unwrap();
+                git_repo
+                    .worktree(branch_name, &wt_path, Some(&opts))
+                    .unwrap();
             }
 
             // Add a commit on the feature branch
@@ -1687,12 +1731,20 @@ mod tests {
                 entry.error
             );
             let result = entry.result.as_ref().unwrap();
-            assert_eq!(result.after_behind, 0, "'{}' should be 0 behind after sync", entry.name);
+            assert_eq!(
+                result.after_behind, 0,
+                "'{}' should be 0 behind after sync",
+                entry.name
+            );
         }
 
         // Verify upstream.txt exists in both worktrees
         for wt_path in &f.wt_paths {
-            assert!(wt_path.join("upstream.txt").exists(), "upstream.txt should exist in {}", wt_path.display());
+            assert!(
+                wt_path.join("upstream.txt").exists(),
+                "upstream.txt should exist in {}",
+                wt_path.display()
+            );
         }
     }
 
@@ -1717,7 +1769,10 @@ mod tests {
 
         // feat-a should fail (dirty)
         let feat_a = results.iter().find(|r| r.name == "feat-a").unwrap();
-        assert!(feat_a.error.is_some(), "feat-a should have an error (dirty worktree)");
+        assert!(
+            feat_a.error.is_some(),
+            "feat-a should have an error (dirty worktree)"
+        );
         assert!(feat_a.result.is_none());
 
         // feat-b should succeed despite feat-a failure
@@ -1792,7 +1847,12 @@ mod tests {
         for wt_path in &f.wt_paths {
             let wt_repo = git2::Repository::open(wt_path).unwrap();
             let head = wt_repo.head().unwrap().peel_to_commit().unwrap();
-            assert_eq!(head.parent_count(), 2, "merge commit should have 2 parents in {}", wt_path.display());
+            assert_eq!(
+                head.parent_count(),
+                2,
+                "merge commit should have 2 parents in {}",
+                wt_path.display()
+            );
         }
     }
 
@@ -1839,7 +1899,10 @@ mod tests {
         };
 
         let results = execute_all(&[], &repo, &repo_info, &db, Strategy::Rebase);
-        assert!(results.is_empty(), "empty input should produce empty output");
+        assert!(
+            results.is_empty(),
+            "empty input should produce empty output"
+        );
     }
 
     #[test]
@@ -1925,7 +1988,7 @@ mod tests {
         let plan = execute_dry_run(
             "feature",
             f._repo_dir.path(),
-            &f.db,
+            Some(&f.db),
             Strategy::Rebase,
             None,
             false,
@@ -1945,11 +2008,10 @@ mod tests {
 
         // Capture state before dry-run
         let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
-        let wt = f
-            .db
-            .find_worktree_by_identifier(db_repo.id, "feature")
-            .unwrap()
-            .unwrap();
+        let wt =
+            f.db.find_worktree_by_identifier(db_repo.id, "feature")
+                .unwrap()
+                .unwrap();
         let events_before = f.db.list_events(wt.id, 100).unwrap();
         let wt_repo = git2::Repository::open(&f.wt_path).unwrap();
         let head_before = wt_repo.head().unwrap().target().unwrap();
@@ -1958,7 +2020,7 @@ mod tests {
         execute_dry_run(
             "feature",
             f._repo_dir.path(),
-            &f.db,
+            Some(&f.db),
             Strategy::Rebase,
             None,
             false,
@@ -1975,10 +2037,7 @@ mod tests {
 
         // Verify git HEAD unchanged
         let head_after = wt_repo.head().unwrap().target().unwrap();
-        assert_eq!(
-            head_before, head_after,
-            "dry-run must not change git HEAD"
-        );
+        assert_eq!(head_before, head_after, "dry-run must not change git HEAD");
     }
 
     #[test]
@@ -1999,7 +2058,10 @@ mod tests {
         assert_eq!(json_val["branch"], "my-feature");
         assert_eq!(json_val["base_branch"], "main");
         assert_eq!(json_val["strategy"], "rebase");
-        assert!(json_val["hooks"].is_null(), "hooks should be null when None");
+        assert!(
+            json_val["hooks"].is_null(),
+            "hooks should be null when None"
+        );
     }
 
     #[test]
@@ -2015,7 +2077,10 @@ mod tests {
 
         let output = format!("{plan}");
         assert!(output.contains("Dry run"), "should mention dry run");
-        assert!(output.contains("my-feature"), "should contain worktree name");
+        assert!(
+            output.contains("my-feature"),
+            "should contain worktree name"
+        );
         assert!(output.contains("main"), "should contain base branch");
         assert!(output.contains("rebase"), "should contain strategy");
         assert!(output.contains("(none)"), "should show (none) for hooks");
@@ -2046,7 +2111,7 @@ mod tests {
         let plan = execute_dry_run(
             "feature",
             f._repo_dir.path(),
-            &f.db,
+            Some(&f.db),
             Strategy::Merge,
             Some(&hooks),
             false,
@@ -2056,11 +2121,11 @@ mod tests {
         assert!(plan.hooks.is_some(), "hooks should be present in plan");
         let plan_hooks = plan.hooks.unwrap();
         assert!(plan_hooks.pre_sync.is_some(), "pre_sync should be present");
-        assert!(plan_hooks.post_sync.is_some(), "post_sync should be present");
-        assert_eq!(
-            plan_hooks.pre_sync.unwrap().run.unwrap(),
-            vec!["echo pre"],
+        assert!(
+            plan_hooks.post_sync.is_some(),
+            "post_sync should be present"
         );
+        assert_eq!(plan_hooks.pre_sync.unwrap().run.unwrap(), vec!["echo pre"],);
     }
 
     #[test]
@@ -2082,7 +2147,7 @@ mod tests {
         let plan = execute_dry_run(
             "feature",
             f._repo_dir.path(),
-            &f.db,
+            Some(&f.db),
             Strategy::Rebase,
             Some(&hooks),
             true, // no_hooks = true
