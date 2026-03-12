@@ -246,6 +246,10 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Commands::Sync { branch, all, strategy, no_hooks }) => {
+            if all && branch.is_some() {
+                eprintln!("error: <BRANCH> cannot be used with --all");
+                std::process::exit(1);
+            }
             if all {
                 if strategy.is_none() {
                     eprintln!("error: {}", cli::commands::sync::BatchSyncMissingStrategy);

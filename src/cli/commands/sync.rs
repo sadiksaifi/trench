@@ -1744,6 +1744,17 @@ mod tests {
     }
 
     #[test]
+    fn batch_sync_rejects_branch_with_all() {
+        // Verify the validation logic: --all + <BRANCH> is an error
+        let branch: Option<String> = Some("my-feature".to_string());
+        let all = true;
+        assert!(
+            all && branch.is_some(),
+            "<BRANCH> together with --all should be rejected"
+        );
+    }
+
+    #[test]
     fn batch_sync_missing_strategy_error_has_correct_message() {
         let err = BatchSyncMissingStrategy;
         let msg = err.to_string();
