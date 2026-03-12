@@ -636,14 +636,17 @@ fn run_sync(
     no_hooks: bool,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = paths::data_dir()?.join("trench.db");
-    let db = state::Database::open(&db_path)?;
 
     // Determine strategy: use CLI flag, or prompt interactively
+    // This runs BEFORE any DB work so dry-run can fail fast.
     let resolved_strategy = match strategy {
         Some(s) => s,
         None => {
-            if dry_run || !std::io::stdin().is_terminal() {
+            if dry_run {
+                eprintln!("error: --strategy is required with --dry-run (use --strategy rebase or --strategy merge)");
+                std::process::exit(8);
+            }
+            if !std::io::stdin().is_terminal() {
                 eprintln!("error: --strategy is required in non-interactive mode (use --strategy rebase or --strategy merge)");
                 std::process::exit(8);
             }
@@ -678,12 +681,12 @@ fn run_sync(
         config::resolve_config(None, project_config.as_ref(), &global_config).hooks
     };
 
-    // Dry-run: show plan and exit
+    // Dry-run: show plan and exit — NO Database::open() needed
     if dry_run {
         let plan = cli::commands::sync::execute_dry_run(
             identifier,
             &cwd,
-            Some(&db),
+            None,
             sync_strategy,
             hooks_config.as_ref(),
             no_hooks,
@@ -695,6 +698,10 @@ fn run_sync(
         }
         return Ok(());
     }
+
+    // Real execution path — open DB here (after dry-run early-return)
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
 
     let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
 
@@ -765,7 +772,18 @@ fn run_sync_all(
     no_hooks: bool,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = paths::data_dir()?.join("trench.db");
+    let db_path = paths::data_dir_path()?.join("trench.db");
+
+    // If dry-run and DB doesn't exist yet, there are no tracked worktrees
+    if dry_run && !db_path.exists() {
+        if json {
+            println!("[]");
+        } else {
+            eprintln!("No active worktrees to sync.");
+        }
+        return Ok(());
+    }
+
     let db = state::Database::open(&db_path)?;
     let repo_info = git::discover_repo(&cwd)?;
 

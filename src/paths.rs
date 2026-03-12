@@ -9,7 +9,8 @@ const STATE_DIR_FALLBACK_SEGMENTS: &[&str] = &[".local", "state"];
 
 /// Ensure a directory exists, creating it (and parents) if needed.
 fn ensure_dir(path: &Path) -> Result<()> {
-    std::fs::create_dir_all(path).with_context(|| format!("failed to create directory: {}", path.display()))?;
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("failed to create directory: {}", path.display()))?;
     Ok(())
 }
 
@@ -30,6 +31,16 @@ pub fn config_dir() -> Result<PathBuf> {
     let path = config_dir_path()?;
     ensure_dir(&path)?;
     Ok(path)
+}
+
+/// Return the trench data directory path (`~/.local/share/trench/`) without creating it.
+///
+/// Use this in read-only contexts (e.g. `--dry-run`) where no side effects
+/// are allowed. For contexts that need the directory to exist, use [`data_dir`].
+pub fn data_dir_path() -> Result<PathBuf> {
+    Ok(dirs::data_dir()
+        .context("could not determine data directory")?
+        .join(APP_NAME))
 }
 
 /// Return the trench data directory (`~/.local/share/trench/`), creating it if needed.
@@ -184,12 +195,8 @@ mod tests {
     fn state_dir_ends_with_trench() {
         let path = state_dir().unwrap();
         assert!(path.ends_with("trench"));
-        let expected_base = dirs::state_dir().unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap()
-                .join(".local")
-                .join("state")
-        });
+        let expected_base = dirs::state_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap().join(".local").join("state"));
         assert!(path.starts_with(expected_base));
         assert!(path.exists());
     }
@@ -221,8 +228,16 @@ mod tests {
     }
 
     #[test]
+    fn data_dir_path_returns_path_without_creating_it() {
+        let path = data_dir_path().unwrap();
+        assert!(path.ends_with("trench"));
+        assert!(path.starts_with(dirs::data_dir().unwrap()));
+    }
+
+    #[test]
     fn render_default_template_with_repo_and_branch() {
-        let path = render_worktree_path(DEFAULT_WORKTREE_TEMPLATE, "my-project", "feature/auth").unwrap();
+        let path =
+            render_worktree_path(DEFAULT_WORKTREE_TEMPLATE, "my-project", "feature/auth").unwrap();
         assert_eq!(path, PathBuf::from("my-project/feature-auth"));
     }
 
@@ -246,7 +261,10 @@ mod tests {
         let result = render_worktree_path("/absolute/{{ repo }}", "trench", "main");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("relative"), "expected 'relative' in error: {msg}");
+        assert!(
+            msg.contains("relative"),
+            "expected 'relative' in error: {msg}"
+        );
     }
 
     #[test]
@@ -316,14 +334,20 @@ mod tests {
         // Empty after stripping
         assert_eq!(sanitize_branch(".."), "");
         // Nested double dots with other chars
-        assert_eq!(sanitize_branch("feature/..secret/auth"), "feature-secret-auth");
+        assert_eq!(
+            sanitize_branch("feature/..secret/auth"),
+            "feature-secret-auth"
+        );
     }
 
     #[test]
     fn expand_tilde_replaces_home_prefix() {
         let expanded = expand_tilde("~/projects");
         let home = dirs::home_dir().unwrap();
-        assert_eq!(expanded, home.join("projects").to_string_lossy().to_string());
+        assert_eq!(
+            expanded,
+            home.join("projects").to_string_lossy().to_string()
+        );
     }
 
     #[test]

@@ -2161,6 +2161,65 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_with_unmanaged_worktree_does_not_create_db_rows() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        // Rename HEAD to "main"
+        {
+            let head_branch_name = git_repo.head().unwrap().shorthand().unwrap().to_string();
+            git_repo
+                .find_branch(&head_branch_name, git2::BranchType::Local)
+                .unwrap()
+                .rename("main", true)
+                .unwrap();
+        }
+
+        // Create a git worktree manually (NOT registered in DB at all)
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("dry-feat");
+        {
+            let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+            git_repo.branch("dry-feat", &head_commit, false).unwrap();
+        }
+        {
+            let branch_ref = git_repo
+                .find_branch("dry-feat", git2::BranchType::Local)
+                .unwrap();
+            let mut opts = git2::WorktreeAddOptions::new();
+            opts.reference(Some(branch_ref.get()));
+            git_repo
+                .worktree("dry-feat", &wt_path, Some(&opts))
+                .unwrap();
+        }
+
+        // execute_dry_run with db=None (simulating deferred DB opening)
+        let plan = execute_dry_run(
+            "dry-feat",
+            repo_dir.path(),
+            None,
+            Strategy::Rebase,
+            None,
+            false,
+        )
+        .expect("dry-run should succeed without DB");
+
+        assert!(plan.dry_run);
+        assert_eq!(plan.name, "dry-feat");
+        assert_eq!(plan.branch, "dry-feat");
+        assert_eq!(plan.base_branch, "main");
+
+        // DB must have no repo or worktree rows
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let found_repo = db.get_repo_by_path(repo_path.to_str().unwrap()).unwrap();
+        assert!(
+            found_repo.is_none(),
+            "dry-run must not create repo rows in DB"
+        );
+    }
+
+    #[test]
     fn batch_dry_run_returns_plan_per_worktree() {
         let f = setup_multi_worktree_repo();
         let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
