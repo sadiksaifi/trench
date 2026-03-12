@@ -2021,4 +2021,36 @@ mod tests {
             vec!["echo pre"],
         );
     }
+
+    #[test]
+    fn dry_run_with_no_hooks_excludes_hooks_from_plan() {
+        use crate::config::{HookDef, HooksConfig};
+
+        let f = setup_diverged_repo();
+
+        let hooks = HooksConfig {
+            pre_sync: Some(HookDef {
+                copy: None,
+                run: Some(vec!["echo pre".to_string()]),
+                shell: None,
+                timeout_secs: None,
+            }),
+            ..Default::default()
+        };
+
+        let plan = execute_dry_run(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            Some(&hooks),
+            true, // no_hooks = true
+        )
+        .expect("dry-run with --no-hooks should succeed");
+
+        assert!(
+            plan.hooks.is_none(),
+            "hooks should be None when --no-hooks is set"
+        );
+    }
 }
