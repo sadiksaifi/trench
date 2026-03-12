@@ -681,12 +681,18 @@ fn run_sync(
         config::resolve_config(None, project_config.as_ref(), &global_config).hooks
     };
 
-    // Dry-run: show plan and exit — NO Database::open() needed
+    // Dry-run: open existing DB (read-only) for accurate base-branch metadata
     if dry_run {
+        let db_path = paths::data_dir_path()?.join("trench.db");
+        let db = if db_path.exists() {
+            Some(state::Database::open(&db_path)?)
+        } else {
+            None
+        };
         let plan = cli::commands::sync::execute_dry_run(
             identifier,
             &cwd,
-            None,
+            db.as_ref(),
             sync_strategy,
             hooks_config.as_ref(),
             no_hooks,
