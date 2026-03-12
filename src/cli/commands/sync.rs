@@ -287,7 +287,7 @@ pub struct SyncDryRunPlan {
 }
 
 /// Hook definitions included in a dry-run plan.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SyncDryRunHooks {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_sync: Option<crate::config::HookDef>,
@@ -378,6 +378,47 @@ pub fn execute_dry_run(
         strategy: strategy.to_string(),
         hooks,
     })
+}
+
+/// Execute a dry-run of `trench sync --all`.
+///
+/// Builds a plan for each worktree without performing any operations.
+pub fn execute_all_dry_run(
+    worktrees: &[Worktree],
+    repo: &crate::state::Repo,
+    repo_info: &RepoInfo,
+    strategy: Strategy,
+    hooks_config: Option<&HooksConfig>,
+    no_hooks: bool,
+) -> Vec<SyncDryRunPlan> {
+    let hooks = if no_hooks {
+        None
+    } else {
+        hooks_config.map(|h| SyncDryRunHooks {
+            pre_sync: h.pre_sync.clone(),
+            post_sync: h.post_sync.clone(),
+        })
+    };
+
+    worktrees
+        .iter()
+        .map(|wt| {
+            let base_branch = wt
+                .base_branch
+                .as_deref()
+                .or(repo.default_base.as_deref())
+                .unwrap_or(repo_info.default_branch.as_str());
+
+            SyncDryRunPlan {
+                dry_run: true,
+                name: wt.name.clone(),
+                branch: wt.branch.clone(),
+                base_branch: base_branch.to_string(),
+                strategy: strategy.to_string(),
+                hooks: hooks.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Execute `trench sync <identifier>` with lifecycle hooks.
@@ -2052,5 +2093,37 @@ mod tests {
             plan.hooks.is_none(),
             "hooks should be None when --no-hooks is set"
         );
+    }
+
+    #[test]
+    fn batch_dry_run_returns_plan_per_worktree() {
+        let f = setup_multi_worktree_repo();
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let repo_info = crate::git::RepoInfo {
+            name: "test-repo".to_string(),
+            path: std::path::PathBuf::from(&f.repo_path_str),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+        let worktrees = f.db.list_worktrees(db_repo.id).unwrap();
+
+        let plans = execute_all_dry_run(
+            &worktrees,
+            &db_repo,
+            &repo_info,
+            Strategy::Rebase,
+            None,
+            false,
+        );
+
+        assert_eq!(plans.len(), 2, "should return a plan for each worktree");
+        let names: Vec<&str> = plans.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"feat-a"), "should include feat-a");
+        assert!(names.contains(&"feat-b"), "should include feat-b");
+        for plan in &plans {
+            assert!(plan.dry_run);
+            assert_eq!(plan.strategy, "rebase");
+            assert_eq!(plan.base_branch, "main");
+        }
     }
 }
