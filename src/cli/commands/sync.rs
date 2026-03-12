@@ -1851,4 +1851,46 @@ mod tests {
         assert_eq!(plan.base_branch, "main");
         assert_eq!(plan.strategy, "rebase");
     }
+
+    #[test]
+    fn dry_run_does_not_write_events_or_modify_git() {
+        let f = setup_diverged_repo();
+
+        // Capture state before dry-run
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let wt = f
+            .db
+            .find_worktree_by_identifier(db_repo.id, "feature")
+            .unwrap()
+            .unwrap();
+        let events_before = f.db.list_events(wt.id, 100).unwrap();
+        let wt_repo = git2::Repository::open(&f.wt_path).unwrap();
+        let head_before = wt_repo.head().unwrap().target().unwrap();
+
+        // Execute dry-run
+        execute_dry_run(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Rebase,
+            None,
+            false,
+        )
+        .expect("dry-run should succeed");
+
+        // Verify no new events
+        let events_after = f.db.list_events(wt.id, 100).unwrap();
+        assert_eq!(
+            events_before.len(),
+            events_after.len(),
+            "dry-run must not write events to DB"
+        );
+
+        // Verify git HEAD unchanged
+        let head_after = wt_repo.head().unwrap().target().unwrap();
+        assert_eq!(
+            head_before, head_after,
+            "dry-run must not change git HEAD"
+        );
+    }
 }
