@@ -1893,4 +1893,25 @@ mod tests {
             "dry-run must not change git HEAD"
         );
     }
+
+    #[test]
+    fn dry_run_plan_serializes_to_json_with_expected_structure() {
+        let plan = SyncDryRunPlan {
+            dry_run: true,
+            name: "my-feature".to_string(),
+            branch: "my-feature".to_string(),
+            base_branch: "main".to_string(),
+            strategy: "rebase".to_string(),
+            hooks: None,
+        };
+
+        let json_val: serde_json::Value = serde_json::to_value(&plan).unwrap();
+
+        assert_eq!(json_val["dry_run"], true);
+        assert_eq!(json_val["name"], "my-feature");
+        assert_eq!(json_val["branch"], "my-feature");
+        assert_eq!(json_val["base_branch"], "main");
+        assert_eq!(json_val["strategy"], "rebase");
+        assert!(json_val["hooks"].is_null(), "hooks should be null when None");
+    }
 }
