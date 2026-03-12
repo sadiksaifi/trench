@@ -107,11 +107,21 @@ impl SyncResult {
 #[error("Batch sync requires an explicit strategy. Use --strategy rebase or --strategy merge.")]
 pub struct BatchSyncMissingStrategy;
 
+/// Explicit status for a batch sync entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchSyncStatus {
+    Success,
+    Failure,
+    Skipped,
+}
+
 /// Per-worktree result from a batch sync operation.
 #[derive(Debug)]
 pub struct BatchSyncEntry {
     /// Worktree name.
     pub name: String,
+    /// Explicit batch outcome.
+    pub status: BatchSyncStatus,
     /// Sync result on success.
     pub result: Option<SyncResult>,
     /// Error message on failure.
@@ -133,11 +143,12 @@ impl BatchSyncEntry {
     pub fn to_json(&self) -> BatchSyncEntryJson {
         BatchSyncEntryJson {
             name: self.name.clone(),
-            status: if self.result.is_some() {
-                "success".to_string()
-            } else {
-                "failure".to_string()
-            },
+            status: match self.status {
+                BatchSyncStatus::Success => "success",
+                BatchSyncStatus::Failure => "failure",
+                BatchSyncStatus::Skipped => "skipped",
+            }
+            .to_string(),
             result: self.result.as_ref().map(|r| r.to_json()),
             error: self.error.clone(),
         }
@@ -160,6 +171,7 @@ pub fn execute_all(
             Ok(sync_result) => {
                 results.push(BatchSyncEntry {
                     name: wt.name.clone(),
+                    status: BatchSyncStatus::Success,
                     result: Some(sync_result),
                     error: None,
                 });
@@ -167,6 +179,7 @@ pub fn execute_all(
             Err(e) => {
                 results.push(BatchSyncEntry {
                     name: wt.name.clone(),
+                    status: BatchSyncStatus::Failure,
                     result: None,
                     error: Some(format!("{e:#}")),
                 });
@@ -1679,6 +1692,55 @@ mod tests {
 
         let results = execute_all(&[], &repo, &repo_info, &db, Strategy::Rebase);
         assert!(results.is_empty(), "empty input should produce empty output");
+    }
+
+    #[test]
+    fn batch_sync_entry_status_is_explicit() {
+        // Pure success: result present, no error
+        let success_entry = BatchSyncEntry {
+            name: "wt-ok".to_string(),
+            status: BatchSyncStatus::Success,
+            result: Some(SyncResult {
+                name: "wt-ok".to_string(),
+                strategy: Strategy::Rebase,
+                before_ahead: 0,
+                before_behind: 1,
+                after_ahead: 0,
+                after_behind: 0,
+            }),
+            error: None,
+        };
+        assert_eq!(success_entry.to_json().status, "success");
+
+        // Pure failure: no result, error present
+        let failure_entry = BatchSyncEntry {
+            name: "wt-fail".to_string(),
+            status: BatchSyncStatus::Failure,
+            result: None,
+            error: Some("dirty worktree".to_string()),
+        };
+        assert_eq!(failure_entry.to_json().status, "failure");
+
+        // Post-sync hook failure: result present AND error present
+        // This should be "failure" because the hook failed, not "success"
+        let hook_fail_entry = BatchSyncEntry {
+            name: "wt-hook-fail".to_string(),
+            status: BatchSyncStatus::Failure,
+            result: Some(SyncResult {
+                name: "wt-hook-fail".to_string(),
+                strategy: Strategy::Rebase,
+                before_ahead: 0,
+                before_behind: 1,
+                after_ahead: 0,
+                after_behind: 0,
+            }),
+            error: Some("post_sync hook failed".to_string()),
+        };
+        assert_eq!(
+            hook_fail_entry.to_json().status,
+            "failure",
+            "entry with both result and error should be 'failure', not 'success'"
+        );
     }
 
     #[test]

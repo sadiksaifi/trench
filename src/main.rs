@@ -770,8 +770,14 @@ fn run_sync_all(strategy: SyncStrategy, json: bool, no_hooks: bool) -> anyhow::R
                             wt.name
                         );
                     }
+                    let has_hook_error = outcome.post_sync_error.is_some();
                     entries.push(cli::commands::sync::BatchSyncEntry {
                         name: wt.name.clone(),
+                        status: if has_hook_error {
+                            cli::commands::sync::BatchSyncStatus::Failure
+                        } else {
+                            cli::commands::sync::BatchSyncStatus::Success
+                        },
                         result: Some(outcome.result),
                         error: outcome
                             .post_sync_error
@@ -782,6 +788,7 @@ fn run_sync_all(strategy: SyncStrategy, json: bool, no_hooks: bool) -> anyhow::R
                     eprintln!("error: sync failed for '{}': {e:#}", wt.name);
                     entries.push(cli::commands::sync::BatchSyncEntry {
                         name: wt.name.clone(),
+                        status: cli::commands::sync::BatchSyncStatus::Failure,
                         result: None,
                         error: Some(format!("{e:#}")),
                     });
@@ -795,7 +802,9 @@ fn run_sync_all(strategy: SyncStrategy, json: bool, no_hooks: bool) -> anyhow::R
     };
 
     // Output results
-    let has_failures = results.iter().any(|r| r.error.is_some());
+    let has_failures = results
+        .iter()
+        .any(|r| r.status != cli::commands::sync::BatchSyncStatus::Success);
 
     if json {
         let json_results: Vec<cli::commands::sync::BatchSyncEntryJson> =
@@ -817,8 +826,14 @@ fn run_sync_all(strategy: SyncStrategy, json: bool, no_hooks: bool) -> anyhow::R
                 eprintln!("Failed '{}': {err}", entry.name);
             }
         }
-        let success = results.iter().filter(|r| r.result.is_some()).count();
-        let failed = results.iter().filter(|r| r.error.is_some()).count();
+        let success = results
+            .iter()
+            .filter(|r| r.status == cli::commands::sync::BatchSyncStatus::Success)
+            .count();
+        let failed = results
+            .iter()
+            .filter(|r| r.status == cli::commands::sync::BatchSyncStatus::Failure)
+            .count();
         eprintln!("\nBatch sync: {success} succeeded, {failed} failed ({} total)", results.len());
     }
 
