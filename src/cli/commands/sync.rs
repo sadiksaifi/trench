@@ -1979,4 +1979,46 @@ mod tests {
         assert!(output.contains("rebase"), "should contain strategy");
         assert!(output.contains("(none)"), "should show (none) for hooks");
     }
+
+    #[test]
+    fn dry_run_with_hooks_includes_hooks_in_plan() {
+        use crate::config::{HookDef, HooksConfig};
+
+        let f = setup_diverged_repo();
+
+        let hooks = HooksConfig {
+            pre_sync: Some(HookDef {
+                copy: None,
+                run: Some(vec!["echo pre".to_string()]),
+                shell: None,
+                timeout_secs: None,
+            }),
+            post_sync: Some(HookDef {
+                copy: None,
+                run: Some(vec!["echo post".to_string()]),
+                shell: None,
+                timeout_secs: None,
+            }),
+            ..Default::default()
+        };
+
+        let plan = execute_dry_run(
+            "feature",
+            f._repo_dir.path(),
+            &f.db,
+            Strategy::Merge,
+            Some(&hooks),
+            false,
+        )
+        .expect("dry-run with hooks should succeed");
+
+        assert!(plan.hooks.is_some(), "hooks should be present in plan");
+        let plan_hooks = plan.hooks.unwrap();
+        assert!(plan_hooks.pre_sync.is_some(), "pre_sync should be present");
+        assert!(plan_hooks.post_sync.is_some(), "post_sync should be present");
+        assert_eq!(
+            plan_hooks.pre_sync.unwrap().run.unwrap(),
+            vec!["echo pre"],
+        );
+    }
 }
