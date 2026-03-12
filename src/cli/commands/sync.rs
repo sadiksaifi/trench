@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::Path;
 
 use anyhow::Result;
@@ -292,6 +293,51 @@ pub struct SyncDryRunHooks {
     pub pre_sync: Option<crate::config::HookDef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_sync: Option<crate::config::HookDef>,
+}
+
+impl fmt::Display for SyncDryRunPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Dry run — no changes will be made\n")?;
+        writeln!(f, "  Worktree:  {}", self.name)?;
+        writeln!(f, "  Branch:    {}", self.branch)?;
+        writeln!(f, "  Base:      {}", self.base_branch)?;
+        writeln!(f, "  Strategy:  {}", self.strategy)?;
+
+        match &self.hooks {
+            Some(hooks) if hooks.pre_sync.is_some() || hooks.post_sync.is_some() => {
+                writeln!(f, "  Hooks:")?;
+                if let Some(h) = &hooks.pre_sync {
+                    writeln!(f, "    pre_sync:")?;
+                    format_hook_def(f, h)?;
+                }
+                if let Some(h) = &hooks.post_sync {
+                    writeln!(f, "    post_sync:")?;
+                    format_hook_def(f, h)?;
+                }
+            }
+            _ => {
+                writeln!(f, "  Hooks:     (none)")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn format_hook_def(f: &mut fmt::Formatter<'_>, hook: &crate::config::HookDef) -> fmt::Result {
+    if let Some(copy) = &hook.copy {
+        writeln!(f, "      copy: {}", copy.join(", "))?;
+    }
+    if let Some(run) = &hook.run {
+        writeln!(f, "      run:  {}", run.join(", "))?;
+    }
+    if let Some(shell) = &hook.shell {
+        writeln!(f, "      shell: {shell}")?;
+    }
+    if let Some(timeout) = &hook.timeout_secs {
+        writeln!(f, "      timeout: {timeout}s")?;
+    }
+    Ok(())
 }
 
 /// Execute a dry-run of `trench sync <identifier>`.
@@ -1913,5 +1959,24 @@ mod tests {
         assert_eq!(json_val["base_branch"], "main");
         assert_eq!(json_val["strategy"], "rebase");
         assert!(json_val["hooks"].is_null(), "hooks should be null when None");
+    }
+
+    #[test]
+    fn dry_run_plan_display_shows_human_readable_text() {
+        let plan = SyncDryRunPlan {
+            dry_run: true,
+            name: "my-feature".to_string(),
+            branch: "my-feature".to_string(),
+            base_branch: "main".to_string(),
+            strategy: "rebase".to_string(),
+            hooks: None,
+        };
+
+        let output = format!("{plan}");
+        assert!(output.contains("Dry run"), "should mention dry run");
+        assert!(output.contains("my-feature"), "should contain worktree name");
+        assert!(output.contains("main"), "should contain base branch");
+        assert!(output.contains("rebase"), "should contain strategy");
+        assert!(output.contains("(none)"), "should show (none) for hooks");
     }
 }
