@@ -255,13 +255,13 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("error: {}", cli::commands::sync::BatchSyncMissingStrategy);
                     std::process::exit(8);
                 }
-                run_sync_all(strategy.unwrap(), json, no_hooks)
+                run_sync_all(strategy.unwrap(), json, dry_run, no_hooks)
             } else {
                 let branch = branch.unwrap_or_else(|| {
                     eprintln!("error: <BRANCH> is required when --all is not set");
                     std::process::exit(1);
                 });
-                run_sync(&branch, strategy, json, no_hooks)
+                run_sync(&branch, strategy, json, dry_run, no_hooks)
             }
         }
         Some(Commands::Log) => {
@@ -611,7 +611,7 @@ fn run_status(
     }
 }
 
-fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, no_hooks: bool) -> anyhow::Result<()> {
+fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, dry_run: bool, no_hooks: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
@@ -620,7 +620,7 @@ fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, no_hoo
     let resolved_strategy = match strategy {
         Some(s) => s,
         None => {
-            if !std::io::stdin().is_terminal() {
+            if dry_run || !std::io::stdin().is_terminal() {
                 eprintln!("error: --strategy is required in non-interactive mode (use --strategy rebase or --strategy merge)");
                 std::process::exit(8);
             }
@@ -645,7 +645,7 @@ fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, no_hoo
         SyncStrategy::Merge => cli::commands::sync::Strategy::Merge,
     };
 
-    // Skip config I/O when --no-hooks is set (escape hatch)
+    // Load hooks config (needed for both dry-run preview and actual execution)
     let hooks_config = if no_hooks {
         None
     } else {
@@ -654,6 +654,24 @@ fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, no_hoo
         let global_config = config::load_global_config()?;
         config::resolve_config(None, project_config.as_ref(), &global_config).hooks
     };
+
+    // Dry-run: show plan and exit
+    if dry_run {
+        let plan = cli::commands::sync::execute_dry_run(
+            identifier,
+            &cwd,
+            &db,
+            sync_strategy,
+            hooks_config.as_ref(),
+            no_hooks,
+        )?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        } else {
+            print!("{plan}");
+        }
+        return Ok(());
+    }
 
     let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
 
@@ -713,7 +731,7 @@ fn run_sync(identifier: &str, strategy: Option<SyncStrategy>, json: bool, no_hoo
     }
 }
 
-fn run_sync_all(strategy: SyncStrategy, json: bool, no_hooks: bool) -> anyhow::Result<()> {
+fn run_sync_all(strategy: SyncStrategy, json: bool, dry_run: bool, no_hooks: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
@@ -739,7 +757,7 @@ fn run_sync_all(strategy: SyncStrategy, json: bool, no_hooks: bool) -> anyhow::R
         SyncStrategy::Merge => cli::commands::sync::Strategy::Merge,
     };
 
-    // If hooks are enabled, load config once for all worktrees
+    // Load hooks config (needed for both dry-run preview and actual execution)
     let hooks_config = if no_hooks {
         None
     } else {
@@ -747,6 +765,26 @@ fn run_sync_all(strategy: SyncStrategy, json: bool, no_hooks: bool) -> anyhow::R
         let global_config = config::load_global_config()?;
         config::resolve_config(None, project_config.as_ref(), &global_config).hooks
     };
+
+    // Dry-run: show per-worktree plans and exit
+    if dry_run {
+        let plans = cli::commands::sync::execute_all_dry_run(
+            &worktrees,
+            &db_repo,
+            &repo_info,
+            sync_strategy,
+            hooks_config.as_ref(),
+            no_hooks,
+        );
+        if json {
+            println!("{}", serde_json::to_string_pretty(&plans)?);
+        } else {
+            for plan in &plans {
+                print!("{plan}");
+            }
+        }
+        return Ok(());
+    }
 
     let has_hooks = !no_hooks
         && hooks_config
