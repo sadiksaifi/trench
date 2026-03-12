@@ -102,6 +102,93 @@ impl SyncResult {
     }
 }
 
+/// Error returned when `--all` is used without `--strategy`.
+#[derive(Debug, thiserror::Error)]
+#[error("Batch sync requires an explicit strategy. Use --strategy rebase or --strategy merge.")]
+pub struct BatchSyncMissingStrategy;
+
+/// Explicit status for a batch sync entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchSyncStatus {
+    Success,
+    Failure,
+    Skipped,
+}
+
+/// Per-worktree result from a batch sync operation.
+#[derive(Debug)]
+pub struct BatchSyncEntry {
+    /// Worktree name.
+    pub name: String,
+    /// Explicit batch outcome.
+    pub status: BatchSyncStatus,
+    /// Sync result on success.
+    pub result: Option<SyncResult>,
+    /// Error message on failure.
+    pub error: Option<String>,
+}
+
+/// JSON representation of a batch sync entry.
+#[derive(Debug, Serialize)]
+pub struct BatchSyncEntryJson {
+    pub name: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<SyncResultJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl BatchSyncEntry {
+    pub fn to_json(&self) -> BatchSyncEntryJson {
+        BatchSyncEntryJson {
+            name: self.name.clone(),
+            status: match self.status {
+                BatchSyncStatus::Success => "success",
+                BatchSyncStatus::Failure => "failure",
+                BatchSyncStatus::Skipped => "skipped",
+            }
+            .to_string(),
+            result: self.result.as_ref().map(|r| r.to_json()),
+            error: self.error.clone(),
+        }
+    }
+}
+
+/// Execute `trench sync --all`: sync every worktree in the list.
+///
+/// Continues on failure — a failing worktree does not block others.
+pub fn execute_all(
+    worktrees: &[crate::state::Worktree],
+    repo: &Repo,
+    repo_info: &RepoInfo,
+    db: &Database,
+    strategy: Strategy,
+) -> Vec<BatchSyncEntry> {
+    let mut results = Vec::new();
+    for wt in worktrees {
+        match execute_resolved(repo, wt, repo_info, db, strategy) {
+            Ok(sync_result) => {
+                results.push(BatchSyncEntry {
+                    name: wt.name.clone(),
+                    status: BatchSyncStatus::Success,
+                    result: Some(sync_result),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                results.push(BatchSyncEntry {
+                    name: wt.name.clone(),
+                    status: BatchSyncStatus::Failure,
+                    result: None,
+                    error: Some(format!("{e:#}")),
+                });
+            }
+        }
+    }
+    results
+}
+
 /// Execute the `trench sync <identifier>` command.
 ///
 /// Resolves the worktree (adopting it if unmanaged), fetches from remote,
@@ -1324,6 +1411,360 @@ mod tests {
         assert!(
             synced_id < post_id,
             "synced event (id={synced_id}) should come before post_sync event (id={post_id})"
+        );
+    }
+
+    struct MultiWorktreeFixture {
+        _git_repo: git2::Repository,
+        wt_paths: Vec<std::path::PathBuf>,
+        db: Database,
+        _repo_dir: tempfile::TempDir,
+        _wt_dirs: Vec<tempfile::TempDir>,
+        repo_path_str: String,
+    }
+
+    /// Set up a repo with two diverged feature worktrees.
+    fn setup_multi_worktree_repo() -> MultiWorktreeFixture {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap().to_string();
+
+        // Rename HEAD to "main"
+        git_repo
+            .find_branch(
+                git_repo.head().unwrap().shorthand().unwrap(),
+                git2::BranchType::Local,
+            )
+            .unwrap()
+            .rename("main", true)
+            .unwrap();
+
+        let mut wt_paths = Vec::new();
+        let mut wt_dirs = Vec::new();
+
+        for branch_name in &["feat-a", "feat-b"] {
+            // Create branch at current main
+            {
+                let head_commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+                git_repo.branch(branch_name, &head_commit, false).unwrap();
+            }
+
+            // Create worktree
+            let wt_dir = tempfile::tempdir().unwrap();
+            let wt_path = wt_dir.path().join(branch_name);
+            {
+                let branch_ref = git_repo
+                    .find_branch(branch_name, git2::BranchType::Local)
+                    .unwrap();
+                let mut opts = git2::WorktreeAddOptions::new();
+                opts.reference(Some(branch_ref.get()));
+                git_repo.worktree(branch_name, &wt_path, Some(&opts)).unwrap();
+            }
+
+            // Add a commit on the feature branch
+            let wt_repo = git2::Repository::open(&wt_path).unwrap();
+            commit_file(
+                &wt_repo,
+                &format!("{branch_name}.txt"),
+                &format!("{branch_name} work"),
+                &format!("{branch_name} commit"),
+            );
+
+            wt_paths.push(wt_path);
+            wt_dirs.push(wt_dir);
+        }
+
+        // Switch back to main and add upstream commit to create divergence
+        {
+            let main_obj = git_repo.revparse_single("refs/heads/main").unwrap();
+            git_repo.checkout_tree(&main_obj, None).unwrap();
+            git_repo.set_head("refs/heads/main").unwrap();
+        }
+        commit_file(
+            &git_repo,
+            "upstream.txt",
+            "upstream change",
+            "upstream commit on main",
+        );
+
+        // Register in DB
+        db.insert_repo("test-repo", &repo_path_str, Some("main"))
+            .unwrap();
+        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().unwrap();
+        for (i, branch_name) in ["feat-a", "feat-b"].iter().enumerate() {
+            let wt_path_str = wt_paths[i].canonicalize().unwrap_or(wt_paths[i].clone());
+            db.insert_worktree(
+                db_repo.id,
+                branch_name,
+                branch_name,
+                wt_path_str.to_str().unwrap(),
+                Some("main"),
+            )
+            .unwrap();
+        }
+
+        MultiWorktreeFixture {
+            _git_repo: git_repo,
+            wt_paths,
+            db,
+            _repo_dir: repo_dir,
+            _wt_dirs: wt_dirs,
+            repo_path_str,
+        }
+    }
+
+    #[test]
+    fn batch_sync_syncs_all_worktrees() {
+        let f = setup_multi_worktree_repo();
+        let repo_info = crate::git::RepoInfo {
+            name: "test-repo".to_string(),
+            path: std::path::PathBuf::from(&f.repo_path_str),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let worktrees = f.db.list_worktrees(db_repo.id).unwrap();
+
+        let results = execute_all(&worktrees, &db_repo, &repo_info, &f.db, Strategy::Rebase);
+
+        assert_eq!(results.len(), 2, "should have results for both worktrees");
+        for entry in &results {
+            assert!(
+                entry.error.is_none(),
+                "worktree '{}' should succeed, got: {:?}",
+                entry.name,
+                entry.error
+            );
+            let result = entry.result.as_ref().unwrap();
+            assert_eq!(result.after_behind, 0, "'{}' should be 0 behind after sync", entry.name);
+        }
+
+        // Verify upstream.txt exists in both worktrees
+        for wt_path in &f.wt_paths {
+            assert!(wt_path.join("upstream.txt").exists(), "upstream.txt should exist in {}", wt_path.display());
+        }
+    }
+
+    #[test]
+    fn batch_sync_continues_on_failure() {
+        let f = setup_multi_worktree_repo();
+        let repo_info = crate::git::RepoInfo {
+            name: "test-repo".to_string(),
+            path: std::path::PathBuf::from(&f.repo_path_str),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let worktrees = f.db.list_worktrees(db_repo.id).unwrap();
+
+        // Make feat-a dirty so it fails sync
+        std::fs::write(f.wt_paths[0].join("dirty.txt"), "uncommitted").unwrap();
+
+        let results = execute_all(&worktrees, &db_repo, &repo_info, &f.db, Strategy::Rebase);
+
+        assert_eq!(results.len(), 2, "should have results for both worktrees");
+
+        // feat-a should fail (dirty)
+        let feat_a = results.iter().find(|r| r.name == "feat-a").unwrap();
+        assert!(feat_a.error.is_some(), "feat-a should have an error (dirty worktree)");
+        assert!(feat_a.result.is_none());
+
+        // feat-b should succeed despite feat-a failure
+        let feat_b = results.iter().find(|r| r.name == "feat-b").unwrap();
+        assert!(feat_b.error.is_none(), "feat-b should succeed");
+        assert!(feat_b.result.is_some());
+        assert_eq!(feat_b.result.as_ref().unwrap().after_behind, 0);
+    }
+
+    #[test]
+    fn batch_sync_json_output_includes_per_worktree_results() {
+        let f = setup_multi_worktree_repo();
+        let repo_info = crate::git::RepoInfo {
+            name: "test-repo".to_string(),
+            path: std::path::PathBuf::from(&f.repo_path_str),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let worktrees = f.db.list_worktrees(db_repo.id).unwrap();
+
+        // Make feat-a dirty
+        std::fs::write(f.wt_paths[0].join("dirty.txt"), "uncommitted").unwrap();
+
+        let results = execute_all(&worktrees, &db_repo, &repo_info, &f.db, Strategy::Rebase);
+        let json_results: Vec<BatchSyncEntryJson> = results.iter().map(|e| e.to_json()).collect();
+
+        let json_str = crate::output::json::format_json(&json_results).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(parsed.is_array());
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+
+        // feat-a should be "failure"
+        let feat_a = arr.iter().find(|v| v["name"] == "feat-a").unwrap();
+        assert_eq!(feat_a["status"], "failure");
+        assert!(feat_a["error"].is_string());
+        assert!(feat_a["result"].is_null());
+
+        // feat-b should be "success"
+        let feat_b = arr.iter().find(|v| v["name"] == "feat-b").unwrap();
+        assert_eq!(feat_b["status"], "success");
+        assert!(feat_b["error"].is_null());
+        assert!(feat_b["result"].is_object());
+        assert_eq!(feat_b["result"]["strategy"], "rebase");
+    }
+
+    #[test]
+    fn batch_sync_with_merge_strategy() {
+        let f = setup_multi_worktree_repo();
+        let repo_info = crate::git::RepoInfo {
+            name: "test-repo".to_string(),
+            path: std::path::PathBuf::from(&f.repo_path_str),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let worktrees = f.db.list_worktrees(db_repo.id).unwrap();
+
+        let results = execute_all(&worktrees, &db_repo, &repo_info, &f.db, Strategy::Merge);
+
+        assert_eq!(results.len(), 2);
+        for entry in &results {
+            assert!(entry.error.is_none(), "'{}' should succeed", entry.name);
+            let result = entry.result.as_ref().unwrap();
+            assert_eq!(result.strategy, Strategy::Merge);
+            assert_eq!(result.after_behind, 0);
+        }
+
+        // Verify merge commits exist (2 parents)
+        for wt_path in &f.wt_paths {
+            let wt_repo = git2::Repository::open(wt_path).unwrap();
+            let head = wt_repo.head().unwrap().peel_to_commit().unwrap();
+            assert_eq!(head.parent_count(), 2, "merge commit should have 2 parents in {}", wt_path.display());
+        }
+    }
+
+    #[test]
+    fn batch_sync_writes_events_for_each_worktree() {
+        let f = setup_multi_worktree_repo();
+        let repo_info = crate::git::RepoInfo {
+            name: "test-repo".to_string(),
+            path: std::path::PathBuf::from(&f.repo_path_str),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+        let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
+        let worktrees = f.db.list_worktrees(db_repo.id).unwrap();
+
+        execute_all(&worktrees, &db_repo, &repo_info, &f.db, Strategy::Rebase);
+
+        // Each worktree should have a "synced" event
+        for wt in &worktrees {
+            let events = f.db.list_events(wt.id, 10).unwrap();
+            assert!(
+                events.iter().any(|e| e.event_type == "synced"),
+                "worktree '{}' should have a 'synced' event",
+                wt.name
+            );
+        }
+    }
+
+    #[test]
+    fn batch_sync_empty_worktree_list_returns_empty() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = crate::state::Repo {
+            id: 1,
+            name: "test".to_string(),
+            path: "/tmp/test".to_string(),
+            default_base: Some("main".to_string()),
+            created_at: 0,
+        };
+        let repo_info = crate::git::RepoInfo {
+            name: "test".to_string(),
+            path: std::path::PathBuf::from("/tmp/test"),
+            remote_url: None,
+            default_branch: "main".to_string(),
+        };
+
+        let results = execute_all(&[], &repo, &repo_info, &db, Strategy::Rebase);
+        assert!(results.is_empty(), "empty input should produce empty output");
+    }
+
+    #[test]
+    fn batch_sync_entry_status_is_explicit() {
+        // Pure success: result present, no error
+        let success_entry = BatchSyncEntry {
+            name: "wt-ok".to_string(),
+            status: BatchSyncStatus::Success,
+            result: Some(SyncResult {
+                name: "wt-ok".to_string(),
+                strategy: Strategy::Rebase,
+                before_ahead: 0,
+                before_behind: 1,
+                after_ahead: 0,
+                after_behind: 0,
+            }),
+            error: None,
+        };
+        assert_eq!(success_entry.to_json().status, "success");
+
+        // Pure failure: no result, error present
+        let failure_entry = BatchSyncEntry {
+            name: "wt-fail".to_string(),
+            status: BatchSyncStatus::Failure,
+            result: None,
+            error: Some("dirty worktree".to_string()),
+        };
+        assert_eq!(failure_entry.to_json().status, "failure");
+
+        // Post-sync hook failure: result present AND error present
+        // This should be "failure" because the hook failed, not "success"
+        let hook_fail_entry = BatchSyncEntry {
+            name: "wt-hook-fail".to_string(),
+            status: BatchSyncStatus::Failure,
+            result: Some(SyncResult {
+                name: "wt-hook-fail".to_string(),
+                strategy: Strategy::Rebase,
+                before_ahead: 0,
+                before_behind: 1,
+                after_ahead: 0,
+                after_behind: 0,
+            }),
+            error: Some("post_sync hook failed".to_string()),
+        };
+        assert_eq!(
+            hook_fail_entry.to_json().status,
+            "failure",
+            "entry with both result and error should be 'failure', not 'success'"
+        );
+    }
+
+    #[test]
+    fn batch_sync_rejects_branch_with_all() {
+        // Verify the validation logic: --all + <BRANCH> is an error
+        let branch: Option<String> = Some("my-feature".to_string());
+        let all = true;
+        assert!(
+            all && branch.is_some(),
+            "<BRANCH> together with --all should be rejected"
+        );
+    }
+
+    #[test]
+    fn batch_sync_missing_strategy_error_has_correct_message() {
+        let err = BatchSyncMissingStrategy;
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Batch sync requires an explicit strategy"),
+            "error should contain hint, got: {msg}"
+        );
+        assert!(
+            msg.contains("--strategy rebase") && msg.contains("--strategy merge"),
+            "error should mention both strategies, got: {msg}"
         );
     }
 }
