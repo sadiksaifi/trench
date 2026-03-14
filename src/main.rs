@@ -1,6 +1,7 @@
 mod adopt;
 mod cli;
 mod config;
+mod exit_code;
 mod git;
 mod hooks;
 mod output;
