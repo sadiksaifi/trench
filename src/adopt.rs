@@ -22,6 +22,90 @@ fn ensure_repo(db: &Database, repo_info: &RepoInfo) -> Result<Repo> {
     )
 }
 
+/// Resolve a worktree by identifier without writing to the database.
+///
+/// Like [`resolve_or_adopt`], tries the DB first (if provided) then falls back
+/// to git worktree discovery. However, the git fallback constructs virtual
+/// `Repo` and `Worktree` structs with placeholder IDs (id=0) instead of
+/// inserting rows. Safe for read-only contexts like `--dry-run`.
+pub fn resolve_only(
+    identifier: &str,
+    repo_info: &RepoInfo,
+    db: Option<&Database>,
+) -> Result<(Repo, Worktree)> {
+    let repo_path_str = repo_info
+        .path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
+
+    // Try DB first (read-only)
+    if let Some(db) = db {
+        if let Some(repo) = db.get_repo_by_path(repo_path_str)? {
+            if let Some(wt) = db.find_worktree_by_identifier(repo.id, identifier)? {
+                return Ok((repo, wt));
+            }
+            let sanitized = paths::sanitize_branch(identifier);
+            if sanitized != identifier {
+                if let Some(wt) = db.find_worktree_by_identifier(repo.id, &sanitized)? {
+                    return Ok((repo, wt));
+                }
+            }
+        }
+    }
+
+    // Check DB for the repo (read-only) before git fallback — preserves stored defaults
+    let db_repo = if let Some(db) = db {
+        db.get_repo_by_path(repo_path_str)?
+    } else {
+        None
+    };
+
+    // Fall back to git worktrees — construct virtual structs (no writes)
+    let git_worktrees = git::list_worktrees(&repo_info.path)?;
+    let sanitized = paths::sanitize_branch(identifier);
+
+    for gw in &git_worktrees {
+        let branch_match = gw.branch.as_deref() == Some(identifier);
+        let name_match = gw.name == identifier || gw.name == sanitized;
+        let sanitized_branch_match = gw
+            .branch
+            .as_deref()
+            .is_some_and(|b| paths::sanitize_branch(b) == sanitized);
+
+        if branch_match || name_match || sanitized_branch_match {
+            let branch = gw.branch.clone().unwrap_or_else(|| identifier.to_string());
+            let name = paths::sanitize_branch(&branch);
+
+            let repo = match db_repo {
+                Some(ref r) => r.clone(),
+                None => Repo {
+                    id: 0,
+                    name: repo_info.name.clone(),
+                    path: repo_path_str.to_string(),
+                    default_base: Some(repo_info.default_branch.clone()),
+                    created_at: 0,
+                },
+            };
+            let wt = Worktree {
+                id: 0,
+                repo_id: repo.id,
+                name,
+                branch,
+                path: gw.path.to_string_lossy().to_string(),
+                base_branch: None,
+                managed: false,
+                adopted_at: None,
+                last_accessed: None,
+                removed_at: None,
+                created_at: 0,
+            };
+            return Ok((repo, wt));
+        }
+    }
+
+    anyhow::bail!("worktree not found: {identifier}")
+}
+
 /// Resolve a worktree by identifier, adopting it if unmanaged.
 ///
 /// Tries the DB first (exact match, then sanitized fallback). If not found,
@@ -66,10 +150,7 @@ pub fn resolve_or_adopt(
 
         if branch_match || name_match || sanitized_branch_match {
             let repo = ensure_repo(db, repo_info)?;
-            let branch = gw
-                .branch
-                .clone()
-                .unwrap_or_else(|| identifier.to_string());
+            let branch = gw.branch.clone().unwrap_or_else(|| identifier.to_string());
             let name = paths::sanitize_branch(&branch);
             let path = gw.path.to_string_lossy();
 
@@ -126,7 +207,10 @@ mod tests {
 
         assert_eq!(repo.id, db_repo.id);
         assert_eq!(wt.id, inserted.id);
-        assert!(wt.adopted_at.is_none(), "existing worktree should not be adopted");
+        assert!(
+            wt.adopted_at.is_none(),
+            "existing worktree should not be adopted"
+        );
     }
 
     #[test]
@@ -244,6 +328,184 @@ mod tests {
     }
 
     #[test]
+    fn resolve_only_does_not_write_for_unmanaged_worktree() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        // Do NOT insert repo or worktree into DB — completely unmanaged
+
+        // Create a git worktree manually
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("virtual-feat");
+        git_repo
+            .branch(
+                "virtual-feat",
+                &git_repo.head().unwrap().peel_to_commit().unwrap(),
+                false,
+            )
+            .unwrap();
+        let branch_ref = git_repo
+            .find_branch("virtual-feat", git2::BranchType::Local)
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch_ref.get()));
+        git_repo
+            .worktree("virtual-feat", &wt_path, Some(&opts))
+            .unwrap();
+
+        let repo_info = git::discover_repo(repo_dir.path()).unwrap();
+
+        // resolve_only should return virtual structs without writing to DB
+        let (repo, wt) =
+            resolve_only("virtual-feat", &repo_info, Some(&db)).expect("should resolve");
+
+        // Virtual structs should have placeholder id=0
+        assert_eq!(repo.id, 0, "virtual repo should have id=0");
+        assert_eq!(wt.id, 0, "virtual worktree should have id=0");
+
+        // Should carry correct info from git
+        assert_eq!(repo.name, repo_info.name);
+        assert_eq!(wt.branch, "virtual-feat");
+        assert_eq!(wt.name, "virtual-feat");
+
+        // DB must have NO repo or worktree rows
+        let repo_path_str = repo_dir.path().canonicalize().unwrap();
+        let found_repo = db
+            .get_repo_by_path(repo_path_str.to_str().unwrap())
+            .unwrap();
+        assert!(
+            found_repo.is_none(),
+            "resolve_only must not insert repo into DB"
+        );
+    }
+
+    #[test]
+    fn resolve_only_returns_managed_worktree_from_db() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
+        let inserted = db
+            .insert_worktree(
+                db_repo.id,
+                "my-feature",
+                "my-feature",
+                "/wt/my-feature",
+                Some("main"),
+            )
+            .unwrap();
+
+        let repo_info = git::discover_repo(repo_dir.path()).unwrap();
+        let (repo, wt) =
+            resolve_only("my-feature", &repo_info, Some(&db)).expect("should resolve existing");
+
+        assert_eq!(repo.id, db_repo.id);
+        assert_eq!(wt.id, inserted.id);
+    }
+
+    #[test]
+    fn resolve_only_without_db_resolves_from_git() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+
+        // Create a git worktree manually
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("no-db-feat");
+        git_repo
+            .branch(
+                "no-db-feat",
+                &git_repo.head().unwrap().peel_to_commit().unwrap(),
+                false,
+            )
+            .unwrap();
+        let branch_ref = git_repo
+            .find_branch("no-db-feat", git2::BranchType::Local)
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch_ref.get()));
+        git_repo
+            .worktree("no-db-feat", &wt_path, Some(&opts))
+            .unwrap();
+
+        let repo_info = git::discover_repo(repo_dir.path()).unwrap();
+
+        // Call with db=None
+        let (repo, wt) =
+            resolve_only("no-db-feat", &repo_info, None).expect("should resolve from git");
+
+        assert_eq!(repo.id, 0);
+        assert_eq!(wt.id, 0);
+        assert_eq!(wt.branch, "no-db-feat");
+    }
+
+    #[test]
+    fn resolve_only_reuses_db_repo_defaults_in_git_fallback() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let git_repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        // Insert repo in DB with a non-default base branch
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_path_str = repo_path.to_str().unwrap();
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("develop"))
+            .unwrap();
+
+        // Create a git worktree NOT registered in DB
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("db-base-feat");
+        git_repo
+            .branch(
+                "db-base-feat",
+                &git_repo.head().unwrap().peel_to_commit().unwrap(),
+                false,
+            )
+            .unwrap();
+        let branch_ref = git_repo
+            .find_branch("db-base-feat", git2::BranchType::Local)
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch_ref.get()));
+        git_repo
+            .worktree("db-base-feat", &wt_path, Some(&opts))
+            .unwrap();
+
+        let repo_info = git::discover_repo(repo_dir.path()).unwrap();
+
+        // resolve_only should use DB repo (with default_base = "develop")
+        let (repo, wt) =
+            resolve_only("db-base-feat", &repo_info, Some(&db)).expect("should resolve");
+
+        // Should get the DB repo's default_base, not git's default branch
+        assert_eq!(
+            repo.default_base.as_deref(),
+            Some("develop"),
+            "should preserve DB-stored default_base"
+        );
+        assert_eq!(repo.id, db_repo.id, "should use DB repo (id > 0)");
+
+        // Worktree should still be virtual (not in DB)
+        assert_eq!(wt.id, 0, "worktree should be virtual");
+        assert_eq!(wt.repo_id, db_repo.id, "worktree should reference DB repo");
+        assert_eq!(wt.branch, "db-base-feat");
+
+        // DB must NOT have a worktree row (resolve_only doesn't write)
+        let found_wt = db
+            .find_worktree_by_identifier(db_repo.id, "db-base-feat")
+            .unwrap();
+        assert!(
+            found_wt.is_none(),
+            "resolve_only must not insert worktree into DB"
+        );
+    }
+
+    #[test]
     fn resolve_or_adopt_idempotent_on_already_adopted() {
         let repo_dir = tempfile::tempdir().unwrap();
         let git_repo = init_repo_with_commit(repo_dir.path());
@@ -282,6 +544,9 @@ mod tests {
         // Second call: returns same DB record (no re-adoption)
         let (_, wt2) = resolve_or_adopt("idempotent-wt", &repo_info, &db).unwrap();
         assert_eq!(wt2.id, wt1.id, "should return same worktree");
-        assert_eq!(wt2.adopted_at, wt1.adopted_at, "adopted_at should not change");
+        assert_eq!(
+            wt2.adopted_at, wt1.adopted_at,
+            "adopted_at should not change"
+        );
     }
 }
