@@ -563,7 +563,7 @@ fn run_open(identifier: &str) -> anyhow::Result<()> {
                 .with_context(|| format!("failed to launch editor '{}'", result.editor))?;
 
             if !status.success() {
-                std::process::exit(status.code().unwrap_or(1));
+                ExitCode::GeneralError.exit();
             }
 
             // Record DB side-effects only after a successful launch
