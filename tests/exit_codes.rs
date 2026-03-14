@@ -187,7 +187,7 @@ fn exit_code_7_hook_timeout() {
         tmp.path().join(".trench.toml"),
         r#"
 [hooks.pre_create]
-run = ["sleep 30"]
+run = ["sleep 5"]
 timeout_secs = 1
 "#,
     )
