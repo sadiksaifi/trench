@@ -13,6 +13,8 @@ use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 
+use exit_code::ExitCode;
+
 use output::OutputConfig;
 
 #[derive(Parser, Debug)]
@@ -254,18 +256,18 @@ fn main() -> anyhow::Result<()> {
         }) => {
             if all && branch.is_some() {
                 eprintln!("error: <BRANCH> cannot be used with --all");
-                std::process::exit(1);
+                ExitCode::GeneralError.exit();
             }
             if all {
                 if strategy.is_none() {
                     eprintln!("error: {}", cli::commands::sync::BatchSyncMissingStrategy);
-                    std::process::exit(8);
+                    ExitCode::MissingRequiredFlag.exit();
                 }
                 run_sync_all(strategy.unwrap(), json, dry_run, no_hooks)
             } else {
                 let branch = branch.unwrap_or_else(|| {
                     eprintln!("error: <BRANCH> is required when --all is not set");
-                    std::process::exit(1);
+                    ExitCode::GeneralError.exit();
                 });
                 run_sync(&branch, strategy, json, dry_run, no_hooks)
             }
@@ -347,29 +349,42 @@ fn run_create(
             }
 
             // Exit 4 if post_create hook failed (FR-24: hard stop)
-            if outcome.post_create_error.is_some() {
-                std::process::exit(4);
+            if let Some(ref hook_err) = outcome.post_create_error {
+                if hook_err
+                    .chain()
+                    .any(|c| c.downcast_ref::<hooks::runner::HookTimeoutError>().is_some())
+                {
+                    ExitCode::HookTimeout.exit();
+                }
+                ExitCode::HookFailed.exit();
             }
             Ok(())
         }
         Err(e) => {
+            // Check for hook timeout first (more specific than hook failure)
+            if e.chain()
+                .any(|c| c.downcast_ref::<hooks::runner::HookTimeoutError>().is_some())
+            {
+                eprintln!("error: {e:#}");
+                ExitCode::HookTimeout.exit();
+            }
             // Check for hook failure (pre_create) via typed error
             if e.downcast_ref::<cli::commands::create::CreateError>()
                 .is_some()
             {
                 eprintln!("error: {e:#}");
-                std::process::exit(4);
+                ExitCode::HookFailed.exit();
             }
             if let Some(git_err) = e.downcast_ref::<git::GitError>() {
                 match git_err {
                     git::GitError::BranchAlreadyExists { .. }
                     | git::GitError::RemoteBranchAlreadyExists { .. } => {
                         eprintln!("error: {e}");
-                        std::process::exit(3);
+                        ExitCode::BranchExists.exit();
                     }
                     git::GitError::BaseBranchNotFound { .. } => {
                         eprintln!("error: {e}");
-                        std::process::exit(2);
+                        ExitCode::NotFound.exit();
                     }
                     _ => {}
                 }
@@ -457,23 +472,30 @@ fn run_remove(identifier: &str, force: bool, prune: bool, no_hooks: bool) -> any
             Ok(())
         }
         Err(e) => {
+            // Check for hook timeout first (more specific than hook failure)
+            if e.chain()
+                .any(|c| c.downcast_ref::<hooks::runner::HookTimeoutError>().is_some())
+            {
+                eprintln!("error: {e:#}");
+                ExitCode::HookTimeout.exit();
+            }
             // Check for pre_remove hook failure → exit code 4
             if e.downcast_ref::<cli::commands::remove::RemoveError>()
                 .is_some()
             {
                 eprintln!("error: {e:#}");
-                std::process::exit(4);
+                ExitCode::HookFailed.exit();
             }
             if let Some(git_err) = e.downcast_ref::<git::GitError>() {
                 if matches!(git_err, git::GitError::WorktreeNotFound { .. }) {
                     eprintln!("error: {e}");
-                    std::process::exit(2);
+                    ExitCode::NotFound.exit();
                 }
             }
             let msg = e.to_string();
             if msg.contains("not found") || msg.contains("not tracked") {
                 eprintln!("error: {e}");
-                std::process::exit(2);
+                ExitCode::NotFound.exit();
             }
             Err(e)
         }
@@ -498,7 +520,7 @@ fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
             let msg = e.to_string();
             if msg.contains("not found") || msg.contains("not tracked") {
                 eprintln!("error: {e}");
-                std::process::exit(2);
+                ExitCode::NotFound.exit();
             }
             Err(e)
         }
@@ -542,7 +564,7 @@ fn run_open(identifier: &str) -> anyhow::Result<()> {
             let msg = e.to_string();
             if msg.contains("not found") || msg.contains("not tracked") {
                 eprintln!("error: {e}");
-                std::process::exit(2);
+                ExitCode::NotFound.exit();
             }
             Err(e)
         }
@@ -622,7 +644,7 @@ fn run_status(
             let msg = e.to_string();
             if msg.contains("not found") {
                 eprintln!("error: {e}");
-                std::process::exit(2);
+                ExitCode::NotFound.exit();
             }
             Err(e)
         }
@@ -645,11 +667,11 @@ fn run_sync(
         None => {
             if dry_run {
                 eprintln!("error: --strategy is required with --dry-run (use --strategy rebase or --strategy merge)");
-                std::process::exit(8);
+                ExitCode::MissingRequiredFlag.exit();
             }
             if !std::io::stdin().is_terminal() {
                 eprintln!("error: --strategy is required in non-interactive mode (use --strategy rebase or --strategy merge)");
-                std::process::exit(8);
+                ExitCode::MissingRequiredFlag.exit();
             }
             eprint!("Sync strategy — (r)ebase or (m)erge? ");
             let mut input = String::new();
@@ -661,7 +683,7 @@ fn run_sync(
                 "m" | "merge" => SyncStrategy::Merge,
                 other => {
                     eprintln!("error: unknown strategy '{other}'. Use 'rebase' or 'merge'.");
-                    std::process::exit(1);
+                    ExitCode::GeneralError.exit();
                 }
             }
         }
@@ -747,25 +769,38 @@ fn run_sync(
             }
 
             // Exit 4 if post_sync hook failed (FR-24: Report — non-zero exit but sync completed)
-            if outcome.post_sync_error.is_some() {
-                std::process::exit(4);
+            if let Some(ref hook_err) = outcome.post_sync_error {
+                if hook_err
+                    .chain()
+                    .any(|c| c.downcast_ref::<hooks::runner::HookTimeoutError>().is_some())
+                {
+                    ExitCode::HookTimeout.exit();
+                }
+                ExitCode::HookFailed.exit();
             }
             Ok(())
         }
         Err(e) => {
+            // Check for hook timeout first (more specific than hook failure)
+            if e.chain()
+                .any(|c| c.downcast_ref::<hooks::runner::HookTimeoutError>().is_some())
+            {
+                eprintln!("error: {e:#}");
+                ExitCode::HookTimeout.exit();
+            }
             // Check for hook failure (pre_sync) via typed error
             if e.downcast_ref::<cli::commands::sync::SyncError>().is_some() {
                 eprintln!("error: {e:#}");
-                std::process::exit(4);
+                ExitCode::HookFailed.exit();
             }
             if let Some(git::GitError::MergeConflict { .. }) = e.downcast_ref::<git::GitError>() {
                 eprintln!("error: {e}");
-                std::process::exit(5);
+                ExitCode::GitError.exit();
             }
             let msg = e.to_string();
             if msg.contains("not found") || msg.contains("not tracked") {
                 eprintln!("error: {e}");
-                std::process::exit(2);
+                ExitCode::NotFound.exit();
             }
             Err(e)
         }
@@ -940,7 +975,7 @@ fn run_sync_all(
     }
 
     if has_failures {
-        std::process::exit(1);
+        ExitCode::GeneralError.exit();
     }
 
     Ok(())
@@ -958,7 +993,7 @@ fn run_init(force: bool) -> anyhow::Result<()> {
         Err(e) => {
             if e.downcast_ref::<cli::commands::init::InitError>().is_some() {
                 eprintln!("error: {e}");
-                std::process::exit(6);
+                ExitCode::ConfigError.exit();
             }
             Err(e)
         }
