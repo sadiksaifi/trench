@@ -217,7 +217,7 @@ fn main() -> anyhow::Result<()> {
     let json = cli.json;
     let porcelain = cli.porcelain;
 
-    match cli.command {
+    let result = match cli.command {
         Some(Commands::Create {
             branch,
             from,
@@ -279,7 +279,18 @@ fn main() -> anyhow::Result<()> {
         None => {
             anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
         }
+    };
+
+    // Catch-all: map unhandled typed errors to their exit codes before
+    // they fall through to anyhow's default "Error: ..." formatter.
+    if let Err(ref e) = result {
+        if e.downcast_ref::<git::GitError>().is_some() {
+            eprintln!("Error: {e}");
+            ExitCode::GitError.exit();
+        }
     }
+
+    result
 }
 
 fn run_create(
