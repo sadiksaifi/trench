@@ -135,9 +135,16 @@ pub fn execute_dry_run(
     let hooks = if no_hooks {
         None
     } else {
-        hooks_config.map(|h| RemoveDryRunHooks {
-            pre_remove: h.pre_remove.clone(),
-            post_remove: h.post_remove.clone(),
+        hooks_config.and_then(|h| {
+            let hooks = RemoveDryRunHooks {
+                pre_remove: h.pre_remove.clone(),
+                post_remove: h.post_remove.clone(),
+            };
+            if hooks.pre_remove.is_none() && hooks.post_remove.is_none() {
+                None
+            } else {
+                Some(hooks)
+            }
         })
     };
 
@@ -1325,5 +1332,36 @@ mod tests {
 
         assert!(plan.prune, "prune should be true");
         assert!(plan.hooks.is_none(), "no hooks configured");
+    }
+
+    #[test]
+    fn dry_run_empty_hooks_config_normalizes_to_none() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("empty-hooks");
+
+        // HooksConfig exists but both pre_remove and post_remove are None
+        let empty_hooks = crate::config::HooksConfig {
+            pre_create: None,
+            post_create: None,
+            pre_remove: None,
+            post_remove: None,
+            pre_sync: None,
+            post_sync: None,
+        };
+
+        let plan = execute_dry_run(
+            "empty-hooks",
+            repo_dir.path(),
+            Some(&db),
+            false,
+            Some(&empty_hooks),
+            false,
+        )
+        .expect("dry-run should succeed");
+
+        assert!(
+            plan.hooks.is_none(),
+            "empty hooks config should normalize to None, got: {:?}",
+            plan.hooks
+        );
     }
 }
