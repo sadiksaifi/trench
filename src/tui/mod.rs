@@ -160,6 +160,22 @@ impl App {
                     screens::detail::render(detail, frame, frame.area());
                 }
             }
+            Some(Screen::Create) => {
+                let placeholder =
+                    Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
+                frame.render_widget(placeholder, frame.area());
+            }
+            Some(Screen::SyncPicker) => {
+                if let Some(ref picker) = self.sync_picker_state {
+                    screens::sync_picker::render(picker, frame, frame.area());
+                }
+            }
+            Some(Screen::DeleteConfirm) => {
+                screens::list::render(&self.list_state, frame, frame.area());
+                if let Some(ref confirm) = self.delete_confirm_state {
+                    screens::delete_confirm::render(confirm, frame, frame.area());
+                }
+            }
             _ => screens::list::render(&self.list_state, frame, frame.area()),
         }
     }
@@ -1285,5 +1301,31 @@ mod tests {
         app.push_screen(Screen::SyncPicker);
         assert_eq!(app.active_screen(), Screen::SyncPicker);
         assert_eq!(app.nav_stack_depth(), 2);
+    }
+
+    #[test]
+    fn help_over_sync_picker_renders_sync_picker_underneath() {
+        let mut app = app_with_rows();
+        // Push SyncPicker, then Help
+        app.sync_picker_state =
+            Some(screens::sync_picker::SyncPickerState::new("feat-a"));
+        app.push_screen(Screen::SyncPicker);
+        app.push_screen(Screen::Help);
+        assert_eq!(app.active_screen(), Screen::Help);
+
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+        // Help overlay should be present
+        assert!(content.contains("Help"), "should render Help overlay");
+        // SyncPicker should be underneath (not list)
+        assert!(
+            content.contains("Sync strategy for"),
+            "should render SyncPicker underneath Help overlay, got: {:?}",
+            content.trim()
+        );
     }
 }
