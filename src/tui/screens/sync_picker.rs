@@ -44,7 +44,11 @@ impl SyncPickerState {
     pub fn confirmed_strategy(&self) -> Strategy {
         match self.selected {
             0 => Strategy::Rebase,
-            _ => Strategy::Merge,
+            1 => Strategy::Merge,
+            _ => {
+                debug_assert!(false, "invalid sync option index: {}", self.selected);
+                Strategy::Rebase
+            }
         }
     }
 
@@ -287,6 +291,14 @@ mod tests {
         let mut state = SyncPickerState::new("feat-auth");
         state.selected = 1;
         assert_eq!(state.confirmed_strategy(), Strategy::Merge);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid sync option index")]
+    fn confirmed_strategy_panics_in_debug_for_invalid_index() {
+        let mut state = SyncPickerState::new("feat-auth");
+        state.selected = 99;
+        let _ = state.confirmed_strategy();
     }
 
     #[test]
