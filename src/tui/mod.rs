@@ -757,6 +757,15 @@ mod tests {
     }
 
     #[test]
+    fn s_on_empty_list_does_not_push_sync_picker() {
+        let mut app = App::new();
+        // Empty list — no rows
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "s on empty list should stay on List");
+        assert!(app.sync_picker_state.is_none(), "sync_picker_state should remain None");
+    }
+
+    #[test]
     fn s_on_detail_pushes_sync_picker() {
         let mut app = App::new();
         app.detail_state = Some(sample_detail_state());
