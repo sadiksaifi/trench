@@ -162,7 +162,7 @@ mod tests {
         let buf = render_to_buffer(60, 30);
         let text = buffer_text(&buf);
         assert!(
-            text.contains("Esc") || text.contains("?"),
+            text.contains("Press ? or Esc to close"),
             "should contain dismiss hint"
         );
     }
