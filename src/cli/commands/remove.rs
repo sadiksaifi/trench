@@ -1133,17 +1133,22 @@ mod tests {
 
     // ── Dry-run tests ──────────────────────────────────────────────────
 
-    #[test]
-    fn dry_run_returns_plan_with_worktree_details_and_hooks() {
+    fn create_worktree_for_dry_run(
+        branch: &str,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Database,
+    ) {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let wt_root = tempfile::tempdir().unwrap();
         let db_dir = tempfile::tempdir().unwrap();
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
 
-        // Create a worktree first
         crate::cli::commands::create::execute(
-            "dry-run-test",
+            branch,
             None,
             repo_dir.path(),
             wt_root.path(),
@@ -1151,6 +1156,13 @@ mod tests {
             &db,
         )
         .expect("create should succeed");
+
+        (repo_dir, wt_root, db_dir, db)
+    }
+
+    #[test]
+    fn dry_run_returns_plan_with_worktree_details_and_hooks() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("dry-run-test");
 
         let hooks = sample_hooks_config();
 
@@ -1173,5 +1185,44 @@ mod tests {
         let plan_hooks = plan.hooks.unwrap();
         assert!(plan_hooks.pre_remove.is_some());
         assert!(plan_hooks.post_remove.is_some());
+    }
+
+    #[test]
+    fn dry_run_with_no_hooks_excludes_hooks() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("no-hooks-dry");
+
+        let hooks = sample_hooks_config();
+
+        let plan = execute_dry_run(
+            "no-hooks-dry",
+            repo_dir.path(),
+            Some(&db),
+            false,
+            Some(&hooks),
+            true, // no_hooks = true
+        )
+        .expect("dry-run should succeed");
+
+        assert!(plan.dry_run);
+        assert_eq!(plan.name, "no-hooks-dry");
+        assert!(plan.hooks.is_none(), "hooks should be None when --no-hooks");
+    }
+
+    #[test]
+    fn dry_run_with_prune_shows_prune_status() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("prune-dry");
+
+        let plan = execute_dry_run(
+            "prune-dry",
+            repo_dir.path(),
+            Some(&db),
+            true, // prune
+            None,
+            false,
+        )
+        .expect("dry-run should succeed");
+
+        assert!(plan.prune, "prune should be true");
+        assert!(plan.hooks.is_none(), "no hooks configured");
     }
 }
