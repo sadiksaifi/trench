@@ -68,8 +68,57 @@ impl SyncPickerState {
 }
 
 const SYNC_PICKER_FOOTER: &str = " ↑/↓ select  Enter confirm  Esc cancel ";
+const SYNC_RESULT_FOOTER: &str = " Enter dismiss  Esc back ";
 
 pub fn render(state: &SyncPickerState, frame: &mut Frame, area: Rect) {
+    if let Some(ref result) = state.result {
+        render_result(state, result, frame, area);
+    } else {
+        render_picker(state, frame, area);
+    }
+}
+
+fn render_result(
+    state: &SyncPickerState,
+    result: &SyncResultMessage,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(3), // title
+        Constraint::Min(1),   // result message
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+
+    // Title
+    let status = if result.success { "Sync Complete" } else { "Sync Failed" };
+    let title = Line::from(vec![
+        Span::styled(status, bold),
+        Span::raw(" — "),
+        Span::raw(&state.worktree_name),
+    ]);
+    frame.render_widget(
+        Paragraph::new(title).alignment(Alignment::Center),
+        chunks[0],
+    );
+
+    // Result message
+    let lines: Vec<Line> = result.message.lines().map(Line::from).collect();
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        chunks[1],
+    );
+
+    // Footer
+    let footer = Paragraph::new(Line::from(SYNC_RESULT_FOOTER))
+        .style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_widget(footer, chunks[2]);
+}
+
+fn render_picker(state: &SyncPickerState, frame: &mut Frame, area: Rect) {
     let bold = Style::default().add_modifier(Modifier::BOLD);
 
     let chunks = Layout::vertical([
@@ -260,5 +309,43 @@ mod tests {
         let buf = render_to_buffer(&state, 80, 15);
         let text = buffer_text(&buf);
         assert!(text.contains("▸"), "should show selection marker");
+    }
+
+    #[test]
+    fn renders_success_result_message() {
+        let mut state = SyncPickerState::new("feat-auth");
+        state.result = Some(SyncResultMessage {
+            success: true,
+            message: "Synced 'feat-auth' via rebase".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 15);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Synced"), "should show sync result message");
+        assert!(text.contains("rebase"), "should show strategy used");
+        assert!(!text.contains("▸"), "should NOT show picker marker in result mode");
+    }
+
+    #[test]
+    fn renders_failure_result_message() {
+        let mut state = SyncPickerState::new("feat-auth");
+        state.result = Some(SyncResultMessage {
+            success: false,
+            message: "Sync failed: worktree has uncommitted changes".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 15);
+        let text = buffer_text(&buf);
+        assert!(text.contains("failed"), "should show failure message");
+    }
+
+    #[test]
+    fn result_mode_shows_dismiss_footer() {
+        let mut state = SyncPickerState::new("feat-auth");
+        state.result = Some(SyncResultMessage {
+            success: true,
+            message: "Done".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 15);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Enter"), "result footer should show Enter to dismiss");
     }
 }
