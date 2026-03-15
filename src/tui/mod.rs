@@ -229,15 +229,24 @@ impl App {
     }
 
     fn handle_sync_picker_key(&mut self, key: KeyEvent) {
-        if let Some(ref mut picker) = self.sync_picker_state {
-            // In result mode, any key dismisses back to list
-            if picker.is_result_mode() {
-                match key.code {
-                    KeyCode::Enter | KeyCode::Char(' ') => self.pop_screen(),
-                    _ => {}
+        let in_result_mode = self
+            .sync_picker_state
+            .as_ref()
+            .is_some_and(|p| p.is_result_mode());
+        if in_result_mode {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    while self.active_screen() != Screen::List {
+                        self.pop_screen();
+                    }
+                    self.sync_picker_state = None;
                 }
-                return;
+                _ => {}
             }
+            return;
+        }
+
+        if let Some(ref mut picker) = self.sync_picker_state {
             match key.code {
                 KeyCode::Down | KeyCode::Char('j') => picker.select_next(),
                 KeyCode::Up | KeyCode::Char('k') => picker.select_previous(),
@@ -852,6 +861,27 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
+        assert!(app.sync_picker_state.is_none(), "sync_picker_state should be cleared");
+    }
+
+    #[test]
+    fn enter_in_result_mode_pops_to_list_from_detail_path() {
+        let mut app = app_with_rows();
+        // Simulate Detail → SyncPicker flow: nav stack = [List, Detail, SyncPicker]
+        app.detail_state = Some(sample_detail_state());
+        app.push_screen(Screen::Detail);
+        let mut state = screens::sync_picker::SyncPickerState::new("feat-a");
+        state.result = Some(screens::sync_picker::SyncResultMessage {
+            success: true,
+            message: "Synced successfully".into(),
+        });
+        app.sync_picker_state = Some(state);
+        app.push_screen(Screen::SyncPicker);
+        assert_eq!(app.nav_stack_depth(), 3);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "should pop all the way to List, not Detail");
+        assert!(app.sync_picker_state.is_none(), "sync_picker_state should be cleared");
     }
 
     #[test]
