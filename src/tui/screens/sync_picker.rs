@@ -1,3 +1,11 @@
+use ratatui::{
+    layout::{Alignment, Constraint, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
+    Frame,
+};
+
 /// View model for the sync strategy picker screen.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyncPickerState {
@@ -32,6 +40,56 @@ impl SyncPickerState {
     pub fn select_previous(&mut self) {
         self.selected = self.selected.saturating_sub(1);
     }
+}
+
+const SYNC_PICKER_FOOTER: &str = " ↑/↓ select  Enter confirm  Esc cancel ";
+
+pub fn render(state: &SyncPickerState, frame: &mut Frame, area: Rect) {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(3), // title + blank line
+        Constraint::Min(1),   // options
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+
+    // Title
+    let title = Line::from(vec![
+        Span::styled("Sync strategy for ", bold),
+        Span::styled(&state.worktree_name, bold),
+    ]);
+    frame.render_widget(
+        Paragraph::new(title).alignment(Alignment::Center),
+        chunks[0],
+    );
+
+    // Options
+    let options = state.options();
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, (label, desc)) in options.iter().enumerate() {
+        let marker = if i == state.selected { "▸ " } else { "  " };
+        let style = if i == state.selected {
+            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{label}"),
+            style,
+        )));
+        lines.push(Line::from(format!("    {desc}")));
+        lines.push(Line::from(""));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        chunks[1],
+    );
+
+    // Footer
+    let footer = Paragraph::new(Line::from(SYNC_PICKER_FOOTER))
+        .style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_widget(footer, chunks[2]);
 }
 
 #[cfg(test)]
@@ -91,5 +149,62 @@ mod tests {
         let mut state = SyncPickerState::new("feat-auth");
         state.select_previous();
         assert_eq!(state.selected, 0, "should stay at Rebase");
+    }
+
+    fn render_to_buffer(state: &SyncPickerState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(state, frame, frame.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        buf.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn renders_title_with_worktree_name() {
+        let state = SyncPickerState::new("feat-auth");
+        let buf = render_to_buffer(&state, 80, 15);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Sync strategy"), "should show title");
+        assert!(text.contains("feat-auth"), "should show worktree name");
+    }
+
+    #[test]
+    fn renders_rebase_and_merge_options() {
+        let state = SyncPickerState::new("feat-auth");
+        let buf = render_to_buffer(&state, 80, 15);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Rebase"), "should show Rebase option");
+        assert!(text.contains("Merge"), "should show Merge option");
+    }
+
+    #[test]
+    fn renders_option_descriptions() {
+        let state = SyncPickerState::new("feat-auth");
+        let buf = render_to_buffer(&state, 80, 15);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Replay your commits"), "should show Rebase description");
+        assert!(text.contains("merge commit"), "should show Merge description");
+    }
+
+    #[test]
+    fn renders_footer_with_keybindings() {
+        let state = SyncPickerState::new("feat-auth");
+        let buf = render_to_buffer(&state, 80, 15);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Enter confirm"), "footer should show Enter confirm");
+        assert!(text.contains("Esc cancel"), "footer should show Esc cancel");
+    }
+
+    #[test]
+    fn selected_option_has_marker() {
+        let state = SyncPickerState::new("feat-auth");
+        let buf = render_to_buffer(&state, 80, 15);
+        let text = buffer_text(&buf);
+        assert!(text.contains("▸"), "should show selection marker");
     }
 }

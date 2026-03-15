@@ -119,6 +119,15 @@ impl App {
                     frame.render_widget(placeholder, frame.area());
                 }
             }
+            Screen::SyncPicker => {
+                if let Some(ref picker) = self.sync_picker_state {
+                    screens::sync_picker::render(picker, frame, frame.area());
+                } else {
+                    let placeholder =
+                        Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
+                    frame.render_widget(placeholder, frame.area());
+                }
+            }
             _ => {
                 let placeholder =
                     Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
@@ -694,6 +703,23 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert!(app.is_running(), "o on detail should not crash or quit");
         assert_eq!(app.active_screen(), Screen::Detail);
+    }
+
+    #[test]
+    fn sync_picker_screen_renders_options_through_app() {
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+
+        let backend = ratatui::backend::TestBackend::new(80, 15);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+        assert!(content.contains("Rebase"), "should render Rebase option");
+        assert!(content.contains("Merge"), "should render Merge option");
+        assert!(content.contains("feat-auth"), "should show worktree name");
     }
 
     #[test]
