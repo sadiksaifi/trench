@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -44,6 +45,117 @@ pub struct RemoveResult {
     /// Whether the remote branch was pruned (only `true` if `--prune` was
     /// requested and the remote branch existed).
     pub pruned_remote: bool,
+}
+
+/// Plan produced by `--dry-run` showing what `trench remove` would do.
+#[derive(Debug, serde::Serialize)]
+pub struct RemoveDryRunPlan {
+    /// Always `true` — signals this is a preview, not a real operation.
+    pub dry_run: bool,
+    pub name: String,
+    pub branch: String,
+    pub path: String,
+    pub prune: bool,
+    pub hooks: Option<RemoveDryRunHooks>,
+}
+
+impl fmt::Display for RemoveDryRunPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Dry run — no changes will be made\n")?;
+        writeln!(f, "  Worktree:  {}", self.name)?;
+        writeln!(f, "  Branch:    {}", self.branch)?;
+        writeln!(f, "  Path:      {}", self.path)?;
+        writeln!(
+            f,
+            "  Prune:     {}",
+            if self.prune { "yes" } else { "no" }
+        )?;
+
+        match &self.hooks {
+            Some(hooks) if hooks.pre_remove.is_some() || hooks.post_remove.is_some() => {
+                writeln!(f, "  Hooks:")?;
+                if let Some(h) = &hooks.pre_remove {
+                    writeln!(f, "    pre_remove:")?;
+                    format_hook_def(f, h)?;
+                }
+                if let Some(h) = &hooks.post_remove {
+                    writeln!(f, "    post_remove:")?;
+                    format_hook_def(f, h)?;
+                }
+            }
+            _ => {
+                writeln!(f, "  Hooks:     (none)")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn format_hook_def(f: &mut fmt::Formatter<'_>, hook: &crate::config::HookDef) -> fmt::Result {
+    if let Some(copy) = &hook.copy {
+        writeln!(f, "      copy: {}", copy.join(", "))?;
+    }
+    if let Some(run) = &hook.run {
+        writeln!(f, "      run:  {}", run.join(", "))?;
+    }
+    if let Some(shell) = &hook.shell {
+        writeln!(f, "      shell: {shell}")?;
+    }
+    if let Some(timeout) = &hook.timeout_secs {
+        writeln!(f, "      timeout: {timeout}s")?;
+    }
+    Ok(())
+}
+
+/// Hook definitions included in a remove dry-run plan.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RemoveDryRunHooks {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_remove: Option<crate::config::HookDef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_remove: Option<crate::config::HookDef>,
+}
+
+/// Execute a dry-run of `trench remove <identifier>`.
+///
+/// Resolves the worktree and builds a plan, but performs no git operations,
+/// no DB writes, and no hook execution.
+pub fn execute_dry_run(
+    identifier: &str,
+    cwd: &Path,
+    db: Option<&Database>,
+    prune: bool,
+    hooks_config: Option<&HooksConfig>,
+    no_hooks: bool,
+) -> Result<RemoveDryRunPlan> {
+    let repo_info = crate::git::discover_repo(cwd)?;
+    let (_repo, wt) = crate::adopt::resolve_only(identifier, &repo_info, db)?;
+
+    let hooks = if no_hooks {
+        None
+    } else {
+        hooks_config.and_then(|h| {
+            let hooks = RemoveDryRunHooks {
+                pre_remove: h.pre_remove.clone(),
+                post_remove: h.post_remove.clone(),
+            };
+            if hooks.pre_remove.is_none() && hooks.post_remove.is_none() {
+                None
+            } else {
+                Some(hooks)
+            }
+        })
+    };
+
+    Ok(RemoveDryRunPlan {
+        dry_run: true,
+        name: wt.name.clone(),
+        branch: wt.branch.clone(),
+        path: wt.path.clone(),
+        prune,
+        hooks,
+    })
 }
 
 /// Execute the `trench remove <identifier>` command.
@@ -1073,5 +1185,183 @@ mod tests {
         // DB should still have removed_at set
         let wt_record = db.get_worktree(wt.id).unwrap().unwrap();
         assert!(wt_record.removed_at.is_some(), "removed_at should be set");
+    }
+
+    // ── Dry-run tests ──────────────────────────────────────────────────
+
+    fn create_worktree_for_dry_run(
+        branch: &str,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Database,
+    ) {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        crate::cli::commands::create::execute(
+            branch,
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        (repo_dir, wt_root, db_dir, db)
+    }
+
+    #[test]
+    fn dry_run_returns_plan_with_worktree_details_and_hooks() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("dry-run-test");
+
+        let hooks = sample_hooks_config();
+
+        let plan = execute_dry_run(
+            "dry-run-test",
+            repo_dir.path(),
+            Some(&db),
+            false, // prune
+            Some(&hooks),
+            false, // no_hooks
+        )
+        .expect("dry-run should succeed");
+
+        assert!(plan.dry_run);
+        assert_eq!(plan.name, "dry-run-test");
+        assert_eq!(plan.branch, "dry-run-test");
+        assert!(!plan.prune);
+        assert!(plan.hooks.is_some());
+
+        let plan_hooks = plan.hooks.unwrap();
+        assert!(plan_hooks.pre_remove.is_some());
+        assert!(plan_hooks.post_remove.is_some());
+    }
+
+    #[test]
+    fn dry_run_with_no_hooks_excludes_hooks() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("no-hooks-dry");
+
+        let hooks = sample_hooks_config();
+
+        let plan = execute_dry_run(
+            "no-hooks-dry",
+            repo_dir.path(),
+            Some(&db),
+            false,
+            Some(&hooks),
+            true, // no_hooks = true
+        )
+        .expect("dry-run should succeed");
+
+        assert!(plan.dry_run);
+        assert_eq!(plan.name, "no-hooks-dry");
+        assert!(plan.hooks.is_none(), "hooks should be None when --no-hooks");
+    }
+
+    #[test]
+    fn dry_run_display_shows_human_readable_plan() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("display-test");
+
+        let hooks = sample_hooks_config();
+
+        let plan = execute_dry_run(
+            "display-test",
+            repo_dir.path(),
+            Some(&db),
+            true,
+            Some(&hooks),
+            false,
+        )
+        .expect("dry-run should succeed");
+
+        let output = format!("{plan}");
+        assert!(output.contains("Dry run"), "should contain 'Dry run' header");
+        assert!(output.contains("display-test"), "should contain worktree name");
+        assert!(output.contains("pre_remove"), "should show pre_remove hook");
+        assert!(output.contains("post_remove"), "should show post_remove hook");
+        assert!(output.contains("Prune:"), "should mention prune status");
+    }
+
+    #[test]
+    fn dry_run_json_serialization_includes_all_fields() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("json-test");
+
+        let hooks = sample_hooks_config();
+
+        let plan = execute_dry_run(
+            "json-test",
+            repo_dir.path(),
+            Some(&db),
+            false,
+            Some(&hooks),
+            false,
+        )
+        .expect("dry-run should succeed");
+
+        let json_str = serde_json::to_string_pretty(&plan).expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["dry_run"], true);
+        assert_eq!(parsed["name"], "json-test");
+        assert_eq!(parsed["branch"], "json-test");
+        assert_eq!(parsed["prune"], false);
+        assert!(parsed["hooks"].is_object(), "hooks should be an object");
+        assert!(parsed["hooks"]["pre_remove"].is_object());
+        assert!(parsed["hooks"]["post_remove"].is_object());
+    }
+
+    #[test]
+    fn dry_run_with_prune_shows_prune_status() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("prune-dry");
+
+        let plan = execute_dry_run(
+            "prune-dry",
+            repo_dir.path(),
+            Some(&db),
+            true, // prune
+            None,
+            false,
+        )
+        .expect("dry-run should succeed");
+
+        assert!(plan.prune, "prune should be true");
+        assert!(plan.hooks.is_none(), "no hooks configured");
+    }
+
+    #[test]
+    fn dry_run_empty_hooks_config_normalizes_to_none() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("empty-hooks");
+
+        // HooksConfig exists but both pre_remove and post_remove are None
+        let empty_hooks = crate::config::HooksConfig {
+            pre_create: None,
+            post_create: None,
+            pre_remove: None,
+            post_remove: None,
+            pre_sync: None,
+            post_sync: None,
+        };
+
+        let plan = execute_dry_run(
+            "empty-hooks",
+            repo_dir.path(),
+            Some(&db),
+            false,
+            Some(&empty_hooks),
+            false,
+        )
+        .expect("dry-run should succeed");
+
+        assert!(
+            plan.hooks.is_none(),
+            "empty hooks config should normalize to None, got: {:?}",
+            plan.hooks
+        );
     }
 }

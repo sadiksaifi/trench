@@ -228,7 +228,7 @@ fn main() -> anyhow::Result<()> {
             force,
             prune,
             no_hooks,
-        }) => run_remove(&branch, force, prune, no_hooks),
+        }) => run_remove(&branch, force, prune, no_hooks, dry_run, json),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::Open { branch }) => run_open(&branch),
@@ -405,14 +405,19 @@ fn run_create(
     }
 }
 
-fn run_remove(identifier: &str, force: bool, prune: bool, no_hooks: bool) -> anyhow::Result<()> {
+fn run_remove(
+    identifier: &str,
+    force: bool,
+    prune: bool,
+    no_hooks: bool,
+    dry_run: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = paths::data_dir()?.join("trench.db");
-    let db = state::Database::open(&db_path)?;
 
     let repo_info = git::discover_repo(&cwd)?;
 
-    // Skip config I/O when --no-hooks is set (escape hatch)
+    // Load hooks config (skip config I/O when --no-hooks is set)
     let hooks_config = if no_hooks {
         None
     } else {
@@ -420,6 +425,34 @@ fn run_remove(identifier: &str, force: bool, prune: bool, no_hooks: bool) -> any
         let global_config = config::load_global_config()?;
         config::resolve_config(None, project_config.as_ref(), &global_config).hooks
     };
+
+    if dry_run {
+        let db_path = paths::data_dir_path()?.join("trench.db");
+        let db = if db_path.exists() {
+            Some(state::Database::open(&db_path)?)
+        } else {
+            None
+        };
+
+        let plan = cli::commands::remove::execute_dry_run(
+            identifier,
+            &cwd,
+            db.as_ref(),
+            prune,
+            hooks_config.as_ref(),
+            no_hooks,
+        )?;
+
+        if json {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        } else {
+            print!("{plan}");
+        }
+        return Ok(());
+    }
+
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
 
     // If not forced, resolve the worktree (adopting if unmanaged) for the prompt
     let resolved = if !force {
