@@ -22,6 +22,16 @@ impl SyncPickerState {
             ("Merge", "Create a merge commit combining both branches"),
         ]
     }
+
+    pub fn select_next(&mut self) {
+        if self.selected < 1 {
+            self.selected += 1;
+        }
+    }
+
+    pub fn select_previous(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
 }
 
 #[cfg(test)]
@@ -50,5 +60,36 @@ mod tests {
         let options = state.options();
         assert!(!options[0].1.is_empty(), "Rebase should have a description");
         assert!(!options[1].1.is_empty(), "Merge should have a description");
+    }
+
+    #[test]
+    fn select_next_moves_from_rebase_to_merge() {
+        let mut state = SyncPickerState::new("feat-auth");
+        assert_eq!(state.selected, 0);
+        state.select_next();
+        assert_eq!(state.selected, 1, "should move to Merge");
+    }
+
+    #[test]
+    fn select_next_clamps_at_merge() {
+        let mut state = SyncPickerState::new("feat-auth");
+        state.selected = 1;
+        state.select_next();
+        assert_eq!(state.selected, 1, "should stay at Merge");
+    }
+
+    #[test]
+    fn select_previous_moves_from_merge_to_rebase() {
+        let mut state = SyncPickerState::new("feat-auth");
+        state.selected = 1;
+        state.select_previous();
+        assert_eq!(state.selected, 0, "should move to Rebase");
+    }
+
+    #[test]
+    fn select_previous_clamps_at_rebase() {
+        let mut state = SyncPickerState::new("feat-auth");
+        state.select_previous();
+        assert_eq!(state.selected, 0, "should stay at Rebase");
     }
 }
