@@ -180,7 +180,13 @@ impl App {
         // Global keys handled at app level
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
-            (KeyCode::Char('?'), _) => self.push_screen(Screen::Help),
+            (KeyCode::Char('?'), _) => {
+                if self.active_screen() == Screen::Help {
+                    self.pop_screen();
+                } else {
+                    self.push_screen(Screen::Help);
+                }
+            }
             (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
                 match self.active_screen() {
                     Screen::DeleteConfirm => {
@@ -489,6 +495,46 @@ mod tests {
             "? should push Help screen"
         );
         assert_eq!(app.nav_stack_depth(), 2, "stack should have List + Help");
+    }
+
+    #[test]
+    fn question_mark_toggles_help_closed_when_already_on_help() {
+        let mut app = App::new();
+        // Open help
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Help);
+        assert_eq!(app.nav_stack_depth(), 2);
+
+        // Press ? again — should close help (toggle)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "? while on Help should pop back to previous screen"
+        );
+        assert_eq!(app.nav_stack_depth(), 1);
+    }
+
+    #[test]
+    fn question_mark_toggles_help_from_detail_screen() {
+        let mut app = app_with_rows();
+        // Navigate to detail
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Detail);
+
+        // Open help from detail
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Help);
+        assert_eq!(app.nav_stack_depth(), 3);
+
+        // Close help — should return to detail
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::Detail,
+            "? toggle should return to Detail, not List"
+        );
+        assert_eq!(app.nav_stack_depth(), 2);
     }
 
     #[test]
