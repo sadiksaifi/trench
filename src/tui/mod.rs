@@ -349,7 +349,18 @@ impl App {
                     self.push_screen(Screen::SyncPicker);
                 }
             }
-            KeyCode::Char('D') => {} // TODO: trigger delete with confirmation
+            KeyCode::Char('D') => {
+                if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
+                    self.delete_confirm_state = Some(
+                        screens::delete_confirm::DeleteConfirmState::new(
+                            &row.name,
+                            &row.path,
+                            &row.branch,
+                        ),
+                    );
+                    self.push_screen(Screen::DeleteConfirm);
+                }
+            }
             _ => {}
         }
     }
@@ -563,6 +574,7 @@ mod tests {
             WorktreeRow {
                 name: "feat-a".into(),
                 branch: "feat/a".into(),
+                path: "/tmp/wt/feat-a".into(),
                 status: "clean".into(),
                 ahead_behind: "+0/-0".into(),
                 managed: true,
@@ -570,6 +582,7 @@ mod tests {
             WorktreeRow {
                 name: "feat-b".into(),
                 branch: "feat/b".into(),
+                path: "/tmp/wt/feat-b".into(),
                 status: "~2".into(),
                 ahead_behind: "+1/-0".into(),
                 managed: true,
@@ -577,6 +590,7 @@ mod tests {
             WorktreeRow {
                 name: "main".into(),
                 branch: "main".into(),
+                path: "/tmp/wt/main".into(),
                 status: "clean".into(),
                 ahead_behind: "-".into(),
                 managed: false,
@@ -636,12 +650,31 @@ mod tests {
     }
 
     #[test]
-    fn shift_d_on_list_is_handled() {
+    fn d_on_list_pushes_delete_confirm() {
         let mut app = app_with_rows();
-        // D (shift+d) should not crash and should not quit or push a screen
         app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
         assert!(app.is_running());
+        assert_eq!(app.active_screen(), Screen::DeleteConfirm);
+        assert_eq!(app.nav_stack_depth(), 2);
+    }
+
+    #[test]
+    fn d_on_list_sets_delete_confirm_state_with_selected_worktree() {
+        let mut app = app_with_rows();
+        app.list_state.selected = 1; // select feat-b
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        let state = app.delete_confirm_state.as_ref().expect("delete_confirm_state should be set");
+        assert_eq!(state.worktree_name, "feat-b");
+        assert_eq!(state.worktree_path, "/tmp/wt/feat-b");
+        assert_eq!(state.branch, "feat/b");
+    }
+
+    #[test]
+    fn d_on_empty_list_does_not_push_delete_confirm() {
+        let mut app = App::new();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
         assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.delete_confirm_state.is_none());
     }
 
     #[test]
