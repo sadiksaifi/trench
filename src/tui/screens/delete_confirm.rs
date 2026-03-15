@@ -65,8 +65,17 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
         chunks[1],
     );
 
-    // Path
-    let path_line = Line::from(Span::raw(&state.worktree_path));
+    // Path (truncate with leading ellipsis if too long for 60-col dialog)
+    let max_path_len = 56;
+    let path_display = if state.worktree_path.len() > max_path_len {
+        format!(
+            "\u{2026}{}",
+            &state.worktree_path[state.worktree_path.len() - (max_path_len - 1)..]
+        )
+    } else {
+        state.worktree_path.clone()
+    };
+    let path_line = Line::from(Span::raw(path_display));
     frame.render_widget(
         Paragraph::new(path_line).alignment(Alignment::Center),
         chunks[2],
@@ -309,6 +318,16 @@ mod tests {
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
         assert!(text.contains("Enter/Space dismiss"), "result footer should show Enter/Space dismiss");
+    }
+
+    #[test]
+    fn long_path_is_truncated_with_ellipsis() {
+        let long_path = "/home/user/projects/company/very-long-project-name/.worktrees/feature-branch-with-extra-long-name";
+        let state = DeleteConfirmState::new("feat-auth", long_path, "feature/auth");
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("\u{2026}"), "long path should be truncated with ellipsis");
+        assert!(!text.contains(long_path), "full long path should NOT appear in dialog");
     }
 
     #[test]
