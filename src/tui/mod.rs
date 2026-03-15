@@ -42,6 +42,15 @@ pub fn run() -> Result<()> {
                     app.handle_key_event(key);
                 }
             }
+
+            if let Some(path) = app.editor_request.take() {
+                ratatui::restore();
+                let editor = std::env::var("EDITOR")
+                    .or_else(|_| std::env::var("VISUAL"))
+                    .unwrap_or_else(|_| "vi".into());
+                let _ = std::process::Command::new(&editor).arg(&path).status();
+                terminal = ratatui::init();
+            }
         }
         Ok(())
     })();
@@ -77,6 +86,7 @@ pub struct App {
     pub detail_state: Option<screens::detail::DetailState>,
     pub sync_picker_state: Option<screens::sync_picker::SyncPickerState>,
     pub delete_confirm_state: Option<screens::delete_confirm::DeleteConfirmState>,
+    pub editor_request: Option<String>,
 }
 
 impl App {
@@ -88,6 +98,7 @@ impl App {
             detail_state: None,
             sync_picker_state: None,
             delete_confirm_state: None,
+            editor_request: None,
         }
     }
 
@@ -352,7 +363,11 @@ impl App {
                     self.push_screen(Screen::SyncPicker);
                 }
             }
-            KeyCode::Char('o') => {} // TODO: open in $EDITOR
+            KeyCode::Char('o') => {
+                if let Some(ref detail) = self.detail_state {
+                    self.editor_request = Some(detail.path.clone());
+                }
+            }
             _ => {}
         }
     }
@@ -1012,12 +1027,18 @@ mod tests {
     }
 
     #[test]
-    fn o_on_detail_is_handled_without_crash() {
+    fn o_on_detail_sets_editor_request() {
         let mut app = App::new();
+        app.detail_state = Some(sample_detail_state());
         app.push_screen(Screen::Detail);
         app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert!(app.is_running(), "o on detail should not crash or quit");
         assert_eq!(app.active_screen(), Screen::Detail);
+        assert_eq!(
+            app.editor_request,
+            Some("/tmp/wt/feat-a".to_string()),
+            "o should set editor_request to worktree path"
+        );
     }
 
     #[test]
