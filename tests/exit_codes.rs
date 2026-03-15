@@ -279,6 +279,11 @@ fn dry_run_remove_does_not_delete_worktree() {
         .current_dir(tmp.path())
         .output()
         .expect("failed to run trench list");
+    assert!(
+        list_output.status.success(),
+        "trench list --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&list_output.stderr)
+    );
     let list_json: serde_json::Value =
         serde_json::from_slice(&list_output.stdout).expect("list should output valid JSON");
     let wt_path = list_json[0]["path"]
