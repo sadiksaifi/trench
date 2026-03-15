@@ -216,7 +216,13 @@ impl App {
 
     fn handle_detail_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('s') => {} // TODO: trigger sync
+            KeyCode::Char('s') => {
+                if let Some(ref detail) = self.detail_state {
+                    self.sync_picker_state =
+                        Some(screens::sync_picker::SyncPickerState::new(&detail.name));
+                    self.push_screen(Screen::SyncPicker);
+                }
+            }
             KeyCode::Char('o') => {} // TODO: open in $EDITOR
             _ => {}
         }
@@ -751,12 +757,15 @@ mod tests {
     }
 
     #[test]
-    fn s_on_detail_is_handled_without_crash() {
+    fn s_on_detail_pushes_sync_picker() {
         let mut app = App::new();
+        app.detail_state = Some(sample_detail_state());
         app.push_screen(Screen::Detail);
+
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
-        assert!(app.is_running(), "s on detail should not crash or quit");
-        assert_eq!(app.active_screen(), Screen::Detail);
+        assert_eq!(app.active_screen(), Screen::SyncPicker);
+        let picker = app.sync_picker_state.as_ref().expect("sync_picker_state should be set");
+        assert_eq!(picker.worktree_name, "feat-a");
     }
 
     #[test]
