@@ -15,6 +15,7 @@ pub enum Screen {
     Detail,
     Create,
     Help,
+    SyncPicker,
 }
 
 type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
@@ -73,6 +74,7 @@ pub struct App {
     nav_stack: Vec<Screen>,
     pub list_state: screens::list::ListState,
     pub detail_state: Option<screens::detail::DetailState>,
+    pub sync_picker_state: Option<screens::sync_picker::SyncPickerState>,
 }
 
 impl App {
@@ -82,6 +84,7 @@ impl App {
             nav_stack: vec![Screen::List],
             list_state: screens::list::ListState::new(vec![]),
             detail_state: None,
+            sync_picker_state: None,
         }
     }
 
@@ -113,6 +116,15 @@ impl App {
                 } else {
                     let placeholder = Paragraph::new("trench TUI — press q to quit")
                         .alignment(Alignment::Center);
+                    frame.render_widget(placeholder, frame.area());
+                }
+            }
+            Screen::SyncPicker => {
+                if let Some(ref picker) = self.sync_picker_state {
+                    screens::sync_picker::render(picker, frame, frame.area());
+                } else {
+                    let placeholder =
+                        Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
                     frame.render_widget(placeholder, frame.area());
                 }
             }
@@ -168,6 +180,7 @@ impl App {
         match self.active_screen() {
             Screen::List => self.handle_list_key(key),
             Screen::Detail => self.handle_detail_key(key),
+            Screen::SyncPicker => self.handle_sync_picker_key(key),
             Screen::Create => {}
             Screen::Help => {}
         }
@@ -203,9 +216,90 @@ impl App {
 
     fn handle_detail_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('s') => {} // TODO: trigger sync
+            KeyCode::Char('s') => {
+                if let Some(ref detail) = self.detail_state {
+                    self.sync_picker_state =
+                        Some(screens::sync_picker::SyncPickerState::new(&detail.name));
+                    self.push_screen(Screen::SyncPicker);
+                }
+            }
             KeyCode::Char('o') => {} // TODO: open in $EDITOR
             _ => {}
+        }
+    }
+
+    fn handle_sync_picker_key(&mut self, key: KeyEvent) {
+        let in_result_mode = self
+            .sync_picker_state
+            .as_ref()
+            .is_some_and(|p| p.is_result_mode());
+        if in_result_mode {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    while self.active_screen() != Screen::List {
+                        self.pop_screen();
+                    }
+                    self.sync_picker_state = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if let Some(ref mut picker) = self.sync_picker_state {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => picker.select_next(),
+                KeyCode::Up | KeyCode::Char('k') => picker.select_previous(),
+                KeyCode::Enter => self.execute_sync(),
+                _ => {}
+            }
+        }
+    }
+
+    fn execute_sync(&mut self) {
+        let picker = match self.sync_picker_state.as_ref() {
+            Some(p) => p,
+            None => return,
+        };
+        let strategy = picker.confirmed_strategy();
+        let worktree_name = picker.worktree_name.clone();
+
+        let Some((cwd, db)) = Self::open_db() else {
+            if let Some(ref mut p) = self.sync_picker_state {
+                p.result = Some(screens::sync_picker::SyncResultMessage {
+                    success: false,
+                    message: "Failed to open database".into(),
+                });
+            }
+            return;
+        };
+
+        match crate::cli::commands::sync::execute(&worktree_name, &cwd, &db, strategy) {
+            Ok(result) => {
+                let msg = format!(
+                    "Synced '{}' via {}\nBefore: +{}/-{}  After: +{}/-{}",
+                    result.name,
+                    result.strategy,
+                    result.before_ahead,
+                    result.before_behind,
+                    result.after_ahead,
+                    result.after_behind,
+                );
+                if let Some(ref mut p) = self.sync_picker_state {
+                    p.result = Some(screens::sync_picker::SyncResultMessage {
+                        success: true,
+                        message: msg,
+                    });
+                }
+            }
+            Err(e) => {
+                if let Some(ref mut p) = self.sync_picker_state {
+                    p.result = Some(screens::sync_picker::SyncResultMessage {
+                        success: false,
+                        message: format!("Sync failed: {e:#}"),
+                    });
+                }
+            }
         }
     }
 
@@ -233,7 +327,13 @@ impl App {
             KeyCode::Char('n') => self.push_screen(Screen::Create),
             KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
-            KeyCode::Char('s') => {} // TODO: trigger sync
+            KeyCode::Char('s') => {
+                if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
+                    self.sync_picker_state =
+                        Some(screens::sync_picker::SyncPickerState::new(&row.name));
+                    self.push_screen(Screen::SyncPicker);
+                }
+            }
             KeyCode::Char('D') => {} // TODO: trigger delete with confirmation
             _ => {}
         }
@@ -263,9 +363,9 @@ mod tests {
     }
 
     #[test]
-    fn screen_enum_has_four_variants() {
-        // Verify all four screen variants exist and are distinct
-        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help];
+    fn screen_enum_has_five_variants() {
+        // Verify all five screen variants exist and are distinct
+        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help, Screen::SyncPicker];
         for (i, a) in screens.iter().enumerate() {
             for (j, b) in screens.iter().enumerate() {
                 if i == j {
@@ -502,12 +602,22 @@ mod tests {
     }
 
     #[test]
-    fn s_on_list_is_handled() {
+    fn s_on_list_pushes_sync_picker() {
         let mut app = app_with_rows();
-        // s should not crash and should not quit or push a screen
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert!(app.is_running());
-        assert_eq!(app.active_screen(), Screen::List);
+        assert_eq!(app.active_screen(), Screen::SyncPicker);
+        assert_eq!(app.nav_stack_depth(), 2);
+    }
+
+    #[test]
+    fn s_on_list_sets_sync_picker_state_with_selected_worktree() {
+        let mut app = app_with_rows();
+        // Select second row
+        app.list_state.selected = 1;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        let state = app.sync_picker_state.as_ref().expect("sync_picker_state should be set");
+        assert_eq!(state.worktree_name, "feat-b");
     }
 
     #[test]
@@ -656,12 +766,24 @@ mod tests {
     }
 
     #[test]
-    fn s_on_detail_is_handled_without_crash() {
+    fn s_on_empty_list_does_not_push_sync_picker() {
         let mut app = App::new();
-        app.push_screen(Screen::Detail);
+        // Empty list — no rows
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
-        assert!(app.is_running(), "s on detail should not crash or quit");
-        assert_eq!(app.active_screen(), Screen::Detail);
+        assert_eq!(app.active_screen(), Screen::List, "s on empty list should stay on List");
+        assert!(app.sync_picker_state.is_none(), "sync_picker_state should remain None");
+    }
+
+    #[test]
+    fn s_on_detail_pushes_sync_picker() {
+        let mut app = App::new();
+        app.detail_state = Some(sample_detail_state());
+        app.push_screen(Screen::Detail);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::SyncPicker);
+        let picker = app.sync_picker_state.as_ref().expect("sync_picker_state should be set");
+        assert_eq!(picker.worktree_name, "feat-a");
     }
 
     #[test]
@@ -671,5 +793,133 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert!(app.is_running(), "o on detail should not crash or quit");
         assert_eq!(app.active_screen(), Screen::Detail);
+    }
+
+    #[test]
+    fn arrow_down_on_sync_picker_selects_merge() {
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 1, "down should select Merge");
+    }
+
+    #[test]
+    fn arrow_up_on_sync_picker_selects_rebase() {
+        let mut app = App::new();
+        let mut state = screens::sync_picker::SyncPickerState::new("feat-auth");
+        state.selected = 1;
+        app.sync_picker_state = Some(state);
+        app.push_screen(Screen::SyncPicker);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0, "up should select Rebase");
+    }
+
+    #[test]
+    fn j_k_keys_work_on_sync_picker() {
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 1, "j should move down");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0, "k should move up");
+    }
+
+    #[test]
+    fn enter_on_sync_picker_triggers_sync_and_sets_result() {
+        // Without a real git repo, execute_sync will fail — but it should
+        // set a result message (failure) and stay on the SyncPicker screen.
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Should still be on SyncPicker (showing result)
+        assert_eq!(app.active_screen(), Screen::SyncPicker);
+        let picker = app.sync_picker_state.as_ref().unwrap();
+        assert!(picker.is_result_mode(), "should be in result mode after Enter");
+        assert!(picker.result.is_some());
+    }
+
+    #[test]
+    fn enter_in_result_mode_pops_back_to_list() {
+        let mut app = App::new();
+        let mut state = screens::sync_picker::SyncPickerState::new("feat-auth");
+        state.result = Some(screens::sync_picker::SyncResultMessage {
+            success: true,
+            message: "Synced successfully".into(),
+        });
+        app.sync_picker_state = Some(state);
+        app.push_screen(Screen::SyncPicker);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
+        assert!(app.sync_picker_state.is_none(), "sync_picker_state should be cleared");
+    }
+
+    #[test]
+    fn enter_in_result_mode_pops_to_list_from_detail_path() {
+        let mut app = app_with_rows();
+        // Simulate Detail → SyncPicker flow: nav stack = [List, Detail, SyncPicker]
+        app.detail_state = Some(sample_detail_state());
+        app.push_screen(Screen::Detail);
+        let mut state = screens::sync_picker::SyncPickerState::new("feat-a");
+        state.result = Some(screens::sync_picker::SyncResultMessage {
+            success: true,
+            message: "Synced successfully".into(),
+        });
+        app.sync_picker_state = Some(state);
+        app.push_screen(Screen::SyncPicker);
+        assert_eq!(app.nav_stack_depth(), 3);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "should pop all the way to List, not Detail");
+        assert!(app.sync_picker_state.is_none(), "sync_picker_state should be cleared");
+    }
+
+    #[test]
+    fn sync_picker_screen_renders_options_through_app() {
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+
+        let backend = ratatui::backend::TestBackend::new(80, 15);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+        assert!(content.contains("Rebase"), "should render Rebase option");
+        assert!(content.contains("Merge"), "should render Merge option");
+        assert!(content.contains("feat-auth"), "should show worktree name");
+    }
+
+    #[test]
+    fn screen_enum_has_sync_picker_variant() {
+        let screen = Screen::SyncPicker;
+        assert_ne!(screen, Screen::List);
+        assert_ne!(screen, Screen::Detail);
+    }
+
+    #[test]
+    fn app_has_sync_picker_state_initially_none() {
+        let app = App::new();
+        assert!(app.sync_picker_state.is_none());
+    }
+
+    #[test]
+    fn push_sync_picker_screen_works() {
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+        assert_eq!(app.active_screen(), Screen::SyncPicker);
+        assert_eq!(app.nav_stack_depth(), 2);
     }
 }
