@@ -73,7 +73,7 @@ impl SyncPickerState {
     }
 }
 
-const SYNC_PICKER_FOOTER: &str = " ↑/↓ select  Enter confirm  Esc cancel ";
+const SYNC_PICKER_FOOTER: &str = " ↑/↓ or j/k select  Enter confirm  Esc cancel ";
 const SYNC_RESULT_FOOTER: &str = " Enter dismiss  Esc back ";
 
 pub fn render(state: &SyncPickerState, frame: &mut Frame, area: Rect) {
