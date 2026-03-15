@@ -11,7 +11,7 @@
 //!   7: Hook timeout
 //!   8: Missing required flag
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn trench_bin() -> PathBuf {
@@ -246,5 +246,76 @@ fn exit_code_1_sync_branch_with_all_flag() {
         Some(1),
         "sync with both --all and <BRANCH> should exit 1, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ── Dry-run tests ─────────────────────────────────────────────────────
+
+/// Helper: create a worktree via trench so we can test dry-run removal.
+fn create_worktree(repo_dir: &Path, branch: &str) {
+    let output = Command::new(trench_bin())
+        .args(["create", branch])
+        .current_dir(repo_dir)
+        .output()
+        .expect("failed to run trench create");
+    assert!(
+        output.status.success(),
+        "trench create should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn dry_run_remove_does_not_delete_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    // Create a worktree first
+    create_worktree(tmp.path(), "dry-run-integ");
+
+    // Get the worktree path from list
+    let list_output = Command::new(trench_bin())
+        .args(["list", "--json"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench list");
+    let list_json: serde_json::Value =
+        serde_json::from_slice(&list_output.stdout).expect("list should output valid JSON");
+    let wt_path = list_json[0]["path"]
+        .as_str()
+        .expect("should have worktree path");
+    assert!(
+        Path::new(wt_path).exists(),
+        "worktree should exist before dry-run"
+    );
+
+    // Run remove with --dry-run
+    let output = Command::new(trench_bin())
+        .args(["remove", "dry-run-integ", "--force", "--dry-run"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench remove --dry-run");
+
+    assert!(
+        output.status.success(),
+        "dry-run remove should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify worktree still exists (no side effects)
+    assert!(
+        Path::new(wt_path).exists(),
+        "worktree should still exist after dry-run"
+    );
+
+    // Verify stdout contains plan info
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Dry run"),
+        "stdout should contain dry-run plan, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("dry-run-integ"),
+        "stdout should mention the worktree name"
     );
 }
