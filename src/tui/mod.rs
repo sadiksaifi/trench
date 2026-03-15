@@ -138,11 +138,29 @@ impl App {
                     screens::delete_confirm::render(confirm, frame, frame.area());
                 }
             }
-            _ => {
+            Screen::Help => {
+                // Render underlying screen first, then overlay help
+                self.render_underlying_screen(frame);
+                screens::help::render(frame, frame.area());
+            }
+            Screen::Create => {
                 let placeholder =
                     Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
                 frame.render_widget(placeholder, frame.area());
             }
+        }
+    }
+
+    /// Render the screen underneath the current overlay (e.g. for Help).
+    fn render_underlying_screen(&self, frame: &mut Frame) {
+        let underlying = self.nav_stack.iter().rev().nth(1).copied();
+        match underlying {
+            Some(Screen::Detail) => {
+                if let Some(ref detail) = self.detail_state {
+                    screens::detail::render(detail, frame, frame.area());
+                }
+            }
+            _ => screens::list::render(&self.list_state, frame, frame.area()),
         }
     }
 
@@ -863,9 +881,9 @@ mod tests {
     }
 
     #[test]
-    fn non_list_screen_renders_placeholder() {
+    fn create_screen_renders_placeholder() {
         let mut app = App::new();
-        app.push_screen(Screen::Help);
+        app.push_screen(Screen::Create);
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.ui(frame)).unwrap();
@@ -873,8 +891,31 @@ mod tests {
         let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
         assert!(
             content.contains("trench TUI"),
-            "non-list screens should show placeholder, got: {:?}",
+            "Create screen should show placeholder, got: {:?}",
             content.trim()
+        );
+    }
+
+    #[test]
+    fn help_screen_renders_help_overlay_not_placeholder() {
+        let mut app = App::new();
+        app.push_screen(Screen::Help);
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(
+            content.contains("Help"),
+            "Help screen should render help overlay with title"
+        );
+        assert!(
+            content.contains("Global"),
+            "Help overlay should show Global group header"
+        );
+        assert!(
+            content.contains("List"),
+            "Help overlay should show List group header"
         );
     }
 

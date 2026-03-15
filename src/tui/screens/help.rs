@@ -1,5 +1,8 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Alignment, Constraint, Flex, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -50,13 +53,119 @@ pub fn keybinding_groups() -> &'static [KeybindingGroup] {
     GROUPS
 }
 
-pub fn render(_frame: &mut Frame, _area: Rect) {
-    // TODO
+/// Render the help overlay centered within `area`.
+pub fn render(frame: &mut Frame, area: Rect) {
+    let groups = keybinding_groups();
+
+    // Build lines from keybinding data
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    for (i, group) in groups.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(group.context, bold)));
+        for entry in group.bindings {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:12}", entry.key), bold),
+                Span::raw(entry.description),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Press ? or Esc to close",
+        dim,
+    )));
+
+    // Size the dialog to fit content + border
+    let content_height = lines.len() as u16;
+    let dialog_width = 44;
+    let dialog_height = content_height + 2; // +2 for top/bottom border
+
+    let dialog_area = centered_rect(dialog_width, dialog_height, area);
+    frame.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Help ")
+        .title_alignment(Alignment::Center);
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, dialog_area);
+}
+
+/// Compute a centered rectangle within `area`.
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let [area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [area] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(area);
+    area
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn render_to_buffer(width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        buf.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn render_shows_help_title_in_border() {
+        let buf = render_to_buffer(60, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Help"), "should contain 'Help' title in border");
+    }
+
+    #[test]
+    fn render_shows_all_group_headers() {
+        let buf = render_to_buffer(60, 30);
+        let text = buffer_text(&buf);
+        for group in keybinding_groups() {
+            assert!(
+                text.contains(group.context),
+                "should contain group header '{}'",
+                group.context
+            );
+        }
+    }
+
+    #[test]
+    fn render_shows_keybinding_entries() {
+        let buf = render_to_buffer(60, 30);
+        let text = buffer_text(&buf);
+        // Check a sample of keybindings appear
+        assert!(text.contains("Toggle help overlay"), "should show '?' description");
+        assert!(text.contains("Move down"), "should show j/↓ description");
+        assert!(text.contains("Sync worktree"), "should show sync description");
+    }
+
+    #[test]
+    fn render_shows_dismiss_hint() {
+        let buf = render_to_buffer(60, 30);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Esc") || text.contains("?"),
+            "should contain dismiss hint"
+        );
+    }
 
     #[test]
     fn keybinding_groups_returns_global_list_and_detail_contexts() {
