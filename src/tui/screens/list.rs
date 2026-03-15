@@ -19,6 +19,7 @@ use ratatui::{
 pub struct WorktreeRow {
     pub name: String,
     pub branch: String,
+    pub path: String,
     pub status: String,
     pub ahead_behind: String,
     pub managed: bool,
@@ -75,6 +76,7 @@ pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Resul
         rows.push(WorktreeRow {
             name: wt.name.clone(),
             branch: wt.branch.clone(),
+            path: wt.path.clone(),
             status: status.0,
             ahead_behind: status.1,
             managed: true,
@@ -94,6 +96,7 @@ pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Resul
             rows.push(WorktreeRow {
                 name: gw.name.clone(),
                 branch,
+                path: gw.path.to_string_lossy().to_string(),
                 status: status.0,
                 ahead_behind: status.1,
                 managed: false,
@@ -122,6 +125,7 @@ pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Resul
                 rows.push(WorktreeRow {
                     name: sw.name.clone(),
                     branch,
+                    path: sw.path.to_string_lossy().to_string(),
                     status: status.0,
                     ahead_behind: status.1,
                     managed: false,
@@ -242,6 +246,7 @@ mod tests {
             WorktreeRow {
                 name: "feature-auth".into(),
                 branch: "feature/auth".into(),
+                path: "/tmp/wt/feature-auth".into(),
                 status: "clean".into(),
                 ahead_behind: "+1/-0".into(),
                 managed: true,
@@ -249,6 +254,7 @@ mod tests {
             WorktreeRow {
                 name: "fix-bug".into(),
                 branch: "fix/bug".into(),
+                path: "/tmp/wt/fix-bug".into(),
                 status: "~3".into(),
                 ahead_behind: "+0/-2".into(),
                 managed: true,
@@ -256,6 +262,7 @@ mod tests {
             WorktreeRow {
                 name: "main".into(),
                 branch: "main".into(),
+                path: "/tmp/wt/main".into(),
                 status: "clean".into(),
                 ahead_behind: "-".into(),
                 managed: false,

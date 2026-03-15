@@ -16,6 +16,7 @@ pub enum Screen {
     Create,
     Help,
     SyncPicker,
+    DeleteConfirm,
 }
 
 type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
@@ -75,6 +76,7 @@ pub struct App {
     pub list_state: screens::list::ListState,
     pub detail_state: Option<screens::detail::DetailState>,
     pub sync_picker_state: Option<screens::sync_picker::SyncPickerState>,
+    pub delete_confirm_state: Option<screens::delete_confirm::DeleteConfirmState>,
 }
 
 impl App {
@@ -85,6 +87,7 @@ impl App {
             list_state: screens::list::ListState::new(vec![]),
             detail_state: None,
             sync_picker_state: None,
+            delete_confirm_state: None,
         }
     }
 
@@ -126,6 +129,13 @@ impl App {
                     let placeholder =
                         Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
                     frame.render_widget(placeholder, frame.area());
+                }
+            }
+            Screen::DeleteConfirm => {
+                // Render list underneath, then overlay the dialog
+                screens::list::render(&self.list_state, frame, frame.area());
+                if let Some(ref confirm) = self.delete_confirm_state {
+                    screens::delete_confirm::render(confirm, frame, frame.area());
                 }
             }
             _ => {
@@ -171,7 +181,18 @@ impl App {
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
             (KeyCode::Char('?'), _) => self.push_screen(Screen::Help),
-            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => self.pop_screen(),
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+                match self.active_screen() {
+                    Screen::DeleteConfirm => {
+                        self.delete_confirm_state = None;
+                    }
+                    Screen::SyncPicker => {
+                        self.sync_picker_state = None;
+                    }
+                    _ => {}
+                }
+                self.pop_screen();
+            }
             _ => self.handle_screen_key(key),
         }
     }
@@ -181,8 +202,76 @@ impl App {
             Screen::List => self.handle_list_key(key),
             Screen::Detail => self.handle_detail_key(key),
             Screen::SyncPicker => self.handle_sync_picker_key(key),
+            Screen::DeleteConfirm => self.handle_delete_confirm_key(key),
             Screen::Create => {}
             Screen::Help => {}
+        }
+    }
+
+    fn handle_delete_confirm_key(&mut self, key: KeyEvent) {
+        let in_result_mode = self
+            .delete_confirm_state
+            .as_ref()
+            .is_some_and(|s| s.is_result_mode());
+
+        if in_result_mode {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.delete_confirm_state = None;
+                    while self.active_screen() != Screen::List {
+                        self.pop_screen();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') => self.execute_delete(),
+            KeyCode::Char('n') => {
+                self.delete_confirm_state = None;
+                self.pop_screen();
+            }
+            _ => {}
+        }
+    }
+
+    fn execute_delete(&mut self) {
+        let confirm = match self.delete_confirm_state.as_ref() {
+            Some(c) => c,
+            None => return,
+        };
+        let worktree_name = confirm.worktree_name.clone();
+
+        let Some((cwd, db)) = Self::open_db() else {
+            if let Some(ref mut c) = self.delete_confirm_state {
+                c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                    success: false,
+                    message: "Failed to open database".into(),
+                });
+            }
+            return;
+        };
+
+        match crate::cli::commands::remove::execute(&worktree_name, &cwd, &db, false) {
+            Ok(result) => {
+                let msg = format!("Removed '{}'", result.name);
+                if let Some(ref mut c) = self.delete_confirm_state {
+                    c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                        success: true,
+                        message: msg,
+                    });
+                }
+            }
+            Err(e) => {
+                if let Some(ref mut c) = self.delete_confirm_state {
+                    c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                        success: false,
+                        message: format!("Delete failed: {e:#}"),
+                    });
+                }
+            }
         }
     }
 
@@ -334,7 +423,18 @@ impl App {
                     self.push_screen(Screen::SyncPicker);
                 }
             }
-            KeyCode::Char('D') => {} // TODO: trigger delete with confirmation
+            KeyCode::Char('D') => {
+                if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
+                    self.delete_confirm_state = Some(
+                        screens::delete_confirm::DeleteConfirmState::new(
+                            &row.name,
+                            &row.path,
+                            &row.branch,
+                        ),
+                    );
+                    self.push_screen(Screen::DeleteConfirm);
+                }
+            }
             _ => {}
         }
     }
@@ -363,9 +463,9 @@ mod tests {
     }
 
     #[test]
-    fn screen_enum_has_five_variants() {
-        // Verify all five screen variants exist and are distinct
-        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help, Screen::SyncPicker];
+    fn screen_enum_has_six_variants() {
+        // Verify all six screen variants exist and are distinct
+        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help, Screen::SyncPicker, Screen::DeleteConfirm];
         for (i, a) in screens.iter().enumerate() {
             for (j, b) in screens.iter().enumerate() {
                 if i == j {
@@ -548,6 +648,7 @@ mod tests {
             WorktreeRow {
                 name: "feat-a".into(),
                 branch: "feat/a".into(),
+                path: "/tmp/wt/feat-a".into(),
                 status: "clean".into(),
                 ahead_behind: "+0/-0".into(),
                 managed: true,
@@ -555,6 +656,7 @@ mod tests {
             WorktreeRow {
                 name: "feat-b".into(),
                 branch: "feat/b".into(),
+                path: "/tmp/wt/feat-b".into(),
                 status: "~2".into(),
                 ahead_behind: "+1/-0".into(),
                 managed: true,
@@ -562,6 +664,7 @@ mod tests {
             WorktreeRow {
                 name: "main".into(),
                 branch: "main".into(),
+                path: "/tmp/wt/main".into(),
                 status: "clean".into(),
                 ahead_behind: "-".into(),
                 managed: false,
@@ -621,12 +724,31 @@ mod tests {
     }
 
     #[test]
-    fn shift_d_on_list_is_handled() {
+    fn d_on_list_pushes_delete_confirm() {
         let mut app = app_with_rows();
-        // D (shift+d) should not crash and should not quit or push a screen
         app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
         assert!(app.is_running());
+        assert_eq!(app.active_screen(), Screen::DeleteConfirm);
+        assert_eq!(app.nav_stack_depth(), 2);
+    }
+
+    #[test]
+    fn d_on_list_sets_delete_confirm_state_with_selected_worktree() {
+        let mut app = app_with_rows();
+        app.list_state.selected = 1; // select feat-b
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        let state = app.delete_confirm_state.as_ref().expect("delete_confirm_state should be set");
+        assert_eq!(state.worktree_name, "feat-b");
+        assert_eq!(state.worktree_path, "/tmp/wt/feat-b");
+        assert_eq!(state.branch, "feat/b");
+    }
+
+    #[test]
+    fn d_on_empty_list_does_not_push_delete_confirm() {
+        let mut app = App::new();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
         assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.delete_confirm_state.is_none());
     }
 
     #[test]
@@ -912,6 +1034,161 @@ mod tests {
     fn app_has_sync_picker_state_initially_none() {
         let app = App::new();
         assert!(app.sync_picker_state.is_none());
+    }
+
+    #[test]
+    fn app_has_delete_confirm_state_initially_none() {
+        let app = App::new();
+        assert!(app.delete_confirm_state.is_none());
+    }
+
+    #[test]
+    fn push_delete_confirm_screen_works() {
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+        assert_eq!(app.active_screen(), Screen::DeleteConfirm);
+        assert_eq!(app.nav_stack_depth(), 2);
+    }
+
+    #[test]
+    fn enter_on_delete_confirm_triggers_delete_and_sets_result() {
+        // Without a real git repo, execute_delete will fail — but it should
+        // set a result message (failure) and stay on the DeleteConfirm screen.
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.active_screen(), Screen::DeleteConfirm);
+        let state = app.delete_confirm_state.as_ref().unwrap();
+        assert!(state.is_result_mode(), "should be in result mode after Enter");
+        assert!(state.result.is_some());
+    }
+
+    #[test]
+    fn y_on_delete_confirm_triggers_delete_and_sets_result() {
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        assert_eq!(app.active_screen(), Screen::DeleteConfirm);
+        let state = app.delete_confirm_state.as_ref().unwrap();
+        assert!(state.is_result_mode(), "y should also trigger delete");
+    }
+
+    #[test]
+    fn n_on_delete_confirm_cancels_dialog() {
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        assert_eq!(app.active_screen(), Screen::List, "n should pop back to list");
+        assert!(app.delete_confirm_state.is_none(), "state should be cleared on cancel");
+    }
+
+    #[test]
+    fn enter_in_delete_result_mode_pops_to_list() {
+        let mut app = App::new();
+        let mut state = screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        );
+        state.result = Some(screens::delete_confirm::DeleteResultMessage {
+            success: true,
+            message: "Removed successfully".into(),
+        });
+        app.delete_confirm_state = Some(state);
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
+        assert!(app.delete_confirm_state.is_none(), "state should be cleared");
+    }
+
+    #[test]
+    fn space_in_delete_result_mode_pops_to_list() {
+        let mut app = App::new();
+        let mut state = screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        );
+        state.result = Some(screens::delete_confirm::DeleteResultMessage {
+            success: true,
+            message: "Done".into(),
+        });
+        app.delete_confirm_state = Some(state);
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Space in result mode should pop to list");
+        assert!(app.delete_confirm_state.is_none());
+    }
+
+    #[test]
+    fn esc_on_delete_confirm_clears_state() {
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Esc should pop back to List");
+        assert!(app.delete_confirm_state.is_none(), "Esc should clear delete_confirm_state");
+    }
+
+    #[test]
+    fn q_on_delete_confirm_clears_state() {
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.delete_confirm_state.is_none(), "q should clear delete_confirm_state");
+    }
+
+    #[test]
+    fn esc_on_delete_result_mode_clears_state() {
+        let mut app = App::new();
+        let mut state = screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        );
+        state.result = Some(screens::delete_confirm::DeleteResultMessage {
+            success: true,
+            message: "Done".into(),
+        });
+        app.delete_confirm_state = Some(state);
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Esc in result mode should pop to List");
+        assert!(app.delete_confirm_state.is_none(), "Esc in result mode should clear state");
+    }
+
+    #[test]
+    fn esc_on_sync_picker_clears_state() {
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.sync_picker_state.is_none(), "Esc should clear sync_picker_state");
     }
 
     #[test]
