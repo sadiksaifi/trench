@@ -16,6 +16,7 @@ pub enum Screen {
     Create,
     Help,
     SyncPicker,
+    DeleteConfirm,
 }
 
 type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
@@ -75,6 +76,7 @@ pub struct App {
     pub list_state: screens::list::ListState,
     pub detail_state: Option<screens::detail::DetailState>,
     pub sync_picker_state: Option<screens::sync_picker::SyncPickerState>,
+    pub delete_confirm_state: Option<screens::delete_confirm::DeleteConfirmState>,
 }
 
 impl App {
@@ -85,6 +87,7 @@ impl App {
             list_state: screens::list::ListState::new(vec![]),
             detail_state: None,
             sync_picker_state: None,
+            delete_confirm_state: None,
         }
     }
 
@@ -126,6 +129,13 @@ impl App {
                     let placeholder =
                         Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
                     frame.render_widget(placeholder, frame.area());
+                }
+            }
+            Screen::DeleteConfirm => {
+                // Render list underneath, then overlay the dialog
+                screens::list::render(&self.list_state, frame, frame.area());
+                if let Some(ref confirm) = self.delete_confirm_state {
+                    screens::delete_confirm::render(confirm, frame, frame.area());
                 }
             }
             _ => {
@@ -181,9 +191,14 @@ impl App {
             Screen::List => self.handle_list_key(key),
             Screen::Detail => self.handle_detail_key(key),
             Screen::SyncPicker => self.handle_sync_picker_key(key),
+            Screen::DeleteConfirm => self.handle_delete_confirm_key(key),
             Screen::Create => {}
             Screen::Help => {}
         }
+    }
+
+    fn handle_delete_confirm_key(&mut self, _key: KeyEvent) {
+        // TODO: implement
     }
 
     /// If the selected worktree is unmanaged, silently adopt it into the DB.
@@ -363,9 +378,9 @@ mod tests {
     }
 
     #[test]
-    fn screen_enum_has_five_variants() {
-        // Verify all five screen variants exist and are distinct
-        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help, Screen::SyncPicker];
+    fn screen_enum_has_six_variants() {
+        // Verify all six screen variants exist and are distinct
+        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help, Screen::SyncPicker, Screen::DeleteConfirm];
         for (i, a) in screens.iter().enumerate() {
             for (j, b) in screens.iter().enumerate() {
                 if i == j {
@@ -912,6 +927,23 @@ mod tests {
     fn app_has_sync_picker_state_initially_none() {
         let app = App::new();
         assert!(app.sync_picker_state.is_none());
+    }
+
+    #[test]
+    fn app_has_delete_confirm_state_initially_none() {
+        let app = App::new();
+        assert!(app.delete_confirm_state.is_none());
+    }
+
+    #[test]
+    fn push_delete_confirm_screen_works() {
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+        assert_eq!(app.active_screen(), Screen::DeleteConfirm);
+        assert_eq!(app.nav_stack_depth(), 2);
     }
 
     #[test]
