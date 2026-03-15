@@ -222,7 +222,14 @@ impl App {
         }
     }
 
-    fn handle_sync_picker_key(&mut self, _key: KeyEvent) {
+    fn handle_sync_picker_key(&mut self, key: KeyEvent) {
+        if let Some(ref mut picker) = self.sync_picker_state {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => picker.select_next(),
+                KeyCode::Up | KeyCode::Char('k') => picker.select_previous(),
+                _ => {}
+            }
+        }
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) {
@@ -703,6 +710,42 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert!(app.is_running(), "o on detail should not crash or quit");
         assert_eq!(app.active_screen(), Screen::Detail);
+    }
+
+    #[test]
+    fn arrow_down_on_sync_picker_selects_merge() {
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 1, "down should select Merge");
+    }
+
+    #[test]
+    fn arrow_up_on_sync_picker_selects_rebase() {
+        let mut app = App::new();
+        let mut state = screens::sync_picker::SyncPickerState::new("feat-auth");
+        state.selected = 1;
+        app.sync_picker_state = Some(state);
+        app.push_screen(Screen::SyncPicker);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0, "up should select Rebase");
+    }
+
+    #[test]
+    fn j_k_keys_work_on_sync_picker() {
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 1, "j should move down");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0, "k should move up");
     }
 
     #[test]
