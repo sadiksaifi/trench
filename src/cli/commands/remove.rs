@@ -59,6 +59,55 @@ pub struct RemoveDryRunPlan {
     pub hooks: Option<RemoveDryRunHooks>,
 }
 
+impl fmt::Display for RemoveDryRunPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Dry run — no changes will be made\n")?;
+        writeln!(f, "  Worktree:  {}", self.name)?;
+        writeln!(f, "  Branch:    {}", self.branch)?;
+        writeln!(f, "  Path:      {}", self.path)?;
+        writeln!(
+            f,
+            "  Prune:     {}",
+            if self.prune { "yes" } else { "no" }
+        )?;
+
+        match &self.hooks {
+            Some(hooks) if hooks.pre_remove.is_some() || hooks.post_remove.is_some() => {
+                writeln!(f, "  Hooks:")?;
+                if let Some(h) = &hooks.pre_remove {
+                    writeln!(f, "    pre_remove:")?;
+                    format_hook_def(f, h)?;
+                }
+                if let Some(h) = &hooks.post_remove {
+                    writeln!(f, "    post_remove:")?;
+                    format_hook_def(f, h)?;
+                }
+            }
+            _ => {
+                writeln!(f, "  Hooks:     (none)")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn format_hook_def(f: &mut fmt::Formatter<'_>, hook: &crate::config::HookDef) -> fmt::Result {
+    if let Some(copy) = &hook.copy {
+        writeln!(f, "      copy: {}", copy.join(", "))?;
+    }
+    if let Some(run) = &hook.run {
+        writeln!(f, "      run:  {}", run.join(", "))?;
+    }
+    if let Some(shell) = &hook.shell {
+        writeln!(f, "      shell: {shell}")?;
+    }
+    if let Some(timeout) = &hook.timeout_secs {
+        writeln!(f, "      timeout: {timeout}s")?;
+    }
+    Ok(())
+}
+
 /// Hook definitions included in a remove dry-run plan.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RemoveDryRunHooks {
@@ -1206,6 +1255,58 @@ mod tests {
         assert!(plan.dry_run);
         assert_eq!(plan.name, "no-hooks-dry");
         assert!(plan.hooks.is_none(), "hooks should be None when --no-hooks");
+    }
+
+    #[test]
+    fn dry_run_display_shows_human_readable_plan() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("display-test");
+
+        let hooks = sample_hooks_config();
+
+        let plan = execute_dry_run(
+            "display-test",
+            repo_dir.path(),
+            Some(&db),
+            true,
+            Some(&hooks),
+            false,
+        )
+        .expect("dry-run should succeed");
+
+        let output = format!("{plan}");
+        assert!(output.contains("Dry run"), "should contain 'Dry run' header");
+        assert!(output.contains("display-test"), "should contain worktree name");
+        assert!(output.contains("pre_remove"), "should show pre_remove hook");
+        assert!(output.contains("post_remove"), "should show post_remove hook");
+        assert!(output.contains("Prune:"), "should mention prune status");
+    }
+
+    #[test]
+    fn dry_run_json_serialization_includes_all_fields() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("json-test");
+
+        let hooks = sample_hooks_config();
+
+        let plan = execute_dry_run(
+            "json-test",
+            repo_dir.path(),
+            Some(&db),
+            false,
+            Some(&hooks),
+            false,
+        )
+        .expect("dry-run should succeed");
+
+        let json_str = serde_json::to_string_pretty(&plan).expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["dry_run"], true);
+        assert_eq!(parsed["name"], "json-test");
+        assert_eq!(parsed["branch"], "json-test");
+        assert_eq!(parsed["prune"], false);
+        assert!(parsed["hooks"].is_object(), "hooks should be an object");
+        assert!(parsed["hooks"]["pre_remove"].is_object());
+        assert!(parsed["hooks"]["post_remove"].is_object());
     }
 
     #[test]
