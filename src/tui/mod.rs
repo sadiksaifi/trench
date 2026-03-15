@@ -15,6 +15,7 @@ pub enum Screen {
     Detail,
     Create,
     Help,
+    SyncPicker,
 }
 
 type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
@@ -73,6 +74,7 @@ pub struct App {
     nav_stack: Vec<Screen>,
     pub list_state: screens::list::ListState,
     pub detail_state: Option<screens::detail::DetailState>,
+    pub sync_picker_state: Option<screens::sync_picker::SyncPickerState>,
 }
 
 impl App {
@@ -82,6 +84,7 @@ impl App {
             nav_stack: vec![Screen::List],
             list_state: screens::list::ListState::new(vec![]),
             detail_state: None,
+            sync_picker_state: None,
         }
     }
 
@@ -168,6 +171,7 @@ impl App {
         match self.active_screen() {
             Screen::List => self.handle_list_key(key),
             Screen::Detail => self.handle_detail_key(key),
+            Screen::SyncPicker => self.handle_sync_picker_key(key),
             Screen::Create => {}
             Screen::Help => {}
         }
@@ -207,6 +211,9 @@ impl App {
             KeyCode::Char('o') => {} // TODO: open in $EDITOR
             _ => {}
         }
+    }
+
+    fn handle_sync_picker_key(&mut self, _key: KeyEvent) {
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) {
@@ -263,9 +270,9 @@ mod tests {
     }
 
     #[test]
-    fn screen_enum_has_four_variants() {
-        // Verify all four screen variants exist and are distinct
-        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help];
+    fn screen_enum_has_five_variants() {
+        // Verify all five screen variants exist and are distinct
+        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help, Screen::SyncPicker];
         for (i, a) in screens.iter().enumerate() {
             for (j, b) in screens.iter().enumerate() {
                 if i == j {
@@ -671,5 +678,27 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert!(app.is_running(), "o on detail should not crash or quit");
         assert_eq!(app.active_screen(), Screen::Detail);
+    }
+
+    #[test]
+    fn screen_enum_has_sync_picker_variant() {
+        let screen = Screen::SyncPicker;
+        assert_ne!(screen, Screen::List);
+        assert_ne!(screen, Screen::Detail);
+    }
+
+    #[test]
+    fn app_has_sync_picker_state_initially_none() {
+        let app = App::new();
+        assert!(app.sync_picker_state.is_none());
+    }
+
+    #[test]
+    fn push_sync_picker_screen_works() {
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+        assert_eq!(app.active_screen(), Screen::SyncPicker);
+        assert_eq!(app.nav_stack_depth(), 2);
     }
 }
