@@ -197,8 +197,71 @@ impl App {
         }
     }
 
-    fn handle_delete_confirm_key(&mut self, _key: KeyEvent) {
-        // TODO: implement
+    fn handle_delete_confirm_key(&mut self, key: KeyEvent) {
+        let in_result_mode = self
+            .delete_confirm_state
+            .as_ref()
+            .is_some_and(|s| s.is_result_mode());
+
+        if in_result_mode {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.delete_confirm_state = None;
+                    while self.active_screen() != Screen::List {
+                        self.pop_screen();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') => self.execute_delete(),
+            KeyCode::Char('n') => {
+                self.delete_confirm_state = None;
+                self.pop_screen();
+            }
+            _ => {}
+        }
+    }
+
+    fn execute_delete(&mut self) {
+        let confirm = match self.delete_confirm_state.as_ref() {
+            Some(c) => c,
+            None => return,
+        };
+        let worktree_name = confirm.worktree_name.clone();
+
+        let Some((cwd, db)) = Self::open_db() else {
+            if let Some(ref mut c) = self.delete_confirm_state {
+                c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                    success: false,
+                    message: "Failed to open database".into(),
+                });
+            }
+            return;
+        };
+
+        match crate::cli::commands::remove::execute(&worktree_name, &cwd, &db, false) {
+            Ok(result) => {
+                let msg = format!("Removed '{}'", result.name);
+                if let Some(ref mut c) = self.delete_confirm_state {
+                    c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                        success: true,
+                        message: msg,
+                    });
+                }
+            }
+            Err(e) => {
+                if let Some(ref mut c) = self.delete_confirm_state {
+                    c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                        success: false,
+                        message: format!("Delete failed: {e:#}"),
+                    });
+                }
+            }
+        }
     }
 
     /// If the selected worktree is unmanaged, silently adopt it into the DB.
@@ -977,6 +1040,89 @@ mod tests {
         app.push_screen(Screen::DeleteConfirm);
         assert_eq!(app.active_screen(), Screen::DeleteConfirm);
         assert_eq!(app.nav_stack_depth(), 2);
+    }
+
+    #[test]
+    fn enter_on_delete_confirm_triggers_delete_and_sets_result() {
+        // Without a real git repo, execute_delete will fail — but it should
+        // set a result message (failure) and stay on the DeleteConfirm screen.
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.active_screen(), Screen::DeleteConfirm);
+        let state = app.delete_confirm_state.as_ref().unwrap();
+        assert!(state.is_result_mode(), "should be in result mode after Enter");
+        assert!(state.result.is_some());
+    }
+
+    #[test]
+    fn y_on_delete_confirm_triggers_delete_and_sets_result() {
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        assert_eq!(app.active_screen(), Screen::DeleteConfirm);
+        let state = app.delete_confirm_state.as_ref().unwrap();
+        assert!(state.is_result_mode(), "y should also trigger delete");
+    }
+
+    #[test]
+    fn n_on_delete_confirm_cancels_dialog() {
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        assert_eq!(app.active_screen(), Screen::List, "n should pop back to list");
+        assert!(app.delete_confirm_state.is_none(), "state should be cleared on cancel");
+    }
+
+    #[test]
+    fn enter_in_delete_result_mode_pops_to_list() {
+        let mut app = App::new();
+        let mut state = screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        );
+        state.result = Some(screens::delete_confirm::DeleteResultMessage {
+            success: true,
+            message: "Removed successfully".into(),
+        });
+        app.delete_confirm_state = Some(state);
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
+        assert!(app.delete_confirm_state.is_none(), "state should be cleared");
+    }
+
+    #[test]
+    fn space_in_delete_result_mode_pops_to_list() {
+        let mut app = App::new();
+        let mut state = screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        );
+        state.result = Some(screens::delete_confirm::DeleteResultMessage {
+            success: true,
+            message: "Done".into(),
+        });
+        app.delete_confirm_state = Some(state);
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Space in result mode should pop to list");
+        assert!(app.delete_confirm_state.is_none());
     }
 
     #[test]
