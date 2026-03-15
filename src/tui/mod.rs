@@ -240,7 +240,13 @@ impl App {
             KeyCode::Char('n') => self.push_screen(Screen::Create),
             KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
-            KeyCode::Char('s') => {} // TODO: trigger sync
+            KeyCode::Char('s') => {
+                if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
+                    self.sync_picker_state =
+                        Some(screens::sync_picker::SyncPickerState::new(&row.name));
+                    self.push_screen(Screen::SyncPicker);
+                }
+            }
             KeyCode::Char('D') => {} // TODO: trigger delete with confirmation
             _ => {}
         }
@@ -509,12 +515,22 @@ mod tests {
     }
 
     #[test]
-    fn s_on_list_is_handled() {
+    fn s_on_list_pushes_sync_picker() {
         let mut app = app_with_rows();
-        // s should not crash and should not quit or push a screen
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert!(app.is_running());
-        assert_eq!(app.active_screen(), Screen::List);
+        assert_eq!(app.active_screen(), Screen::SyncPicker);
+        assert_eq!(app.nav_stack_depth(), 2);
+    }
+
+    #[test]
+    fn s_on_list_sets_sync_picker_state_with_selected_worktree() {
+        let mut app = app_with_rows();
+        // Select second row
+        app.list_state.selected = 1;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        let state = app.sync_picker_state.as_ref().expect("sync_picker_state should be set");
+        assert_eq!(state.worktree_name, "feat-b");
     }
 
     #[test]
