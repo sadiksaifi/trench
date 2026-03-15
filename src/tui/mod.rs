@@ -42,6 +42,15 @@ pub fn run() -> Result<()> {
                     app.handle_key_event(key);
                 }
             }
+
+            if let Some(path) = app.editor_request.take() {
+                ratatui::restore();
+                let editor = std::env::var("EDITOR")
+                    .or_else(|_| std::env::var("VISUAL"))
+                    .unwrap_or_else(|_| "vi".into());
+                let _ = std::process::Command::new(&editor).arg(&path).status();
+                terminal = ratatui::init();
+            }
         }
         Ok(())
     })();
@@ -77,6 +86,7 @@ pub struct App {
     pub detail_state: Option<screens::detail::DetailState>,
     pub sync_picker_state: Option<screens::sync_picker::SyncPickerState>,
     pub delete_confirm_state: Option<screens::delete_confirm::DeleteConfirmState>,
+    pub editor_request: Option<String>,
 }
 
 impl App {
@@ -88,6 +98,7 @@ impl App {
             detail_state: None,
             sync_picker_state: None,
             delete_confirm_state: None,
+            editor_request: None,
         }
     }
 
@@ -138,11 +149,45 @@ impl App {
                     screens::delete_confirm::render(confirm, frame, frame.area());
                 }
             }
-            _ => {
+            Screen::Help => {
+                // Render underlying screen first, then overlay help
+                self.render_underlying_screen(frame);
+                screens::help::render(frame, frame.area());
+            }
+            Screen::Create => {
                 let placeholder =
                     Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
                 frame.render_widget(placeholder, frame.area());
             }
+        }
+    }
+
+    /// Render the screen underneath the current overlay (e.g. for Help).
+    fn render_underlying_screen(&self, frame: &mut Frame) {
+        let underlying = self.nav_stack.iter().rev().nth(1).copied();
+        match underlying {
+            Some(Screen::Detail) => {
+                if let Some(ref detail) = self.detail_state {
+                    screens::detail::render(detail, frame, frame.area());
+                }
+            }
+            Some(Screen::Create) => {
+                let placeholder =
+                    Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
+                frame.render_widget(placeholder, frame.area());
+            }
+            Some(Screen::SyncPicker) => {
+                if let Some(ref picker) = self.sync_picker_state {
+                    screens::sync_picker::render(picker, frame, frame.area());
+                }
+            }
+            Some(Screen::DeleteConfirm) => {
+                screens::list::render(&self.list_state, frame, frame.area());
+                if let Some(ref confirm) = self.delete_confirm_state {
+                    screens::delete_confirm::render(confirm, frame, frame.area());
+                }
+            }
+            _ => screens::list::render(&self.list_state, frame, frame.area()),
         }
     }
 
@@ -180,7 +225,13 @@ impl App {
         // Global keys handled at app level
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
-            (KeyCode::Char('?'), _) => self.push_screen(Screen::Help),
+            (KeyCode::Char('?'), _) => {
+                if self.active_screen() == Screen::Help {
+                    self.pop_screen();
+                } else {
+                    self.push_screen(Screen::Help);
+                }
+            }
             (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
                 match self.active_screen() {
                     Screen::DeleteConfirm => {
@@ -312,7 +363,11 @@ impl App {
                     self.push_screen(Screen::SyncPicker);
                 }
             }
-            KeyCode::Char('o') => {} // TODO: open in $EDITOR
+            KeyCode::Char('o') => {
+                if let Some(ref detail) = self.detail_state {
+                    self.editor_request = Some(detail.path.clone());
+                }
+            }
             _ => {}
         }
     }
@@ -489,6 +544,46 @@ mod tests {
             "? should push Help screen"
         );
         assert_eq!(app.nav_stack_depth(), 2, "stack should have List + Help");
+    }
+
+    #[test]
+    fn question_mark_toggles_help_closed_when_already_on_help() {
+        let mut app = App::new();
+        // Open help
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Help);
+        assert_eq!(app.nav_stack_depth(), 2);
+
+        // Press ? again — should close help (toggle)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "? while on Help should pop back to previous screen"
+        );
+        assert_eq!(app.nav_stack_depth(), 1);
+    }
+
+    #[test]
+    fn question_mark_toggles_help_from_detail_screen() {
+        let mut app = app_with_rows();
+        // Navigate to detail
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Detail);
+
+        // Open help from detail
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Help);
+        assert_eq!(app.nav_stack_depth(), 3);
+
+        // Close help — should return to detail
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::Detail,
+            "? toggle should return to Detail, not List"
+        );
+        assert_eq!(app.nav_stack_depth(), 2);
     }
 
     #[test]
@@ -817,9 +912,9 @@ mod tests {
     }
 
     #[test]
-    fn non_list_screen_renders_placeholder() {
+    fn create_screen_renders_placeholder() {
         let mut app = App::new();
-        app.push_screen(Screen::Help);
+        app.push_screen(Screen::Create);
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.ui(frame)).unwrap();
@@ -827,8 +922,31 @@ mod tests {
         let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
         assert!(
             content.contains("trench TUI"),
-            "non-list screens should show placeholder, got: {:?}",
+            "Create screen should show placeholder, got: {:?}",
             content.trim()
+        );
+    }
+
+    #[test]
+    fn help_screen_renders_help_overlay_not_placeholder() {
+        let mut app = App::new();
+        app.push_screen(Screen::Help);
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(
+            content.contains("Help"),
+            "Help screen should render help overlay with title"
+        );
+        assert!(
+            content.contains("Global"),
+            "Help overlay should show Global group header"
+        );
+        assert!(
+            content.contains("List"),
+            "Help overlay should show List group header"
         );
     }
 
@@ -909,12 +1027,18 @@ mod tests {
     }
 
     #[test]
-    fn o_on_detail_is_handled_without_crash() {
+    fn o_on_detail_sets_editor_request() {
         let mut app = App::new();
+        app.detail_state = Some(sample_detail_state());
         app.push_screen(Screen::Detail);
         app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert!(app.is_running(), "o on detail should not crash or quit");
         assert_eq!(app.active_screen(), Screen::Detail);
+        assert_eq!(
+            app.editor_request,
+            Some("/tmp/wt/feat-a".to_string()),
+            "o should set editor_request to worktree path"
+        );
     }
 
     #[test]
@@ -1198,5 +1322,31 @@ mod tests {
         app.push_screen(Screen::SyncPicker);
         assert_eq!(app.active_screen(), Screen::SyncPicker);
         assert_eq!(app.nav_stack_depth(), 2);
+    }
+
+    #[test]
+    fn help_over_sync_picker_renders_sync_picker_underneath() {
+        let mut app = app_with_rows();
+        // Push SyncPicker, then Help
+        app.sync_picker_state =
+            Some(screens::sync_picker::SyncPickerState::new("feat-a"));
+        app.push_screen(Screen::SyncPicker);
+        app.push_screen(Screen::Help);
+        assert_eq!(app.active_screen(), Screen::Help);
+
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+        // Help overlay should be present
+        assert!(content.contains("Help"), "should render Help overlay");
+        // SyncPicker should be underneath (not list)
+        assert!(
+            content.contains("Sync strategy for"),
+            "should render SyncPicker underneath Help overlay, got: {:?}",
+            content.trim()
+        );
     }
 }
