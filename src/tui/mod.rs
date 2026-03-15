@@ -224,10 +224,66 @@ impl App {
 
     fn handle_sync_picker_key(&mut self, key: KeyEvent) {
         if let Some(ref mut picker) = self.sync_picker_state {
+            // In result mode, any key dismisses back to list
+            if picker.is_result_mode() {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char(' ') => self.pop_screen(),
+                    _ => {}
+                }
+                return;
+            }
             match key.code {
                 KeyCode::Down | KeyCode::Char('j') => picker.select_next(),
                 KeyCode::Up | KeyCode::Char('k') => picker.select_previous(),
+                KeyCode::Enter => self.execute_sync(),
                 _ => {}
+            }
+        }
+    }
+
+    fn execute_sync(&mut self) {
+        let picker = match self.sync_picker_state.as_ref() {
+            Some(p) => p,
+            None => return,
+        };
+        let strategy = picker.confirmed_strategy();
+        let worktree_name = picker.worktree_name.clone();
+
+        let Some((cwd, db)) = Self::open_db() else {
+            if let Some(ref mut p) = self.sync_picker_state {
+                p.result = Some(screens::sync_picker::SyncResultMessage {
+                    success: false,
+                    message: "Failed to open database".into(),
+                });
+            }
+            return;
+        };
+
+        match crate::cli::commands::sync::execute(&worktree_name, &cwd, &db, strategy) {
+            Ok(result) => {
+                let msg = format!(
+                    "Synced '{}' via {}\nBefore: +{}/-{}  After: +{}/-{}",
+                    result.name,
+                    result.strategy,
+                    result.before_ahead,
+                    result.before_behind,
+                    result.after_ahead,
+                    result.after_behind,
+                );
+                if let Some(ref mut p) = self.sync_picker_state {
+                    p.result = Some(screens::sync_picker::SyncResultMessage {
+                        success: true,
+                        message: msg,
+                    });
+                }
+            }
+            Err(e) => {
+                if let Some(ref mut p) = self.sync_picker_state {
+                    p.result = Some(screens::sync_picker::SyncResultMessage {
+                        success: false,
+                        message: format!("Sync failed: {e:#}"),
+                    });
+                }
             }
         }
     }
@@ -746,6 +802,38 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0, "k should move up");
+    }
+
+    #[test]
+    fn enter_on_sync_picker_triggers_sync_and_sets_result() {
+        // Without a real git repo, execute_sync will fail — but it should
+        // set a result message (failure) and stay on the SyncPicker screen.
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Should still be on SyncPicker (showing result)
+        assert_eq!(app.active_screen(), Screen::SyncPicker);
+        let picker = app.sync_picker_state.as_ref().unwrap();
+        assert!(picker.is_result_mode(), "should be in result mode after Enter");
+        assert!(picker.result.is_some());
+    }
+
+    #[test]
+    fn enter_in_result_mode_pops_back_to_list() {
+        let mut app = App::new();
+        let mut state = screens::sync_picker::SyncPickerState::new("feat-auth");
+        state.result = Some(screens::sync_picker::SyncResultMessage {
+            success: true,
+            message: "Synced successfully".into(),
+        });
+        app.sync_picker_state = Some(state);
+        app.push_screen(Screen::SyncPicker);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
     }
 
     #[test]

@@ -6,6 +6,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::cli::commands::sync::Strategy;
+
 /// View model for the sync strategy picker screen.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyncPickerState {
@@ -13,6 +15,15 @@ pub struct SyncPickerState {
     pub worktree_name: String,
     /// Currently selected option: 0 = Rebase, 1 = Merge.
     pub selected: usize,
+    /// Result message after sync execution. None = picker mode, Some = result mode.
+    pub result: Option<SyncResultMessage>,
+}
+
+/// Outcome displayed after a sync operation completes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncResultMessage {
+    pub success: bool,
+    pub message: String,
 }
 
 impl SyncPickerState {
@@ -20,7 +31,21 @@ impl SyncPickerState {
         Self {
             worktree_name: worktree_name.to_string(),
             selected: 0,
+            result: None,
         }
+    }
+
+    /// Returns the Strategy corresponding to the current selection.
+    pub fn confirmed_strategy(&self) -> Strategy {
+        match self.selected {
+            0 => Strategy::Rebase,
+            _ => Strategy::Merge,
+        }
+    }
+
+    /// Whether the picker is showing a result (post-sync).
+    pub fn is_result_mode(&self) -> bool {
+        self.result.is_some()
     }
 
     /// Returns the two strategy options as (label, description) pairs.
@@ -198,6 +223,35 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("Enter confirm"), "footer should show Enter confirm");
         assert!(text.contains("Esc cancel"), "footer should show Esc cancel");
+    }
+
+    #[test]
+    fn confirmed_strategy_returns_rebase_when_selected_is_zero() {
+        let state = SyncPickerState::new("feat-auth");
+        assert_eq!(state.confirmed_strategy(), Strategy::Rebase);
+    }
+
+    #[test]
+    fn confirmed_strategy_returns_merge_when_selected_is_one() {
+        let mut state = SyncPickerState::new("feat-auth");
+        state.selected = 1;
+        assert_eq!(state.confirmed_strategy(), Strategy::Merge);
+    }
+
+    #[test]
+    fn is_result_mode_false_initially() {
+        let state = SyncPickerState::new("feat-auth");
+        assert!(!state.is_result_mode());
+    }
+
+    #[test]
+    fn is_result_mode_true_after_setting_result() {
+        let mut state = SyncPickerState::new("feat-auth");
+        state.result = Some(SyncResultMessage {
+            success: true,
+            message: "Synced successfully".into(),
+        });
+        assert!(state.is_result_mode());
     }
 
     #[test]
