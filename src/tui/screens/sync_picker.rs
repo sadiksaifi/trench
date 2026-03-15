@@ -8,6 +8,11 @@ use ratatui::{
 
 use crate::cli::commands::sync::Strategy;
 
+const SYNC_OPTIONS: [(&str, &str); 2] = [
+    ("Rebase", "Replay your commits on top of the base branch"),
+    ("Merge", "Create a merge commit combining both branches"),
+];
+
 /// View model for the sync strategy picker screen.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyncPickerState {
@@ -49,11 +54,8 @@ impl SyncPickerState {
     }
 
     /// Returns the two strategy options as (label, description) pairs.
-    pub fn options(&self) -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("Rebase", "Replay your commits on top of the base branch"),
-            ("Merge", "Create a merge commit combining both branches"),
-        ]
+    pub fn options(&self) -> &'static [(&'static str, &'static str)] {
+        &SYNC_OPTIONS
     }
 
     pub fn select_next(&mut self) {
