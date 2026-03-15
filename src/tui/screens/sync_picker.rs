@@ -59,7 +59,7 @@ impl SyncPickerState {
     }
 
     pub fn select_next(&mut self) {
-        if self.selected < 1 {
+        if self.selected < SYNC_OPTIONS.len() - 1 {
             self.selected += 1;
         }
     }
