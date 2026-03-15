@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 const CONFIRM_FOOTER: &str = " Enter/y confirm  Esc/n cancel ";
-const RESULT_FOOTER: &str = " Enter dismiss ";
+const RESULT_FOOTER: &str = " Enter/Space dismiss ";
 
 pub fn render(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
     if let Some(ref result) = state.result {
@@ -308,7 +308,19 @@ mod tests {
         });
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("Enter dismiss"), "result footer should show Enter dismiss");
+        assert!(text.contains("Enter/Space dismiss"), "result footer should show Enter/Space dismiss");
+    }
+
+    #[test]
+    fn result_footer_mentions_space() {
+        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        state.result = Some(DeleteResultMessage {
+            success: true,
+            message: "Done".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Space"), "result footer should mention Space key");
     }
 
     #[test]
