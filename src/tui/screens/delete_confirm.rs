@@ -122,8 +122,7 @@ fn render_result(
     let chunks = Layout::vertical([
         Constraint::Length(1), // blank
         Constraint::Length(1), // title
-        Constraint::Length(1), // message
-        Constraint::Min(0),   // spacer
+        Constraint::Min(1),    // message (multi-line errors)
         Constraint::Length(1), // footer
     ])
     .split(inner);
@@ -151,7 +150,7 @@ fn render_result(
 
     let footer = Paragraph::new(Line::from(RESULT_FOOTER))
         .style(Style::default().add_modifier(Modifier::REVERSED));
-    frame.render_widget(footer, chunks[4]);
+    frame.render_widget(footer, chunks[3]);
 }
 
 /// View model for the delete confirmation dialog.
@@ -339,7 +338,29 @@ mod tests {
         let state = DeleteConfirmState::new("feat-auth", &long_path, "feature/auth");
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("\u{2026}"), "long multibyte path should be truncated with ellipsis");
+        assert!(
+            text.contains("\u{2026}"),
+            "long multibyte path should be truncated with ellipsis"
+        );
+    }
+
+    #[test]
+    fn multiline_result_message_is_fully_visible() {
+        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        state.result = Some(DeleteResultMessage {
+            success: false,
+            message: "Delete failed: git error\ncaused by: lock file exists".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("git error"),
+            "first line of message should be visible"
+        );
+        assert!(
+            text.contains("lock file"),
+            "second line of message should be visible"
+        );
     }
 
     #[test]
