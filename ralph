@@ -136,8 +136,11 @@ PROMPT_END
 info "launching claude on issue #${ISSUE}..."
 echo ""
 
+CLAUDE_MODEL="${MODEL:-opus[1m]}"
+info "model: ${CLAUDE_MODEL}"
+
 claude --dangerously-skip-permissions \
-  --model "opus" \
+  --model "$CLAUDE_MODEL" \
   -p "/tdd ${PROMPT}" \
   --verbose \
   --output-format stream-json | cclean
