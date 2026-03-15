@@ -52,12 +52,31 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
     ])
     .split(inner);
 
-    // Name + branch
+    // Name + branch (truncate branch if combined line exceeds inner width)
+    let max_line_chars = 56;
+    let overhead = 11; // "Delete " (7) + "  (" (3) + ")" (1)
+    let max_content = max_line_chars - overhead;
+    let name_len = state.worktree_name.chars().count();
+    let branch_len = state.branch.chars().count();
+    let branch_display = if name_len + branch_len > max_content {
+        let available = max_content.saturating_sub(name_len);
+        if available >= 2 {
+            let keep = available - 1;
+            format!(
+                "{}\u{2026}",
+                state.branch.chars().take(keep).collect::<String>()
+            )
+        } else {
+            "\u{2026}".to_string()
+        }
+    } else {
+        state.branch.clone()
+    };
     let name_line = Line::from(vec![
         Span::styled("Delete ", bold),
         Span::styled(&state.worktree_name, bold),
         Span::raw("  ("),
-        Span::raw(&state.branch),
+        Span::raw(branch_display),
         Span::raw(")"),
     ]);
     frame.render_widget(
@@ -360,6 +379,23 @@ mod tests {
         assert!(
             text.contains("lock file"),
             "second line of message should be visible"
+        );
+    }
+
+    #[test]
+    fn long_branch_name_is_truncated_in_confirm_dialog() {
+        let long_branch =
+            "feature/very-long-descriptive-branch-name-that-exceeds-dialog-width";
+        let state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", long_branch);
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("\u{2026}"),
+            "long branch should be truncated with ellipsis"
+        );
+        assert!(
+            !text.contains(long_branch),
+            "full branch name should NOT appear in dialog"
         );
     }
 
