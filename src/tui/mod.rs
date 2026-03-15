@@ -181,7 +181,18 @@ impl App {
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
             (KeyCode::Char('?'), _) => self.push_screen(Screen::Help),
-            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => self.pop_screen(),
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+                match self.active_screen() {
+                    Screen::DeleteConfirm => {
+                        self.delete_confirm_state = None;
+                    }
+                    Screen::SyncPicker => {
+                        self.sync_picker_state = None;
+                    }
+                    _ => {}
+                }
+                self.pop_screen();
+            }
             _ => self.handle_screen_key(key),
         }
     }
@@ -1123,6 +1134,61 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::List, "Space in result mode should pop to list");
         assert!(app.delete_confirm_state.is_none());
+    }
+
+    #[test]
+    fn esc_on_delete_confirm_clears_state() {
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Esc should pop back to List");
+        assert!(app.delete_confirm_state.is_none(), "Esc should clear delete_confirm_state");
+    }
+
+    #[test]
+    fn q_on_delete_confirm_clears_state() {
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.delete_confirm_state.is_none(), "q should clear delete_confirm_state");
+    }
+
+    #[test]
+    fn esc_on_delete_result_mode_clears_state() {
+        let mut app = App::new();
+        let mut state = screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+        );
+        state.result = Some(screens::delete_confirm::DeleteResultMessage {
+            success: true,
+            message: "Done".into(),
+        });
+        app.delete_confirm_state = Some(state);
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Esc in result mode should pop to List");
+        assert!(app.delete_confirm_state.is_none(), "Esc in result mode should clear state");
+    }
+
+    #[test]
+    fn esc_on_sync_picker_clears_state() {
+        let mut app = App::new();
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-auth"));
+        app.push_screen(Screen::SyncPicker);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.sync_picker_state.is_none(), "Esc should clear sync_picker_state");
     }
 
     #[test]
