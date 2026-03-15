@@ -427,7 +427,7 @@ fn run_remove(
     };
 
     if dry_run {
-        let db_path = paths::data_dir()?.join("trench.db");
+        let db_path = paths::data_dir_path()?.join("trench.db");
         let db = if db_path.exists() {
             Some(state::Database::open(&db_path)?)
         } else {
