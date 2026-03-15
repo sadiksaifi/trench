@@ -66,12 +66,12 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
     );
 
     // Path (truncate with leading ellipsis if too long for 60-col dialog)
-    let max_path_len = 56;
-    let path_display = if state.worktree_path.len() > max_path_len {
-        format!(
-            "\u{2026}{}",
-            &state.worktree_path[state.worktree_path.len() - (max_path_len - 1)..]
-        )
+    let max_path_chars = 56;
+    let path_len = state.worktree_path.chars().count();
+    let path_display = if path_len > max_path_chars {
+        let keep = max_path_chars - 1;
+        let suffix: String = state.worktree_path.chars().skip(path_len - keep).collect();
+        format!("\u{2026}{suffix}")
     } else {
         state.worktree_path.clone()
     };
@@ -328,6 +328,18 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("\u{2026}"), "long path should be truncated with ellipsis");
         assert!(!text.contains(long_path), "full long path should NOT appear in dialog");
+    }
+
+    #[test]
+    fn long_path_with_multibyte_chars_does_not_panic() {
+        // "/tmp/ñ" = 7 bytes (ñ at indices 5-6). With 54 ASCII chars appended,
+        // total = 61 bytes. Byte-slice at [61-55..] = [6..] lands on 0xB1,
+        // the second byte of ñ — a byte-based slice would panic here.
+        let long_path = format!("/tmp/ñ{}", "a".repeat(54));
+        let state = DeleteConfirmState::new("feat-auth", &long_path, "feature/auth");
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("\u{2026}"), "long multibyte path should be truncated with ellipsis");
     }
 
     #[test]
