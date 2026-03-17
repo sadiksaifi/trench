@@ -297,7 +297,9 @@ fn compute_summary(entries: &[LogEntry]) -> SummaryStats {
         }
         counts
             .into_iter()
-            .max_by_key(|(_, count)| *count)
+            .max_by(|(name_a, count_a), (name_b, count_b)| {
+                count_a.cmp(count_b).then_with(|| name_b.cmp(name_a))
+            })
             .map(|(name, count)| (name.to_string(), count))
     };
 
@@ -498,6 +500,33 @@ mod tests {
         let most_active = &parsed["most_active_worktree"];
         assert_eq!(most_active["name"], "alpha");
         assert_eq!(most_active["event_count"], 4);
+    }
+
+    #[test]
+    fn compute_summary_tiebreak_is_deterministic() {
+        // When two worktrees have the same event count, the lexicographically
+        // smaller name should always win (deterministic tie-breaking).
+        let entries = vec![
+            LogEntry {
+                id: 1,
+                event_type: "created".to_string(),
+                worktree_name: Some("beta".to_string()),
+                payload: None,
+                created_at: 1700000000,
+            },
+            LogEntry {
+                id: 2,
+                event_type: "created".to_string(),
+                worktree_name: Some("alpha".to_string()),
+                payload: None,
+                created_at: 1700000001,
+            },
+        ];
+
+        let stats = compute_summary(&entries);
+        let (name, count) = stats.most_active.expect("should have most_active");
+        assert_eq!(count, 1);
+        assert_eq!(name, "alpha", "lexicographically smaller name should win on tie");
     }
 
     #[test]
