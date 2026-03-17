@@ -379,3 +379,183 @@ fn log_scoped_and_tail_combined() {
         "event should be for combo-a"
     );
 }
+
+#[test]
+fn log_output_replays_hook_stdout_stderr() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    // Write .trench.toml with post_create hooks that produce output
+    std::fs::write(
+        tmp.path().join(".trench.toml"),
+        r#"
+[hooks.post_create]
+run = ["echo hook_run_output"]
+shell = "echo hook_shell_output >&2"
+timeout_secs = 30
+"#,
+    )
+    .unwrap();
+
+    // Create a worktree — triggers post_create hook
+    let create = Command::new(trench_bin())
+        .args(["create", "output-test"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("create");
+    assert!(
+        create.status.success(),
+        "trench create should succeed, stderr: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    // Replay hook output via --output (table mode)
+    let output = Command::new(trench_bin())
+        .args(["log", "output-test", "--output", "--no-color"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("trench log --output");
+
+    assert!(
+        output.status.success(),
+        "trench log --output should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should contain actual hook output
+    assert!(
+        stdout.contains("hook_run_output"),
+        "should contain run output, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("hook_shell_output"),
+        "should contain shell output, got: {stdout}"
+    );
+
+    // Should contain step labels
+    assert!(
+        stdout.contains("[run]"),
+        "should contain [run] step label, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("[shell]"),
+        "should contain [shell] step label, got: {stdout}"
+    );
+
+    // Should contain event type header
+    assert!(
+        stdout.contains("hook:post_create"),
+        "should contain event type, got: {stdout}"
+    );
+}
+
+#[test]
+fn log_output_json_returns_structured_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    // Write .trench.toml with hooks that produce output
+    std::fs::write(
+        tmp.path().join(".trench.toml"),
+        r#"
+[hooks.post_create]
+run = ["echo json_test_output"]
+timeout_secs = 30
+"#,
+    )
+    .unwrap();
+
+    // Create a worktree
+    let create = Command::new(trench_bin())
+        .args(["create", "json-output-test"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("create");
+    assert!(
+        create.status.success(),
+        "trench create should succeed, stderr: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    // Replay hook output via --output --json
+    let output = Command::new(trench_bin())
+        .args(["log", "json-output-test", "--output", "--json"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("trench log --output --json");
+
+    assert!(
+        output.status.success(),
+        "trench log --output --json should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+
+    assert_eq!(parsed["event_type"], "hook:post_create");
+    assert_eq!(parsed["exit_code"], 0);
+    assert!(parsed["duration_secs"].is_number());
+    assert!(parsed["timestamp"].is_string());
+
+    let lines = parsed["lines"].as_array().expect("lines array");
+    assert!(!lines.is_empty(), "should have at least one output line");
+
+    // Find the line containing our output
+    let has_output = lines.iter().any(|l| l["line"].as_str() == Some("json_test_output"));
+    assert!(has_output, "should contain our hook output, got: {parsed}");
+
+    // Check step label
+    let run_line = lines.iter().find(|l| l["line"].as_str() == Some("json_test_output")).unwrap();
+    assert_eq!(run_line["step"], "run");
+    assert_eq!(run_line["stream"], "stdout");
+}
+
+#[test]
+fn log_output_without_branch_exits_8() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    let output = Command::new(trench_bin())
+        .args(["log", "--output"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("trench log --output");
+
+    assert_eq!(
+        exit_code(output.status),
+        8,
+        "should exit 8 when --output used without branch, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn log_output_no_hooks_exits_2() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    // Create a worktree without hooks
+    let create = Command::new(trench_bin())
+        .args(["create", "no-hooks-test", "--no-hooks"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("create");
+    assert!(create.status.success());
+
+    // Try to replay output — should fail since no hook events
+    let output = Command::new(trench_bin())
+        .args(["log", "no-hooks-test", "--output"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("trench log --output");
+
+    assert_eq!(
+        exit_code(output.status),
+        2,
+        "should exit 2 when no hook output, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

@@ -642,6 +642,13 @@ fn run_log(
     json: bool,
     use_color: bool,
 ) -> anyhow::Result<()> {
+    // --output requires a worktree argument
+    if show_output && branch.is_none() {
+        eprintln!("error: --output requires a worktree argument");
+        eprintln!("usage: trench log <branch> --output");
+        ExitCode::MissingRequiredFlag.exit();
+    }
+
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
@@ -680,14 +687,8 @@ fn run_log(
 
     // --output mode: show hook stdout/stderr for a specific worktree
     if show_output {
-        let b = match branch {
-            Some(b) => b,
-            None => {
-                eprintln!("error: --output requires a worktree argument");
-                eprintln!("usage: trench log <branch> --output");
-                ExitCode::MissingRequiredFlag.exit();
-            }
-        };
+        // branch is guaranteed Some by the check at function entry
+        let b = branch.unwrap();
         let result = if json {
             cli::commands::log::execute_output_json(&db, repo_id, b)
         } else {
