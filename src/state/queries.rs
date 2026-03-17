@@ -670,4 +670,71 @@ mod tests {
             .unwrap();
         assert_eq!(all.len(), 5, "no limit should return all 5 events");
     }
+
+    #[test]
+    fn list_events_filtered_by_worktree_name() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt_a = db
+            .insert_worktree(repo.id, "alpha", "feature/alpha", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo.id, "beta", "feature/beta", "/wt/b", None)
+            .unwrap();
+
+        // 3 events for alpha, 2 for beta
+        for _ in 0..3 {
+            db.insert_event(repo.id, Some(wt_a.id), "created", None)
+                .unwrap();
+        }
+        for _ in 0..2 {
+            db.insert_event(repo.id, Some(wt_b.id), "created", None)
+                .unwrap();
+        }
+
+        // Filter by sanitized name
+        let alpha_events = db
+            .list_events_filtered(repo.id, Some("alpha"), None)
+            .unwrap();
+        assert_eq!(alpha_events.len(), 3);
+
+        // Filter by branch name
+        let beta_events = db
+            .list_events_filtered(repo.id, Some("feature/beta"), None)
+            .unwrap();
+        assert_eq!(beta_events.len(), 2);
+
+        // Combined: filter + limit
+        let limited = db
+            .list_events_filtered(repo.id, Some("alpha"), Some(2))
+            .unwrap();
+        assert_eq!(limited.len(), 2);
+    }
+
+    #[test]
+    fn worktree_exists_any_includes_removed() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "gone", "feature/gone", "/wt/gone", None)
+            .unwrap();
+
+        assert!(db.worktree_exists_any(repo.id, "gone").unwrap());
+        assert!(db.worktree_exists_any(repo.id, "feature/gone").unwrap());
+        assert!(!db.worktree_exists_any(repo.id, "nonexistent").unwrap());
+
+        // Mark as removed — should still exist
+        db.update_worktree(
+            wt.id,
+            &crate::state::WorktreeUpdate {
+                removed_at: Some(Some(1000)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            db.worktree_exists_any(repo.id, "gone").unwrap(),
+            "removed worktree should still be found"
+        );
+    }
 }
