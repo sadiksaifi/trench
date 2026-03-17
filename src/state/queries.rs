@@ -443,6 +443,35 @@ impl Database {
         Ok(())
     }
 
+    /// Retrieve hook output lines for an event with full metadata (step, timestamps).
+    pub fn get_hook_output(&self, event_id: i64) -> Result<Vec<super::HookOutputLine>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT stream, line, step, line_number, created_at FROM logs
+                 WHERE event_id = ?1 ORDER BY line_number",
+            )
+            .context("failed to prepare get_hook_output query")?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![event_id], |row| {
+                Ok(super::HookOutputLine {
+                    stream: row.get(0)?,
+                    line: row.get(1)?,
+                    step: row.get(2)?,
+                    line_number: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .context("failed to get hook output")?;
+
+        let mut lines = Vec::new();
+        for row in rows {
+            lines.push(row.context("failed to read hook output line")?);
+        }
+        Ok(lines)
+    }
+
     /// Retrieve log lines for an event, ordered by line number.
     pub fn get_logs(&self, event_id: i64) -> Result<Vec<(String, String, i64)>> {
         let mut stmt = self
