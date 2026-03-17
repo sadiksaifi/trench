@@ -252,33 +252,28 @@ pub fn execute_output_json(
     format_json_value(&output)
 }
 
-/// Display aggregate summary statistics for the event log.
-///
-/// Shows total events, hook runs, average duration, most active worktree,
-/// and success/failure ratio.
-pub fn execute_summary(
-    db: &Database,
-    repo_id: i64,
-) -> Result<String> {
-    let entries = db.list_events_filtered(repo_id, None, None)?;
+/// Internal aggregate stats computed from event entries.
+struct SummaryStats {
+    total_events: usize,
+    hook_runs: usize,
+    avg_hook_duration: f64,
+    successes: usize,
+    failures: usize,
+    most_active: Option<(String, usize)>,
+}
 
-    if entries.is_empty() {
-        return Ok("No events recorded yet.\n".to_string());
-    }
-
-    let total_events = entries.len();
-
+/// Compute aggregate summary statistics from a list of log entries.
+fn compute_summary(entries: &[LogEntry]) -> SummaryStats {
     let hook_entries: Vec<&LogEntry> = entries
         .iter()
         .filter(|e| e.event_type.starts_with("hook:"))
         .collect();
-    let total_hooks = hook_entries.len();
 
     let durations: Vec<f64> = hook_entries
         .iter()
         .filter_map(|e| extract_duration(e))
         .collect();
-    let avg_duration = if durations.is_empty() {
+    let avg_hook_duration = if durations.is_empty() {
         0.0
     } else {
         durations.iter().sum::<f64>() / durations.len() as f64
@@ -293,10 +288,9 @@ pub fn execute_summary(
         .filter(|e| matches!(extract_exit_code(e), Some(c) if c != 0))
         .count();
 
-    // Most active worktree: worktree with the most events
     let most_active = {
         let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for entry in &entries {
+        for entry in entries {
             if let Some(name) = entry.worktree_name.as_deref() {
                 *counts.entry(name).or_insert(0) += 1;
             }
@@ -307,13 +301,36 @@ pub fn execute_summary(
             .map(|(name, count)| (name.to_string(), count))
     };
 
+    SummaryStats {
+        total_events: entries.len(),
+        hook_runs: hook_entries.len(),
+        avg_hook_duration,
+        successes,
+        failures,
+        most_active,
+    }
+}
+
+/// Display aggregate summary statistics for the event log.
+pub fn execute_summary(
+    db: &Database,
+    repo_id: i64,
+) -> Result<String> {
+    let entries = db.list_events_filtered(repo_id, None, None)?;
+
+    if entries.is_empty() {
+        return Ok("No events recorded yet.\n".to_string());
+    }
+
+    let stats = compute_summary(&entries);
+
     let mut out = String::new();
-    out.push_str(&format!("Total events:       {}\n", total_events));
-    out.push_str(&format!("Hook runs:          {}\n", total_hooks));
-    out.push_str(&format!("Avg hook duration:  {:.1}s\n", avg_duration));
-    out.push_str(&format!("Successes:          {}\n", successes));
-    out.push_str(&format!("Failures:           {}\n", failures));
-    match &most_active {
+    out.push_str(&format!("Total events:       {}\n", stats.total_events));
+    out.push_str(&format!("Hook runs:          {}\n", stats.hook_runs));
+    out.push_str(&format!("Avg hook duration:  {:.1}s\n", stats.avg_hook_duration));
+    out.push_str(&format!("Successes:          {}\n", stats.successes));
+    out.push_str(&format!("Failures:           {}\n", stats.failures));
+    match &stats.most_active {
         Some((name, count)) => {
             out.push_str(&format!("Most active:        {} ({} events)\n", name, count));
         }
@@ -347,54 +364,18 @@ pub fn execute_summary_json(
     repo_id: i64,
 ) -> Result<String> {
     let entries = db.list_events_filtered(repo_id, None, None)?;
-
-    let hook_entries: Vec<&LogEntry> = entries
-        .iter()
-        .filter(|e| e.event_type.starts_with("hook:"))
-        .collect();
-
-    let durations: Vec<f64> = hook_entries
-        .iter()
-        .filter_map(|e| extract_duration(e))
-        .collect();
-    let avg_duration = if durations.is_empty() {
-        0.0
-    } else {
-        durations.iter().sum::<f64>() / durations.len() as f64
-    };
-
-    let successes = hook_entries
-        .iter()
-        .filter(|e| extract_exit_code(e) == Some(0))
-        .count();
-    let failures = hook_entries
-        .iter()
-        .filter(|e| matches!(extract_exit_code(e), Some(c) if c != 0))
-        .count();
-
-    let most_active = {
-        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for entry in &entries {
-            if let Some(name) = entry.worktree_name.as_deref() {
-                *counts.entry(name).or_insert(0) += 1;
-            }
-        }
-        counts
-            .into_iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(name, count)| MostActiveJson {
-                name: name.to_string(),
-                event_count: count,
-            })
-    };
+    let stats = compute_summary(&entries);
 
     let summary = SummaryJson {
-        total_events: entries.len(),
-        hook_runs: hook_entries.len(),
-        avg_hook_duration_secs: (avg_duration * 10.0).round() / 10.0,
-        successes,
-        failures,
-        most_active_worktree: most_active,
+        total_events: stats.total_events,
+        hook_runs: stats.hook_runs,
+        avg_hook_duration_secs: (stats.avg_hook_duration * 10.0).round() / 10.0,
+        successes: stats.successes,
+        failures: stats.failures,
+        most_active_worktree: stats.most_active.map(|(name, count)| MostActiveJson {
+            name,
+            event_count: count,
+        }),
     };
 
     format_json_value(&summary)
