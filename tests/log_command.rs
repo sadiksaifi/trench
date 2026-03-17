@@ -7,34 +7,29 @@ fn trench_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_trench"))
 }
 
+/// Run a git command in `dir`, panicking with stderr on failure.
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run git {}: {e}", args[0]));
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args[0],
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Initialize a temporary git repo with an initial commit.
 fn init_git_repo(dir: &std::path::Path) {
-    Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(dir)
-        .output()
-        .expect("git init failed");
-    Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(dir)
-        .output()
-        .expect("git config email failed");
-    Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(dir)
-        .output()
-        .expect("git config name failed");
+    git(dir, &["init", "-b", "main"]);
+    git(dir, &["config", "user.email", "test@test.com"]);
+    git(dir, &["config", "user.name", "Test"]);
     std::fs::write(dir.join("README.md"), "# test\n").unwrap();
-    Command::new("git")
-        .args(["add", "."])
-        .current_dir(dir)
-        .output()
-        .expect("git add failed");
-    Command::new("git")
-        .args(["commit", "-m", "init"])
-        .current_dir(dir)
-        .output()
-        .expect("git commit failed");
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-m", "init"]);
 }
 
 #[test]
