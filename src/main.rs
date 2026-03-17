@@ -150,6 +150,10 @@ enum Commands {
         /// Show stdout/stderr from the last hook execution for the worktree
         #[arg(long)]
         output: bool,
+
+        /// Show aggregate statistics (total events, hook runs, avg duration, etc.)
+        #[arg(long)]
+        summary: bool,
     },
     /// Initialize .trench.toml in current directory
     Init {
@@ -283,8 +287,8 @@ fn main() -> anyhow::Result<()> {
                 run_sync(&branch, strategy, json, dry_run, no_hooks)
             }
         }
-        Some(Commands::Log { branch, tail, output }) => {
-            run_log(branch.as_deref(), tail, output, json, output_config.should_color())
+        Some(Commands::Log { branch, tail, output, summary }) => {
+            run_log(branch.as_deref(), tail, output, summary, json, output_config.should_color())
         }
         None => {
             anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
@@ -639,9 +643,16 @@ fn run_log(
     branch: Option<&str>,
     tail: Option<usize>,
     show_output: bool,
+    show_summary: bool,
     json: bool,
     use_color: bool,
 ) -> anyhow::Result<()> {
+    // --summary and --output are mutually exclusive
+    if show_summary && show_output {
+        eprintln!("error: --summary and --output cannot be used together");
+        ExitCode::MissingRequiredFlag.exit();
+    }
+
     // --output requires a worktree argument
     if show_output && branch.is_none() {
         eprintln!("error: --output requires a worktree argument");
@@ -668,6 +679,14 @@ fn run_log(
                 ExitCode::NotFound.exit();
             }
             // No repo tracked yet — show empty state
+            if show_summary && json {
+                let output = cli::commands::log::execute_summary_json(&db, 0)?;
+                println!("{output}");
+                return Ok(());
+            } else if show_summary {
+                println!("No events recorded yet.");
+                return Ok(());
+            }
             if json {
                 println!("[]");
             } else {
@@ -683,6 +702,21 @@ fn run_log(
             eprintln!("error: worktree '{b}' not found");
             ExitCode::NotFound.exit();
         }
+    }
+
+    // --summary mode: show aggregate statistics
+    if show_summary {
+        let output = if json {
+            cli::commands::log::execute_summary_json(&db, repo_id)?
+        } else {
+            cli::commands::log::execute_summary(&db, repo_id)?
+        };
+        if output.ends_with('\n') {
+            print!("{output}");
+        } else {
+            println!("{output}");
+        }
+        return Ok(());
     }
 
     // --output mode: show hook stdout/stderr for a specific worktree
