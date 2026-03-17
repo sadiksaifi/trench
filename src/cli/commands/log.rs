@@ -25,9 +25,8 @@ fn extract_exit_code(entry: &LogEntry) -> Option<i64> {
 
 /// Format a Unix timestamp as a human-readable datetime string.
 fn format_timestamp(ts: i64) -> String {
-    let secs = ts;
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
+    let days = ts.div_euclid(86400);
+    let time_of_day = ts.rem_euclid(86400);
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
     let seconds = time_of_day % 60;

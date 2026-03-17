@@ -159,11 +159,11 @@ fn log_shows_events_after_create_and_remove() {
         "removed should be before created (most recent first)"
     );
 
-    // Each event should have a worktree name
+    // Each event should have a worktree (string or null for repo-level events)
     for event in arr {
         assert!(
-            event["worktree"].is_string(),
-            "each event should have a worktree name, got: {}",
+            event["worktree"].is_string() || event["worktree"].is_null(),
+            "worktree should be string or null, got: {}",
             event
         );
         assert!(
