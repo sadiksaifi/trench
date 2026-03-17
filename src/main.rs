@@ -666,7 +666,7 @@ fn run_log(
     };
 
     // If a branch filter is specified, verify the worktree exists
-    if let Some(ref b) = branch {
+    if let Some(b) = branch {
         if !db.worktree_exists_any(repo_id, b)? {
             eprintln!("error: worktree '{b}' not found");
             ExitCode::NotFound.exit();
