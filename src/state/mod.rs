@@ -922,6 +922,45 @@ mod tests {
     }
 
     #[test]
+    fn list_all_events_does_not_leak_cross_repo_worktree_name() {
+        let db = Database::open_in_memory().unwrap();
+        let repo_a = db.insert_repo("a", "/a", None).unwrap();
+        let repo_b = db.insert_repo("b", "/b", None).unwrap();
+        let _wt_a = db
+            .insert_worktree(repo_a.id, "wt-a", "branch-a", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo_b.id, "wt-b", "branch-b", "/wt/b", None)
+            .unwrap();
+
+        // Bypass the trigger to insert a cross-repo event:
+        // event belongs to repo_a but references repo_b's worktree_id.
+        let conn = db.conn_for_test();
+        conn.execute(
+            "DROP TRIGGER events_check_worktree_repo_consistency",
+            [],
+        )
+        .unwrap();
+        let created_at = unix_epoch_secs() as i64;
+        conn.execute(
+            "INSERT INTO events (repo_id, worktree_id, event_type, payload, created_at)
+             VALUES (?1, ?2, ?3, NULL, ?4)",
+            rusqlite::params![repo_a.id, wt_b.id, "created", created_at],
+        )
+        .unwrap();
+
+        let entries = db.list_all_events(repo_a.id, 100).unwrap();
+        assert_eq!(entries.len(), 1);
+        // The worktree belongs to repo_b, so it should NOT resolve to a name
+        // when querying repo_a's events.
+        assert!(
+            entries[0].worktree_name.is_none(),
+            "cross-repo worktree name should not leak; got {:?}",
+            entries[0].worktree_name
+        );
+    }
+
+    #[test]
     fn get_repo_by_path_returns_existing_repo() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("my-project", "/home/user/my-project", Some("main")).unwrap();

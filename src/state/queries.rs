@@ -498,7 +498,9 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT e.id, e.event_type, w.name, e.payload, e.created_at
              FROM events e
-             LEFT JOIN worktrees w ON e.worktree_id = w.id
+             LEFT JOIN worktrees w
+               ON e.worktree_id = w.id
+              AND e.repo_id = w.repo_id
              WHERE e.repo_id = ?1
              ORDER BY e.created_at DESC, e.id DESC
              LIMIT ?2",
