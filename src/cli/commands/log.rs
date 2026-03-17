@@ -1,5 +1,7 @@
 use anyhow::Result;
+use serde::Serialize;
 
+use crate::output::json::format_json;
 use crate::output::table::Table;
 use crate::state::{Database, LogEntry};
 
@@ -121,6 +123,35 @@ pub fn execute(db: &Database, repo_id: i64, use_color: bool) -> Result<String> {
     Ok(out)
 }
 
+#[derive(Serialize)]
+struct LogEntryJson {
+    id: i64,
+    timestamp: String,
+    event_type: String,
+    worktree: Option<String>,
+    duration_secs: Option<f64>,
+    exit_code: Option<i64>,
+    created_at: i64,
+}
+
+fn to_json_entry(entry: &LogEntry) -> LogEntryJson {
+    LogEntryJson {
+        id: entry.id,
+        timestamp: format_timestamp(entry.created_at),
+        event_type: entry.event_type.clone(),
+        worktree: entry.worktree_name.clone(),
+        duration_secs: extract_duration(entry),
+        exit_code: extract_exit_code(entry),
+        created_at: entry.created_at,
+    }
+}
+
+pub fn execute_json(db: &Database, repo_id: i64) -> Result<String> {
+    let entries = db.list_all_events(repo_id, 1000)?;
+    let json_entries: Vec<LogEntryJson> = entries.iter().map(to_json_entry).collect();
+    format_json(&json_entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +254,50 @@ mod tests {
 
         let output = execute(&db, repo.id, true).unwrap();
         assert!(output.contains("\x1b[31m"), "failure events should be red");
+    }
+
+    #[test]
+    fn execute_json_returns_json_array() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt-alpha", "alpha", "/wt/alpha", None)
+            .unwrap();
+
+        let payload = serde_json::json!({"exit_code": 0, "duration_secs": 1.5});
+        db.insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload))
+            .unwrap();
+        db.insert_event(repo.id, Some(wt.id), "created", None)
+            .unwrap();
+
+        let output = execute_json(&db, repo.id).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let arr = parsed.as_array().expect("should be array");
+
+        assert_eq!(arr.len(), 2, "should have 2 events");
+
+        // Most recent first — "created" was inserted last
+        let first = &arr[0];
+        assert_eq!(first["event_type"], "created");
+        assert_eq!(first["worktree"], "wt-alpha");
+        assert!(first["duration_secs"].is_null());
+        assert!(first["exit_code"].is_null());
+
+        let second = &arr[1];
+        assert_eq!(second["event_type"], "hook:post_create");
+        assert_eq!(second["duration_secs"], 1.5);
+        assert_eq!(second["exit_code"], 0);
+        assert!(second["timestamp"].is_string());
+        assert!(second["created_at"].is_number());
+    }
+
+    #[test]
+    fn execute_json_returns_empty_array_when_no_events() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+
+        let output = execute_json(&db, repo.id).unwrap();
+        assert_eq!(output, "[]");
     }
 
     #[test]
