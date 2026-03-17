@@ -148,6 +148,54 @@ fn to_json_entry(entry: &LogEntry) -> LogEntryJson {
     }
 }
 
+/// Display stdout/stderr from the last hook execution for a worktree.
+///
+/// Shows output labeled by step (run/shell) with timestamps.
+/// Returns an error if no hook events exist for the worktree.
+pub fn execute_output(
+    db: &Database,
+    repo_id: i64,
+    worktree: &str,
+) -> Result<String> {
+    let event = db
+        .get_last_hook_event_for_worktree(repo_id, worktree)?
+        .ok_or_else(|| anyhow::anyhow!("No hook output found for worktree '{}'", worktree))?;
+
+    let lines = db.get_hook_output(event.id)?;
+
+    if lines.is_empty() {
+        let mut out = String::new();
+        out.push_str(&format!("=== {} ({})\n", event.event_type, format_timestamp(event.created_at)));
+        out.push_str("(no output captured)\n");
+        return Ok(out);
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("=== {} ({})\n", event.event_type, format_timestamp(event.created_at)));
+
+    for line in &lines {
+        let step_label = line.step.as_deref().unwrap_or("unknown");
+        let ts = format_timestamp(line.created_at);
+        let stream_marker = if line.stream == "stderr" { "!" } else { " " };
+        out.push_str(&format!(
+            "[{}]{} {} {}\n",
+            step_label, stream_marker, ts, line.line
+        ));
+    }
+
+    Ok(out)
+}
+
+/// JSON output for hook stdout/stderr replay.
+pub fn execute_output_json(
+    db: &Database,
+    repo_id: i64,
+    worktree: &str,
+) -> Result<String> {
+    // Stub — will be implemented in cycle 6
+    execute_output(db, repo_id, worktree)
+}
+
 pub fn execute_json(
     db: &Database,
     repo_id: i64,
@@ -162,6 +210,57 @@ pub fn execute_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execute_output_shows_hook_output_with_step_labels() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "feat", "feature/feat", "/wt/feat", None)
+            .unwrap();
+
+        // Insert a hook event
+        let payload = serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.5});
+        let event_id = db
+            .insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload))
+            .unwrap();
+
+        // Insert log lines with step labels
+        db.insert_log(event_id, "stdout", "Installing deps...", 1, Some("run")).unwrap();
+        db.insert_log(event_id, "stderr", "warning: peer dep", 2, Some("run")).unwrap();
+        db.insert_log(event_id, "stdout", "Migration done", 3, Some("shell")).unwrap();
+
+        let output = execute_output(&db, repo.id, "feat").unwrap();
+
+        // Should contain step labels
+        assert!(output.contains("[run]"), "should show [run] step label");
+        assert!(output.contains("[shell]"), "should show [shell] step label");
+
+        // Should contain actual output lines
+        assert!(output.contains("Installing deps..."), "should show stdout line");
+        assert!(output.contains("warning: peer dep"), "should show stderr line");
+        assert!(output.contains("Migration done"), "should show shell output");
+
+        // Should contain event type header
+        assert!(output.contains("hook:post_create"), "should show event type");
+    }
+
+    #[test]
+    fn execute_output_returns_error_when_no_hook_events() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let _wt = db
+            .insert_worktree(repo.id, "feat", "feature/feat", "/wt/feat", None)
+            .unwrap();
+
+        // Only a non-hook event
+        db.insert_event(repo.id, Some(_wt.id), "created", None).unwrap();
+
+        let result = execute_output(&db, repo.id, "feat");
+        assert!(result.is_err(), "should error when no hook output exists");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("No hook output"), "error message: {err}");
+    }
 
     #[test]
     fn execute_shows_empty_state_message() {

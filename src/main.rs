@@ -146,6 +146,10 @@ enum Commands {
         /// Limit to the last N events
         #[arg(long)]
         tail: Option<usize>,
+
+        /// Show stdout/stderr from the last hook execution for the worktree
+        #[arg(long)]
+        output: bool,
     },
     /// Initialize .trench.toml in current directory
     Init {
@@ -279,8 +283,8 @@ fn main() -> anyhow::Result<()> {
                 run_sync(&branch, strategy, json, dry_run, no_hooks)
             }
         }
-        Some(Commands::Log { branch, tail }) => {
-            run_log(branch.as_deref(), tail, json, output_config.should_color())
+        Some(Commands::Log { branch, tail, output }) => {
+            run_log(branch.as_deref(), tail, output, json, output_config.should_color())
         }
         None => {
             anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
@@ -634,6 +638,7 @@ fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
 fn run_log(
     branch: Option<&str>,
     tail: Option<usize>,
+    show_output: bool,
     json: bool,
     use_color: bool,
 ) -> anyhow::Result<()> {
@@ -671,6 +676,37 @@ fn run_log(
             eprintln!("error: worktree '{b}' not found");
             ExitCode::NotFound.exit();
         }
+    }
+
+    // --output mode: show hook stdout/stderr for a specific worktree
+    if show_output {
+        let b = match branch {
+            Some(b) => b,
+            None => {
+                eprintln!("error: --output requires a worktree argument");
+                eprintln!("usage: trench log <branch> --output");
+                ExitCode::MissingRequiredFlag.exit();
+            }
+        };
+        let result = if json {
+            cli::commands::log::execute_output_json(&db, repo_id, b)
+        } else {
+            cli::commands::log::execute_output(&db, repo_id, b)
+        };
+        match result {
+            Ok(out) => {
+                if out.ends_with('\n') {
+                    print!("{out}");
+                } else {
+                    println!("{out}");
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::NotFound.exit();
+            }
+        }
+        return Ok(());
     }
 
     let output = if json {
