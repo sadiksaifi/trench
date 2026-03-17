@@ -257,16 +257,18 @@ fn log_scoped_to_worktree_filters_events() {
     init_git_repo(tmp.path());
 
     // Create two worktrees
-    Command::new(trench_bin())
+    let out = Command::new(trench_bin())
         .args(["create", "alpha-branch", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("create alpha");
-    Command::new(trench_bin())
+    assert!(out.status.success(), "trench create alpha failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new(trench_bin())
         .args(["create", "beta-branch", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("create beta");
+    assert!(out.status.success(), "trench create beta failed: {}", String::from_utf8_lossy(&out.stderr));
 
     // Log scoped to alpha — JSON output
     let output = Command::new(trench_bin())
@@ -301,16 +303,18 @@ fn log_tail_limits_output() {
     init_git_repo(tmp.path());
 
     // Create and remove to generate multiple events
-    Command::new(trench_bin())
+    let out = Command::new(trench_bin())
         .args(["create", "tail-test", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("create");
-    Command::new(trench_bin())
+    assert!(out.status.success(), "trench create failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new(trench_bin())
         .args(["remove", "tail-test", "--force", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("remove");
+    assert!(out.status.success(), "trench remove failed: {}", String::from_utf8_lossy(&out.stderr));
 
     // tail 1 — JSON
     let output = Command::new(trench_bin())
@@ -332,23 +336,26 @@ fn log_scoped_and_tail_combined() {
     init_git_repo(tmp.path());
 
     // Create two worktrees
-    Command::new(trench_bin())
+    let out = Command::new(trench_bin())
         .args(["create", "combo-a", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("create combo-a");
-    Command::new(trench_bin())
+    assert!(out.status.success(), "trench create combo-a failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new(trench_bin())
         .args(["create", "combo-b", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("create combo-b");
+    assert!(out.status.success(), "trench create combo-b failed: {}", String::from_utf8_lossy(&out.stderr));
 
     // Remove combo-a to generate more events for it
-    Command::new(trench_bin())
+    let out = Command::new(trench_bin())
         .args(["remove", "combo-a", "--force", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("remove combo-a");
+    assert!(out.status.success(), "trench remove combo-a failed: {}", String::from_utf8_lossy(&out.stderr));
 
     // combo-a should have at least 2 events (created + removed), tail to 1
     let output = Command::new(trench_bin())
