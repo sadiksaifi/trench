@@ -55,8 +55,14 @@ fn days_to_ymd(days: i64) -> (i64, i64, i64) {
     (y, m as i64, d as i64)
 }
 
-pub fn execute(db: &Database, repo_id: i64, use_color: bool) -> Result<String> {
-    let entries = db.list_all_events(repo_id)?;
+pub fn execute(
+    db: &Database,
+    repo_id: i64,
+    use_color: bool,
+    worktree: Option<&str>,
+    tail: Option<usize>,
+) -> Result<String> {
+    let entries = db.list_events_filtered(repo_id, worktree, tail)?;
 
     if entries.is_empty() {
         return Ok("No events.\n".to_string());
@@ -142,8 +148,13 @@ fn to_json_entry(entry: &LogEntry) -> LogEntryJson {
     }
 }
 
-pub fn execute_json(db: &Database, repo_id: i64) -> Result<String> {
-    let entries = db.list_all_events(repo_id)?;
+pub fn execute_json(
+    db: &Database,
+    repo_id: i64,
+    worktree: Option<&str>,
+    tail: Option<usize>,
+) -> Result<String> {
+    let entries = db.list_events_filtered(repo_id, worktree, tail)?;
     let json_entries: Vec<LogEntryJson> = entries.iter().map(to_json_entry).collect();
     format_json(&json_entries)
 }
@@ -157,7 +168,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
 
-        let output = execute(&db, repo.id, false).unwrap();
+        let output = execute(&db, repo.id, false, None, None).unwrap();
         assert_eq!(output, "No events.\n");
     }
 
@@ -177,7 +188,7 @@ mod tests {
         db.insert_event(repo.id, Some(wt.id), "created", None)
             .unwrap();
 
-        let output = execute(&db, repo.id, false).unwrap();
+        let output = execute(&db, repo.id, false, None, None).unwrap();
 
         // Should have headers
         assert!(output.contains("Timestamp"), "should show Timestamp header");
@@ -210,7 +221,7 @@ mod tests {
         db.insert_event(repo.id, Some(wt.id), "created", None)
             .unwrap();
 
-        let output = execute(&db, repo.id, false).unwrap();
+        let output = execute(&db, repo.id, false, None, None).unwrap();
         assert!(
             !output.contains("\x1b"),
             "no-color output must not contain ANSI escapes"
@@ -229,7 +240,7 @@ mod tests {
         db.insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload))
             .unwrap();
 
-        let output = execute(&db, repo.id, true).unwrap();
+        let output = execute(&db, repo.id, true, None, None).unwrap();
         assert!(
             output.contains("\x1b[32m"),
             "success events should be green"
@@ -248,7 +259,7 @@ mod tests {
         db.insert_event(repo.id, Some(wt.id), "hook:pre_create", Some(&payload))
             .unwrap();
 
-        let output = execute(&db, repo.id, true).unwrap();
+        let output = execute(&db, repo.id, true, None, None).unwrap();
         assert!(output.contains("\x1b[31m"), "failure events should be red");
     }
 
@@ -266,7 +277,7 @@ mod tests {
         db.insert_event(repo.id, Some(wt.id), "created", None)
             .unwrap();
 
-        let output = execute_json(&db, repo.id).unwrap();
+        let output = execute_json(&db, repo.id, None, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let arr = parsed.as_array().expect("should be array");
 
@@ -292,8 +303,53 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
 
-        let output = execute_json(&db, repo.id).unwrap();
+        let output = execute_json(&db, repo.id, None, None).unwrap();
         assert_eq!(output, "[]");
+    }
+
+    #[test]
+    fn execute_with_tail_limits_output() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+        for _ in 0..5 {
+            db.insert_event(repo.id, Some(wt.id), "created", None)
+                .unwrap();
+        }
+
+        let output = execute(&db, repo.id, false, None, Some(2)).unwrap();
+        // Header + 2 data rows
+        let data_lines: Vec<&str> = output.lines().skip(1).filter(|l| !l.is_empty()).collect();
+        assert_eq!(data_lines.len(), 2, "should only show 2 events");
+    }
+
+    #[test]
+    fn execute_json_with_worktree_filter() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt_a = db
+            .insert_worktree(repo.id, "alpha", "feature/alpha", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo.id, "beta", "feature/beta", "/wt/b", None)
+            .unwrap();
+
+        db.insert_event(repo.id, Some(wt_a.id), "created", None)
+            .unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "switched", None)
+            .unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "created", None)
+            .unwrap();
+
+        let output = execute_json(&db, repo.id, Some("alpha"), None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "should only show alpha's 2 events");
+        for entry in arr {
+            assert_eq!(entry["worktree"], "alpha");
+        }
     }
 
     #[test]

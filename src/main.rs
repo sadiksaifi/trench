@@ -648,9 +648,9 @@ fn run_log(json: bool, use_color: bool) -> anyhow::Result<()> {
     };
 
     let output = if json {
-        cli::commands::log::execute_json(&db, repo_id)?
+        cli::commands::log::execute_json(&db, repo_id, None, None)?
     } else {
-        cli::commands::log::execute(&db, repo_id, use_color)?
+        cli::commands::log::execute(&db, repo_id, use_color, None, None)?
     };
     if output.ends_with('\n') {
         print!("{output}");
