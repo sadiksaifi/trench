@@ -252,6 +252,79 @@ pub fn execute_output_json(
     format_json_value(&output)
 }
 
+/// Display aggregate summary statistics for the event log.
+///
+/// Shows total events, hook runs, average duration, most active worktree,
+/// and success/failure ratio.
+pub fn execute_summary(
+    db: &Database,
+    repo_id: i64,
+) -> Result<String> {
+    let entries = db.list_events_filtered(repo_id, None, None)?;
+
+    if entries.is_empty() {
+        return Ok("No events recorded yet.\n".to_string());
+    }
+
+    let total_events = entries.len();
+
+    let hook_entries: Vec<&LogEntry> = entries
+        .iter()
+        .filter(|e| e.event_type.starts_with("hook:"))
+        .collect();
+    let total_hooks = hook_entries.len();
+
+    let durations: Vec<f64> = hook_entries
+        .iter()
+        .filter_map(|e| extract_duration(e))
+        .collect();
+    let avg_duration = if durations.is_empty() {
+        0.0
+    } else {
+        durations.iter().sum::<f64>() / durations.len() as f64
+    };
+
+    let successes = hook_entries
+        .iter()
+        .filter(|e| extract_exit_code(e) == Some(0))
+        .count();
+    let failures = hook_entries
+        .iter()
+        .filter(|e| matches!(extract_exit_code(e), Some(c) if c != 0))
+        .count();
+
+    // Most active worktree: worktree with the most events
+    let most_active = {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for entry in &entries {
+            if let Some(name) = entry.worktree_name.as_deref() {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(name, count)| (name.to_string(), count))
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("Total events:       {}\n", total_events));
+    out.push_str(&format!("Hook runs:          {}\n", total_hooks));
+    out.push_str(&format!("Avg hook duration:  {:.1}s\n", avg_duration));
+    out.push_str(&format!("Successes:          {}\n", successes));
+    out.push_str(&format!("Failures:           {}\n", failures));
+    match &most_active {
+        Some((name, count)) => {
+            out.push_str(&format!("Most active:        {} ({} events)\n", name, count));
+        }
+        None => {
+            out.push_str("Most active:        -\n");
+        }
+    }
+
+    Ok(out)
+}
+
 pub fn execute_json(
     db: &Database,
     repo_id: i64,
@@ -266,6 +339,15 @@ pub fn execute_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execute_summary_empty_state_shows_message() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+
+        let output = execute_summary(&db, repo.id).unwrap();
+        assert!(output.contains("No events"), "should indicate no events: {output}");
+    }
 
     #[test]
     fn execute_output_shows_hook_output_with_step_labels() {
