@@ -837,35 +837,27 @@ mod tests {
             .unwrap();
 
         // Insert events (they get auto-timestamped with now())
-        db.insert_event(repo.id, Some(wt1.id), "created", None)
+        let first_id = db
+            .insert_event(repo.id, Some(wt1.id), "created", None)
             .unwrap();
-        db.insert_event(repo.id, Some(wt2.id), "created", None)
+        let second_id = db
+            .insert_event(repo.id, Some(wt2.id), "created", None)
             .unwrap();
         let payload = serde_json::json!({"exit_code": 0, "duration_secs": 1.5});
-        db.insert_event(repo.id, Some(wt1.id), "hook:post_create", Some(&payload))
+        let third_id = db
+            .insert_event(repo.id, Some(wt1.id), "hook:post_create", Some(&payload))
             .unwrap();
 
         let entries = db.list_all_events(repo.id).unwrap();
         assert_eq!(entries.len(), 3, "should return all 3 events");
 
-        // Most recent first (last inserted = most recent due to same-second timestamps)
-        // All should have worktree names
-        assert!(
-            entries.iter().any(|e| e.worktree_name.as_deref() == Some("wt-alpha")),
-            "should include wt-alpha events"
+        // Verify exact ordering: most recent (highest id) first,
+        // which also validates the id DESC tiebreaker for same-second timestamps.
+        assert_eq!(
+            entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![third_id, second_id, first_id],
+            "events should be ordered by created_at DESC, then id DESC"
         );
-        assert!(
-            entries.iter().any(|e| e.worktree_name.as_deref() == Some("wt-beta")),
-            "should include wt-beta events"
-        );
-
-        // Verify ordering: created_at should be descending
-        for w in entries.windows(2) {
-            assert!(
-                w[0].created_at >= w[1].created_at,
-                "events should be ordered most recent first"
-            );
-        }
     }
 
     #[test]
