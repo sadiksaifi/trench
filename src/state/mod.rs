@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn list_all_events_returns_events_for_repo_most_recent_first() {
+    fn list_events_filtered_returns_events_for_repo_most_recent_first() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
         let wt1 = db
@@ -848,7 +848,7 @@ mod tests {
             .insert_event(repo.id, Some(wt1.id), "hook:post_create", Some(&payload))
             .unwrap();
 
-        let entries = db.list_all_events(repo.id).unwrap();
+        let entries = db.list_events_filtered(repo.id, None, None).unwrap();
         assert_eq!(entries.len(), 3, "should return all 3 events");
 
         // Verify exact ordering: most recent (highest id) first,
@@ -861,21 +861,21 @@ mod tests {
     }
 
     #[test]
-    fn list_all_events_includes_events_without_worktree() {
+    fn list_events_filtered_includes_events_without_worktree() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
 
         // Event with no worktree_id
         db.insert_event(repo.id, None, "init", None).unwrap();
 
-        let entries = db.list_all_events(repo.id).unwrap();
+        let entries = db.list_events_filtered(repo.id, None, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].worktree_name.is_none());
         assert_eq!(entries[0].event_type, "init");
     }
 
     #[test]
-    fn list_all_events_scoped_to_repo() {
+    fn list_events_filtered_scoped_to_repo() {
         let db = Database::open_in_memory().unwrap();
         let repo_a = db.insert_repo("a", "/a", None).unwrap();
         let repo_b = db.insert_repo("b", "/b", None).unwrap();
@@ -891,13 +891,13 @@ mod tests {
         db.insert_event(repo_b.id, Some(wt_b.id), "created", None)
             .unwrap();
 
-        let entries_a = db.list_all_events(repo_a.id).unwrap();
+        let entries_a = db.list_events_filtered(repo_a.id, None, None).unwrap();
         assert_eq!(entries_a.len(), 1, "should only return repo_a events");
         assert_eq!(entries_a[0].worktree_name.as_deref(), Some("wt-a"));
     }
 
     #[test]
-    fn list_all_events_returns_all_events_unbounded() {
+    fn list_events_filtered_returns_all_events_unbounded() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
         let wt = db
@@ -909,12 +909,12 @@ mod tests {
                 .unwrap();
         }
 
-        let entries = db.list_all_events(repo.id).unwrap();
+        let entries = db.list_events_filtered(repo.id, None, None).unwrap();
         assert_eq!(entries.len(), 1500, "should return all events without a cap");
     }
 
     #[test]
-    fn list_all_events_does_not_leak_cross_repo_worktree_name() {
+    fn list_events_filtered_does_not_leak_cross_repo_worktree_name() {
         let db = Database::open_in_memory().unwrap();
         let repo_a = db.insert_repo("a", "/a", None).unwrap();
         let repo_b = db.insert_repo("b", "/b", None).unwrap();
@@ -941,7 +941,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = db.list_all_events(repo_a.id).unwrap();
+        let entries = db.list_events_filtered(repo_a.id, None, None).unwrap();
         assert_eq!(entries.len(), 1);
         // The worktree belongs to repo_b, so it should NOT resolve to a name
         // when querying repo_a's events.

@@ -1,10 +1,15 @@
 //! Integration tests for `trench log` command.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
 fn trench_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_trench"))
+}
+
+/// Helper to get the exit code from a status.
+fn exit_code(status: ExitStatus) -> i32 {
+    status.code().unwrap_or(-1)
 }
 
 /// Run a git command in `dir`, panicking with stderr on failure.
@@ -216,5 +221,161 @@ fn log_table_output_after_create() {
     assert!(
         stdout.contains("log-table-test"),
         "should show worktree name, got: {stdout}"
+    );
+}
+
+#[test]
+fn log_nonexistent_worktree_exits_2() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    // Create at least one worktree so the repo is tracked
+    let create = Command::new(trench_bin())
+        .args(["create", "real-branch", "--no-hooks"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench create");
+    assert!(create.status.success());
+
+    let output = Command::new(trench_bin())
+        .args(["log", "nonexistent-branch"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench log");
+
+    assert_eq!(
+        exit_code(output.status),
+        2,
+        "should exit 2 for unknown worktree, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn log_scoped_to_worktree_filters_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    // Create two worktrees
+    let out = Command::new(trench_bin())
+        .args(["create", "alpha-branch", "--no-hooks"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("create alpha");
+    assert!(out.status.success(), "trench create alpha failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new(trench_bin())
+        .args(["create", "beta-branch", "--no-hooks"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("create beta");
+    assert!(out.status.success(), "trench create beta failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // Log scoped to alpha — JSON output
+    let output = Command::new(trench_bin())
+        .args(["log", "alpha-branch", "--json"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench log alpha-branch --json");
+
+    assert!(
+        output.status.success(),
+        "trench log alpha-branch --json should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let arr = parsed.as_array().expect("array");
+
+    // All events should be for alpha-branch
+    for event in arr {
+        assert_eq!(
+            event["worktree"].as_str().unwrap_or(""),
+            "alpha-branch",
+            "scoped log should only contain alpha events"
+        );
+    }
+}
+
+#[test]
+fn log_tail_limits_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    // Create and remove to generate multiple events
+    let out = Command::new(trench_bin())
+        .args(["create", "tail-test", "--no-hooks"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("create");
+    assert!(out.status.success(), "trench create failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new(trench_bin())
+        .args(["remove", "tail-test", "--force", "--no-hooks"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("remove");
+    assert!(out.status.success(), "trench remove failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // tail 1 — JSON
+    let output = Command::new(trench_bin())
+        .args(["log", "--tail", "1", "--json"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("trench log --tail 1 --json");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let arr = parsed.as_array().expect("array");
+    assert_eq!(arr.len(), 1, "tail 1 should return exactly 1 event");
+}
+
+#[test]
+fn log_scoped_and_tail_combined() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    // Create two worktrees
+    let out = Command::new(trench_bin())
+        .args(["create", "combo-a", "--no-hooks"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("create combo-a");
+    assert!(out.status.success(), "trench create combo-a failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new(trench_bin())
+        .args(["create", "combo-b", "--no-hooks"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("create combo-b");
+    assert!(out.status.success(), "trench create combo-b failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // Remove combo-a to generate more events for it
+    let out = Command::new(trench_bin())
+        .args(["remove", "combo-a", "--force", "--no-hooks"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("remove combo-a");
+    assert!(out.status.success(), "trench remove combo-a failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // combo-a should have at least 2 events (created + removed), tail to 1
+    let output = Command::new(trench_bin())
+        .args(["log", "combo-a", "--tail", "1", "--json"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("trench log combo-a --tail 1 --json");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let arr = parsed.as_array().expect("array");
+    assert_eq!(arr.len(), 1, "combined filter should return 1 event");
+    assert_eq!(
+        arr[0]["worktree"].as_str().unwrap_or(""),
+        "combo-a",
+        "event should be for combo-a"
     );
 }

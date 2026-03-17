@@ -490,23 +490,65 @@ impl Database {
         Ok(count)
     }
 
-    /// List all events for a repo (across all worktrees), most recent first.
+    /// List events for a repo with optional worktree filter and limit.
     ///
-    /// Joins with the worktrees table to include the worktree name.
-    /// Events without a worktree_id will have `worktree_name = None`.
-    pub fn list_all_events(&self, repo_id: i64) -> Result<Vec<LogEntry>> {
-        let mut stmt = self.conn.prepare(
+    /// When `worktree_identifier` is `Some`, only events for the matching
+    /// worktree (by name or branch) are returned.
+    /// When `limit` is `Some`, at most that many events are returned.
+    /// Results are ordered most recent first.
+    pub fn list_events_filtered(
+        &self,
+        repo_id: i64,
+        worktree_identifier: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<LogEntry>> {
+        let mut sql = String::from(
             "SELECT e.id, e.event_type, w.name, e.payload, e.created_at
              FROM events e
              LEFT JOIN worktrees w
                ON e.worktree_id = w.id
               AND e.repo_id = w.repo_id
-             WHERE e.repo_id = ?1
-             ORDER BY e.created_at DESC, e.id DESC",
-        ).context("failed to prepare list_all_events query")?;
+             WHERE e.repo_id = ?1",
+        );
+
+        // Parameter layout:
+        //   ?1 = repo_id (always)
+        //   ?2 = worktree_identifier (if Some) or limit (if worktree is None)
+        //   ?3 = limit (only when worktree_identifier is also Some)
+        if worktree_identifier.is_some() {
+            sql.push_str(" AND (w.name = ?2 OR w.branch = ?2)");
+        }
+
+        sql.push_str(" ORDER BY e.created_at DESC, e.id DESC");
+
+        if limit.is_some() {
+            if worktree_identifier.is_some() {
+                sql.push_str(" LIMIT ?3");
+            } else {
+                sql.push_str(" LIMIT ?2");
+            }
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .context("failed to prepare list_events_filtered query")?;
+
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> = {
+            let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(repo_id)];
+            if let Some(id) = worktree_identifier {
+                p.push(Box::new(id.to_string()));
+            }
+            if let Some(lim) = limit {
+                p.push(Box::new(lim as i64));
+            }
+            p
+        };
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
 
         let rows = stmt
-            .query_map(rusqlite::params![repo_id], |row| {
+            .query_map(param_refs.as_slice(), |row| {
                 Ok(LogEntry {
                     id: row.get(0)?,
                     event_type: row.get(1)?,
@@ -515,13 +557,27 @@ impl Database {
                     created_at: row.get(4)?,
                 })
             })
-            .context("failed to list all events")?;
+            .context("failed to list filtered events")?;
 
         let mut entries = Vec::new();
         for row in rows {
             entries.push(row.context("failed to read log entry row")?);
         }
         Ok(entries)
+    }
+
+    /// Check whether any worktree (active or removed) exists for the given
+    /// identifier (name or branch) in a repo.
+    pub fn worktree_exists_any(&self, repo_id: i64, identifier: &str) -> Result<bool> {
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM worktrees WHERE repo_id = ?1 AND (name = ?2 OR branch = ?2))",
+                rusqlite::params![repo_id, identifier],
+                |row| row.get(0),
+            )
+            .context("failed to check worktree existence")?;
+        Ok(exists)
     }
 
     /// List events for a worktree, most recent first, up to `limit`.
@@ -550,5 +606,105 @@ impl Database {
             events.push(row.context("failed to read event row")?);
         }
         Ok(events)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Database;
+
+    #[test]
+    fn list_events_filtered_with_limit_returns_n_most_recent() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "feat", "feat", "/wt/feat", None)
+            .unwrap();
+
+        // Insert 5 events
+        for _ in 0..5 {
+            db.insert_event(repo.id, Some(wt.id), "created", None)
+                .unwrap();
+        }
+
+        // Limit to 3
+        let entries = db
+            .list_events_filtered(repo.id, None, Some(3))
+            .unwrap();
+        assert_eq!(entries.len(), 3, "should return exactly 3 events");
+
+        // No limit returns all
+        let all = db
+            .list_events_filtered(repo.id, None, None)
+            .unwrap();
+        assert_eq!(all.len(), 5, "no limit should return all 5 events");
+    }
+
+    #[test]
+    fn list_events_filtered_by_worktree_name() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt_a = db
+            .insert_worktree(repo.id, "alpha", "feature/alpha", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo.id, "beta", "feature/beta", "/wt/b", None)
+            .unwrap();
+
+        // 3 events for alpha, 2 for beta
+        for _ in 0..3 {
+            db.insert_event(repo.id, Some(wt_a.id), "created", None)
+                .unwrap();
+        }
+        for _ in 0..2 {
+            db.insert_event(repo.id, Some(wt_b.id), "created", None)
+                .unwrap();
+        }
+
+        // Filter by sanitized name
+        let alpha_events = db
+            .list_events_filtered(repo.id, Some("alpha"), None)
+            .unwrap();
+        assert_eq!(alpha_events.len(), 3);
+
+        // Filter by branch name
+        let beta_events = db
+            .list_events_filtered(repo.id, Some("feature/beta"), None)
+            .unwrap();
+        assert_eq!(beta_events.len(), 2);
+
+        // Combined: filter + limit
+        let limited = db
+            .list_events_filtered(repo.id, Some("alpha"), Some(2))
+            .unwrap();
+        assert_eq!(limited.len(), 2);
+    }
+
+    #[test]
+    fn worktree_exists_any_includes_removed() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "gone", "feature/gone", "/wt/gone", None)
+            .unwrap();
+
+        assert!(db.worktree_exists_any(repo.id, "gone").unwrap());
+        assert!(db.worktree_exists_any(repo.id, "feature/gone").unwrap());
+        assert!(!db.worktree_exists_any(repo.id, "nonexistent").unwrap());
+
+        // Mark as removed — should still exist
+        db.update_worktree(
+            wt.id,
+            &crate::state::WorktreeUpdate {
+                removed_at: Some(Some(1000)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            db.worktree_exists_any(repo.id, "gone").unwrap(),
+            "removed worktree should still be found"
+        );
     }
 }

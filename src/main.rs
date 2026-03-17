@@ -139,7 +139,14 @@ enum Commands {
         no_hooks: bool,
     },
     /// View event log
-    Log,
+    Log {
+        /// Filter events to a specific worktree (by branch name or sanitized name)
+        branch: Option<String>,
+
+        /// Limit to the last N events
+        #[arg(long)]
+        tail: Option<usize>,
+    },
     /// Initialize .trench.toml in current directory
     Init {
         /// Overwrite existing .trench.toml
@@ -272,7 +279,9 @@ fn main() -> anyhow::Result<()> {
                 run_sync(&branch, strategy, json, dry_run, no_hooks)
             }
         }
-        Some(Commands::Log) => run_log(json, output_config.should_color()),
+        Some(Commands::Log { branch, tail }) => {
+            run_log(branch.as_deref(), tail, json, output_config.should_color())
+        }
         None => {
             anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
         }
@@ -622,7 +631,12 @@ fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_log(json: bool, use_color: bool) -> anyhow::Result<()> {
+fn run_log(
+    branch: Option<&str>,
+    tail: Option<usize>,
+    json: bool,
+    use_color: bool,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
@@ -637,6 +651,10 @@ fn run_log(json: bool, use_color: bool) -> anyhow::Result<()> {
     let repo_id = match repo {
         Some(r) => r.id,
         None => {
+            if let Some(b) = branch {
+                eprintln!("error: worktree '{b}' not found");
+                ExitCode::NotFound.exit();
+            }
             // No repo tracked yet — show empty state
             if json {
                 println!("[]");
@@ -647,10 +665,18 @@ fn run_log(json: bool, use_color: bool) -> anyhow::Result<()> {
         }
     };
 
+    // If a branch filter is specified, verify the worktree exists
+    if let Some(b) = branch {
+        if !db.worktree_exists_any(repo_id, b)? {
+            eprintln!("error: worktree '{b}' not found");
+            ExitCode::NotFound.exit();
+        }
+    }
+
     let output = if json {
-        cli::commands::log::execute_json(&db, repo_id)?
+        cli::commands::log::execute_json(&db, repo_id, branch, tail)?
     } else {
-        cli::commands::log::execute(&db, repo_id, use_color)?
+        cli::commands::log::execute(&db, repo_id, use_color, branch, tail)?
     };
     if output.ends_with('\n') {
         print!("{output}");
