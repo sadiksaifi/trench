@@ -511,6 +511,10 @@ impl Database {
              WHERE e.repo_id = ?1",
         );
 
+        // Parameter layout:
+        //   ?1 = repo_id (always)
+        //   ?2 = worktree_identifier (if Some) or limit (if worktree is None)
+        //   ?3 = limit (only when worktree_identifier is also Some)
         if worktree_identifier.is_some() {
             sql.push_str(" AND (w.name = ?2 OR w.branch = ?2)");
         }
