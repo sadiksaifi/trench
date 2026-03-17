@@ -25,9 +25,6 @@ fn extract_exit_code(entry: &LogEntry) -> Option<i64> {
 
 /// Format a Unix timestamp as a human-readable datetime string.
 fn format_timestamp(ts: i64) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-    let dt = UNIX_EPOCH + Duration::from_secs(ts as u64);
-    // Format as "YYYY-MM-DD HH:MM:SS" using chrono-free approach
     let secs = ts;
     let days = secs / 86400;
     let time_of_day = secs % 86400;
