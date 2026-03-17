@@ -188,7 +188,7 @@ fn record_execution(
     )?;
 
     for (i, (stream, line)) in output.iter().enumerate() {
-        db.insert_log(event_id, stream, line, (i + 1) as i64)?;
+        db.insert_log(event_id, stream, line, (i + 1) as i64, None)?;
     }
 
     Ok(event_id)

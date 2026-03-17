@@ -430,13 +430,14 @@ impl Database {
         stream: &str,
         line: &str,
         line_number: i64,
+        step: Option<&str>,
     ) -> Result<()> {
         let created_at = now();
         self.conn
             .execute(
-                "INSERT INTO logs (event_id, stream, line, line_number, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![event_id, stream, line, line_number, created_at],
+                "INSERT INTO logs (event_id, stream, line, line_number, step, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![event_id, stream, line, line_number, step, created_at],
             )
             .context("failed to insert log line")?;
         Ok(())
