@@ -559,3 +559,198 @@ fn log_output_no_hooks_exits_2() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn log_summary_empty_state_shows_no_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    let output = Command::new(trench_bin())
+        .args(["log", "--summary"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench log --summary");
+
+    assert!(
+        output.status.success(),
+        "trench log --summary should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No events"),
+        "should show empty state message, got: {stdout}"
+    );
+}
+
+#[test]
+fn log_summary_json_empty_state_returns_zeroed_stats() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    let output = Command::new(trench_bin())
+        .args(["log", "--summary", "--json"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench log --summary --json");
+
+    assert!(
+        output.status.success(),
+        "should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    assert_eq!(parsed["total_events"], 0);
+    assert_eq!(parsed["hook_runs"], 0);
+    assert_eq!(parsed["avg_hook_duration_secs"], 0.0);
+    assert_eq!(parsed["successes"], 0);
+    assert_eq!(parsed["failures"], 0);
+    assert!(parsed["most_active_worktree"].is_null());
+}
+
+#[test]
+fn log_summary_shows_accurate_stats_after_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    // Create a .trench.toml with a post_create hook so hook events get recorded
+    std::fs::write(
+        tmp.path().join(".trench.toml"),
+        r#"
+[hooks.post_create]
+run = ["echo hello"]
+"#,
+    )
+    .unwrap();
+    git(tmp.path(), &["add", "."]);
+    git(tmp.path(), &["commit", "-m", "add trench config"]);
+
+    // Create two worktrees (each generates "created" + "hook:post_create" events)
+    let create1 = Command::new(trench_bin())
+        .args(["create", "summary-feat-1"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("create 1");
+    assert!(
+        create1.status.success(),
+        "create 1 failed: {}",
+        String::from_utf8_lossy(&create1.stderr)
+    );
+
+    let create2 = Command::new(trench_bin())
+        .args(["create", "summary-feat-2"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("create 2");
+    assert!(
+        create2.status.success(),
+        "create 2 failed: {}",
+        String::from_utf8_lossy(&create2.stderr)
+    );
+
+    // Get JSON summary
+    let summary_output = Command::new(trench_bin())
+        .args(["log", "--summary", "--json"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("summary");
+    assert!(
+        summary_output.status.success(),
+        "summary failed: {}",
+        String::from_utf8_lossy(&summary_output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&summary_output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    // Should have at least 4 events (2 created + 2 hook:post_create)
+    let total = parsed["total_events"].as_u64().unwrap();
+    assert!(
+        total >= 4,
+        "should have at least 4 events, got {total}"
+    );
+
+    // Should have at least 2 hook runs
+    let hooks = parsed["hook_runs"].as_u64().unwrap();
+    assert!(
+        hooks >= 2,
+        "should have at least 2 hook runs, got {hooks}"
+    );
+
+    // Hook duration should be > 0
+    let avg = parsed["avg_hook_duration_secs"].as_f64().unwrap();
+    assert!(
+        avg >= 0.0,
+        "avg_hook_duration_secs should be non-negative, got {avg}"
+    );
+
+    // Successes should be >= 2 (both hooks succeeded)
+    let successes = parsed["successes"].as_u64().unwrap();
+    assert!(
+        successes >= 2,
+        "should have at least 2 successes, got {successes}"
+    );
+
+    assert_eq!(parsed["failures"], 0, "no hook failures expected");
+
+    // Most active worktree should be present
+    assert!(
+        parsed["most_active_worktree"].is_object(),
+        "most_active_worktree should be an object"
+    );
+    assert!(
+        parsed["most_active_worktree"]["name"].is_string(),
+        "most_active_worktree.name should be a string"
+    );
+    assert!(
+        parsed["most_active_worktree"]["event_count"].as_u64().unwrap() >= 2,
+        "most_active_worktree should have at least 2 events"
+    );
+
+    // Also verify human-readable output has the expected labels
+    let human_output = Command::new(trench_bin())
+        .args(["log", "--summary"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("human summary");
+    assert!(human_output.status.success());
+
+    let human_stdout = String::from_utf8_lossy(&human_output.stdout);
+    assert!(human_stdout.contains("Total events:"), "should have Total events label");
+    assert!(human_stdout.contains("Hook runs:"), "should have Hook runs label");
+    assert!(human_stdout.contains("Avg hook duration:"), "should have Avg hook duration label");
+    assert!(human_stdout.contains("Successes:"), "should have Successes label");
+    assert!(human_stdout.contains("Failures:"), "should have Failures label");
+    assert!(human_stdout.contains("Most active:"), "should have Most active label");
+}
+
+#[test]
+fn log_summary_and_output_conflict() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    let output = Command::new(trench_bin())
+        .args(["log", "--summary", "--output"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run");
+
+    assert_eq!(
+        exit_code(output.status),
+        8,
+        "should exit 8 for conflicting flags, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--summary") && stderr.contains("--output"),
+        "should mention both flags in error: {stderr}"
+    );
+}
