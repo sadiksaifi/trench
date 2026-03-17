@@ -89,7 +89,7 @@ fn log_shows_events_after_create_and_remove() {
 
     // Create a worktree
     let create_output = Command::new(trench_bin())
-        .args(["create", "log-test-feature"])
+        .args(["create", "log-test-feature", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("failed to run trench create");
@@ -101,7 +101,7 @@ fn log_shows_events_after_create_and_remove() {
 
     // Remove the worktree
     let remove_output = Command::new(trench_bin())
-        .args(["remove", "log-test-feature", "--force"])
+        .args(["remove", "log-test-feature", "--force", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("failed to run trench remove");
@@ -184,7 +184,7 @@ fn log_table_output_after_create() {
 
     // Create a worktree
     let create_output = Command::new(trench_bin())
-        .args(["create", "log-table-test"])
+        .args(["create", "log-table-test", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("failed to run trench create");
