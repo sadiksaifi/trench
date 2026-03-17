@@ -2,6 +2,7 @@ pub mod completions;
 pub mod create;
 pub mod init;
 pub mod list;
+pub mod log;
 pub mod open;
 pub mod remove;
 pub mod shell_init;
