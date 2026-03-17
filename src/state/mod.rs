@@ -69,6 +69,16 @@ pub struct Event {
     pub created_at: i64,
 }
 
+/// An event record enriched with worktree name, for log display.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub id: i64,
+    pub event_type: String,
+    pub worktree_name: Option<String>,
+    pub payload: Option<String>,
+    pub created_at: i64,
+}
+
 /// Core database handle wrapping a SQLite connection with migrations applied.
 #[derive(Debug)]
 pub struct Database {
@@ -813,6 +823,133 @@ mod tests {
 
         let logs = db.get_logs(event_id).unwrap();
         assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn list_all_events_returns_events_for_repo_most_recent_first() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt1 = db
+            .insert_worktree(repo.id, "wt-alpha", "alpha", "/wt/alpha", None)
+            .unwrap();
+        let wt2 = db
+            .insert_worktree(repo.id, "wt-beta", "beta", "/wt/beta", None)
+            .unwrap();
+
+        // Insert events (they get auto-timestamped with now())
+        let first_id = db
+            .insert_event(repo.id, Some(wt1.id), "created", None)
+            .unwrap();
+        let second_id = db
+            .insert_event(repo.id, Some(wt2.id), "created", None)
+            .unwrap();
+        let payload = serde_json::json!({"exit_code": 0, "duration_secs": 1.5});
+        let third_id = db
+            .insert_event(repo.id, Some(wt1.id), "hook:post_create", Some(&payload))
+            .unwrap();
+
+        let entries = db.list_all_events(repo.id).unwrap();
+        assert_eq!(entries.len(), 3, "should return all 3 events");
+
+        // Verify exact ordering: most recent (highest id) first,
+        // which also validates the id DESC tiebreaker for same-second timestamps.
+        assert_eq!(
+            entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![third_id, second_id, first_id],
+            "events should be ordered by created_at DESC, then id DESC"
+        );
+    }
+
+    #[test]
+    fn list_all_events_includes_events_without_worktree() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+
+        // Event with no worktree_id
+        db.insert_event(repo.id, None, "init", None).unwrap();
+
+        let entries = db.list_all_events(repo.id).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].worktree_name.is_none());
+        assert_eq!(entries[0].event_type, "init");
+    }
+
+    #[test]
+    fn list_all_events_scoped_to_repo() {
+        let db = Database::open_in_memory().unwrap();
+        let repo_a = db.insert_repo("a", "/a", None).unwrap();
+        let repo_b = db.insert_repo("b", "/b", None).unwrap();
+        let wt_a = db
+            .insert_worktree(repo_a.id, "wt-a", "branch-a", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo_b.id, "wt-b", "branch-b", "/wt/b", None)
+            .unwrap();
+
+        db.insert_event(repo_a.id, Some(wt_a.id), "created", None)
+            .unwrap();
+        db.insert_event(repo_b.id, Some(wt_b.id), "created", None)
+            .unwrap();
+
+        let entries_a = db.list_all_events(repo_a.id).unwrap();
+        assert_eq!(entries_a.len(), 1, "should only return repo_a events");
+        assert_eq!(entries_a[0].worktree_name.as_deref(), Some("wt-a"));
+    }
+
+    #[test]
+    fn list_all_events_returns_all_events_unbounded() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        for _ in 0..1500 {
+            db.insert_event(repo.id, Some(wt.id), "created", None)
+                .unwrap();
+        }
+
+        let entries = db.list_all_events(repo.id).unwrap();
+        assert_eq!(entries.len(), 1500, "should return all events without a cap");
+    }
+
+    #[test]
+    fn list_all_events_does_not_leak_cross_repo_worktree_name() {
+        let db = Database::open_in_memory().unwrap();
+        let repo_a = db.insert_repo("a", "/a", None).unwrap();
+        let repo_b = db.insert_repo("b", "/b", None).unwrap();
+        let _wt_a = db
+            .insert_worktree(repo_a.id, "wt-a", "branch-a", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo_b.id, "wt-b", "branch-b", "/wt/b", None)
+            .unwrap();
+
+        // Bypass the trigger to insert a cross-repo event:
+        // event belongs to repo_a but references repo_b's worktree_id.
+        let conn = db.conn_for_test();
+        conn.execute(
+            "DROP TRIGGER events_check_worktree_repo_consistency",
+            [],
+        )
+        .unwrap();
+        let created_at = unix_epoch_secs() as i64;
+        conn.execute(
+            "INSERT INTO events (repo_id, worktree_id, event_type, payload, created_at)
+             VALUES (?1, ?2, ?3, NULL, ?4)",
+            rusqlite::params![repo_a.id, wt_b.id, "created", created_at],
+        )
+        .unwrap();
+
+        let entries = db.list_all_events(repo_a.id).unwrap();
+        assert_eq!(entries.len(), 1);
+        // The worktree belongs to repo_b, so it should NOT resolve to a name
+        // when querying repo_a's events.
+        assert!(
+            entries[0].worktree_name.is_none(),
+            "cross-repo worktree name should not leak; got {:?}",
+            entries[0].worktree_name
+        );
     }
 
     #[test]

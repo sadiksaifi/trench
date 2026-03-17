@@ -272,10 +272,7 @@ fn main() -> anyhow::Result<()> {
                 run_sync(&branch, strategy, json, dry_run, no_hooks)
             }
         }
-        Some(Commands::Log) => {
-            // Log command not yet implemented
-            Ok(())
-        }
+        Some(Commands::Log) => run_log(json, output_config.should_color()),
         None => {
             anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
         }
@@ -622,6 +619,44 @@ fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
 
     let output = cli::commands::tag::execute(identifier, tags, &cwd, &db)?;
     print!("{output}");
+    Ok(())
+}
+
+fn run_log(json: bool, use_color: bool) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let db_path = paths::data_dir()?.join("trench.db");
+    let db = state::Database::open(&db_path)?;
+
+    let repo_info = git::discover_repo(&cwd)?;
+    let repo_path_str = repo_info
+        .path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
+
+    let repo = db.get_repo_by_path(repo_path_str)?;
+    let repo_id = match repo {
+        Some(r) => r.id,
+        None => {
+            // No repo tracked yet — show empty state
+            if json {
+                println!("[]");
+            } else {
+                println!("No events.");
+            }
+            return Ok(());
+        }
+    };
+
+    let output = if json {
+        cli::commands::log::execute_json(&db, repo_id)?
+    } else {
+        cli::commands::log::execute(&db, repo_id, use_color)?
+    };
+    if output.ends_with('\n') {
+        print!("{output}");
+    } else {
+        println!("{output}");
+    }
     Ok(())
 }
 

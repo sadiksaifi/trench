@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use rusqlite::OptionalExtension;
 
-use super::{unix_epoch_secs, Database, Event, Repo, Worktree, WorktreeUpdate};
+use super::{unix_epoch_secs, Database, Event, LogEntry, Repo, Worktree, WorktreeUpdate};
 
 fn now() -> i64 {
     unix_epoch_secs() as i64
@@ -488,6 +488,40 @@ impl Database {
             .query_row(sql, param_refs.as_slice(), |row| row.get(0))
             .context("failed to count events")?;
         Ok(count)
+    }
+
+    /// List all events for a repo (across all worktrees), most recent first.
+    ///
+    /// Joins with the worktrees table to include the worktree name.
+    /// Events without a worktree_id will have `worktree_name = None`.
+    pub fn list_all_events(&self, repo_id: i64) -> Result<Vec<LogEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.event_type, w.name, e.payload, e.created_at
+             FROM events e
+             LEFT JOIN worktrees w
+               ON e.worktree_id = w.id
+              AND e.repo_id = w.repo_id
+             WHERE e.repo_id = ?1
+             ORDER BY e.created_at DESC, e.id DESC",
+        ).context("failed to prepare list_all_events query")?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![repo_id], |row| {
+                Ok(LogEntry {
+                    id: row.get(0)?,
+                    event_type: row.get(1)?,
+                    worktree_name: row.get(2)?,
+                    payload: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .context("failed to list all events")?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.context("failed to read log entry row")?);
+        }
+        Ok(entries)
     }
 
     /// List events for a worktree, most recent first, up to `limit`.
