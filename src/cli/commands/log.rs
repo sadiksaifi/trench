@@ -481,6 +481,45 @@ mod tests {
     }
 
     #[test]
+    fn execute_summary_json_computes_correct_structured_stats() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt_a = db
+            .insert_worktree(repo.id, "alpha", "feature/alpha", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo.id, "beta", "feature/beta", "/wt/b", None)
+            .unwrap();
+
+        // 2 plain events for alpha
+        db.insert_event(repo.id, Some(wt_a.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "switched", None).unwrap();
+
+        // 3 hook events: 2 success, 1 failure
+        let ok_payload = serde_json::json!({"exit_code": 0, "duration_secs": 2.0});
+        let fail_payload = serde_json::json!({"exit_code": 1, "duration_secs": 4.0});
+        db.insert_event(repo.id, Some(wt_a.id), "hook:post_create", Some(&ok_payload)).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "hook:pre_sync", Some(&ok_payload)).unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "hook:post_create", Some(&fail_payload)).unwrap();
+
+        // 1 plain for beta
+        db.insert_event(repo.id, Some(wt_b.id), "created", None).unwrap();
+
+        let output = execute_summary_json(&db, repo.id).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        assert_eq!(parsed["total_events"], 6);
+        assert_eq!(parsed["hook_runs"], 3);
+        assert_eq!(parsed["avg_hook_duration_secs"], 2.7);
+        assert_eq!(parsed["successes"], 2);
+        assert_eq!(parsed["failures"], 1);
+
+        let most_active = &parsed["most_active_worktree"];
+        assert_eq!(most_active["name"], "alpha");
+        assert_eq!(most_active["event_count"], 4);
+    }
+
+    #[test]
     fn execute_output_shows_hook_output_with_step_labels() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
