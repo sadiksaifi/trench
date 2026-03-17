@@ -46,7 +46,7 @@ pub async fn execute_hook(
     let env_vars = build_env(env_ctx, event);
     let timeout_secs = config.timeout_secs.unwrap_or(120);
 
-    let mut all_output: Vec<(String, String)> = Vec::new(); // (stream, line)
+    let mut all_output: Vec<(String, String, String)> = Vec::new(); // (step, stream, line)
 
     // Step 1: Copy (not subject to timeout)
     if let Some(ref patterns) = config.copy {
@@ -68,7 +68,7 @@ pub async fn execute_hook(
         {
             Ok(Ok(run_result)) => {
                 for cmd_output in &run_result.executed {
-                    collect_output(&mut all_output, &cmd_output.stdout, &cmd_output.stderr);
+                    collect_output(&mut all_output, "run", &cmd_output.stdout, &cmd_output.stderr);
                 }
             }
             Ok(Err(e)) => {
@@ -97,7 +97,7 @@ pub async fn execute_hook(
             .await
         {
             Ok(Ok(shell_output)) => {
-                collect_output(&mut all_output, &shell_output.stdout, &shell_output.stderr);
+                collect_output(&mut all_output, "shell", &shell_output.stdout, &shell_output.stderr);
             }
             Ok(Err(e)) => {
                 let exit_code = extract_shell_error_output(&e, &mut all_output);
@@ -131,11 +131,11 @@ pub async fn execute_hook(
 /// Extract partial output from a RunStepError and return the exit code.
 fn extract_run_error_output(
     err: &anyhow::Error,
-    all_output: &mut Vec<(String, String)>,
+    all_output: &mut Vec<(String, String, String)>,
 ) -> i32 {
     if let Some(run_err) = err.downcast_ref::<RunStepError>() {
         for cmd_output in &run_err.results.executed {
-            collect_output(all_output, &cmd_output.stdout, &cmd_output.stderr);
+            collect_output(all_output, "run", &cmd_output.stdout, &cmd_output.stderr);
         }
         run_err.exit_code
     } else {
@@ -146,22 +146,22 @@ fn extract_run_error_output(
 /// Extract output from a ShellStepError and return the exit code.
 fn extract_shell_error_output(
     err: &anyhow::Error,
-    all_output: &mut Vec<(String, String)>,
+    all_output: &mut Vec<(String, String, String)>,
 ) -> i32 {
     if let Some(shell_err) = err.downcast_ref::<ShellStepError>() {
-        collect_output(all_output, &shell_err.output.stdout, &shell_err.output.stderr);
+        collect_output(all_output, "shell", &shell_err.output.stdout, &shell_err.output.stderr);
         shell_err.exit_code
     } else {
         1
     }
 }
 
-fn collect_output(all_output: &mut Vec<(String, String)>, stdout: &str, stderr: &str) {
+fn collect_output(all_output: &mut Vec<(String, String, String)>, step: &str, stdout: &str, stderr: &str) {
     for line in stdout.lines() {
-        all_output.push(("stdout".to_string(), line.to_string()));
+        all_output.push((step.to_string(), "stdout".to_string(), line.to_string()));
     }
     for line in stderr.lines() {
-        all_output.push(("stderr".to_string(), line.to_string()));
+        all_output.push((step.to_string(), "stderr".to_string(), line.to_string()));
     }
 }
 
@@ -172,7 +172,7 @@ fn record_execution(
     event: &HookEvent,
     exit_code: i32,
     duration_secs: f64,
-    output: &[(String, String)],
+    output: &[(String, String, String)],
 ) -> Result<i64> {
     let payload = serde_json::json!({
         "hook": event.as_str(),
@@ -187,8 +187,8 @@ fn record_execution(
         Some(&payload),
     )?;
 
-    for (i, (stream, line)) in output.iter().enumerate() {
-        db.insert_log(event_id, stream, line, (i + 1) as i64, None)?;
+    for (i, (step, stream, line)) in output.iter().enumerate() {
+        db.insert_log(event_id, stream, line, (i + 1) as i64, Some(step))?;
     }
 
     Ok(event_id)
@@ -599,5 +599,51 @@ mod tests {
         let streams: Vec<&str> = logs.iter().map(|(s, _, _)| s.as_str()).collect();
         assert!(streams.contains(&"stdout"));
         assert!(streams.contains(&"stderr"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hook_output_logs_include_step_labels() {
+        let source = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let (db, repo_id, wt_id) = setup_db();
+
+        let config = HookDef {
+            copy: None,
+            run: Some(vec!["echo from_run".to_string()]),
+            shell: Some("echo from_shell".to_string()),
+            timeout_secs: Some(30),
+        };
+
+        let env_ctx = test_env_ctx(source.path(), work.path());
+
+        let result = execute_hook(
+            &HookEvent::PostCreate,
+            &config,
+            &env_ctx,
+            source.path(),
+            work.path(),
+            &db,
+            repo_id,
+            Some(wt_id),
+        )
+        .await
+        .unwrap();
+
+        // Verify step labels are stored via raw query
+        let conn = db.conn_for_test();
+        let mut stmt = conn.prepare(
+            "SELECT line, step FROM logs WHERE event_id = ?1 ORDER BY line_number"
+        ).unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map(rusqlite::params![result.event_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], ("from_run".to_string(), Some("run".to_string())));
+        assert_eq!(rows[1], ("from_shell".to_string(), Some("shell".to_string())));
     }
 }
