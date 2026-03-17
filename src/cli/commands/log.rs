@@ -317,8 +317,10 @@ fn compute_summary(entries: &[LogEntry]) -> SummaryStats {
 pub fn execute_summary(
     db: &Database,
     repo_id: i64,
+    worktree: Option<&str>,
+    tail: Option<usize>,
 ) -> Result<String> {
-    let entries = db.list_events_filtered(repo_id, None, None)?;
+    let entries = db.list_events_filtered(repo_id, worktree, tail)?;
 
     if entries.is_empty() {
         return Ok("No events recorded yet.\n".to_string());
@@ -364,8 +366,10 @@ struct MostActiveJson {
 pub fn execute_summary_json(
     db: &Database,
     repo_id: i64,
+    worktree: Option<&str>,
+    tail: Option<usize>,
 ) -> Result<String> {
-    let entries = db.list_events_filtered(repo_id, None, None)?;
+    let entries = db.list_events_filtered(repo_id, worktree, tail)?;
     let stats = compute_summary(&entries);
 
     let summary = SummaryJson {
@@ -403,7 +407,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
 
-        let output = execute_summary(&db, repo.id).unwrap();
+        let output = execute_summary(&db, repo.id, None, None).unwrap();
         assert!(output.contains("No events"), "should indicate no events: {output}");
     }
 
@@ -432,7 +436,7 @@ mod tests {
         // 1 plain event for beta
         db.insert_event(repo.id, Some(wt_b.id), "created", None).unwrap();
 
-        let output = execute_summary(&db, repo.id).unwrap();
+        let output = execute_summary(&db, repo.id, None, None).unwrap();
 
         // Total events: 6 (2 plain + 3 hooks + 1 plain)
         assert!(output.contains("Total events:       6"), "total events: {output}");
@@ -452,7 +456,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
 
-        let output = execute_summary_json(&db, repo.id).unwrap();
+        let output = execute_summary_json(&db, repo.id, None, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
 
         assert_eq!(parsed["total_events"], 0);
@@ -488,7 +492,7 @@ mod tests {
         // 1 plain for beta
         db.insert_event(repo.id, Some(wt_b.id), "created", None).unwrap();
 
-        let output = execute_summary_json(&db, repo.id).unwrap();
+        let output = execute_summary_json(&db, repo.id, None, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
 
         assert_eq!(parsed["total_events"], 6);
@@ -500,6 +504,48 @@ mod tests {
         let most_active = &parsed["most_active_worktree"];
         assert_eq!(most_active["name"], "alpha");
         assert_eq!(most_active["event_count"], 4);
+    }
+
+    #[test]
+    fn execute_summary_respects_worktree_filter() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt_a = db
+            .insert_worktree(repo.id, "alpha", "feature/alpha", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo.id, "beta", "feature/beta", "/wt/b", None)
+            .unwrap();
+
+        // 3 events for alpha, 2 for beta
+        db.insert_event(repo.id, Some(wt_a.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "switched", None).unwrap();
+        let ok_payload = serde_json::json!({"exit_code": 0, "duration_secs": 1.0});
+        db.insert_event(repo.id, Some(wt_a.id), "hook:post_create", Some(&ok_payload)).unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "switched", None).unwrap();
+
+        // Filter to alpha only
+        let output = execute_summary(&db, repo.id, Some("alpha"), None).unwrap();
+        assert!(output.contains("Total events:       3"), "should show 3 alpha events: {output}");
+        assert!(output.contains("Most active:        alpha"), "most active should be alpha: {output}");
+    }
+
+    #[test]
+    fn execute_summary_json_respects_tail_filter() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        for _ in 0..5 {
+            db.insert_event(repo.id, Some(wt.id), "created", None).unwrap();
+        }
+
+        let output = execute_summary_json(&db, repo.id, None, Some(2)).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(parsed["total_events"], 2, "tail=2 should limit to 2 events");
     }
 
     #[test]

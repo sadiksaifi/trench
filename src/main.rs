@@ -680,7 +680,7 @@ fn run_log(
             }
             // No repo tracked yet — show empty state
             if show_summary && json {
-                let output = cli::commands::log::execute_summary_json(&db, 0)?;
+                let output = cli::commands::log::execute_summary_json(&db, 0, None, None)?;
                 println!("{output}");
                 return Ok(());
             } else if show_summary {
@@ -707,9 +707,9 @@ fn run_log(
     // --summary mode: show aggregate statistics
     if show_summary {
         let output = if json {
-            cli::commands::log::execute_summary_json(&db, repo_id)?
+            cli::commands::log::execute_summary_json(&db, repo_id, branch, tail)?
         } else {
-            cli::commands::log::execute_summary(&db, repo_id)?
+            cli::commands::log::execute_summary(&db, repo_id, branch, tail)?
         };
         if output.ends_with('\n') {
             print!("{output}");
