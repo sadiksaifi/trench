@@ -325,6 +325,81 @@ pub fn execute_summary(
     Ok(out)
 }
 
+#[derive(Serialize)]
+struct SummaryJson {
+    total_events: usize,
+    hook_runs: usize,
+    avg_hook_duration_secs: f64,
+    successes: usize,
+    failures: usize,
+    most_active_worktree: Option<MostActiveJson>,
+}
+
+#[derive(Serialize)]
+struct MostActiveJson {
+    name: String,
+    event_count: usize,
+}
+
+/// JSON output for aggregate summary statistics.
+pub fn execute_summary_json(
+    db: &Database,
+    repo_id: i64,
+) -> Result<String> {
+    let entries = db.list_events_filtered(repo_id, None, None)?;
+
+    let hook_entries: Vec<&LogEntry> = entries
+        .iter()
+        .filter(|e| e.event_type.starts_with("hook:"))
+        .collect();
+
+    let durations: Vec<f64> = hook_entries
+        .iter()
+        .filter_map(|e| extract_duration(e))
+        .collect();
+    let avg_duration = if durations.is_empty() {
+        0.0
+    } else {
+        durations.iter().sum::<f64>() / durations.len() as f64
+    };
+
+    let successes = hook_entries
+        .iter()
+        .filter(|e| extract_exit_code(e) == Some(0))
+        .count();
+    let failures = hook_entries
+        .iter()
+        .filter(|e| matches!(extract_exit_code(e), Some(c) if c != 0))
+        .count();
+
+    let most_active = {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for entry in &entries {
+            if let Some(name) = entry.worktree_name.as_deref() {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(name, count)| MostActiveJson {
+                name: name.to_string(),
+                event_count: count,
+            })
+    };
+
+    let summary = SummaryJson {
+        total_events: entries.len(),
+        hook_runs: hook_entries.len(),
+        avg_hook_duration_secs: (avg_duration * 10.0).round() / 10.0,
+        successes,
+        failures,
+        most_active_worktree: most_active,
+    };
+
+    format_json_value(&summary)
+}
+
 pub fn execute_json(
     db: &Database,
     repo_id: i64,
@@ -387,6 +462,22 @@ mod tests {
         assert!(output.contains("Failures:           1"), "failures: {output}");
         // Most active: alpha (4 events: 2 plain + 2 hooks)
         assert!(output.contains("Most active:        alpha (4 events)"), "most active: {output}");
+    }
+
+    #[test]
+    fn execute_summary_json_empty_state_returns_zeroed_stats() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+
+        let output = execute_summary_json(&db, repo.id).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        assert_eq!(parsed["total_events"], 0);
+        assert_eq!(parsed["hook_runs"], 0);
+        assert_eq!(parsed["avg_hook_duration_secs"], 0.0);
+        assert_eq!(parsed["successes"], 0);
+        assert_eq!(parsed["failures"], 0);
+        assert!(parsed["most_active_worktree"].is_null());
     }
 
     #[test]
