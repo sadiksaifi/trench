@@ -350,6 +350,46 @@ mod tests {
     }
 
     #[test]
+    fn execute_summary_computes_correct_aggregate_stats() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt_a = db
+            .insert_worktree(repo.id, "alpha", "feature/alpha", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo.id, "beta", "feature/beta", "/wt/b", None)
+            .unwrap();
+
+        // 2 plain events for alpha
+        db.insert_event(repo.id, Some(wt_a.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "switched", None).unwrap();
+
+        // 3 hook events: 2 success (alpha), 1 failure (beta)
+        let ok_payload = serde_json::json!({"exit_code": 0, "duration_secs": 2.0});
+        let fail_payload = serde_json::json!({"exit_code": 1, "duration_secs": 4.0});
+        db.insert_event(repo.id, Some(wt_a.id), "hook:post_create", Some(&ok_payload)).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "hook:pre_sync", Some(&ok_payload)).unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "hook:post_create", Some(&fail_payload)).unwrap();
+
+        // 1 plain event for beta
+        db.insert_event(repo.id, Some(wt_b.id), "created", None).unwrap();
+
+        let output = execute_summary(&db, repo.id).unwrap();
+
+        // Total events: 6 (2 plain + 3 hooks + 1 plain)
+        assert!(output.contains("Total events:       6"), "total events: {output}");
+        // Hook runs: 3
+        assert!(output.contains("Hook runs:          3"), "hook runs: {output}");
+        // Avg duration: (2.0 + 2.0 + 4.0) / 3 = 2.666...
+        assert!(output.contains("Avg hook duration:  2.7s"), "avg duration: {output}");
+        // Successes: 2, Failures: 1
+        assert!(output.contains("Successes:          2"), "successes: {output}");
+        assert!(output.contains("Failures:           1"), "failures: {output}");
+        // Most active: alpha (4 events: 2 plain + 2 hooks)
+        assert!(output.contains("Most active:        alpha (4 events)"), "most active: {output}");
+    }
+
+    #[test]
     fn execute_output_shows_hook_output_with_step_labels() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
