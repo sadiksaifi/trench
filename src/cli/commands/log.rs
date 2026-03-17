@@ -57,7 +57,7 @@ fn days_to_ymd(days: i64) -> (i64, i64, i64) {
 }
 
 pub fn execute(db: &Database, repo_id: i64, use_color: bool) -> Result<String> {
-    let entries = db.list_all_events(repo_id, 1000)?;
+    let entries = db.list_all_events(repo_id)?;
 
     if entries.is_empty() {
         return Ok("No events.\n".to_string());
@@ -144,7 +144,7 @@ fn to_json_entry(entry: &LogEntry) -> LogEntryJson {
 }
 
 pub fn execute_json(db: &Database, repo_id: i64) -> Result<String> {
-    let entries = db.list_all_events(repo_id, 1000)?;
+    let entries = db.list_all_events(repo_id)?;
     let json_entries: Vec<LogEntryJson> = entries.iter().map(to_json_entry).collect();
     format_json(&json_entries)
 }

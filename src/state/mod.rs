@@ -845,7 +845,7 @@ mod tests {
         db.insert_event(repo.id, Some(wt1.id), "hook:post_create", Some(&payload))
             .unwrap();
 
-        let entries = db.list_all_events(repo.id, 100).unwrap();
+        let entries = db.list_all_events(repo.id).unwrap();
         assert_eq!(entries.len(), 3, "should return all 3 events");
 
         // Most recent first (last inserted = most recent due to same-second timestamps)
@@ -876,27 +876,10 @@ mod tests {
         // Event with no worktree_id
         db.insert_event(repo.id, None, "init", None).unwrap();
 
-        let entries = db.list_all_events(repo.id, 100).unwrap();
+        let entries = db.list_all_events(repo.id).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].worktree_name.is_none());
         assert_eq!(entries[0].event_type, "init");
-    }
-
-    #[test]
-    fn list_all_events_respects_limit() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = db.insert_repo("r", "/r", None).unwrap();
-        let wt = db
-            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
-            .unwrap();
-
-        for _ in 0..5 {
-            db.insert_event(repo.id, Some(wt.id), "created", None)
-                .unwrap();
-        }
-
-        let entries = db.list_all_events(repo.id, 3).unwrap();
-        assert_eq!(entries.len(), 3, "should respect limit");
     }
 
     #[test]
@@ -916,9 +899,26 @@ mod tests {
         db.insert_event(repo_b.id, Some(wt_b.id), "created", None)
             .unwrap();
 
-        let entries_a = db.list_all_events(repo_a.id, 100).unwrap();
+        let entries_a = db.list_all_events(repo_a.id).unwrap();
         assert_eq!(entries_a.len(), 1, "should only return repo_a events");
         assert_eq!(entries_a[0].worktree_name.as_deref(), Some("wt-a"));
+    }
+
+    #[test]
+    fn list_all_events_returns_all_events_unbounded() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        for _ in 0..1500 {
+            db.insert_event(repo.id, Some(wt.id), "created", None)
+                .unwrap();
+        }
+
+        let entries = db.list_all_events(repo.id).unwrap();
+        assert_eq!(entries.len(), 1500, "should return all events without a cap");
     }
 
     #[test]
@@ -949,7 +949,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = db.list_all_events(repo_a.id, 100).unwrap();
+        let entries = db.list_all_events(repo_a.id).unwrap();
         assert_eq!(entries.len(), 1);
         // The worktree belongs to repo_b, so it should NOT resolve to a name
         // when querying repo_a's events.
