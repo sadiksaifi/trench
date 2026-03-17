@@ -430,16 +430,46 @@ impl Database {
         stream: &str,
         line: &str,
         line_number: i64,
+        step: Option<&str>,
     ) -> Result<()> {
         let created_at = now();
         self.conn
             .execute(
-                "INSERT INTO logs (event_id, stream, line, line_number, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![event_id, stream, line, line_number, created_at],
+                "INSERT INTO logs (event_id, stream, line, line_number, step, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![event_id, stream, line, line_number, step, created_at],
             )
             .context("failed to insert log line")?;
         Ok(())
+    }
+
+    /// Retrieve hook output lines for an event with full metadata (step, timestamps).
+    pub fn get_hook_output(&self, event_id: i64) -> Result<Vec<super::HookOutputLine>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT stream, line, step, line_number, created_at FROM logs
+                 WHERE event_id = ?1 ORDER BY line_number",
+            )
+            .context("failed to prepare get_hook_output query")?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![event_id], |row| {
+                Ok(super::HookOutputLine {
+                    stream: row.get(0)?,
+                    line: row.get(1)?,
+                    step: row.get(2)?,
+                    line_number: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .context("failed to get hook output")?;
+
+        let mut lines = Vec::new();
+        for row in rows {
+            lines.push(row.context("failed to read hook output line")?);
+        }
+        Ok(lines)
     }
 
     /// Retrieve log lines for an event, ordered by line number.
@@ -580,6 +610,41 @@ impl Database {
         Ok(exists)
     }
 
+    /// Find the most recent hook event for a worktree (by name or branch).
+    ///
+    /// Returns the last event whose `event_type` starts with `hook:` for the
+    /// matching worktree, or `None` if no hook events exist.
+    pub fn get_last_hook_event_for_worktree(
+        &self,
+        repo_id: i64,
+        identifier: &str,
+    ) -> Result<Option<Event>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.event_type, e.payload, e.created_at
+             FROM events e
+             JOIN worktrees w ON e.worktree_id = w.id AND e.repo_id = w.repo_id
+             WHERE e.repo_id = ?1
+               AND (w.name = ?2 OR w.branch = ?2)
+               AND e.event_type LIKE 'hook:%'
+             ORDER BY e.created_at DESC, e.id DESC
+             LIMIT 1",
+        ).context("failed to prepare get_last_hook_event_for_worktree query")?;
+
+        let event = stmt
+            .query_row(rusqlite::params![repo_id, identifier], |row| {
+                Ok(Event {
+                    id: row.get(0)?,
+                    event_type: row.get(1)?,
+                    payload: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })
+            .optional()
+            .context("failed to get last hook event")?;
+
+        Ok(event)
+    }
+
     /// List events for a worktree, most recent first, up to `limit`.
     pub fn list_events(&self, worktree_id: i64, limit: usize) -> Result<Vec<Event>> {
         let mut stmt = self.conn.prepare(
@@ -613,6 +678,59 @@ impl Database {
 mod tests {
     use super::*;
     use crate::state::Database;
+
+    #[test]
+    fn get_last_hook_event_returns_most_recent_hook() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "feat", "feature/feat", "/wt/feat", None)
+            .unwrap();
+
+        // Insert a non-hook event, then two hook events
+        db.insert_event(repo.id, Some(wt.id), "created", None).unwrap();
+        let payload1 = serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.0});
+        db.insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload1)).unwrap();
+        let payload2 = serde_json::json!({"hook": "pre_sync", "exit_code": 0, "duration_secs": 0.5});
+        let last_id = db.insert_event(repo.id, Some(wt.id), "hook:pre_sync", Some(&payload2)).unwrap();
+
+        let event = db.get_last_hook_event_for_worktree(repo.id, "feat").unwrap();
+        assert!(event.is_some(), "should find a hook event");
+        let event = event.unwrap();
+        assert_eq!(event.id, last_id);
+        assert_eq!(event.event_type, "hook:pre_sync");
+    }
+
+    #[test]
+    fn get_last_hook_event_returns_none_when_no_hooks() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "feat", "feature/feat", "/wt/feat", None)
+            .unwrap();
+
+        // Only non-hook events
+        db.insert_event(repo.id, Some(wt.id), "created", None).unwrap();
+
+        let event = db.get_last_hook_event_for_worktree(repo.id, "feat").unwrap();
+        assert!(event.is_none(), "should return None when no hook events");
+    }
+
+    #[test]
+    fn get_last_hook_event_matches_by_branch_name() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "feat", "feature/feat", "/wt/feat", None)
+            .unwrap();
+
+        let payload = serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.0});
+        db.insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload)).unwrap();
+
+        // Match by branch name (not sanitized name)
+        let event = db.get_last_hook_event_for_worktree(repo.id, "feature/feat").unwrap();
+        assert!(event.is_some(), "should match by branch name");
+    }
 
     #[test]
     fn list_events_filtered_with_limit_returns_n_most_recent() {

@@ -1,26 +1,18 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::output::json::format_json;
+use crate::output::json::{format_json, format_json_value};
 use crate::output::table::Table;
 use crate::state::{Database, LogEntry};
 
 /// Extract duration_secs from a LogEntry's JSON payload, if present.
 fn extract_duration(entry: &LogEntry) -> Option<f64> {
-    entry
-        .payload
-        .as_deref()
-        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
-        .and_then(|v| v.get("duration_secs")?.as_f64())
+    extract_duration_from_payload(&entry.payload)
 }
 
 /// Extract exit_code from a LogEntry's JSON payload, if present.
 fn extract_exit_code(entry: &LogEntry) -> Option<i64> {
-    entry
-        .payload
-        .as_deref()
-        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
-        .and_then(|v| v.get("exit_code")?.as_i64())
+    extract_exit_code_from_payload(&entry.payload)
 }
 
 /// Format a Unix timestamp as a human-readable datetime string.
@@ -126,6 +118,43 @@ pub fn execute(
 }
 
 #[derive(Serialize)]
+struct HookOutputJson {
+    event_id: i64,
+    event_type: String,
+    timestamp: String,
+    duration_secs: Option<f64>,
+    exit_code: Option<i64>,
+    created_at: i64,
+    lines: Vec<HookOutputLineJson>,
+}
+
+#[derive(Serialize)]
+struct HookOutputLineJson {
+    stream: String,
+    line: String,
+    step: Option<String>,
+    line_number: i64,
+    timestamp: String,
+    created_at: i64,
+}
+
+/// Extract duration_secs from a JSON payload string.
+fn extract_duration_from_payload(payload: &Option<String>) -> Option<f64> {
+    payload
+        .as_deref()
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .and_then(|v| v.get("duration_secs")?.as_f64())
+}
+
+/// Extract exit_code from a JSON payload string.
+fn extract_exit_code_from_payload(payload: &Option<String>) -> Option<i64> {
+    payload
+        .as_deref()
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .and_then(|v| v.get("exit_code")?.as_i64())
+}
+
+#[derive(Serialize)]
 struct LogEntryJson {
     id: i64,
     timestamp: String,
@@ -148,6 +177,81 @@ fn to_json_entry(entry: &LogEntry) -> LogEntryJson {
     }
 }
 
+/// Display stdout/stderr from the last hook execution for a worktree.
+///
+/// Shows output labeled by step (run/shell) with timestamps.
+/// Returns an error if no hook events exist for the worktree.
+pub fn execute_output(
+    db: &Database,
+    repo_id: i64,
+    worktree: &str,
+) -> Result<String> {
+    let event = db
+        .get_last_hook_event_for_worktree(repo_id, worktree)?
+        .ok_or_else(|| anyhow::anyhow!("No hook output found for worktree '{}'", worktree))?;
+
+    let lines = db.get_hook_output(event.id)?;
+
+    if lines.is_empty() {
+        let mut out = String::new();
+        out.push_str(&format!("=== {} ({})\n", event.event_type, format_timestamp(event.created_at)));
+        out.push_str("(no output captured)\n");
+        return Ok(out);
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("=== {} ({})\n", event.event_type, format_timestamp(event.created_at)));
+
+    for line in &lines {
+        let step_label = line.step.as_deref().unwrap_or("unknown");
+        let ts = format_timestamp(line.created_at);
+        let stream_marker = if line.stream == "stderr" { "!" } else { " " };
+        out.push_str(&format!(
+            "[{}]{} {} {}\n",
+            step_label, stream_marker, ts, line.line
+        ));
+    }
+
+    Ok(out)
+}
+
+/// JSON output for hook stdout/stderr replay.
+pub fn execute_output_json(
+    db: &Database,
+    repo_id: i64,
+    worktree: &str,
+) -> Result<String> {
+    let event = db
+        .get_last_hook_event_for_worktree(repo_id, worktree)?
+        .ok_or_else(|| anyhow::anyhow!("No hook output found for worktree '{}'", worktree))?;
+
+    let lines = db.get_hook_output(event.id)?;
+
+    let json_lines: Vec<HookOutputLineJson> = lines
+        .iter()
+        .map(|l| HookOutputLineJson {
+            stream: l.stream.clone(),
+            line: l.line.clone(),
+            step: l.step.clone(),
+            line_number: l.line_number,
+            timestamp: format_timestamp(l.created_at),
+            created_at: l.created_at,
+        })
+        .collect();
+
+    let output = HookOutputJson {
+        event_id: event.id,
+        event_type: event.event_type.clone(),
+        timestamp: format_timestamp(event.created_at),
+        duration_secs: extract_duration_from_payload(&event.payload),
+        exit_code: extract_exit_code_from_payload(&event.payload),
+        created_at: event.created_at,
+        lines: json_lines,
+    };
+
+    format_json_value(&output)
+}
+
 pub fn execute_json(
     db: &Database,
     repo_id: i64,
@@ -162,6 +266,96 @@ pub fn execute_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execute_output_shows_hook_output_with_step_labels() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "feat", "feature/feat", "/wt/feat", None)
+            .unwrap();
+
+        // Insert a hook event
+        let payload = serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.5});
+        let event_id = db
+            .insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload))
+            .unwrap();
+
+        // Insert log lines with step labels
+        db.insert_log(event_id, "stdout", "Installing deps...", 1, Some("run")).unwrap();
+        db.insert_log(event_id, "stderr", "warning: peer dep", 2, Some("run")).unwrap();
+        db.insert_log(event_id, "stdout", "Migration done", 3, Some("shell")).unwrap();
+
+        let output = execute_output(&db, repo.id, "feat").unwrap();
+
+        // Should contain step labels
+        assert!(output.contains("[run]"), "should show [run] step label");
+        assert!(output.contains("[shell]"), "should show [shell] step label");
+
+        // Should contain actual output lines
+        assert!(output.contains("Installing deps..."), "should show stdout line");
+        assert!(output.contains("warning: peer dep"), "should show stderr line");
+        assert!(output.contains("Migration done"), "should show shell output");
+
+        // Should contain event type header
+        assert!(output.contains("hook:post_create"), "should show event type");
+    }
+
+    #[test]
+    fn execute_output_json_returns_structured_json() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "feat", "feature/feat", "/wt/feat", None)
+            .unwrap();
+
+        let payload = serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.5});
+        let event_id = db
+            .insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload))
+            .unwrap();
+
+        db.insert_log(event_id, "stdout", "hello", 1, Some("run")).unwrap();
+        db.insert_log(event_id, "stderr", "warn", 2, Some("shell")).unwrap();
+
+        let output = execute_output_json(&db, repo.id, "feat").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        // Top-level fields
+        assert_eq!(parsed["event_type"], "hook:post_create");
+        assert_eq!(parsed["exit_code"], 0);
+        assert_eq!(parsed["duration_secs"], 1.5);
+        assert!(parsed["timestamp"].is_string());
+
+        // Lines array
+        let lines = parsed["lines"].as_array().expect("lines should be array");
+        assert_eq!(lines.len(), 2);
+
+        assert_eq!(lines[0]["stream"], "stdout");
+        assert_eq!(lines[0]["line"], "hello");
+        assert_eq!(lines[0]["step"], "run");
+        assert_eq!(lines[0]["line_number"], 1);
+        assert!(lines[0]["timestamp"].is_string());
+
+        assert_eq!(lines[1]["stream"], "stderr");
+        assert_eq!(lines[1]["step"], "shell");
+    }
+
+    #[test]
+    fn execute_output_returns_error_when_no_hook_events() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let _wt = db
+            .insert_worktree(repo.id, "feat", "feature/feat", "/wt/feat", None)
+            .unwrap();
+
+        // Only a non-hook event
+        db.insert_event(repo.id, Some(_wt.id), "created", None).unwrap();
+
+        let result = execute_output(&db, repo.id, "feat");
+        assert!(result.is_err(), "should error when no hook output exists");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("No hook output"), "error message: {err}");
+    }
 
     #[test]
     fn execute_shows_empty_state_message() {

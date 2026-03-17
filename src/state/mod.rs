@@ -79,6 +79,16 @@ pub struct LogEntry {
     pub created_at: i64,
 }
 
+/// A single line of hook output with metadata for replay display.
+#[derive(Debug, Clone)]
+pub struct HookOutputLine {
+    pub stream: String,
+    pub line: String,
+    pub step: Option<String>,
+    pub line_number: i64,
+    pub created_at: i64,
+}
+
 /// Core database handle wrapping a SQLite connection with migrations applied.
 #[derive(Debug)]
 pub struct Database {
@@ -135,6 +145,7 @@ impl Database {
         Migrations::new(vec![
             M::up(include_str!("sql/001_initial_schema.sql")),
             M::up(include_str!("sql/002_add_removed_at.sql")),
+            M::up(include_str!("sql/003_add_step_to_logs.sql")),
         ])
     }
 
@@ -798,15 +809,75 @@ mod tests {
             .insert_event(repo.id, Some(wt.id), "hook:post_create", None)
             .unwrap();
 
-        db.insert_log(event_id, "stdout", "hello world", 1).unwrap();
-        db.insert_log(event_id, "stderr", "warning: something", 2).unwrap();
-        db.insert_log(event_id, "stdout", "done", 3).unwrap();
+        db.insert_log(event_id, "stdout", "hello world", 1, Some("run")).unwrap();
+        db.insert_log(event_id, "stderr", "warning: something", 2, Some("run")).unwrap();
+        db.insert_log(event_id, "stdout", "done", 3, Some("shell")).unwrap();
 
         let logs = db.get_logs(event_id).unwrap();
         assert_eq!(logs.len(), 3);
         assert_eq!(logs[0], ("stdout".to_string(), "hello world".to_string(), 1));
         assert_eq!(logs[1], ("stderr".to_string(), "warning: something".to_string(), 2));
         assert_eq!(logs[2], ("stdout".to_string(), "done".to_string(), 3));
+    }
+
+    #[test]
+    fn get_hook_output_returns_lines_with_step_and_timestamp() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        let event_id = db
+            .insert_event(repo.id, Some(wt.id), "hook:post_create", None)
+            .unwrap();
+
+        db.insert_log(event_id, "stdout", "hello", 1, Some("run")).unwrap();
+        db.insert_log(event_id, "stderr", "warn", 2, Some("run")).unwrap();
+        db.insert_log(event_id, "stdout", "done", 3, Some("shell")).unwrap();
+
+        let lines = db.get_hook_output(event_id).unwrap();
+        assert_eq!(lines.len(), 3);
+
+        assert_eq!(lines[0].stream, "stdout");
+        assert_eq!(lines[0].line, "hello");
+        assert_eq!(lines[0].step, Some("run".to_string()));
+        assert_eq!(lines[0].line_number, 1);
+        assert!(lines[0].created_at > 0);
+
+        assert_eq!(lines[1].stream, "stderr");
+        assert_eq!(lines[1].step, Some("run".to_string()));
+
+        assert_eq!(lines[2].step, Some("shell".to_string()));
+    }
+
+    #[test]
+    fn insert_log_stores_step_label() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        let event_id = db
+            .insert_event(repo.id, Some(wt.id), "hook:post_create", None)
+            .unwrap();
+
+        db.insert_log(event_id, "stdout", "line1", 1, Some("run")).unwrap();
+        db.insert_log(event_id, "stderr", "line2", 2, Some("shell")).unwrap();
+        db.insert_log(event_id, "stdout", "line3", 3, None).unwrap();
+
+        // Verify step is stored via raw query
+        let mut stmt = db.conn_for_test().prepare(
+            "SELECT step FROM logs WHERE event_id = ?1 ORDER BY line_number"
+        ).unwrap();
+        let steps: Vec<Option<String>> = stmt
+            .query_map(rusqlite::params![event_id], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert_eq!(steps, vec![Some("run".to_string()), Some("shell".to_string()), None]);
     }
 
     #[test]
