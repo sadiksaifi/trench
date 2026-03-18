@@ -36,11 +36,18 @@ pub fn run() -> Result<()> {
 
     let result = (|| -> Result<()> {
         while app.is_running() {
+            // Process any pending hook output messages
+            app.process_hook_messages();
+
             terminal.draw(|frame| app.ui(frame))?;
 
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.handle_key_event(key);
+            // Non-blocking poll: wait up to 50ms for key events, allowing
+            // hook messages to be processed between frames for live streaming.
+            if event::poll(std::time::Duration::from_millis(50))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind == KeyEventKind::Press {
+                        app.handle_key_event(key);
+                    }
                 }
             }
 
@@ -89,6 +96,7 @@ pub struct App {
     pub sync_picker_state: Option<screens::sync_picker::SyncPickerState>,
     pub delete_confirm_state: Option<screens::delete_confirm::DeleteConfirmState>,
     pub hook_log_state: Option<screens::hook_log::HookLogState>,
+    pub hook_rx: Option<std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>>,
     pub editor_request: Option<String>,
 }
 
@@ -103,6 +111,7 @@ impl App {
             sync_picker_state: None,
             delete_confirm_state: None,
             hook_log_state: None,
+            hook_rx: None,
             editor_request: None,
         }
     }
@@ -241,6 +250,15 @@ impl App {
             if self.list_state.rows.len() > prev_selected {
                 self.list_state.selected = prev_selected;
             }
+        }
+    }
+
+    /// Drain pending messages from the hook output channel and update state.
+    pub fn process_hook_messages(&mut self) {
+        let Some(ref rx) = self.hook_rx else { return };
+        let Some(ref mut state) = self.hook_log_state else { return };
+        while let Ok(msg) = rx.try_recv() {
+            state.process_message(msg);
         }
     }
 
@@ -1836,5 +1854,46 @@ mod tests {
             app.create_state.as_ref().unwrap().error.is_some(),
             "empty input after backspace should revalidate and show error"
         );
+    }
+
+    #[test]
+    fn process_hook_messages_updates_hook_log_state() {
+        use screens::hook_log::{HookLogState, HookOutputMessage};
+
+        let mut app = App::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.hook_log_state = Some(HookLogState::new("post_create"));
+        app.hook_rx = Some(rx);
+        app.push_screen(Screen::HookLog);
+
+        // Send messages through the channel
+        tx.send(HookOutputMessage::StepStarted { step: "run".into() }).unwrap();
+        tx.send(HookOutputMessage::OutputLine {
+            step: "run".into(), stream: "stdout".into(), line: "hello".into(),
+        }).unwrap();
+        tx.send(HookOutputMessage::StepCompleted {
+            step: "run".into(), success: true, duration: std::time::Duration::from_millis(100),
+        }).unwrap();
+        tx.send(HookOutputMessage::HookCompleted {
+            success: true, duration: std::time::Duration::from_secs(1), error: None,
+        }).unwrap();
+
+        // Process messages
+        app.process_hook_messages();
+
+        let state = app.hook_log_state.as_ref().unwrap();
+        assert_eq!(state.sections.len(), 1);
+        assert_eq!(state.sections[0].step, "run");
+        assert_eq!(state.sections[0].lines.len(), 1);
+        assert_eq!(state.sections[0].lines[0].text, "hello");
+        assert!(state.completed);
+        assert!(state.success);
+    }
+
+    #[test]
+    fn process_hook_messages_no_op_without_receiver() {
+        let mut app = App::new();
+        // No hook_rx set — should not panic
+        app.process_hook_messages();
     }
 }
