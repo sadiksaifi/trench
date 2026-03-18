@@ -178,6 +178,7 @@ pub async fn execute_with_hooks(
     db: &Database,
     hooks_config: Option<&HooksConfig>,
     no_hooks: bool,
+    hook_tx: Option<&std::sync::mpsc::Sender<crate::tui::screens::hook_log::HookOutputMessage>>,
 ) -> Result<CreateWithHooksResult> {
     let has_hooks = hooks_config
         .map(|h| h.pre_create.is_some() || h.post_create.is_some())
@@ -234,7 +235,7 @@ pub async fn execute_with_hooks(
             db,
             repo.id,
             None,
-            None,
+            hook_tx,
         )
         .await
         .map_err(CreateError::PreCreateHookFailed)?;
@@ -258,7 +259,7 @@ pub async fn execute_with_hooks(
             db,
             repo.id,
             worktree_id,
-            None,
+            hook_tx,
         )
         .await
         {
@@ -1095,6 +1096,7 @@ mod tests {
             &db,
             None, // no hooks configured
             false, // no_hooks flag = false
+            None,
         )
         .await
         .expect("should succeed");
@@ -1129,6 +1131,7 @@ mod tests {
             &db,
             Some(&hooks),
             true, // no_hooks = true → skip
+            None,
         )
         .await
         .expect("should succeed");
@@ -1171,6 +1174,7 @@ mod tests {
             &db,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("should succeed");
@@ -1208,6 +1212,7 @@ mod tests {
             &db,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect_err("should fail when pre_create hook fails");
@@ -1261,6 +1266,7 @@ mod tests {
             &db,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("should succeed");
@@ -1308,6 +1314,7 @@ mod tests {
             &db,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("should succeed (worktree stays despite hook failure)");
@@ -1363,6 +1370,7 @@ mod tests {
             &db,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("should succeed");
@@ -1430,6 +1438,7 @@ mod tests {
             &db,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect_err("should fail when pre_create hook fails");

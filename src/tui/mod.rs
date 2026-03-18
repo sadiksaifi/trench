@@ -234,6 +234,15 @@ impl App {
         }
     }
 
+    /// Load hooks config from the project config.
+    fn load_hooks_config(cwd: &std::path::Path) -> Option<crate::config::HooksConfig> {
+        let repo_info = crate::git::discover_repo(cwd).ok()?;
+        let project_config = crate::config::load_project_config(&repo_info.path).ok()?;
+        let global_config = crate::config::load_global_config().ok()?;
+        let resolved = crate::config::resolve_config(None, project_config.as_ref(), &global_config);
+        resolved.hooks
+    }
+
     fn open_db() -> Option<(std::path::PathBuf, Database)> {
         let cwd = std::env::current_dir().ok()?;
         let db_path = paths::data_dir().ok()?.join("trench.db");
@@ -251,6 +260,17 @@ impl App {
                 self.list_state.selected = prev_selected;
             }
         }
+    }
+
+    /// Set up the hook log screen with a receiver for live streaming.
+    pub fn start_hook_log(
+        &mut self,
+        title: &str,
+        rx: std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>,
+    ) {
+        self.hook_log_state = Some(screens::hook_log::HookLogState::new(title));
+        self.hook_rx = Some(rx);
+        self.push_screen(Screen::HookLog);
     }
 
     /// Drain pending messages from the hook output channel and update state.
@@ -361,22 +381,80 @@ impl App {
             return;
         };
 
-        match crate::cli::commands::remove::execute(&worktree_name, &cwd, &db, false) {
-            Ok(result) => {
-                let msg = format!("Removed '{}'", result.name);
-                if let Some(ref mut c) = self.delete_confirm_state {
-                    c.result = Some(screens::delete_confirm::DeleteResultMessage {
-                        success: true,
-                        message: msg,
+        // Check for hooks
+        let hooks_config = Self::load_hooks_config(&cwd);
+        let has_hooks = hooks_config
+            .as_ref()
+            .map(|h| h.pre_remove.is_some() || h.post_remove.is_some())
+            .unwrap_or(false);
+
+        if has_hooks {
+            // Resolve repo + worktree for background hook execution
+            let repo_info = match crate::git::discover_repo(&cwd) {
+                Ok(r) => r,
+                Err(e) => {
+                    if let Some(ref mut c) = self.delete_confirm_state {
+                        c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                            success: false,
+                            message: format!("Delete failed: {e:#}"),
+                        });
+                    }
+                    return;
+                }
+            };
+            let resolve = crate::adopt::resolve_or_adopt(&worktree_name, &repo_info, &db);
+            let (repo, wt) = match resolve {
+                Ok((r, w)) => (r, w),
+                Err(e) => {
+                    if let Some(ref mut c) = self.delete_confirm_state {
+                        c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                            success: false,
+                            message: format!("Delete failed: {e:#}"),
+                        });
+                    }
+                    return;
+                }
+            };
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let hooks = hooks_config.unwrap();
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+                let result = rt.block_on(
+                    crate::cli::commands::remove::execute_resolved_with_hooks(
+                        &repo, &wt, &repo_info, &db, false, Some(&hooks), false, Some(&tx),
+                    ),
+                );
+                if let Err(e) = result {
+                    let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                        success: false,
+                        duration: std::time::Duration::ZERO,
+                        error: Some(format!("{e:#}")),
                     });
                 }
-            }
-            Err(e) => {
-                if let Some(ref mut c) = self.delete_confirm_state {
-                    c.result = Some(screens::delete_confirm::DeleteResultMessage {
-                        success: false,
-                        message: format!("Delete failed: {e:#}"),
-                    });
+            });
+            self.start_hook_log("remove hooks", rx);
+        } else {
+            match crate::cli::commands::remove::execute(&worktree_name, &cwd, &db, false) {
+                Ok(result) => {
+                    let msg = format!("Removed '{}'", result.name);
+                    if let Some(ref mut c) = self.delete_confirm_state {
+                        c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                            success: true,
+                            message: msg,
+                        });
+                    }
+                }
+                Err(e) => {
+                    if let Some(ref mut c) = self.delete_confirm_state {
+                        c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                            success: false,
+                            message: format!("Delete failed: {e:#}"),
+                        });
+                    }
                 }
             }
         }
@@ -474,30 +552,65 @@ impl App {
             return;
         };
 
-        match crate::cli::commands::sync::execute(&worktree_name, &cwd, &db, strategy) {
-            Ok(result) => {
-                let msg = format!(
-                    "Synced '{}' via {}\nBefore: +{}/-{}  After: +{}/-{}",
-                    result.name,
-                    result.strategy,
-                    result.before_ahead,
-                    result.before_behind,
-                    result.after_ahead,
-                    result.after_behind,
-                );
-                if let Some(ref mut p) = self.sync_picker_state {
-                    p.result = Some(screens::sync_picker::SyncResultMessage {
-                        success: true,
-                        message: msg,
+        // Check for hooks
+        let hooks_config = Self::load_hooks_config(&cwd);
+        let has_hooks = hooks_config
+            .as_ref()
+            .map(|h| h.pre_sync.is_some() || h.post_sync.is_some())
+            .unwrap_or(false);
+
+        if has_hooks {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let hooks = hooks_config.unwrap();
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+                let result = rt.block_on(crate::cli::commands::sync::execute_with_hooks(
+                    &worktree_name,
+                    &cwd,
+                    &db,
+                    strategy,
+                    Some(&hooks),
+                    false,
+                    Some(&tx),
+                ));
+                if let Err(e) = result {
+                    let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                        success: false,
+                        duration: std::time::Duration::ZERO,
+                        error: Some(format!("{e:#}")),
                     });
                 }
-            }
-            Err(e) => {
-                if let Some(ref mut p) = self.sync_picker_state {
-                    p.result = Some(screens::sync_picker::SyncResultMessage {
-                        success: false,
-                        message: format!("Sync failed: {e:#}"),
-                    });
+            });
+            self.start_hook_log("sync hooks", rx);
+        } else {
+            match crate::cli::commands::sync::execute(&worktree_name, &cwd, &db, strategy) {
+                Ok(result) => {
+                    let msg = format!(
+                        "Synced '{}' via {}\nBefore: +{}/-{}  After: +{}/-{}",
+                        result.name,
+                        result.strategy,
+                        result.before_ahead,
+                        result.before_behind,
+                        result.after_ahead,
+                        result.after_behind,
+                    );
+                    if let Some(ref mut p) = self.sync_picker_state {
+                        p.result = Some(screens::sync_picker::SyncResultMessage {
+                            success: true,
+                            message: msg,
+                        });
+                    }
+                }
+                Err(e) => {
+                    if let Some(ref mut p) = self.sync_picker_state {
+                        p.result = Some(screens::sync_picker::SyncResultMessage {
+                            success: false,
+                            message: format!("Sync failed: {e:#}"),
+                        });
+                    }
                 }
             }
         }
@@ -668,6 +781,7 @@ impl App {
 
         let branch = state.branch_input.clone();
         let base = state.selected_base_branch().map(|s| s.to_string());
+        let hooks_enabled = state.hooks_enabled;
 
         let Some((cwd, db)) = Self::open_db() else {
             state.result = Some(screens::create::CreateResultMessage {
@@ -688,30 +802,80 @@ impl App {
             }
         };
 
-        let template = &state.worktree_template;
-        match crate::cli::commands::create::execute(
-            &branch,
-            base.as_deref(),
-            &cwd,
-            &worktree_root,
-            template,
-            &db,
-        ) {
-            Ok(result) => {
-                let msg = format!("Created '{}' at {}", result.name, result.path.display());
-                if let Some(ref mut s) = self.create_state {
-                    s.result = Some(screens::create::CreateResultMessage {
-                        success: true,
-                        message: msg,
+        // Load config to check for hooks
+        let hooks_config = if hooks_enabled {
+            Self::load_hooks_config(&cwd)
+        } else {
+            None
+        };
+
+        let has_hooks = hooks_config
+            .as_ref()
+            .map(|h| h.pre_create.is_some() || h.post_create.is_some())
+            .unwrap_or(false);
+
+        let template = state.worktree_template.clone();
+
+        if has_hooks {
+            // Background execution with live streaming
+            let (tx, rx) = std::sync::mpsc::channel();
+            let hooks = hooks_config.unwrap();
+            let branch_clone = branch.clone();
+            let base_clone = base.clone();
+
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+                let result = rt.block_on(crate::cli::commands::create::execute_with_hooks(
+                    &branch_clone,
+                    base_clone.as_deref(),
+                    &cwd,
+                    &worktree_root,
+                    &template,
+                    &db,
+                    Some(&hooks),
+                    false,
+                    Some(&tx),
+                ));
+                // Send completion if not already sent by execute_hook
+                if let Err(e) = result {
+                    let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                        success: false,
+                        duration: std::time::Duration::ZERO,
+                        error: Some(format!("{e:#}")),
                     });
                 }
-            }
-            Err(e) => {
-                if let Some(ref mut s) = self.create_state {
-                    s.result = Some(screens::create::CreateResultMessage {
-                        success: false,
-                        message: format!("Create failed: {e:#}"),
-                    });
+            });
+
+            self.start_hook_log("create hooks", rx);
+        } else {
+            // Synchronous path without hooks
+            match crate::cli::commands::create::execute(
+                &branch,
+                base.as_deref(),
+                &cwd,
+                &worktree_root,
+                &template,
+                &db,
+            ) {
+                Ok(result) => {
+                    let msg = format!("Created '{}' at {}", result.name, result.path.display());
+                    if let Some(ref mut s) = self.create_state {
+                        s.result = Some(screens::create::CreateResultMessage {
+                            success: true,
+                            message: msg,
+                        });
+                    }
+                }
+                Err(e) => {
+                    if let Some(ref mut s) = self.create_state {
+                        s.result = Some(screens::create::CreateResultMessage {
+                            success: false,
+                            message: format!("Create failed: {e:#}"),
+                        });
+                    }
                 }
             }
         }
@@ -1895,5 +2059,16 @@ mod tests {
         let mut app = App::new();
         // No hook_rx set — should not panic
         app.process_hook_messages();
+    }
+
+    #[test]
+    fn start_hook_log_sets_up_state_and_pushes_screen() {
+        let mut app = App::new();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("post_create", rx);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+        assert!(app.hook_log_state.is_some());
+        assert_eq!(app.hook_log_state.as_ref().unwrap().title, "post_create");
+        assert!(app.hook_rx.is_some());
     }
 }

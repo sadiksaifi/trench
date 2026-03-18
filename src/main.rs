@@ -359,6 +359,7 @@ fn run_create(
         &db,
         resolved.hooks.as_ref(),
         no_hooks,
+        None,
     )) {
         Ok(outcome) => {
             // Report post_create hook failure to stderr
@@ -512,6 +513,7 @@ fn run_remove(
         prune,
         hooks_config.as_ref(),
         no_hooks,
+        None,
     )) {
         Ok(outcome) => {
             // Report post_remove hook failure as warning (FR-24: WarnOnly)
@@ -917,6 +919,7 @@ fn run_sync(
         sync_strategy,
         hooks_config.as_ref(),
         no_hooks,
+        None,
     )) {
         Ok(outcome) => {
             // Report post_sync hook failure to stderr (FR-24: Report)
@@ -1072,6 +1075,7 @@ fn run_sync_all(
                 sync_strategy,
                 hooks_config.as_ref(),
                 no_hooks,
+                None,
             )) {
                 Ok(outcome) => {
                     if let Some(ref hook_err) = outcome.post_sync_error {

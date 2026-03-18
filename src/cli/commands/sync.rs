@@ -434,6 +434,7 @@ pub async fn execute_with_hooks(
     strategy: Strategy,
     hooks_config: Option<&HooksConfig>,
     no_hooks: bool,
+    hook_tx: Option<&std::sync::mpsc::Sender<crate::tui::screens::hook_log::HookOutputMessage>>,
 ) -> Result<SyncWithHooksResult> {
     let has_hooks = hooks_config
         .map(|h| h.pre_sync.is_some() || h.post_sync.is_some())
@@ -486,7 +487,7 @@ pub async fn execute_with_hooks(
             db,
             repo.id,
             Some(wt.id),
-            None,
+            hook_tx,
         )
         .await
         .map_err(SyncError::PreSyncHookFailed)?;
@@ -506,7 +507,7 @@ pub async fn execute_with_hooks(
             db,
             repo.id,
             Some(wt.id),
-            None,
+            hook_tx,
         )
         .await
         {
@@ -1243,6 +1244,7 @@ mod tests {
             Strategy::Rebase,
             None,  // no hooks config
             false, // no_hooks flag
+            None,
         )
         .await
         .expect("sync should succeed");
@@ -1265,6 +1267,7 @@ mod tests {
             Strategy::Rebase,
             Some(&hooks),
             true, // no_hooks = true
+            None,
         )
         .await
         .expect("sync should succeed");
@@ -1314,6 +1317,7 @@ mod tests {
             Strategy::Rebase,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("sync should succeed");
@@ -1371,6 +1375,7 @@ mod tests {
             Strategy::Rebase,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect_err("should fail when pre_sync hook fails");
@@ -1427,6 +1432,7 @@ mod tests {
             Strategy::Rebase,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("sync should succeed");
@@ -1478,6 +1484,7 @@ mod tests {
             Strategy::Rebase,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("sync should succeed even if post_sync fails");
@@ -1555,6 +1562,7 @@ mod tests {
             Strategy::Rebase,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("sync should succeed");

@@ -241,6 +241,7 @@ pub async fn execute_resolved_with_hooks(
     prune: bool,
     hooks_config: Option<&HooksConfig>,
     no_hooks: bool,
+    hook_tx: Option<&std::sync::mpsc::Sender<crate::tui::screens::hook_log::HookOutputMessage>>,
 ) -> Result<RemoveWithHooksResult> {
     let has_hooks = hooks_config
         .map(|h| h.pre_remove.is_some() || h.post_remove.is_some())
@@ -285,7 +286,7 @@ pub async fn execute_resolved_with_hooks(
                 db,
                 repo.id,
                 Some(wt.id),
-                None,
+                hook_tx,
             )
             .await
             .map_err(RemoveError::PreRemoveHookFailed)?;
@@ -317,7 +318,7 @@ pub async fn execute_resolved_with_hooks(
             db,
             repo.id,
             Some(wt.id),
-            None,
+            hook_tx,
         )
         .await
         {
@@ -816,6 +817,7 @@ mod tests {
             false,
             None,  // no hooks
             false, // no_hooks flag irrelevant
+            None,
         )
         .await
         .expect("remove should succeed");
@@ -859,6 +861,7 @@ mod tests {
             false,
             Some(&hooks),
             true, // no_hooks = true
+            None,
         )
         .await
         .expect("remove should succeed");
@@ -915,6 +918,7 @@ mod tests {
             false,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("remove should succeed");
@@ -982,6 +986,7 @@ mod tests {
             false,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect_err("should fail when pre_remove hook fails");
@@ -1048,6 +1053,7 @@ mod tests {
             false,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("remove should succeed");
@@ -1112,6 +1118,7 @@ mod tests {
             false,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("remove should succeed even when worktree dir is gone");
@@ -1170,6 +1177,7 @@ mod tests {
             false,
             Some(&hooks),
             false,
+            None,
         )
         .await
         .expect("remove should succeed even if post_remove fails");
