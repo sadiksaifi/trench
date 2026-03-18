@@ -179,6 +179,9 @@ pub fn validate_branch_name(name: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("Branch name is required".into());
     }
+    if trimmed != name {
+        return Err("Branch name cannot have leading or trailing whitespace".into());
+    }
     if trimmed.contains("..") {
         return Err("Branch name cannot contain '..'".into());
     }
@@ -427,5 +430,12 @@ mod tests {
     fn validate_branch_name_rejects_empty() {
         assert!(validate_branch_name("").is_err());
         assert!(validate_branch_name("   ").is_err());
+    }
+
+    #[test]
+    fn validate_branch_name_rejects_leading_trailing_whitespace() {
+        assert!(validate_branch_name(" feature").is_err());
+        assert!(validate_branch_name("feature ").is_err());
+        assert!(validate_branch_name(" feature ").is_err());
     }
 }
