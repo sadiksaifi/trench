@@ -45,16 +45,28 @@ impl HookLogState {
     pub fn from_hook_output(
         lines: &[crate::state::HookOutputLine],
         event_type: &str,
-        _payload: &Option<String>,
+        payload: &Option<String>,
     ) -> Self {
         let title = event_type.strip_prefix("hook:").unwrap_or(event_type);
 
+        // Extract success from payload exit_code
+        let exit_code = payload
+            .as_deref()
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+            .and_then(|v| v.get("exit_code")?.as_i64());
+        let success = exit_code.map_or(true, |c| c == 0);
+
+        // Track timestamps per section for duration computation
+        struct SectionTimestamps {
+            first: i64,
+            last: i64,
+        }
         let mut sections: Vec<HookLogSection> = Vec::new();
+        let mut timestamps: Vec<SectionTimestamps> = Vec::new();
 
         for line in lines {
             let step = line.step.as_deref().unwrap_or("unknown");
 
-            // Find or create the section for this step
             let needs_new = sections.last().map_or(true, |s| s.step != step);
             if needs_new {
                 sections.push(HookLogSection {
@@ -64,7 +76,13 @@ impl HookLogState {
                     success: true,
                     duration: None,
                 });
+                timestamps.push(SectionTimestamps {
+                    first: line.created_at,
+                    last: line.created_at,
+                });
             }
+
+            timestamps.last_mut().unwrap().last = line.created_at;
 
             sections.last_mut().unwrap().lines.push(HookLogLine {
                 stream: line.stream.clone(),
@@ -72,11 +90,19 @@ impl HookLogState {
             });
         }
 
+        // Compute section durations from timestamps
+        for (section, ts) in sections.iter_mut().zip(timestamps.iter()) {
+            let delta = (ts.last - ts.first).max(0) as u64;
+            if delta > 0 {
+                section.duration = Some(Duration::from_secs(delta));
+            }
+        }
+
         Self {
             title: title.to_string(),
             sections,
             completed: true,
-            success: true,
+            success,
             scroll_offset: 0,
             error: None,
         }
@@ -644,6 +670,53 @@ mod tests {
         assert_eq!(state.sections[2].lines.len(), 1);
         // All sections completed
         assert!(state.sections.iter().all(|s| s.completed));
+    }
+
+    #[test]
+    fn from_hook_output_success_from_payload_exit_code_zero() {
+        let payload = Some(r#"{"exit_code": 0, "duration_secs": 2.5}"#.to_string());
+        let state = HookLogState::from_hook_output(&[], "hook:post_create", &payload);
+
+        assert!(state.success);
+        assert!(state.completed);
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn from_hook_output_failure_from_payload_exit_code_nonzero() {
+        let payload = Some(r#"{"exit_code": 1, "duration_secs": 0.5}"#.to_string());
+        let state = HookLogState::from_hook_output(&[], "hook:post_create", &payload);
+
+        assert!(!state.success);
+        assert!(state.completed);
+    }
+
+    #[test]
+    fn from_hook_output_section_duration_computed_from_timestamps() {
+        use crate::state::HookOutputLine;
+
+        let lines = vec![
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "start".into(),
+                step: Some("run".into()),
+                line_number: 1,
+                created_at: 1700000000,
+            },
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "end".into(),
+                step: Some("run".into()),
+                line_number: 2,
+                created_at: 1700000003,
+            },
+        ];
+
+        let state = HookLogState::from_hook_output(&lines, "hook:post_create", &None);
+
+        assert_eq!(state.sections.len(), 1);
+        let duration = state.sections[0].duration.expect("should have duration");
+        assert_eq!(duration, std::time::Duration::from_secs(3));
     }
 
     #[test]
