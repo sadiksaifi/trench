@@ -591,12 +591,12 @@ impl App {
                 KeyCode::Char(c) => {
                     state.insert_char(c);
                     state.update_path_preview();
-                    state.error = None;
+                    let _ = state.validate();
                 }
                 KeyCode::Backspace => {
                     state.backspace();
                     state.update_path_preview();
-                    state.error = None;
+                    let _ = state.validate();
                 }
                 KeyCode::Left => state.cursor_left(),
                 KeyCode::Right => state.cursor_right(),
@@ -1796,6 +1796,22 @@ mod tests {
             app.create_state.as_ref().unwrap().branch_input,
             "q",
             "q should be inserted into branch_input"
+        );
+    }
+
+    #[test]
+    fn backspace_to_empty_revalidates_and_shows_error() {
+        let mut app = app_with_create_state();
+        // Type a char then backspace — should revalidate and show error for empty
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(
+            app.create_state.as_ref().unwrap().error.is_none(),
+            "valid input should have no error"
+        );
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(
+            app.create_state.as_ref().unwrap().error.is_some(),
+            "empty input after backspace should revalidate and show error"
         );
     }
 }
