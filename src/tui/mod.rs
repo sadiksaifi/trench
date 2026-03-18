@@ -235,6 +235,15 @@ impl App {
                 .is_some_and(|s| !s.is_result_mode() && s.focused_field == screens::create::CreateField::Branch)
     }
 
+    fn clear_active_screen_state(&mut self) {
+        match self.active_screen() {
+            Screen::DeleteConfirm => self.delete_confirm_state = None,
+            Screen::SyncPicker => self.sync_picker_state = None,
+            Screen::Create => self.create_state = None,
+            _ => {}
+        }
+    }
+
     pub fn handle_key_event(&mut self, key: KeyEvent) {
         // Global keys handled at app level
         match (key.code, key.modifiers) {
@@ -247,33 +256,11 @@ impl App {
                 }
             }
             (KeyCode::Esc, _) => {
-                match self.active_screen() {
-                    Screen::DeleteConfirm => {
-                        self.delete_confirm_state = None;
-                    }
-                    Screen::SyncPicker => {
-                        self.sync_picker_state = None;
-                    }
-                    Screen::Create => {
-                        self.create_state = None;
-                    }
-                    _ => {}
-                }
+                self.clear_active_screen_state();
                 self.pop_screen();
             }
             (KeyCode::Char('q'), _) if !self.is_create_branch_text_entry_active() => {
-                match self.active_screen() {
-                    Screen::DeleteConfirm => {
-                        self.delete_confirm_state = None;
-                    }
-                    Screen::SyncPicker => {
-                        self.sync_picker_state = None;
-                    }
-                    Screen::Create => {
-                        self.create_state = None;
-                    }
-                    _ => {}
-                }
+                self.clear_active_screen_state();
                 self.pop_screen();
             }
             _ => self.handle_screen_key(key),
