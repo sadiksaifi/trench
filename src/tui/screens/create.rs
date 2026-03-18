@@ -226,10 +226,21 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
     } else {
         Style::default()
     };
-    let branch_label = Paragraph::new(Line::from(vec![
-        Span::styled("  Branch: ", branch_style),
-        Span::raw(&state.branch_input),
-    ]));
+    let branch_spans = if state.focused_field == CreateField::Branch && !state.is_result_mode() {
+        let (before, after) = state.branch_input.split_at(state.cursor_pos);
+        vec![
+            Span::styled("  Branch: ", branch_style),
+            Span::raw(before.to_string()),
+            Span::styled("\u{2588}", Style::default().add_modifier(Modifier::REVERSED)),
+            Span::raw(after.to_string()),
+        ]
+    } else {
+        vec![
+            Span::styled("  Branch: ", branch_style),
+            Span::raw(&state.branch_input),
+        ]
+    };
+    let branch_label = Paragraph::new(Line::from(branch_spans));
     frame.render_widget(branch_label, chunks[1]);
 
     // Base branch selector
@@ -718,5 +729,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn render_shows_cursor_in_branch_field() {
+        let state = sample_state();
+        // Branch is focused by default and empty
+        assert_eq!(state.focused_field, CreateField::Branch);
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains('\u{2588}'),
+            "should show block cursor in focused Branch field, got: {text}"
+        );
     }
 }
