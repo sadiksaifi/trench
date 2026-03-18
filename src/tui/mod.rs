@@ -277,8 +277,15 @@ impl App {
     pub fn process_hook_messages(&mut self) {
         let Some(ref rx) = self.hook_rx else { return };
         let Some(ref mut state) = self.hook_log_state else { return };
+        let mut received = false;
         while let Ok(msg) = rx.try_recv() {
             state.process_message(msg);
+            received = true;
+        }
+        // Auto-scroll to latest output when new messages arrive
+        if received {
+            // Use a reasonable default visible height; actual height is set during render
+            state.auto_scroll(20);
         }
     }
 
@@ -295,7 +302,10 @@ impl App {
             Screen::DeleteConfirm => self.delete_confirm_state = None,
             Screen::SyncPicker => self.sync_picker_state = None,
             Screen::Create => self.create_state = None,
-            Screen::HookLog => self.hook_log_state = None,
+            Screen::HookLog => {
+                self.hook_log_state = None;
+                self.hook_rx = None;
+            }
             _ => {}
         }
     }
@@ -2070,5 +2080,30 @@ mod tests {
         assert!(app.hook_log_state.is_some());
         assert_eq!(app.hook_log_state.as_ref().unwrap().title, "post_create");
         assert!(app.hook_rx.is_some());
+    }
+
+    #[test]
+    fn esc_on_hook_log_returns_to_list_and_clears_state() {
+        let mut app = App::new();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("post_create", rx);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.hook_log_state.is_none());
+        assert!(app.hook_rx.is_none());
+    }
+
+    #[test]
+    fn q_on_hook_log_returns_to_list() {
+        let mut app = App::new();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("post_create", rx);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.hook_log_state.is_none());
     }
 }
