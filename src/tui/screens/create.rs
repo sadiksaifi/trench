@@ -3,6 +3,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::paths;
+
 /// Which form field is currently focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateField {
@@ -111,6 +113,18 @@ impl CreateState {
     /// Return the currently selected base branch name, if any.
     pub fn selected_base_branch(&self) -> Option<&str> {
         self.base_branches.get(self.selected_base).map(|s| s.as_str())
+    }
+
+    /// Recompute the path preview from the current branch input and repo name.
+    pub fn update_path_preview(&mut self) {
+        if self.branch_input.is_empty() {
+            self.path_preview.clear();
+            return;
+        }
+        match paths::render_worktree_path(&self.worktree_template, &self.repo_name, &self.branch_input) {
+            Ok(p) => self.path_preview = p.to_string_lossy().into_owned(),
+            Err(_) => self.path_preview.clear(),
+        }
     }
 
     /// Toggle hooks on/off.
@@ -367,6 +381,41 @@ mod tests {
     fn selected_base_branch_returns_none_on_empty() {
         let state = CreateState::new(vec![], "repo".into(), "t".into());
         assert_eq!(state.selected_base_branch(), None);
+    }
+
+    #[test]
+    fn update_path_preview_renders_sanitized_path() {
+        let mut state = CreateState::new(
+            vec!["main".into()],
+            "my-project".into(),
+            "{{ repo }}/{{ branch | sanitize }}".into(),
+        );
+        state.branch_input = "feature/auth".into();
+        state.update_path_preview();
+        assert_eq!(state.path_preview, "my-project/feature-auth");
+    }
+
+    #[test]
+    fn update_path_preview_empty_branch_clears_preview() {
+        let mut state = CreateState::new(
+            vec!["main".into()],
+            "my-project".into(),
+            "{{ repo }}/{{ branch | sanitize }}".into(),
+        );
+        state.update_path_preview();
+        assert_eq!(state.path_preview, "");
+    }
+
+    #[test]
+    fn update_path_preview_with_custom_template() {
+        let mut state = CreateState::new(
+            vec!["main".into()],
+            "trench".into(),
+            "custom/{{ repo }}/{{ branch | sanitize }}".into(),
+        );
+        state.branch_input = "fix@home".into();
+        state.update_path_preview();
+        assert_eq!(state.path_preview, "custom/trench/fix-home");
     }
 
     #[test]
