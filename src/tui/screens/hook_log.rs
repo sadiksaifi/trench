@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
@@ -139,10 +141,114 @@ impl HookLogState {
     }
 }
 
+const FOOTER_RUNNING: &str = " Esc back (hooks continue) ";
+const FOOTER_DONE: &str = " Esc back  Enter dismiss ";
+
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 1.0 {
+        format!("{:.0}ms", secs * 1000.0)
+    } else {
+        format!("{:.1}s", secs)
+    }
+}
+
 /// Render the hook log screen.
 pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
-    let text = format!("Hook: {} — running...", state.title);
-    frame.render_widget(Paragraph::new(text), area);
+    let chunks = Layout::vertical([
+        Constraint::Length(2), // title
+        Constraint::Min(1),   // output area
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+
+    // Title
+    let status_text = if state.completed {
+        if state.success {
+            " — Complete"
+        } else {
+            " — Failed"
+        }
+    } else {
+        " — running..."
+    };
+    let title = Line::from(vec![
+        Span::styled(
+            format!("Hook: {}", state.title),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(status_text),
+    ]);
+    frame.render_widget(Paragraph::new(title), chunks[0]);
+
+    // Build output lines with scrolling
+    let mut lines: Vec<Line> = Vec::new();
+
+    for section in &state.sections {
+        // Section header
+        let header_style = if section.completed {
+            if section.success {
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            }
+        } else {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        };
+
+        let status_icon = if section.completed {
+            if section.success { "✓" } else { "✗" }
+        } else {
+            "●"
+        };
+
+        let elapsed = section
+            .duration
+            .map(|d| format!(" ({})", format_duration(d)))
+            .unwrap_or_default();
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{status_icon} [{step}]{elapsed}", step = section.step),
+                header_style,
+            ),
+        ]));
+
+        // Output lines
+        for log_line in &section.lines {
+            let style = if log_line.stream == "stderr" {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {}", log_line.text),
+                style,
+            )));
+        }
+    }
+
+    // Error message at bottom
+    if let Some(ref err) = state.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("Error: {err}"),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    // Apply scroll offset
+    let visible_height = chunks[1].height as usize;
+    let skip = state.scroll_offset.min(lines.len());
+    let visible_lines: Vec<Line> = lines.into_iter().skip(skip).take(visible_height).collect();
+
+    frame.render_widget(Paragraph::new(visible_lines), chunks[1]);
+
+    // Footer
+    let footer_text = if state.completed { FOOTER_DONE } else { FOOTER_RUNNING };
+    let footer = Paragraph::new(Line::from(footer_text))
+        .style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_widget(footer, chunks[2]);
 }
 
 #[cfg(test)]
@@ -420,5 +526,118 @@ mod tests {
         });
         state.auto_scroll(20); // plenty of room
         assert_eq!(state.scroll_offset, 0);
+    }
+
+    fn render_to_buffer(state: &HookLogState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(state, frame, frame.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        buf.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn render_shows_title_with_hook_name() {
+        let state = HookLogState::new("post_create");
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("post_create"), "should show hook name in title, got: {text}");
+    }
+
+    #[test]
+    fn render_shows_section_header() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("run"), "should show section header for 'run' step");
+    }
+
+    #[test]
+    fn render_shows_output_lines() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".into(), stream: "stdout".into(), line: "installing packages".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("installing packages"), "should show output line");
+    }
+
+    #[test]
+    fn render_shows_elapsed_time_for_completed_step() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::StepCompleted {
+            step: "run".into(), success: true, duration: Duration::from_millis(1500),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("1.5s"), "should show elapsed time, got: {text}");
+    }
+
+    #[test]
+    fn render_shows_footer_with_esc() {
+        let state = HookLogState::new("post_create");
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Esc"), "footer should show Esc keybinding");
+    }
+
+    #[test]
+    fn render_completed_success_shows_status() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::HookCompleted {
+            success: true, duration: Duration::from_secs(2), error: None,
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Complete") || text.contains("Success"), "should show success status, got: {text}");
+    }
+
+    #[test]
+    fn render_completed_failure_shows_error() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::HookCompleted {
+            success: false, duration: Duration::from_secs(1), error: Some("exit code 1".into()),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("exit code 1"), "should show error message, got: {text}");
+    }
+
+    #[test]
+    fn render_success_step_header_has_green_style() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::StepCompleted {
+            step: "run".into(), success: true, duration: Duration::from_millis(100),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        // Find a cell in the header row that has green foreground
+        let has_green = buf.content().iter().any(|cell| {
+            cell.fg == ratatui::style::Color::Green
+        });
+        assert!(has_green, "successful step should have green-colored text");
+    }
+
+    #[test]
+    fn render_failure_step_header_has_red_style() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::StepCompleted {
+            step: "run".into(), success: false, duration: Duration::from_millis(100),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        let has_red = buf.content().iter().any(|cell| {
+            cell.fg == ratatui::style::Color::Red
+        });
+        assert!(has_red, "failed step should have red-colored text");
     }
 }
