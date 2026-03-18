@@ -538,6 +538,21 @@ pub fn create_worktree(
 /// Opens the repository at `repo_path` and discovers all worktrees: the main
 /// working directory plus any additional worktrees created via `git worktree add`.
 /// Returns each worktree's name, path, current branch, and whether it is the main worktree.
+/// List all local branch names in a repository, sorted alphabetically.
+pub fn list_local_branches(repo_path: &Path) -> Result<Vec<String>, GitError> {
+    let repo =
+        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+    let branches = repo.branches(Some(git2::BranchType::Local))?;
+    let mut names: Vec<String> = branches
+        .filter_map(|b| {
+            b.ok()
+                .and_then(|(branch, _)| branch.name().ok().flatten().map(String::from))
+        })
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
 pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeEntry>, GitError> {
     let repo =
         git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
