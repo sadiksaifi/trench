@@ -129,6 +129,32 @@ impl HookLogState {
         content + if self.error.is_some() { 2 } else { 0 }
     }
 
+    /// Scroll up by one line.
+    pub fn scroll_up(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+    }
+
+    /// Scroll down by one line, clamped to max scrollable range.
+    pub fn scroll_down(&mut self, visible_height: usize) {
+        let max = self.total_lines().saturating_sub(visible_height);
+        if self.scroll_offset < max {
+            self.scroll_offset += 1;
+        }
+    }
+
+    /// Page up by half the visible height.
+    pub fn page_up(&mut self, visible_height: usize) {
+        let step = visible_height / 2;
+        self.scroll_offset = self.scroll_offset.saturating_sub(step);
+    }
+
+    /// Page down by half the visible height, clamped to max.
+    pub fn page_down(&mut self, visible_height: usize) {
+        let step = visible_height / 2;
+        let max = self.total_lines().saturating_sub(visible_height);
+        self.scroll_offset = (self.scroll_offset + step).min(max);
+    }
+
     /// Auto-scroll to keep the latest output visible.
     pub fn auto_scroll(&mut self, visible_height: usize) {
         let total = self.total_lines();
@@ -670,6 +696,85 @@ mod tests {
         assert_eq!(state.sections[2].lines.len(), 1);
         // All sections completed
         assert!(state.sections.iter().all(|s| s.completed));
+    }
+
+    #[test]
+    fn scroll_down_increments_offset() {
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        for i in 0..30 {
+            state.process_message(HookOutputMessage::OutputLine {
+                step: "run".into(),
+                stream: "stdout".into(),
+                line: format!("line {i}"),
+            });
+        }
+        state.scroll_offset = 0;
+        state.scroll_down(10); // visible_height = 10
+        assert_eq!(state.scroll_offset, 1);
+    }
+
+    #[test]
+    fn scroll_up_decrements_offset() {
+        let mut state = HookLogState::new("test");
+        state.scroll_offset = 5;
+        state.scroll_up();
+        assert_eq!(state.scroll_offset, 4);
+    }
+
+    #[test]
+    fn scroll_up_does_not_go_below_zero() {
+        let mut state = HookLogState::new("test");
+        state.scroll_offset = 0;
+        state.scroll_up();
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn page_down_advances_by_half_page() {
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        for i in 0..50 {
+            state.process_message(HookOutputMessage::OutputLine {
+                step: "run".into(),
+                stream: "stdout".into(),
+                line: format!("line {i}"),
+            });
+        }
+        state.scroll_offset = 0;
+        state.page_down(20); // visible_height = 20
+        assert_eq!(state.scroll_offset, 10); // half of visible_height
+    }
+
+    #[test]
+    fn page_up_retreats_by_half_page() {
+        let mut state = HookLogState::new("test");
+        state.scroll_offset = 15;
+        state.page_up(20); // visible_height = 20
+        assert_eq!(state.scroll_offset, 5); // 15 - 10
+    }
+
+    #[test]
+    fn page_up_clamps_to_zero() {
+        let mut state = HookLogState::new("test");
+        state.scroll_offset = 3;
+        state.page_up(20);
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_down_clamps_to_max() {
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "only line".into(),
+        });
+        // total_lines = 2 (header + line), visible = 10 → no scrolling possible
+        state.scroll_offset = 0;
+        state.scroll_down(10);
+        assert_eq!(state.scroll_offset, 0);
     }
 
     #[test]
