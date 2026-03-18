@@ -1,5 +1,8 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -162,8 +165,91 @@ impl CreateState {
     }
 }
 
-pub fn render(_state: &CreateState, _frame: &mut Frame, _area: Rect) {
-    // placeholder — will be implemented in rendering cycle
+const FOOTER_KEYS: &str = " Tab next field  Enter create  Esc cancel ";
+
+pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
+    // Layout: title (1) + form rows (7) + path preview (1) + error (1) + spacer + footer (1)
+    let chunks = Layout::vertical([
+        Constraint::Length(2), // title
+        Constraint::Length(2), // branch label + input
+        Constraint::Length(2), // base label + selector
+        Constraint::Length(2), // hooks label + toggle
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // path preview
+        Constraint::Length(1), // error
+        Constraint::Min(0),   // spacer
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+
+    // Title
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled("Create Worktree", Style::default().add_modifier(Modifier::BOLD)),
+    ]));
+    frame.render_widget(title, chunks[0]);
+
+    // Branch input
+    let branch_style = if state.focused_field == CreateField::Branch {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let branch_label = Paragraph::new(Line::from(vec![
+        Span::styled("  Branch: ", branch_style),
+        Span::raw(&state.branch_input),
+    ]));
+    frame.render_widget(branch_label, chunks[1]);
+
+    // Base branch selector
+    let base_style = if state.focused_field == CreateField::Base {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let base_value = state
+        .selected_base_branch()
+        .unwrap_or("-");
+    let base_label = Paragraph::new(Line::from(vec![
+        Span::styled("  Base:   ", base_style),
+        Span::raw(format!("< {} >", base_value)),
+    ]));
+    frame.render_widget(base_label, chunks[2]);
+
+    // Hooks toggle
+    let hooks_style = if state.focused_field == CreateField::Hooks {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let hooks_value = if state.hooks_enabled { "ON" } else { "OFF" };
+    let hooks_label = Paragraph::new(Line::from(vec![
+        Span::styled("  Hooks:  ", hooks_style),
+        Span::raw(format!("[{}]", hooks_value)),
+    ]));
+    frame.render_widget(hooks_label, chunks[3]);
+
+    // Path preview
+    if !state.path_preview.is_empty() {
+        let preview = Paragraph::new(Line::from(vec![
+            Span::styled("  Path:   ", Style::default().add_modifier(Modifier::DIM)),
+            Span::styled(&state.path_preview, Style::default().add_modifier(Modifier::DIM)),
+        ]));
+        frame.render_widget(preview, chunks[5]);
+    }
+
+    // Error
+    if let Some(ref err) = state.error {
+        let error_line = Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(err.as_str(), Style::default().add_modifier(Modifier::BOLD)),
+        ]));
+        frame.render_widget(error_line, chunks[6]);
+    }
+
+    // Footer
+    let footer = Paragraph::new(Line::from(FOOTER_KEYS))
+        .style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_widget(footer, chunks[8]);
 }
 
 #[cfg(test)]
@@ -479,6 +565,104 @@ mod tests {
         let result = state.validate();
         assert!(result.is_err());
         assert!(state.error.as_ref().unwrap().contains("invalid"));
+    }
+
+    fn render_to_buffer(state: &CreateState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(state, frame, frame.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        buf.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn render_shows_title() {
+        let state = sample_state();
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Create Worktree"), "should show title, got: {text}");
+    }
+
+    #[test]
+    fn render_shows_branch_label() {
+        let state = sample_state();
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Branch"), "should show Branch label");
+    }
+
+    #[test]
+    fn render_shows_base_label_and_selected_branch() {
+        let state = sample_state();
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Base"), "should show Base label");
+        assert!(text.contains("main"), "should show selected base branch 'main'");
+    }
+
+    #[test]
+    fn render_shows_hooks_label() {
+        let state = sample_state();
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Hooks"), "should show Hooks label");
+    }
+
+    #[test]
+    fn render_shows_hooks_enabled_state() {
+        let mut state = sample_state();
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("ON"), "should show ON when hooks enabled");
+
+        state.hooks_enabled = false;
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("OFF"), "should show OFF when hooks disabled");
+    }
+
+    #[test]
+    fn render_shows_path_preview_when_branch_entered() {
+        let mut state = sample_state();
+        state.branch_input = "feature/auth".into();
+        state.update_path_preview();
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Path"), "should show Path label");
+        assert!(text.contains("repo/feature-auth"), "should show path preview");
+    }
+
+    #[test]
+    fn render_shows_error_message() {
+        let mut state = sample_state();
+        state.error = Some("Branch name is required".into());
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Branch name is required"), "should show error");
+    }
+
+    #[test]
+    fn render_shows_branch_input_text() {
+        let mut state = sample_state();
+        state.branch_input = "my-feature".into();
+        state.cursor_pos = 10;
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("my-feature"), "should show typed branch name");
+    }
+
+    #[test]
+    fn render_shows_footer_keybindings() {
+        let state = sample_state();
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Tab"), "should show Tab in footer");
+        assert!(text.contains("Esc"), "should show Esc in footer");
     }
 
     #[test]
