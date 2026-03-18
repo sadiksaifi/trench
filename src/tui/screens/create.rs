@@ -16,6 +16,12 @@ pub enum CreateField {
     Hooks,
 }
 
+/// Result message displayed after a create attempt.
+pub struct CreateResultMessage {
+    pub success: bool,
+    pub message: String,
+}
+
 /// State for the TUI create-worktree form (FR-46).
 pub struct CreateState {
     pub branch_input: String,
@@ -26,8 +32,16 @@ pub struct CreateState {
     pub focused_field: CreateField,
     pub path_preview: String,
     pub error: Option<String>,
+    pub result: Option<CreateResultMessage>,
     pub repo_name: String,
     pub worktree_template: String,
+}
+
+impl CreateState {
+    /// Whether the form is showing a result (post-create).
+    pub fn is_result_mode(&self) -> bool {
+        self.result.is_some()
+    }
 }
 
 impl CreateState {
@@ -41,6 +55,7 @@ impl CreateState {
             focused_field: CreateField::Branch,
             path_preview: String::new(),
             error: None,
+            result: None,
             repo_name,
             worktree_template,
         }
@@ -166,8 +181,32 @@ impl CreateState {
 }
 
 const FOOTER_KEYS: &str = " Tab next field  Enter create  Esc cancel ";
+const FOOTER_RESULT: &str = " Enter dismiss ";
 
 pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
+    // Result mode — show outcome + dismiss footer
+    if let Some(ref result) = state.result {
+        let chunks = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+        let title = Paragraph::new(Line::from(vec![
+            Span::styled("Create Worktree", Style::default().add_modifier(Modifier::BOLD)),
+        ]));
+        frame.render_widget(title, chunks[0]);
+        let msg = Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::raw(&result.message),
+        ]));
+        frame.render_widget(msg, chunks[1]);
+        let footer = Paragraph::new(Line::from(FOOTER_RESULT))
+            .style(Style::default().add_modifier(Modifier::REVERSED));
+        frame.render_widget(footer, chunks[2]);
+        return;
+    }
+
     // Layout: title (1) + form rows (7) + path preview (1) + error (1) + spacer + footer (1)
     let chunks = Layout::vertical([
         Constraint::Length(2), // title

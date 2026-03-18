@@ -541,6 +541,24 @@ impl App {
     fn handle_create_key(&mut self, key: KeyEvent) {
         use screens::create::CreateField;
 
+        let in_result_mode = self
+            .create_state
+            .as_ref()
+            .is_some_and(|s| s.is_result_mode());
+
+        if in_result_mode {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.create_state = None;
+                    while self.active_screen() != Screen::List {
+                        self.pop_screen();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         let Some(ref mut state) = self.create_state else {
             return;
         };
@@ -586,7 +604,65 @@ impl App {
     }
 
     fn execute_create(&mut self) {
-        // Will be implemented in cycle 10
+        let state = match self.create_state.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Validate first
+        if state.validate().is_err() {
+            return;
+        }
+
+        let branch = state.branch_input.trim().to_string();
+        let base = state.selected_base_branch().map(|s| s.to_string());
+
+        let Some((cwd, db)) = Self::open_db() else {
+            state.result = Some(screens::create::CreateResultMessage {
+                success: false,
+                message: "Failed to open database".into(),
+            });
+            return;
+        };
+
+        let worktree_root = match paths::worktree_root() {
+            Ok(r) => r,
+            Err(e) => {
+                state.result = Some(screens::create::CreateResultMessage {
+                    success: false,
+                    message: format!("Failed to resolve worktree root: {e:#}"),
+                });
+                return;
+            }
+        };
+
+        let template = &state.worktree_template;
+        match crate::cli::commands::create::execute(
+            &branch,
+            base.as_deref(),
+            &cwd,
+            &worktree_root,
+            template,
+            &db,
+        ) {
+            Ok(result) => {
+                let msg = format!("Created '{}' at {}", result.name, result.path.display());
+                if let Some(ref mut s) = self.create_state {
+                    s.result = Some(screens::create::CreateResultMessage {
+                        success: true,
+                        message: msg,
+                    });
+                }
+            }
+            Err(e) => {
+                if let Some(ref mut s) = self.create_state {
+                    s.result = Some(screens::create::CreateResultMessage {
+                        success: false,
+                        message: format!("Create failed: {e:#}"),
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -1162,6 +1238,88 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Create);
         assert!(app.create_state.is_some(), "create_state should be initialized");
+    }
+
+    #[test]
+    fn enter_on_hooks_field_with_empty_branch_shows_validation_error() {
+        let mut app = app_with_create_state();
+        // Move to Hooks field
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.create_state.as_ref().unwrap().focused_field,
+            screens::create::CreateField::Hooks
+        );
+        // Try to create with empty branch
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // Should still be on Create screen with error
+        assert_eq!(app.active_screen(), Screen::Create);
+        assert!(
+            app.create_state.as_ref().unwrap().error.is_some(),
+            "should show validation error for empty branch"
+        );
+        assert!(
+            app.create_state.as_ref().unwrap().result.is_none(),
+            "should not have result yet"
+        );
+    }
+
+    #[test]
+    fn enter_on_hooks_field_with_branch_triggers_execute() {
+        let mut app = app_with_create_state();
+        // Type a branch name
+        for c in "test-branch".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        // Move to Hooks field
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        // Try to create — will fail without real git repo but should set result
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Create);
+        let state = app.create_state.as_ref().unwrap();
+        assert!(state.is_result_mode(), "should be in result mode after execute attempt");
+    }
+
+    #[test]
+    fn enter_in_create_result_mode_pops_to_list() {
+        let mut app = app_with_create_state();
+        // Set result directly
+        app.create_state.as_mut().unwrap().result = Some(screens::create::CreateResultMessage {
+            success: true,
+            message: "Created 'test'".into(),
+        });
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
+        assert!(app.create_state.is_none(), "create_state should be cleared");
+    }
+
+    #[test]
+    fn space_in_create_result_mode_pops_to_list() {
+        let mut app = app_with_create_state();
+        app.create_state.as_mut().unwrap().result = Some(screens::create::CreateResultMessage {
+            success: false,
+            message: "Create failed".into(),
+        });
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.create_state.is_none());
+    }
+
+    #[test]
+    fn create_result_mode_renders_result_message() {
+        let mut app = app_with_create_state();
+        app.create_state.as_mut().unwrap().result = Some(screens::create::CreateResultMessage {
+            success: true,
+            message: "Created 'feat-x' at /tmp/wt/feat-x".into(),
+        });
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(content.contains("Created"), "should show result message");
+        assert!(content.contains("dismiss"), "should show dismiss footer");
     }
 
     #[test]
