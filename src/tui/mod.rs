@@ -227,6 +227,14 @@ impl App {
         }
     }
 
+    fn is_create_branch_text_entry_active(&self) -> bool {
+        self.active_screen() == Screen::Create
+            && self
+                .create_state
+                .as_ref()
+                .is_some_and(|s| !s.is_result_mode() && s.focused_field == screens::create::CreateField::Branch)
+    }
+
     pub fn handle_key_event(&mut self, key: KeyEvent) {
         // Global keys handled at app level
         match (key.code, key.modifiers) {
@@ -238,7 +246,22 @@ impl App {
                     self.push_screen(Screen::Help);
                 }
             }
-            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+            (KeyCode::Esc, _) => {
+                match self.active_screen() {
+                    Screen::DeleteConfirm => {
+                        self.delete_confirm_state = None;
+                    }
+                    Screen::SyncPicker => {
+                        self.sync_picker_state = None;
+                    }
+                    Screen::Create => {
+                        self.create_state = None;
+                    }
+                    _ => {}
+                }
+                self.pop_screen();
+            }
+            (KeyCode::Char('q'), _) if !self.is_create_branch_text_entry_active() => {
                 match self.active_screen() {
                     Screen::DeleteConfirm => {
                         self.delete_confirm_state = None;
@@ -1134,8 +1157,14 @@ mod tests {
     }
 
     #[test]
-    fn q_on_create_pops_to_list_and_clears_state() {
+    fn q_on_create_pops_when_not_in_branch_field() {
         let mut app = app_with_create_state();
+        // Move focus to Base field so q acts as cancel
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.create_state.as_ref().unwrap().focused_field,
+            screens::create::CreateField::Base
+        );
         app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::List);
         assert!(app.create_state.is_none());
@@ -1742,6 +1771,31 @@ mod tests {
             content.contains("Sync strategy for"),
             "should render SyncPicker underneath Help overlay, got: {:?}",
             content.trim()
+        );
+    }
+
+    #[test]
+    fn q_inserts_into_branch_field_on_create_screen() {
+        let mut app = app_with_create_state();
+        assert_eq!(app.active_screen(), Screen::Create);
+        // Branch field is focused by default
+        assert_eq!(
+            app.create_state.as_ref().unwrap().focused_field,
+            screens::create::CreateField::Branch
+        );
+
+        // Press 'q' — should insert into branch_input, NOT pop screen
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+
+        assert_eq!(
+            app.active_screen(),
+            Screen::Create,
+            "q should NOT pop the Create screen when Branch field is focused"
+        );
+        assert_eq!(
+            app.create_state.as_ref().unwrap().branch_input,
+            "q",
+            "q should be inserted into branch_input"
         );
     }
 }
