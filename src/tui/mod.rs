@@ -458,7 +458,14 @@ impl App {
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
                     Ok(rt) => rt,
-                    Err(_) => return,
+                    Err(e) => {
+                        let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                            success: false,
+                            duration: std::time::Duration::ZERO,
+                            error: Some(format!("Failed to start hook runtime: {e}")),
+                        });
+                        return;
+                    }
                 };
                 let result =
                     rt.block_on(crate::cli::commands::remove::execute_resolved_with_hooks(
@@ -612,7 +619,14 @@ impl App {
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
                     Ok(rt) => rt,
-                    Err(_) => return,
+                    Err(e) => {
+                        let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                            success: false,
+                            duration: std::time::Duration::ZERO,
+                            error: Some(format!("Failed to start hook runtime: {e}")),
+                        });
+                        return;
+                    }
                 };
                 let result = rt.block_on(crate::cli::commands::sync::execute_with_hooks(
                     &worktree_name,
@@ -872,7 +886,14 @@ impl App {
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
                     Ok(rt) => rt,
-                    Err(_) => return,
+                    Err(e) => {
+                        let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                            success: false,
+                            duration: std::time::Duration::ZERO,
+                            error: Some(format!("Failed to start hook runtime: {e}")),
+                        });
+                        return;
+                    }
                 };
                 let result = rt.block_on(crate::cli::commands::create::execute_with_hooks(
                     &branch_clone,
