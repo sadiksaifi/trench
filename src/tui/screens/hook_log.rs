@@ -38,6 +38,50 @@ pub struct HookLogState {
 }
 
 impl HookLogState {
+    /// Build a completed HookLogState from stored DB hook output lines.
+    ///
+    /// Groups lines by step into sections, marks all sections as completed.
+    /// Used for replaying historical hook executions from the logs table.
+    pub fn from_hook_output(
+        lines: &[crate::state::HookOutputLine],
+        event_type: &str,
+        _payload: &Option<String>,
+    ) -> Self {
+        let title = event_type.strip_prefix("hook:").unwrap_or(event_type);
+
+        let mut sections: Vec<HookLogSection> = Vec::new();
+
+        for line in lines {
+            let step = line.step.as_deref().unwrap_or("unknown");
+
+            // Find or create the section for this step
+            let needs_new = sections.last().map_or(true, |s| s.step != step);
+            if needs_new {
+                sections.push(HookLogSection {
+                    step: step.to_string(),
+                    lines: Vec::new(),
+                    completed: true,
+                    success: true,
+                    duration: None,
+                });
+            }
+
+            sections.last_mut().unwrap().lines.push(HookLogLine {
+                stream: line.stream.clone(),
+                text: line.line.clone(),
+            });
+        }
+
+        Self {
+            title: title.to_string(),
+            sections,
+            completed: true,
+            success: true,
+            scroll_offset: 0,
+            error: None,
+        }
+    }
+
     pub fn new(title: &str) -> Self {
         Self {
             title: title.to_string(),
@@ -513,6 +557,44 @@ mod tests {
         });
         state.auto_scroll(20); // plenty of room
         assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn from_hook_output_single_step_creates_one_section() {
+        use crate::state::HookOutputLine;
+
+        let lines = vec![
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "installing deps".into(),
+                step: Some("run".into()),
+                line_number: 1,
+                created_at: 1700000000,
+            },
+            HookOutputLine {
+                stream: "stderr".into(),
+                line: "warning: peer dep".into(),
+                step: Some("run".into()),
+                line_number: 2,
+                created_at: 1700000001,
+            },
+        ];
+
+        let event_type = "hook:post_create";
+        let payload: Option<String> = None;
+
+        let state = HookLogState::from_hook_output(&lines, event_type, &payload);
+
+        assert_eq!(state.title, "post_create");
+        assert!(state.completed);
+        assert_eq!(state.sections.len(), 1);
+        assert_eq!(state.sections[0].step, "run");
+        assert_eq!(state.sections[0].lines.len(), 2);
+        assert_eq!(state.sections[0].lines[0].text, "installing deps");
+        assert_eq!(state.sections[0].lines[0].stream, "stdout");
+        assert_eq!(state.sections[0].lines[1].text, "warning: peer dep");
+        assert_eq!(state.sections[0].lines[1].stream, "stderr");
+        assert!(state.sections[0].completed);
     }
 
     fn render_to_buffer(state: &HookLogState, width: u16, height: u16) -> ratatui::buffer::Buffer {
