@@ -276,20 +276,33 @@ impl App {
     }
 
     /// Drain pending messages from the hook output channel and update state.
+    /// Continues draining even after dismiss (hook_log_state is None) so that
+    /// HookCompleted triggers a final refresh_list.
     pub fn process_hook_messages(&mut self) {
         let Some(ref rx) = self.hook_rx else { return };
-        let Some(ref mut state) = self.hook_log_state else {
-            return;
-        };
         let mut received = false;
+        let mut completed = false;
         while let Ok(msg) = rx.try_recv() {
-            state.process_message(msg);
-            received = true;
+            if matches!(
+                &msg,
+                screens::hook_log::HookOutputMessage::HookCompleted { .. }
+            ) {
+                completed = true;
+            }
+            if let Some(ref mut state) = self.hook_log_state {
+                state.process_message(msg);
+                received = true;
+            }
         }
-        // Auto-scroll to latest output when new messages arrive
         if received {
-            // Use a reasonable default visible height; actual height is set during render
-            state.auto_scroll(20);
+            if let Some(ref mut state) = self.hook_log_state {
+                state.auto_scroll(20);
+            }
+        }
+        if completed && self.hook_log_state.is_none() {
+            // Hook finished after user dismissed — refresh list to reflect changes
+            self.hook_rx = None;
+            self.refresh_list();
         }
     }
 
@@ -307,7 +320,7 @@ impl App {
             Screen::Create => self.create_state = None,
             Screen::HookLog => {
                 self.hook_log_state = None;
-                self.hook_rx = None;
+                // Keep hook_rx alive for post-dismiss draining
             }
             _ => {}
         }
@@ -318,7 +331,8 @@ impl App {
     /// underlying operation cannot be re-triggered.
     fn dismiss_hook_log(&mut self) {
         self.hook_log_state = None;
-        self.hook_rx = None;
+        // Keep hook_rx alive — process_hook_messages will drain it and
+        // call refresh_list when HookCompleted arrives after dismiss.
         self.create_state = None;
         self.sync_picker_state = None;
         self.delete_confirm_state = None;
@@ -2292,7 +2306,8 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::List);
         assert!(app.hook_log_state.is_none());
-        assert!(app.hook_rx.is_none());
+        // hook_rx stays alive for post-dismiss draining
+        assert!(app.hook_rx.is_some());
     }
 
     #[test]
@@ -2336,6 +2351,38 @@ mod tests {
         assert!(
             app.create_state.is_none(),
             "source dialog state should be cleared"
+        );
+    }
+
+    #[test]
+    fn process_hook_messages_drains_after_dismiss() {
+        use screens::hook_log::HookOutputMessage;
+
+        let mut app = App::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("test hooks", rx);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+
+        // Dismiss the hook log (user pressed Esc)
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.hook_log_state.is_none(), "state should be cleared");
+        // hook_rx should still be alive for draining
+        assert!(app.hook_rx.is_some(), "hook_rx should survive dismiss");
+
+        // Background thread sends completion after dismiss
+        tx.send(HookOutputMessage::HookCompleted {
+            success: true,
+            duration: std::time::Duration::from_secs(1),
+            error: None,
+        })
+        .unwrap();
+
+        // process_hook_messages should drain and clean up
+        app.process_hook_messages();
+        assert!(
+            app.hook_rx.is_none(),
+            "hook_rx should be cleaned up after HookCompleted"
         );
     }
 }
