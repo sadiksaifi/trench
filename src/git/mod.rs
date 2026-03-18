@@ -1624,4 +1624,43 @@ mod tests {
         assert!(!entry.is_main);
         assert_eq!(entry.branch.as_deref(), Some("my-feature"));
     }
+
+    #[test]
+    fn list_local_branches_returns_default_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(tmp.path());
+        let branches = list_local_branches(tmp.path()).unwrap();
+        assert!(!branches.is_empty(), "should have at least the default branch");
+    }
+
+    #[test]
+    fn list_local_branches_includes_created_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        // Create an additional branch
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature-x", &head, false).unwrap();
+        let branches = list_local_branches(tmp.path()).unwrap();
+        assert!(
+            branches.contains(&"feature-x".to_string()),
+            "should list 'feature-x', got: {branches:?}"
+        );
+    }
+
+    #[test]
+    fn list_local_branches_sorted_alphabetically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("zzz", &head, false).unwrap();
+        repo.branch("aaa", &head, false).unwrap();
+        repo.branch("mmm", &head, false).unwrap();
+        let branches = list_local_branches(tmp.path()).unwrap();
+        let sorted: Vec<_> = {
+            let mut s = branches.clone();
+            s.sort();
+            s
+        };
+        assert_eq!(branches, sorted, "branches should be sorted");
+    }
 }
