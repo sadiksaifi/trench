@@ -12,9 +12,7 @@ use ratatui::{
 #[derive(Debug, Clone)]
 pub enum HookOutputMessage {
     /// A new hook step (copy/run/shell) has started.
-    StepStarted {
-        step: String,
-    },
+    StepStarted { step: String },
     /// A line of output from the current step.
     OutputLine {
         step: String,
@@ -74,12 +72,14 @@ impl HookLogState {
         }
     }
 
-    /// Total number of renderable lines (section headers + output lines).
+    /// Total number of renderable lines (section headers + output lines + error).
     pub fn total_lines(&self) -> usize {
-        self.sections
+        let content: usize = self
+            .sections
             .iter()
             .map(|s| 1 + s.lines.len()) // 1 header per section + output lines
-            .sum()
+            .sum();
+        content + if self.error.is_some() { 2 } else { 0 }
     }
 
     /// Auto-scroll to keep the latest output visible.
@@ -105,10 +105,7 @@ impl HookLogState {
                 });
             }
             HookOutputMessage::OutputLine { step, stream, line } => {
-                let section = self
-                    .sections
-                    .iter_mut()
-                    .rfind(|s| s.step == step);
+                let section = self.sections.iter_mut().rfind(|s| s.step == step);
                 if let Some(section) = section {
                     section.lines.push(HookLogLine { stream, text: line });
                 }
@@ -118,21 +115,14 @@ impl HookLogState {
                 success,
                 duration,
             } => {
-                let section = self
-                    .sections
-                    .iter_mut()
-                    .rfind(|s| s.step == step);
+                let section = self.sections.iter_mut().rfind(|s| s.step == step);
                 if let Some(section) = section {
                     section.completed = true;
                     section.success = success;
                     section.duration = Some(duration);
                 }
             }
-            HookOutputMessage::HookCompleted {
-                success,
-                error,
-                ..
-            } => {
+            HookOutputMessage::HookCompleted { success, error, .. } => {
                 self.completed = true;
                 self.success = success;
                 self.error = error;
@@ -157,7 +147,7 @@ fn format_duration(d: Duration) -> String {
 pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // title
-        Constraint::Min(1),   // output area
+        Constraint::Min(1),    // output area
         Constraint::Length(1), // footer
     ])
     .split(area);
@@ -188,16 +178,24 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
         // Section header
         let header_style = if section.completed {
             if section.success {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             }
         } else {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         };
 
         let status_icon = if section.completed {
-            if section.success { "✓" } else { "✗" }
+            if section.success {
+                "✓"
+            } else {
+                "✗"
+            }
         } else {
             "●"
         };
@@ -207,12 +205,10 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
             .map(|d| format!(" ({})", format_duration(d)))
             .unwrap_or_default();
 
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{status_icon} [{step}]{elapsed}", step = section.step),
-                header_style,
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("{status_icon} [{step}]{elapsed}", step = section.step),
+            header_style,
+        )]));
 
         // Output lines
         for log_line in &section.lines {
@@ -245,7 +241,11 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(visible_lines), chunks[1]);
 
     // Footer
-    let footer_text = if state.completed { FOOTER_DONE } else { FOOTER_RUNNING };
+    let footer_text = if state.completed {
+        FOOTER_DONE
+    } else {
+        FOOTER_RUNNING
+    };
     let footer = Paragraph::new(Line::from(footer_text))
         .style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(footer, chunks[2]);
@@ -486,14 +486,22 @@ mod tests {
         let mut state = HookLogState::new("test");
         state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
         state.process_message(HookOutputMessage::OutputLine {
-            step: "run".into(), stream: "stdout".into(), line: "line1".into(),
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "line1".into(),
         });
         state.process_message(HookOutputMessage::OutputLine {
-            step: "run".into(), stream: "stdout".into(), line: "line2".into(),
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "line2".into(),
         });
-        state.process_message(HookOutputMessage::StepStarted { step: "shell".into() });
+        state.process_message(HookOutputMessage::StepStarted {
+            step: "shell".into(),
+        });
         state.process_message(HookOutputMessage::OutputLine {
-            step: "shell".into(), stream: "stdout".into(), line: "line3".into(),
+            step: "shell".into(),
+            stream: "stdout".into(),
+            line: "line3".into(),
         });
         // total_lines = output lines + section headers (1 per section)
         assert_eq!(state.total_lines(), 5); // 2 headers + 3 output lines
@@ -512,7 +520,7 @@ mod tests {
         }
         // After many lines, auto_scroll should set offset near the end
         state.auto_scroll(10); // visible_height = 10
-        // scroll_offset should be total_lines - visible_height
+                               // scroll_offset should be total_lines - visible_height
         let expected = state.total_lines().saturating_sub(10);
         assert_eq!(state.scroll_offset, expected);
     }
@@ -522,7 +530,9 @@ mod tests {
         let mut state = HookLogState::new("test");
         state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
         state.process_message(HookOutputMessage::OutputLine {
-            step: "run".into(), stream: "stdout".into(), line: "one".into(),
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "one".into(),
         });
         state.auto_scroll(20); // plenty of room
         assert_eq!(state.scroll_offset, 0);
@@ -546,7 +556,10 @@ mod tests {
         let state = HookLogState::new("post_create");
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("post_create"), "should show hook name in title, got: {text}");
+        assert!(
+            text.contains("post_create"),
+            "should show hook name in title, got: {text}"
+        );
     }
 
     #[test]
@@ -555,7 +568,10 @@ mod tests {
         state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("run"), "should show section header for 'run' step");
+        assert!(
+            text.contains("run"),
+            "should show section header for 'run' step"
+        );
     }
 
     #[test]
@@ -563,11 +579,16 @@ mod tests {
         let mut state = HookLogState::new("post_create");
         state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
         state.process_message(HookOutputMessage::OutputLine {
-            step: "run".into(), stream: "stdout".into(), line: "installing packages".into(),
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "installing packages".into(),
         });
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("installing packages"), "should show output line");
+        assert!(
+            text.contains("installing packages"),
+            "should show output line"
+        );
     }
 
     #[test]
@@ -575,11 +596,16 @@ mod tests {
         let mut state = HookLogState::new("post_create");
         state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
         state.process_message(HookOutputMessage::StepCompleted {
-            step: "run".into(), success: true, duration: Duration::from_millis(1500),
+            step: "run".into(),
+            success: true,
+            duration: Duration::from_millis(1500),
         });
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("1.5s"), "should show elapsed time, got: {text}");
+        assert!(
+            text.contains("1.5s"),
+            "should show elapsed time, got: {text}"
+        );
     }
 
     #[test]
@@ -594,22 +620,32 @@ mod tests {
     fn render_completed_success_shows_status() {
         let mut state = HookLogState::new("post_create");
         state.process_message(HookOutputMessage::HookCompleted {
-            success: true, duration: Duration::from_secs(2), error: None,
+            success: true,
+            duration: Duration::from_secs(2),
+            error: None,
         });
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("Complete") || text.contains("Success"), "should show success status, got: {text}");
+        assert!(
+            text.contains("Complete") || text.contains("Success"),
+            "should show success status, got: {text}"
+        );
     }
 
     #[test]
     fn render_completed_failure_shows_error() {
         let mut state = HookLogState::new("post_create");
         state.process_message(HookOutputMessage::HookCompleted {
-            success: false, duration: Duration::from_secs(1), error: Some("exit code 1".into()),
+            success: false,
+            duration: Duration::from_secs(1),
+            error: Some("exit code 1".into()),
         });
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("exit code 1"), "should show error message, got: {text}");
+        assert!(
+            text.contains("exit code 1"),
+            "should show error message, got: {text}"
+        );
     }
 
     #[test]
@@ -617,13 +653,16 @@ mod tests {
         let mut state = HookLogState::new("post_create");
         state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
         state.process_message(HookOutputMessage::StepCompleted {
-            step: "run".into(), success: true, duration: Duration::from_millis(100),
+            step: "run".into(),
+            success: true,
+            duration: Duration::from_millis(100),
         });
         let buf = render_to_buffer(&state, 80, 20);
         // Find a cell in the header row that has green foreground
-        let has_green = buf.content().iter().any(|cell| {
-            cell.fg == ratatui::style::Color::Green
-        });
+        let has_green = buf
+            .content()
+            .iter()
+            .any(|cell| cell.fg == ratatui::style::Color::Green);
         assert!(has_green, "successful step should have green-colored text");
     }
 
@@ -632,12 +671,41 @@ mod tests {
         let mut state = HookLogState::new("post_create");
         state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
         state.process_message(HookOutputMessage::StepCompleted {
-            step: "run".into(), success: false, duration: Duration::from_millis(100),
+            step: "run".into(),
+            success: false,
+            duration: Duration::from_millis(100),
         });
         let buf = render_to_buffer(&state, 80, 20);
-        let has_red = buf.content().iter().any(|cell| {
-            cell.fg == ratatui::style::Color::Red
-        });
+        let has_red = buf
+            .content()
+            .iter()
+            .any(|cell| cell.fg == ratatui::style::Color::Red);
         assert!(has_red, "failed step should have red-colored text");
+    }
+
+    #[test]
+    fn total_lines_includes_error_lines() {
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "line1".into(),
+        });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "line2".into(),
+        });
+        // Without error: 1 header + 2 output = 3
+        assert_eq!(state.total_lines(), 3);
+
+        state.process_message(HookOutputMessage::HookCompleted {
+            success: false,
+            duration: Duration::from_secs(1),
+            error: Some("command failed".into()),
+        });
+        // With error: 3 content + 2 error lines (blank + "Error: ...") = 5
+        assert_eq!(state.total_lines(), 5);
     }
 }
