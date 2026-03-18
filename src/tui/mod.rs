@@ -142,8 +142,8 @@ impl App {
                 if let Some(ref detail) = self.detail_state {
                     screens::detail::render(detail, frame, frame.area());
                 } else {
-                    let placeholder = Paragraph::new("trench TUI — press q to quit")
-                        .alignment(Alignment::Center);
+                    let placeholder =
+                        Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
                     frame.render_widget(placeholder, frame.area());
                 }
             }
@@ -252,7 +252,9 @@ impl App {
 
     /// Reload worktree data from git + DB for the list screen.
     pub fn refresh_list(&mut self) {
-        let Some((cwd, db)) = Self::open_db() else { return };
+        let Some((cwd, db)) = Self::open_db() else {
+            return;
+        };
         if let Ok(rows) = screens::list::load_worktrees(&cwd, &db, &[]) {
             let prev_selected = self.list_state.selected;
             self.list_state = screens::list::ListState::new(rows);
@@ -276,7 +278,9 @@ impl App {
     /// Drain pending messages from the hook output channel and update state.
     pub fn process_hook_messages(&mut self) {
         let Some(ref rx) = self.hook_rx else { return };
-        let Some(ref mut state) = self.hook_log_state else { return };
+        let Some(ref mut state) = self.hook_log_state else {
+            return;
+        };
         let mut received = false;
         while let Ok(msg) = rx.try_recv() {
             state.process_message(msg);
@@ -291,10 +295,9 @@ impl App {
 
     fn is_create_branch_text_entry_active(&self) -> bool {
         self.active_screen() == Screen::Create
-            && self
-                .create_state
-                .as_ref()
-                .is_some_and(|s| !s.is_result_mode() && s.focused_field == screens::create::CreateField::Branch)
+            && self.create_state.as_ref().is_some_and(|s| {
+                !s.is_result_mode() && s.focused_field == screens::create::CreateField::Branch
+            })
     }
 
     fn clear_active_screen_state(&mut self) {
@@ -310,6 +313,22 @@ impl App {
         }
     }
 
+    /// Dismiss the hook log screen and unwind to List, clearing any
+    /// intermediate source dialog state (Create/Sync/Delete) so the
+    /// underlying operation cannot be re-triggered.
+    fn dismiss_hook_log(&mut self) {
+        self.hook_log_state = None;
+        self.hook_rx = None;
+        self.create_state = None;
+        self.sync_picker_state = None;
+        self.delete_confirm_state = None;
+        self.nav_stack.retain(|s| *s == Screen::List);
+        if self.nav_stack.is_empty() {
+            self.nav_stack.push(Screen::List);
+        }
+        self.refresh_list();
+    }
+
     pub fn handle_key_event(&mut self, key: KeyEvent) {
         // Global keys handled at app level
         match (key.code, key.modifiers) {
@@ -322,12 +341,20 @@ impl App {
                 }
             }
             (KeyCode::Esc, _) => {
-                self.clear_active_screen_state();
-                self.pop_screen();
+                if self.active_screen() == Screen::HookLog {
+                    self.dismiss_hook_log();
+                } else {
+                    self.clear_active_screen_state();
+                    self.pop_screen();
+                }
             }
             (KeyCode::Char('q'), _) if !self.is_create_branch_text_entry_active() => {
-                self.clear_active_screen_state();
-                self.pop_screen();
+                if self.active_screen() == Screen::HookLog {
+                    self.dismiss_hook_log();
+                } else {
+                    self.clear_active_screen_state();
+                    self.pop_screen();
+                }
             }
             _ => self.handle_screen_key(key),
         }
@@ -433,11 +460,17 @@ impl App {
                     Ok(rt) => rt,
                     Err(_) => return,
                 };
-                let result = rt.block_on(
-                    crate::cli::commands::remove::execute_resolved_with_hooks(
-                        &repo, &wt, &repo_info, &db, false, Some(&hooks), false, Some(&tx),
-                    ),
-                );
+                let result =
+                    rt.block_on(crate::cli::commands::remove::execute_resolved_with_hooks(
+                        &repo,
+                        &wt,
+                        &repo_info,
+                        &db,
+                        false,
+                        Some(&hooks),
+                        false,
+                        Some(&tx),
+                    ));
                 if let Err(e) = result {
                     let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
                         success: false,
@@ -482,7 +515,9 @@ impl App {
             row.branch.clone()
         };
 
-        let Some((cwd, db)) = Self::open_db() else { return };
+        let Some((cwd, db)) = Self::open_db() else {
+            return;
+        };
         let repo_info = match crate::git::discover_repo(&cwd) {
             Ok(r) => r,
             Err(_) => return,
@@ -493,7 +528,9 @@ impl App {
 
     fn load_detail(&mut self, name: &str) -> bool {
         self.detail_state = None;
-        let Some((cwd, db)) = Self::open_db() else { return false };
+        let Some((cwd, db)) = Self::open_db() else {
+            return false;
+        };
         self.detail_state = Some(screens::detail::load_detail(name, &cwd, &db));
         true
     }
@@ -662,13 +699,12 @@ impl App {
             }
             KeyCode::Char('D') => {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
-                    self.delete_confirm_state = Some(
-                        screens::delete_confirm::DeleteConfirmState::new(
+                    self.delete_confirm_state =
+                        Some(screens::delete_confirm::DeleteConfirmState::new(
                             &row.name,
                             &row.path,
                             &row.branch,
-                        ),
-                    );
+                        ));
                     self.push_screen(Screen::DeleteConfirm);
                 }
             }
@@ -916,7 +952,15 @@ mod tests {
 
     #[test]
     fn screen_enum_has_seven_variants() {
-        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help, Screen::SyncPicker, Screen::DeleteConfirm, Screen::HookLog];
+        let screens = [
+            Screen::List,
+            Screen::Detail,
+            Screen::Create,
+            Screen::Help,
+            Screen::SyncPicker,
+            Screen::DeleteConfirm,
+            Screen::HookLog,
+        ];
         for (i, a) in screens.iter().enumerate() {
             for (j, b) in screens.iter().enumerate() {
                 if i == j {
@@ -1223,7 +1267,10 @@ mod tests {
         // Select second row
         app.list_state.selected = 1;
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
-        let state = app.sync_picker_state.as_ref().expect("sync_picker_state should be set");
+        let state = app
+            .sync_picker_state
+            .as_ref()
+            .expect("sync_picker_state should be set");
         assert_eq!(state.worktree_name, "feat-b");
     }
 
@@ -1241,7 +1288,10 @@ mod tests {
         let mut app = app_with_rows();
         app.list_state.selected = 1; // select feat-b
         app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
-        let state = app.delete_confirm_state.as_ref().expect("delete_confirm_state should be set");
+        let state = app
+            .delete_confirm_state
+            .as_ref()
+            .expect("delete_confirm_state should be set");
         assert_eq!(state.worktree_name, "feat-b");
         assert_eq!(state.worktree_path, "/tmp/wt/feat-b");
         assert_eq!(state.branch, "feat/b");
@@ -1368,7 +1418,10 @@ mod tests {
         assert_eq!(app.active_screen(), Screen::Create);
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::List);
-        assert!(app.create_state.is_none(), "create_state should be cleared on Esc");
+        assert!(
+            app.create_state.is_none(),
+            "create_state should be cleared on Esc"
+        );
     }
 
     #[test]
@@ -1481,7 +1534,10 @@ mod tests {
         // Without a real git repo, init_create_form will use fallback defaults
         app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Create);
-        assert!(app.create_state.is_some(), "create_state should be initialized");
+        assert!(
+            app.create_state.is_some(),
+            "create_state should be initialized"
+        );
     }
 
     #[test]
@@ -1522,7 +1578,10 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Create);
         let state = app.create_state.as_ref().unwrap();
-        assert!(state.is_result_mode(), "should be in result mode after execute attempt");
+        assert!(
+            state.is_result_mode(),
+            "should be in result mode after execute attempt"
+        );
     }
 
     #[test]
@@ -1534,7 +1593,11 @@ mod tests {
             message: "Created 'test'".into(),
         });
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Enter in result mode should pop to list"
+        );
         assert!(app.create_state.is_none(), "create_state should be cleared");
     }
 
@@ -1649,8 +1712,15 @@ mod tests {
         let mut app = App::new();
         // Empty list — no rows
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "s on empty list should stay on List");
-        assert!(app.sync_picker_state.is_none(), "sync_picker_state should remain None");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "s on empty list should stay on List"
+        );
+        assert!(
+            app.sync_picker_state.is_none(),
+            "sync_picker_state should remain None"
+        );
     }
 
     #[test]
@@ -1661,7 +1731,10 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::SyncPicker);
-        let picker = app.sync_picker_state.as_ref().expect("sync_picker_state should be set");
+        let picker = app
+            .sync_picker_state
+            .as_ref()
+            .expect("sync_picker_state should be set");
         assert_eq!(picker.worktree_name, "feat-a");
     }
 
@@ -1688,7 +1761,11 @@ mod tests {
         assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 1, "down should select Merge");
+        assert_eq!(
+            app.sync_picker_state.as_ref().unwrap().selected,
+            1,
+            "down should select Merge"
+        );
     }
 
     #[test]
@@ -1700,7 +1777,11 @@ mod tests {
         app.push_screen(Screen::SyncPicker);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0, "up should select Rebase");
+        assert_eq!(
+            app.sync_picker_state.as_ref().unwrap().selected,
+            0,
+            "up should select Rebase"
+        );
     }
 
     #[test]
@@ -1710,10 +1791,18 @@ mod tests {
         app.push_screen(Screen::SyncPicker);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 1, "j should move down");
+        assert_eq!(
+            app.sync_picker_state.as_ref().unwrap().selected,
+            1,
+            "j should move down"
+        );
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0, "k should move up");
+        assert_eq!(
+            app.sync_picker_state.as_ref().unwrap().selected,
+            0,
+            "k should move up"
+        );
     }
 
     #[test]
@@ -1729,7 +1818,10 @@ mod tests {
         // Should still be on SyncPicker (showing result)
         assert_eq!(app.active_screen(), Screen::SyncPicker);
         let picker = app.sync_picker_state.as_ref().unwrap();
-        assert!(picker.is_result_mode(), "should be in result mode after Enter");
+        assert!(
+            picker.is_result_mode(),
+            "should be in result mode after Enter"
+        );
         assert!(picker.result.is_some());
     }
 
@@ -1745,8 +1837,15 @@ mod tests {
         app.push_screen(Screen::SyncPicker);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
-        assert!(app.sync_picker_state.is_none(), "sync_picker_state should be cleared");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Enter in result mode should pop to list"
+        );
+        assert!(
+            app.sync_picker_state.is_none(),
+            "sync_picker_state should be cleared"
+        );
     }
 
     #[test]
@@ -1765,8 +1864,15 @@ mod tests {
         assert_eq!(app.nav_stack_depth(), 3);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "should pop all the way to List, not Detail");
-        assert!(app.sync_picker_state.is_none(), "sync_picker_state should be cleared");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "should pop all the way to List, not Detail"
+        );
+        assert!(
+            app.sync_picker_state.is_none(),
+            "sync_picker_state should be cleared"
+        );
     }
 
     #[test]
@@ -1809,7 +1915,9 @@ mod tests {
     fn push_delete_confirm_screen_works() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
         assert_eq!(app.active_screen(), Screen::DeleteConfirm);
@@ -1822,7 +1930,9 @@ mod tests {
         // set a result message (failure) and stay on the DeleteConfirm screen.
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
 
@@ -1830,7 +1940,10 @@ mod tests {
 
         assert_eq!(app.active_screen(), Screen::DeleteConfirm);
         let state = app.delete_confirm_state.as_ref().unwrap();
-        assert!(state.is_result_mode(), "should be in result mode after Enter");
+        assert!(
+            state.is_result_mode(),
+            "should be in result mode after Enter"
+        );
         assert!(state.result.is_some());
     }
 
@@ -1838,7 +1951,9 @@ mod tests {
     fn y_on_delete_confirm_triggers_delete_and_sets_result() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
 
@@ -1853,21 +1968,32 @@ mod tests {
     fn n_on_delete_confirm_cancels_dialog() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
 
-        assert_eq!(app.active_screen(), Screen::List, "n should pop back to list");
-        assert!(app.delete_confirm_state.is_none(), "state should be cleared on cancel");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "n should pop back to list"
+        );
+        assert!(
+            app.delete_confirm_state.is_none(),
+            "state should be cleared on cancel"
+        );
     }
 
     #[test]
     fn enter_in_delete_result_mode_pops_to_list() {
         let mut app = App::new();
         let mut state = screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         );
         state.result = Some(screens::delete_confirm::DeleteResultMessage {
             success: true,
@@ -1877,15 +2003,24 @@ mod tests {
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
-        assert!(app.delete_confirm_state.is_none(), "state should be cleared");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Enter in result mode should pop to list"
+        );
+        assert!(
+            app.delete_confirm_state.is_none(),
+            "state should be cleared"
+        );
     }
 
     #[test]
     fn space_in_delete_result_mode_pops_to_list() {
         let mut app = App::new();
         let mut state = screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         );
         state.result = Some(screens::delete_confirm::DeleteResultMessage {
             success: true,
@@ -1895,7 +2030,11 @@ mod tests {
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Space in result mode should pop to list");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Space in result mode should pop to list"
+        );
         assert!(app.delete_confirm_state.is_none());
     }
 
@@ -1903,33 +2042,49 @@ mod tests {
     fn esc_on_delete_confirm_clears_state() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Esc should pop back to List");
-        assert!(app.delete_confirm_state.is_none(), "Esc should clear delete_confirm_state");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Esc should pop back to List"
+        );
+        assert!(
+            app.delete_confirm_state.is_none(),
+            "Esc should clear delete_confirm_state"
+        );
     }
 
     #[test]
     fn q_on_delete_confirm_clears_state() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::List);
-        assert!(app.delete_confirm_state.is_none(), "q should clear delete_confirm_state");
+        assert!(
+            app.delete_confirm_state.is_none(),
+            "q should clear delete_confirm_state"
+        );
     }
 
     #[test]
     fn esc_on_delete_result_mode_clears_state() {
         let mut app = App::new();
         let mut state = screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         );
         state.result = Some(screens::delete_confirm::DeleteResultMessage {
             success: true,
@@ -1939,8 +2094,15 @@ mod tests {
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Esc in result mode should pop to List");
-        assert!(app.delete_confirm_state.is_none(), "Esc in result mode should clear state");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Esc in result mode should pop to List"
+        );
+        assert!(
+            app.delete_confirm_state.is_none(),
+            "Esc in result mode should clear state"
+        );
     }
 
     #[test]
@@ -1951,7 +2113,10 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::List);
-        assert!(app.sync_picker_state.is_none(), "Esc should clear sync_picker_state");
+        assert!(
+            app.sync_picker_state.is_none(),
+            "Esc should clear sync_picker_state"
+        );
     }
 
     #[test]
@@ -1967,8 +2132,7 @@ mod tests {
     fn help_over_sync_picker_renders_sync_picker_underneath() {
         let mut app = app_with_rows();
         // Push SyncPicker, then Help
-        app.sync_picker_state =
-            Some(screens::sync_picker::SyncPickerState::new("feat-a"));
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-a"));
         app.push_screen(Screen::SyncPicker);
         app.push_screen(Screen::Help);
         assert_eq!(app.active_screen(), Screen::Help);
@@ -2041,16 +2205,26 @@ mod tests {
         app.push_screen(Screen::HookLog);
 
         // Send messages through the channel
-        tx.send(HookOutputMessage::StepStarted { step: "run".into() }).unwrap();
+        tx.send(HookOutputMessage::StepStarted { step: "run".into() })
+            .unwrap();
         tx.send(HookOutputMessage::OutputLine {
-            step: "run".into(), stream: "stdout".into(), line: "hello".into(),
-        }).unwrap();
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "hello".into(),
+        })
+        .unwrap();
         tx.send(HookOutputMessage::StepCompleted {
-            step: "run".into(), success: true, duration: std::time::Duration::from_millis(100),
-        }).unwrap();
+            step: "run".into(),
+            success: true,
+            duration: std::time::Duration::from_millis(100),
+        })
+        .unwrap();
         tx.send(HookOutputMessage::HookCompleted {
-            success: true, duration: std::time::Duration::from_secs(1), error: None,
-        }).unwrap();
+            success: true,
+            duration: std::time::Duration::from_secs(1),
+            error: None,
+        })
+        .unwrap();
 
         // Process messages
         app.process_hook_messages();
@@ -2105,5 +2279,37 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::List);
         assert!(app.hook_log_state.is_none());
+    }
+
+    #[test]
+    fn dismiss_hook_log_returns_to_list_not_source() {
+        let mut app = App::new();
+        // Simulate: List → Create → HookLog (as happens during create-with-hooks)
+        app.create_state = Some(screens::create::CreateState::new(
+            vec![],
+            String::new(),
+            String::new(),
+        ));
+        app.push_screen(Screen::Create);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("create hooks", rx);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+        assert_eq!(app.nav_stack_depth(), 3); // List → Create → HookLog
+
+        // Esc should dismiss HookLog AND the source dialog, landing on List
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "dismiss from HookLog should return to List, not Create"
+        );
+        assert!(
+            app.hook_log_state.is_none(),
+            "hook_log_state should be cleared"
+        );
+        assert!(
+            app.create_state.is_none(),
+            "source dialog state should be cleared"
+        );
     }
 }
