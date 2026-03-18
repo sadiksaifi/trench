@@ -1,5 +1,11 @@
 use std::time::Duration;
 
+use ratatui::{
+    layout::Rect,
+    widgets::Paragraph,
+    Frame,
+};
+
 /// A message sent from the hook runner to the TUI for live streaming.
 #[derive(Debug, Clone)]
 pub enum HookOutputMessage {
@@ -131,6 +137,12 @@ impl HookLogState {
             }
         }
     }
+}
+
+/// Render the hook log screen.
+pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
+    let text = format!("Hook: {} — running...", state.title);
+    frame.render_widget(Paragraph::new(text), area);
 }
 
 #[cfg(test)]

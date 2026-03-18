@@ -17,6 +17,7 @@ pub enum Screen {
     Help,
     SyncPicker,
     DeleteConfirm,
+    HookLog,
 }
 
 type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
@@ -87,6 +88,7 @@ pub struct App {
     pub create_state: Option<screens::create::CreateState>,
     pub sync_picker_state: Option<screens::sync_picker::SyncPickerState>,
     pub delete_confirm_state: Option<screens::delete_confirm::DeleteConfirmState>,
+    pub hook_log_state: Option<screens::hook_log::HookLogState>,
     pub editor_request: Option<String>,
 }
 
@@ -100,6 +102,7 @@ impl App {
             create_state: None,
             sync_picker_state: None,
             delete_confirm_state: None,
+            hook_log_state: None,
             editor_request: None,
         }
     }
@@ -165,6 +168,15 @@ impl App {
                     frame.render_widget(placeholder, frame.area());
                 }
             }
+            Screen::HookLog => {
+                if let Some(ref hook_log) = self.hook_log_state {
+                    screens::hook_log::render(hook_log, frame, frame.area());
+                } else {
+                    let placeholder =
+                        Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
+                    frame.render_widget(placeholder, frame.area());
+                }
+            }
         }
     }
 
@@ -191,6 +203,11 @@ impl App {
                 screens::list::render(&self.list_state, frame, frame.area());
                 if let Some(ref confirm) = self.delete_confirm_state {
                     screens::delete_confirm::render(confirm, frame, frame.area());
+                }
+            }
+            Some(Screen::HookLog) => {
+                if let Some(ref hook_log) = self.hook_log_state {
+                    screens::hook_log::render(hook_log, frame, frame.area());
                 }
             }
             _ => screens::list::render(&self.list_state, frame, frame.area()),
@@ -240,6 +257,7 @@ impl App {
             Screen::DeleteConfirm => self.delete_confirm_state = None,
             Screen::SyncPicker => self.sync_picker_state = None,
             Screen::Create => self.create_state = None,
+            Screen::HookLog => self.hook_log_state = None,
             _ => {}
         }
     }
@@ -274,6 +292,7 @@ impl App {
             Screen::SyncPicker => self.handle_sync_picker_key(key),
             Screen::DeleteConfirm => self.handle_delete_confirm_key(key),
             Screen::Create => self.handle_create_key(key),
+            Screen::HookLog => {} // Esc/q handled globally; no screen-specific keys
             Screen::Help => {}
         }
     }
@@ -704,9 +723,8 @@ mod tests {
     }
 
     #[test]
-    fn screen_enum_has_six_variants() {
-        // Verify all six screen variants exist and are distinct
-        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help, Screen::SyncPicker, Screen::DeleteConfirm];
+    fn screen_enum_has_seven_variants() {
+        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help, Screen::SyncPicker, Screen::DeleteConfirm, Screen::HookLog];
         for (i, a) in screens.iter().enumerate() {
             for (j, b) in screens.iter().enumerate() {
                 if i == j {
@@ -716,6 +734,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn hook_log_screen_can_be_pushed_and_popped() {
+        let mut app = App::new();
+        app.hook_log_state = Some(screens::hook_log::HookLogState::new("post_create"));
+        app.push_screen(Screen::HookLog);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+        assert_eq!(app.nav_stack_depth(), 2);
+
+        // Esc pops back
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
     }
 
     #[test]
