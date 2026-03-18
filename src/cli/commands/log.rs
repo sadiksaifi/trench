@@ -252,6 +252,141 @@ pub fn execute_output_json(
     format_json_value(&output)
 }
 
+/// Internal aggregate stats computed from event entries.
+struct SummaryStats {
+    total_events: usize,
+    hook_runs: usize,
+    avg_hook_duration: f64,
+    successes: usize,
+    failures: usize,
+    most_active: Option<(String, usize)>,
+}
+
+/// Compute aggregate summary statistics from a list of log entries.
+fn compute_summary(entries: &[LogEntry]) -> SummaryStats {
+    let hook_entries: Vec<&LogEntry> = entries
+        .iter()
+        .filter(|e| e.event_type.starts_with("hook:"))
+        .collect();
+
+    let durations: Vec<f64> = hook_entries
+        .iter()
+        .filter_map(|e| extract_duration(e))
+        .collect();
+    let avg_hook_duration = if durations.is_empty() {
+        0.0
+    } else {
+        durations.iter().sum::<f64>() / durations.len() as f64
+    };
+
+    let successes = hook_entries
+        .iter()
+        .filter(|e| extract_exit_code(e) == Some(0))
+        .count();
+    let failures = hook_entries
+        .iter()
+        .filter(|e| matches!(extract_exit_code(e), Some(c) if c != 0))
+        .count();
+
+    let most_active = {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for entry in entries {
+            if let Some(name) = entry.worktree_name.as_deref() {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by(|(name_a, count_a), (name_b, count_b)| {
+                count_a.cmp(count_b).then_with(|| name_b.cmp(name_a))
+            })
+            .map(|(name, count)| (name.to_string(), count))
+    };
+
+    SummaryStats {
+        total_events: entries.len(),
+        hook_runs: hook_entries.len(),
+        avg_hook_duration,
+        successes,
+        failures,
+        most_active,
+    }
+}
+
+/// Display aggregate summary statistics for the event log.
+pub fn execute_summary(
+    db: &Database,
+    repo_id: i64,
+    worktree: Option<&str>,
+    tail: Option<usize>,
+) -> Result<String> {
+    let entries = db.list_events_filtered(repo_id, worktree, tail)?;
+
+    if entries.is_empty() {
+        return Ok("No events recorded yet.\n".to_string());
+    }
+
+    let stats = compute_summary(&entries);
+
+    let mut out = String::new();
+    out.push_str(&format!("Total events:       {}\n", stats.total_events));
+    out.push_str(&format!("Hook runs:          {}\n", stats.hook_runs));
+    out.push_str(&format!("Avg hook duration:  {:.1}s\n", stats.avg_hook_duration));
+    out.push_str(&format!("Successes:          {}\n", stats.successes));
+    out.push_str(&format!("Failures:           {}\n", stats.failures));
+    match &stats.most_active {
+        Some((name, count)) => {
+            out.push_str(&format!("Most active:        {} ({} events)\n", name, count));
+        }
+        None => {
+            out.push_str("Most active:        -\n");
+        }
+    }
+
+    Ok(out)
+}
+
+#[derive(Serialize)]
+struct SummaryJson {
+    total_events: usize,
+    hook_runs: usize,
+    avg_hook_duration_secs: f64,
+    successes: usize,
+    failures: usize,
+    most_active_worktree: Option<MostActiveJson>,
+}
+
+#[derive(Serialize)]
+struct MostActiveJson {
+    name: String,
+    event_count: usize,
+}
+
+/// JSON output for aggregate summary statistics.
+pub fn execute_summary_json(
+    db: &Database,
+    repo_id: i64,
+    worktree: Option<&str>,
+    tail: Option<usize>,
+) -> Result<String> {
+    let entries = db.list_events_filtered(repo_id, worktree, tail)?;
+    let stats = compute_summary(&entries);
+
+    let summary = SummaryJson {
+        total_events: stats.total_events,
+        hook_runs: stats.hook_runs,
+        avg_hook_duration_secs: (stats.avg_hook_duration * 10.0).round() / 10.0,
+        successes: stats.successes,
+        failures: stats.failures,
+        most_active_worktree: stats.most_active.map(|(name, count)| MostActiveJson {
+            name,
+            event_count: count,
+        }),
+    };
+
+    format_json_value(&summary)
+}
+
 pub fn execute_json(
     db: &Database,
     repo_id: i64,
@@ -266,6 +401,179 @@ pub fn execute_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execute_summary_empty_state_shows_message() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+
+        let output = execute_summary(&db, repo.id, None, None).unwrap();
+        assert!(output.contains("No events"), "should indicate no events: {output}");
+    }
+
+    #[test]
+    fn execute_summary_computes_correct_aggregate_stats() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt_a = db
+            .insert_worktree(repo.id, "alpha", "feature/alpha", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo.id, "beta", "feature/beta", "/wt/b", None)
+            .unwrap();
+
+        // 2 plain events for alpha
+        db.insert_event(repo.id, Some(wt_a.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "switched", None).unwrap();
+
+        // 3 hook events: 2 success (alpha), 1 failure (beta)
+        let ok_payload = serde_json::json!({"exit_code": 0, "duration_secs": 2.0});
+        let fail_payload = serde_json::json!({"exit_code": 1, "duration_secs": 4.0});
+        db.insert_event(repo.id, Some(wt_a.id), "hook:post_create", Some(&ok_payload)).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "hook:pre_sync", Some(&ok_payload)).unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "hook:post_create", Some(&fail_payload)).unwrap();
+
+        // 1 plain event for beta
+        db.insert_event(repo.id, Some(wt_b.id), "created", None).unwrap();
+
+        let output = execute_summary(&db, repo.id, None, None).unwrap();
+
+        // Total events: 6 (2 plain + 3 hooks + 1 plain)
+        assert!(output.contains("Total events:       6"), "total events: {output}");
+        // Hook runs: 3
+        assert!(output.contains("Hook runs:          3"), "hook runs: {output}");
+        // Avg duration: (2.0 + 2.0 + 4.0) / 3 = 2.666...
+        assert!(output.contains("Avg hook duration:  2.7s"), "avg duration: {output}");
+        // Successes: 2, Failures: 1
+        assert!(output.contains("Successes:          2"), "successes: {output}");
+        assert!(output.contains("Failures:           1"), "failures: {output}");
+        // Most active: alpha (4 events: 2 plain + 2 hooks)
+        assert!(output.contains("Most active:        alpha (4 events)"), "most active: {output}");
+    }
+
+    #[test]
+    fn execute_summary_json_empty_state_returns_zeroed_stats() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+
+        let output = execute_summary_json(&db, repo.id, None, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        assert_eq!(parsed["total_events"], 0);
+        assert_eq!(parsed["hook_runs"], 0);
+        assert_eq!(parsed["avg_hook_duration_secs"], 0.0);
+        assert_eq!(parsed["successes"], 0);
+        assert_eq!(parsed["failures"], 0);
+        assert!(parsed["most_active_worktree"].is_null());
+    }
+
+    #[test]
+    fn execute_summary_json_computes_correct_structured_stats() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt_a = db
+            .insert_worktree(repo.id, "alpha", "feature/alpha", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo.id, "beta", "feature/beta", "/wt/b", None)
+            .unwrap();
+
+        // 2 plain events for alpha
+        db.insert_event(repo.id, Some(wt_a.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "switched", None).unwrap();
+
+        // 3 hook events: 2 success, 1 failure
+        let ok_payload = serde_json::json!({"exit_code": 0, "duration_secs": 2.0});
+        let fail_payload = serde_json::json!({"exit_code": 1, "duration_secs": 4.0});
+        db.insert_event(repo.id, Some(wt_a.id), "hook:post_create", Some(&ok_payload)).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "hook:pre_sync", Some(&ok_payload)).unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "hook:post_create", Some(&fail_payload)).unwrap();
+
+        // 1 plain for beta
+        db.insert_event(repo.id, Some(wt_b.id), "created", None).unwrap();
+
+        let output = execute_summary_json(&db, repo.id, None, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+
+        assert_eq!(parsed["total_events"], 6);
+        assert_eq!(parsed["hook_runs"], 3);
+        assert_eq!(parsed["avg_hook_duration_secs"], 2.7);
+        assert_eq!(parsed["successes"], 2);
+        assert_eq!(parsed["failures"], 1);
+
+        let most_active = &parsed["most_active_worktree"];
+        assert_eq!(most_active["name"], "alpha");
+        assert_eq!(most_active["event_count"], 4);
+    }
+
+    #[test]
+    fn execute_summary_respects_worktree_filter() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt_a = db
+            .insert_worktree(repo.id, "alpha", "feature/alpha", "/wt/a", None)
+            .unwrap();
+        let wt_b = db
+            .insert_worktree(repo.id, "beta", "feature/beta", "/wt/b", None)
+            .unwrap();
+
+        // 3 events for alpha, 2 for beta
+        db.insert_event(repo.id, Some(wt_a.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "switched", None).unwrap();
+        let ok_payload = serde_json::json!({"exit_code": 0, "duration_secs": 1.0});
+        db.insert_event(repo.id, Some(wt_a.id), "hook:post_create", Some(&ok_payload)).unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "switched", None).unwrap();
+
+        // Filter to alpha only
+        let output = execute_summary(&db, repo.id, Some("alpha"), None).unwrap();
+        assert!(output.contains("Total events:       3"), "should show 3 alpha events: {output}");
+        assert!(output.contains("Most active:        alpha"), "most active should be alpha: {output}");
+    }
+
+    #[test]
+    fn execute_summary_json_respects_tail_filter() {
+        let db = Database::open_in_memory().unwrap();
+        let repo = db.insert_repo("r", "/r", None).unwrap();
+        let wt = db
+            .insert_worktree(repo.id, "wt", "branch", "/wt", None)
+            .unwrap();
+
+        for _ in 0..5 {
+            db.insert_event(repo.id, Some(wt.id), "created", None).unwrap();
+        }
+
+        let output = execute_summary_json(&db, repo.id, None, Some(2)).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(parsed["total_events"], 2, "tail=2 should limit to 2 events");
+    }
+
+    #[test]
+    fn compute_summary_tiebreak_is_deterministic() {
+        // When two worktrees have the same event count, the lexicographically
+        // smaller name should always win (deterministic tie-breaking).
+        let entries = vec![
+            LogEntry {
+                id: 1,
+                event_type: "created".to_string(),
+                worktree_name: Some("beta".to_string()),
+                payload: None,
+                created_at: 1700000000,
+            },
+            LogEntry {
+                id: 2,
+                event_type: "created".to_string(),
+                worktree_name: Some("alpha".to_string()),
+                payload: None,
+                created_at: 1700000001,
+            },
+        ];
+
+        let stats = compute_summary(&entries);
+        let (name, count) = stats.most_active.expect("should have most_active");
+        assert_eq!(count, 1);
+        assert_eq!(name, "alpha", "lexicographically smaller name should win on tie");
+    }
 
     #[test]
     fn execute_output_shows_hook_output_with_step_labels() {

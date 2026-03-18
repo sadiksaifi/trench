@@ -22,6 +22,8 @@ pub enum ExitCode {
     HookTimeout,
     /// 8 — Missing required flag
     MissingRequiredFlag,
+    /// 9 — Flag conflict
+    FlagConflict,
 }
 
 impl ExitCode {
@@ -37,6 +39,7 @@ impl ExitCode {
             Self::ConfigError => 6,
             Self::HookTimeout => 7,
             Self::MissingRequiredFlag => 8,
+            Self::FlagConflict => 9,
         }
     }
 
@@ -58,6 +61,7 @@ impl std::fmt::Display for ExitCode {
             Self::ConfigError => "config error",
             Self::HookTimeout => "hook timeout",
             Self::MissingRequiredFlag => "missing required flag",
+            Self::FlagConflict => "flag conflict",
         };
         write!(f, "{} ({desc})", self.code())
     }
@@ -78,6 +82,7 @@ mod tests {
         assert_eq!(ExitCode::ConfigError.code(), 6);
         assert_eq!(ExitCode::HookTimeout.code(), 7);
         assert_eq!(ExitCode::MissingRequiredFlag.code(), 8);
+        assert_eq!(ExitCode::FlagConflict.code(), 9);
     }
 
     #[test]
@@ -94,11 +99,15 @@ mod tests {
             format!("{}", ExitCode::MissingRequiredFlag),
             "8 (missing required flag)"
         );
+        assert_eq!(
+            format!("{}", ExitCode::FlagConflict),
+            "9 (flag conflict)"
+        );
     }
 
     #[test]
-    fn enum_has_exactly_nine_variants() {
-        // Verify all 9 codes are distinct
+    fn enum_has_exactly_ten_variants() {
+        // Verify all 10 codes are distinct
         let codes: Vec<i32> = vec![
             ExitCode::Success.code(),
             ExitCode::GeneralError.code(),
@@ -109,11 +118,12 @@ mod tests {
             ExitCode::ConfigError.code(),
             ExitCode::HookTimeout.code(),
             ExitCode::MissingRequiredFlag.code(),
+            ExitCode::FlagConflict.code(),
         ];
         let mut unique = codes.clone();
         unique.sort();
         unique.dedup();
-        assert_eq!(unique.len(), 9);
-        assert_eq!(unique, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(unique.len(), 10);
+        assert_eq!(unique, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 }
