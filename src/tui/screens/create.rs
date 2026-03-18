@@ -147,15 +147,8 @@ impl CreateState {
 
     /// Validate the form. Sets `self.error` on failure, clears it on success.
     pub fn validate(&mut self) -> Result<(), ()> {
-        let trimmed = self.branch_input.trim();
-        if trimmed.is_empty() {
-            self.error = Some("Branch name is required".into());
-            return Err(());
-        }
-        // Sanitize and check if result is empty (e.g. ".." → "")
-        let sanitized = paths::sanitize_branch(trimmed);
-        if sanitized.is_empty() {
-            self.error = Some("Branch name is invalid".into());
+        if let Err(reason) = paths::validate_branch_name(&self.branch_input) {
+            self.error = Some(reason);
             return Err(());
         }
         self.error = None;
@@ -603,7 +596,16 @@ mod tests {
         state.branch_input = "..".into();
         let result = state.validate();
         assert!(result.is_err());
-        assert!(state.error.as_ref().unwrap().contains("invalid"));
+        assert!(state.error.is_some());
+    }
+
+    #[test]
+    fn validate_branch_with_spaces_returns_error() {
+        let mut state = sample_state();
+        state.branch_input = "foo bar".into();
+        let result = state.validate();
+        assert!(result.is_err());
+        assert!(state.error.is_some());
     }
 
     fn render_to_buffer(state: &CreateState, width: u16, height: u16) -> ratatui::buffer::Buffer {
