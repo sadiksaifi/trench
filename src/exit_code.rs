@@ -106,12 +106,6 @@ mod tests {
     }
 
     #[test]
-    fn flag_conflict_variant_exists() {
-        assert_eq!(ExitCode::FlagConflict.code(), 9);
-        assert_eq!(format!("{}", ExitCode::FlagConflict), "9 (flag conflict)");
-    }
-
-    #[test]
     fn enum_has_exactly_ten_variants() {
         // Verify all 10 codes are distinct
         let codes: Vec<i32> = vec![

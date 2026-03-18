@@ -704,9 +704,10 @@ run = ["echo hello"]
         parsed["most_active_worktree"].is_object(),
         "most_active_worktree should be an object"
     );
-    assert!(
-        parsed["most_active_worktree"]["name"].is_string(),
-        "most_active_worktree.name should be a string"
+    // Lexicographic tie-break: "summary-feat-1" < "summary-feat-2"
+    assert_eq!(
+        parsed["most_active_worktree"]["name"], "summary-feat-1",
+        "when event counts tie, most_active_worktree should use lexicographic name tie-break"
     );
     assert!(
         parsed["most_active_worktree"]["event_count"].as_u64().unwrap() >= 2,
