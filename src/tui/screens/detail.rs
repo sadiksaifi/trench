@@ -158,7 +158,7 @@ fn days_to_date(days_since_epoch: i64) -> (i64, i64, i64) {
 
 const METADATA_HEIGHT: u16 = 5;
 
-const DETAIL_FOOTER_KEYS: &str = " s sync  o open  Esc back ";
+const DETAIL_FOOTER_KEYS: &str = " s sync  o open  l log  Esc back ";
 
 pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
     let bold = Style::default().add_modifier(Modifier::BOLD);

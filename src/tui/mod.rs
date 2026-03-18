@@ -572,8 +572,49 @@ impl App {
                     self.editor_request = Some(detail.path.clone());
                 }
             }
+            KeyCode::Char('l') => {
+                if let Some(ref detail) = self.detail_state {
+                    let name = detail.name.clone();
+                    self.load_hook_log_replay(&name);
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Load hook log replay from DB for the given worktree and push HookLog screen.
+    ///
+    /// Returns `true` if the hook log was loaded, `false` if no hook history exists
+    /// or the DB is unavailable.
+    pub fn load_hook_log_replay(&mut self, worktree_name: &str) -> bool {
+        let Some((cwd, db)) = Self::open_db() else {
+            return false;
+        };
+        let repo_info = match crate::git::discover_repo(&cwd) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let repo = match db.get_repo_by_path(&repo_info.path.to_string_lossy()) {
+            Ok(Some(r)) => r,
+            _ => return false,
+        };
+        let event = match db.get_last_hook_event_for_worktree(repo.id, worktree_name) {
+            Ok(Some(e)) => e,
+            _ => return false,
+        };
+        let lines = match db.get_hook_output(event.id) {
+            Ok(l) => l,
+            Err(_) => return false,
+        };
+
+        let state = screens::hook_log::HookLogState::from_hook_output(
+            &lines,
+            &event.event_type,
+            &event.payload,
+        );
+        self.hook_log_state = Some(state);
+        self.push_screen(Screen::HookLog);
+        true
     }
 
     fn handle_hook_log_key(&mut self, key: KeyEvent) {
@@ -756,6 +797,12 @@ impl App {
                             &row.branch,
                         ));
                     self.push_screen(Screen::DeleteConfirm);
+                }
+            }
+            KeyCode::Char('l') => {
+                if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
+                    let name = row.name.clone();
+                    self.load_hook_log_replay(&name);
                 }
             }
             _ => {}
@@ -2470,6 +2517,42 @@ mod tests {
             app.hook_log_state.as_ref().unwrap().scroll_offset > 0,
             "PageDown should scroll the hook log"
         );
+    }
+
+    #[test]
+    fn l_key_on_list_does_not_crash_without_db() {
+        let mut app = app_with_rows();
+        assert_eq!(app.active_screen(), Screen::List);
+
+        // `l` triggers load_hook_log_replay which silently fails without a DB
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        // Should still be on list (replay failed gracefully)
+        assert_eq!(app.active_screen(), Screen::List);
+    }
+
+    #[test]
+    fn l_key_on_detail_does_not_crash_without_db() {
+        let mut app = app_with_rows();
+        // Set up a fake detail state
+        app.detail_state = Some(screens::detail::DetailState {
+            name: "feat-a".into(),
+            branch: "feat/a".into(),
+            path: "/tmp/wt/feat-a".into(),
+            base_branch: "main".into(),
+            ahead_behind: "+0/-0".into(),
+            created: "2026-03-01".into(),
+            last_accessed: "-".into(),
+            hook_status: "-".into(),
+            hook_timestamp: "-".into(),
+            changed_files: vec![],
+            commits: vec![],
+        });
+        app.push_screen(Screen::Detail);
+        assert_eq!(app.active_screen(), Screen::Detail);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        // Should still be on detail (replay failed gracefully)
+        assert_eq!(app.active_screen(), Screen::Detail);
     }
 
     #[test]
