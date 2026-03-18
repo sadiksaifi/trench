@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -8,6 +9,7 @@ use super::run::{execute_run_step, RunStepError};
 use super::shell::{execute_shell_step, ShellStepError};
 use super::{build_env, HookConfig, HookEnvContext, HookEvent};
 use crate::state::Database;
+use crate::tui::screens::hook_log::HookOutputMessage;
 
 /// Timeout error returned when run + shell steps exceed `timeout_secs`.
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +34,14 @@ pub struct HookResult {
 /// - Any step failure stops remaining steps.
 /// - All output is captured and logged to the database.
 /// - Returns `HookTimeoutError` (exit code 7) on timeout.
+/// Helper to send a message through the optional sender, ignoring errors.
+fn send_msg(tx: Option<&Sender<HookOutputMessage>>, msg: HookOutputMessage) {
+    if let Some(tx) = tx {
+        let _ = tx.send(msg);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_hook(
     event: &HookEvent,
     config: &HookConfig,
@@ -41,6 +51,7 @@ pub async fn execute_hook(
     db: &Database,
     repo_id: i64,
     worktree_id: Option<i64>,
+    tx: Option<&Sender<HookOutputMessage>>,
 ) -> Result<HookResult> {
     let start = Instant::now();
     let env_vars = build_env(env_ctx, event);
@@ -50,41 +61,73 @@ pub async fn execute_hook(
 
     // Step 1: Copy (not subject to timeout)
     if let Some(ref patterns) = config.copy {
+        let step_start = Instant::now();
+        send_msg(tx, HookOutputMessage::StepStarted { step: "copy".into() });
         if let Err(e) = execute_copy_step(source_dir, work_dir, patterns) {
+            let step_dur = step_start.elapsed();
+            send_msg(tx, HookOutputMessage::StepCompleted {
+                step: "copy".into(), success: false, duration: step_dur,
+            });
             let duration = start.elapsed();
             record_execution(
                 db, repo_id, worktree_id, event, 1, duration.as_secs_f64(), &all_output,
             )?;
+            send_msg(tx, HookOutputMessage::HookCompleted {
+                success: false, duration, error: Some(e.to_string()),
+            });
             return Err(e.context("copy step failed"));
         }
+        let step_dur = step_start.elapsed();
+        send_msg(tx, HookOutputMessage::StepCompleted {
+            step: "copy".into(), success: true, duration: step_dur,
+        });
     }
 
     // Step 2: Run (subject to timeout)
     let run_deadline = Instant::now() + std::time::Duration::from_secs(timeout_secs);
     if let Some(ref commands) = config.run {
+        let step_start = Instant::now();
+        send_msg(tx, HookOutputMessage::StepStarted { step: "run".into() });
         let remaining = run_deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, execute_run_step(commands, work_dir, &env_vars))
             .await
         {
             Ok(Ok(run_result)) => {
                 for cmd_output in &run_result.executed {
-                    collect_output(&mut all_output, "run", &cmd_output.stdout, &cmd_output.stderr);
+                    collect_output_with_sender(&mut all_output, "run", &cmd_output.stdout, &cmd_output.stderr, tx);
                 }
+                let step_dur = step_start.elapsed();
+                send_msg(tx, HookOutputMessage::StepCompleted {
+                    step: "run".into(), success: true, duration: step_dur,
+                });
             }
             Ok(Err(e)) => {
-                // Collect partial output from the error if it's a RunStepError
                 let exit_code = extract_run_error_output(&e, &mut all_output);
+                let step_dur = step_start.elapsed();
+                send_msg(tx, HookOutputMessage::StepCompleted {
+                    step: "run".into(), success: false, duration: step_dur,
+                });
                 let duration = start.elapsed();
                 record_execution(
                     db, repo_id, worktree_id, event, exit_code, duration.as_secs_f64(), &all_output,
                 )?;
+                send_msg(tx, HookOutputMessage::HookCompleted {
+                    success: false, duration, error: Some(e.to_string()),
+                });
                 return Err(e);
             }
             Err(_) => {
+                let step_dur = step_start.elapsed();
+                send_msg(tx, HookOutputMessage::StepCompleted {
+                    step: "run".into(), success: false, duration: step_dur,
+                });
                 let duration = start.elapsed();
                 record_execution(
                     db, repo_id, worktree_id, event, 7, duration.as_secs_f64(), &all_output,
                 )?;
+                send_msg(tx, HookOutputMessage::HookCompleted {
+                    success: false, duration, error: Some(format!("hook timed out after {timeout_secs}s")),
+                });
                 return Err(HookTimeoutError { timeout_secs }.into());
             }
         }
@@ -92,26 +135,46 @@ pub async fn execute_hook(
 
     // Step 3: Shell (remaining timeout budget)
     if let Some(ref script) = config.shell {
+        let step_start = Instant::now();
+        send_msg(tx, HookOutputMessage::StepStarted { step: "shell".into() });
         let remaining = run_deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, execute_shell_step(script, work_dir, &env_vars))
             .await
         {
             Ok(Ok(shell_output)) => {
-                collect_output(&mut all_output, "shell", &shell_output.stdout, &shell_output.stderr);
+                collect_output_with_sender(&mut all_output, "shell", &shell_output.stdout, &shell_output.stderr, tx);
+                let step_dur = step_start.elapsed();
+                send_msg(tx, HookOutputMessage::StepCompleted {
+                    step: "shell".into(), success: true, duration: step_dur,
+                });
             }
             Ok(Err(e)) => {
                 let exit_code = extract_shell_error_output(&e, &mut all_output);
+                let step_dur = step_start.elapsed();
+                send_msg(tx, HookOutputMessage::StepCompleted {
+                    step: "shell".into(), success: false, duration: step_dur,
+                });
                 let duration = start.elapsed();
                 record_execution(
                     db, repo_id, worktree_id, event, exit_code, duration.as_secs_f64(), &all_output,
                 )?;
+                send_msg(tx, HookOutputMessage::HookCompleted {
+                    success: false, duration, error: Some(e.to_string()),
+                });
                 return Err(e);
             }
             Err(_) => {
+                let step_dur = step_start.elapsed();
+                send_msg(tx, HookOutputMessage::StepCompleted {
+                    step: "shell".into(), success: false, duration: step_dur,
+                });
                 let duration = start.elapsed();
                 record_execution(
                     db, repo_id, worktree_id, event, 7, duration.as_secs_f64(), &all_output,
                 )?;
+                send_msg(tx, HookOutputMessage::HookCompleted {
+                    success: false, duration, error: Some(format!("hook timed out after {timeout_secs}s")),
+                });
                 return Err(HookTimeoutError { timeout_secs }.into());
             }
         }
@@ -121,6 +184,10 @@ pub async fn execute_hook(
     let event_id = record_execution(
         db, repo_id, worktree_id, event, 0, duration.as_secs_f64(), &all_output,
     )?;
+
+    send_msg(tx, HookOutputMessage::HookCompleted {
+        success: true, duration, error: None,
+    });
 
     Ok(HookResult {
         event_id,
@@ -157,11 +224,31 @@ fn extract_shell_error_output(
 }
 
 fn collect_output(all_output: &mut Vec<(String, String, String)>, step: &str, stdout: &str, stderr: &str) {
+    collect_output_with_sender(all_output, step, stdout, stderr, None);
+}
+
+fn collect_output_with_sender(
+    all_output: &mut Vec<(String, String, String)>,
+    step: &str,
+    stdout: &str,
+    stderr: &str,
+    tx: Option<&Sender<HookOutputMessage>>,
+) {
     for line in stdout.lines() {
         all_output.push((step.to_string(), "stdout".to_string(), line.to_string()));
+        send_msg(tx, HookOutputMessage::OutputLine {
+            step: step.to_string(),
+            stream: "stdout".to_string(),
+            line: line.to_string(),
+        });
     }
     for line in stderr.lines() {
         all_output.push((step.to_string(), "stderr".to_string(), line.to_string()));
+        send_msg(tx, HookOutputMessage::OutputLine {
+            step: step.to_string(),
+            stream: "stderr".to_string(),
+            line: line.to_string(),
+        });
     }
 }
 
@@ -247,6 +334,7 @@ mod tests {
             &db,
             repo_id,
             Some(wt_id),
+            None,
         )
         .await
         .expect("hook should succeed");
@@ -303,6 +391,7 @@ mod tests {
             &db,
             repo_id,
             Some(wt_id),
+            None,
         )
         .await
         .expect("hook should succeed");
@@ -339,6 +428,7 @@ mod tests {
             &db,
             repo_id,
             Some(wt_id),
+            None,
         )
         .await
         .expect("hook should succeed");
@@ -374,6 +464,7 @@ mod tests {
             &db,
             repo_id,
             Some(wt_id),
+            None,
         )
         .await
         .expect_err("hook should fail");
@@ -424,6 +515,7 @@ mod tests {
             &db,
             repo_id,
             Some(wt_id),
+            None,
         )
         .await
         .expect_err("hook should fail");
@@ -464,6 +556,7 @@ mod tests {
             &db,
             repo_id,
             Some(wt_id),
+            None,
         )
         .await
         .expect_err("hook should timeout");
@@ -507,6 +600,7 @@ mod tests {
             &db,
             repo_id,
             Some(wt_id),
+            None,
         )
         .await
         .expect_err("hook should timeout on shell step");
@@ -540,6 +634,7 @@ mod tests {
             &db,
             repo_id,
             Some(wt_id),
+            None,
         )
         .await
         .unwrap();
@@ -582,6 +677,7 @@ mod tests {
             &db,
             repo_id,
             Some(wt_id),
+            None,
         )
         .await
         .unwrap();
@@ -625,6 +721,7 @@ mod tests {
             &db,
             repo_id,
             Some(wt_id),
+            None,
         )
         .await
         .unwrap();
@@ -645,5 +742,90 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0], ("from_run".to_string(), Some("run".to_string())));
         assert_eq!(rows[1], ("from_shell".to_string(), Some("shell".to_string())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_hook_sends_messages_through_sender() {
+        use crate::tui::screens::hook_log::HookOutputMessage;
+
+        let source = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let (db, repo_id, wt_id) = setup_db();
+
+        let config = HookDef {
+            copy: None,
+            run: Some(vec!["echo hello".to_string()]),
+            shell: None,
+            timeout_secs: Some(30),
+        };
+
+        let env_ctx = test_env_ctx(source.path(), work.path());
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let _result = execute_hook(
+            &HookEvent::PostCreate,
+            &config,
+            &env_ctx,
+            source.path(),
+            work.path(),
+            &db,
+            repo_id,
+            Some(wt_id),
+            Some(&tx),
+        )
+        .await
+        .expect("hook should succeed");
+
+        // Collect all messages
+        let mut messages = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            messages.push(msg);
+        }
+
+        // Should have: StepStarted(run), OutputLine(hello), StepCompleted(run), HookCompleted
+        assert!(messages.len() >= 3, "expected at least 3 messages, got: {}", messages.len());
+
+        // First should be StepStarted
+        assert!(matches!(&messages[0], HookOutputMessage::StepStarted { step } if step == "run"));
+
+        // Should contain an output line with "hello"
+        let has_hello = messages.iter().any(|m| {
+            matches!(m, HookOutputMessage::OutputLine { line, .. } if line == "hello")
+        });
+        assert!(has_hello, "should have output line with 'hello'");
+
+        // Last should be HookCompleted
+        assert!(matches!(messages.last().unwrap(), HookOutputMessage::HookCompleted { success: true, .. }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_hook_without_sender_still_works() {
+        let source = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let (db, repo_id, wt_id) = setup_db();
+
+        let config = HookDef {
+            copy: None,
+            run: Some(vec!["echo test".to_string()]),
+            shell: None,
+            timeout_secs: Some(30),
+        };
+
+        let env_ctx = test_env_ctx(source.path(), work.path());
+
+        // Pass None for sender — should work exactly like before
+        let result = execute_hook(
+            &HookEvent::PostCreate,
+            &config,
+            &env_ctx,
+            source.path(),
+            work.path(),
+            &db,
+            repo_id,
+            Some(wt_id),
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
     }
 }

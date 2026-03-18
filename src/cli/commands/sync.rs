@@ -486,6 +486,7 @@ pub async fn execute_with_hooks(
             db,
             repo.id,
             Some(wt.id),
+            None,
         )
         .await
         .map_err(SyncError::PreSyncHookFailed)?;
@@ -505,6 +506,7 @@ pub async fn execute_with_hooks(
             db,
             repo.id,
             Some(wt.id),
+            None,
         )
         .await
         {

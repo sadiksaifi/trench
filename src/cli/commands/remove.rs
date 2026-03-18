@@ -285,6 +285,7 @@ pub async fn execute_resolved_with_hooks(
                 db,
                 repo.id,
                 Some(wt.id),
+                None,
             )
             .await
             .map_err(RemoveError::PreRemoveHookFailed)?;
@@ -316,6 +317,7 @@ pub async fn execute_resolved_with_hooks(
             db,
             repo.id,
             Some(wt.id),
+            None,
         )
         .await
         {

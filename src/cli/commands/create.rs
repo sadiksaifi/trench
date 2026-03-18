@@ -234,6 +234,7 @@ pub async fn execute_with_hooks(
             db,
             repo.id,
             None,
+            None,
         )
         .await
         .map_err(CreateError::PreCreateHookFailed)?;
@@ -257,6 +258,7 @@ pub async fn execute_with_hooks(
             db,
             repo.id,
             worktree_id,
+            None,
         )
         .await
         {
