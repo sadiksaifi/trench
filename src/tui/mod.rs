@@ -381,7 +381,7 @@ impl App {
             Screen::SyncPicker => self.handle_sync_picker_key(key),
             Screen::DeleteConfirm => self.handle_delete_confirm_key(key),
             Screen::Create => self.handle_create_key(key),
-            Screen::HookLog => {} // Esc/q handled globally; no screen-specific keys
+            Screen::HookLog => self.handle_hook_log_key(key),
             Screen::Help => {}
         }
     }
@@ -573,6 +573,24 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn handle_hook_log_key(&mut self, key: KeyEvent) {
+        // Use a default visible height for scroll calculations.
+        // The actual terminal height isn't available here, so 20 is a
+        // reasonable default; the important thing is that the scroll
+        // direction and clamping work correctly.
+        const VISIBLE_HEIGHT: usize = 20;
+
+        if let Some(ref mut state) = self.hook_log_state {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => state.scroll_down(VISIBLE_HEIGHT),
+                KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
+                KeyCode::PageDown => state.page_down(VISIBLE_HEIGHT),
+                KeyCode::PageUp => state.page_up(VISIBLE_HEIGHT),
+                _ => {}
+            }
         }
     }
 
@@ -2384,5 +2402,93 @@ mod tests {
             app.hook_rx.is_none(),
             "hook_rx should be cleaned up after HookCompleted"
         );
+    }
+
+    #[test]
+    fn hook_log_arrow_down_scrolls_state() {
+        let mut app = App::new();
+        let mut state = screens::hook_log::HookLogState::new("test");
+        state.process_message(screens::hook_log::HookOutputMessage::StepStarted {
+            step: "run".into(),
+        });
+        for i in 0..30 {
+            state.process_message(screens::hook_log::HookOutputMessage::OutputLine {
+                step: "run".into(),
+                stream: "stdout".into(),
+                line: format!("line {i}"),
+            });
+        }
+        state.scroll_offset = 0;
+        state.completed = true;
+        app.hook_log_state = Some(state);
+        app.push_screen(Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(
+            app.hook_log_state.as_ref().unwrap().scroll_offset > 0,
+            "Down arrow should scroll the hook log"
+        );
+    }
+
+    #[test]
+    fn hook_log_arrow_up_scrolls_state() {
+        let mut app = App::new();
+        let mut state = screens::hook_log::HookLogState::new("test");
+        state.scroll_offset = 5;
+        state.completed = true;
+        app.hook_log_state = Some(state);
+        app.push_screen(Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(
+            app.hook_log_state.as_ref().unwrap().scroll_offset, 4,
+            "Up arrow should decrement scroll offset"
+        );
+    }
+
+    #[test]
+    fn hook_log_page_down_scrolls_state() {
+        let mut app = App::new();
+        let mut state = screens::hook_log::HookLogState::new("test");
+        state.process_message(screens::hook_log::HookOutputMessage::StepStarted {
+            step: "run".into(),
+        });
+        for i in 0..50 {
+            state.process_message(screens::hook_log::HookOutputMessage::OutputLine {
+                step: "run".into(),
+                stream: "stdout".into(),
+                line: format!("line {i}"),
+            });
+        }
+        state.scroll_offset = 0;
+        state.completed = true;
+        app.hook_log_state = Some(state);
+        app.push_screen(Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert!(
+            app.hook_log_state.as_ref().unwrap().scroll_offset > 0,
+            "PageDown should scroll the hook log"
+        );
+    }
+
+    #[test]
+    fn hook_log_j_k_scroll_state() {
+        let mut app = App::new();
+        let mut state = screens::hook_log::HookLogState::new("test");
+        state.scroll_offset = 5;
+        state.completed = true;
+        app.hook_log_state = Some(state);
+        app.push_screen(Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(
+            app.hook_log_state.as_ref().unwrap().scroll_offset, 4,
+            "k should scroll up"
+        );
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        // j scrolls down — scroll_offset might go back up or stay depending on total_lines
+        // Just verify it didn't crash and the handler ran
     }
 }

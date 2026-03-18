@@ -35,6 +35,8 @@ pub struct HookLogState {
     pub success: bool,
     pub scroll_offset: usize,
     pub error: Option<String>,
+    /// True when viewing historical DB data (replay mode), false during live streaming.
+    pub replay: bool,
 }
 
 impl HookLogState {
@@ -105,6 +107,7 @@ impl HookLogState {
             success,
             scroll_offset: 0,
             error: None,
+            replay: true,
         }
     }
 
@@ -116,6 +119,7 @@ impl HookLogState {
             success: false,
             scroll_offset: 0,
             error: None,
+            replay: false,
         }
     }
 
@@ -206,6 +210,7 @@ impl HookLogState {
 
 const FOOTER_RUNNING: &str = " Esc back (hooks continue) ";
 const FOOTER_DONE: &str = " Esc back  Enter dismiss ";
+const FOOTER_REPLAY: &str = " ↑/↓ scroll  PgUp/PgDn page  Esc back ";
 
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs_f64();
@@ -314,7 +319,9 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(visible_lines), chunks[1]);
 
     // Footer
-    let footer_text = if state.completed {
+    let footer_text = if state.replay {
+        FOOTER_REPLAY
+    } else if state.completed {
         FOOTER_DONE
     } else {
         FOOTER_RUNNING
@@ -775,6 +782,30 @@ mod tests {
         state.scroll_offset = 0;
         state.scroll_down(10);
         assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn replay_footer_shows_scroll_hint() {
+        let state = HookLogState::from_hook_output(&[], "hook:post_create", &None);
+        assert!(state.replay, "from_hook_output should set replay flag");
+
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        // Replay footer should mention scrolling keys, not "hooks continue"
+        assert!(
+            !text.contains("hooks continue"),
+            "replay footer should not mention running hooks"
+        );
+        assert!(
+            text.contains("Esc"),
+            "replay footer should show Esc to go back"
+        );
+    }
+
+    #[test]
+    fn live_mode_does_not_set_replay_flag() {
+        let state = HookLogState::new("test");
+        assert!(!state.replay, "new() should not set replay flag");
     }
 
     #[test]
