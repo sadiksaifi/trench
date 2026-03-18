@@ -8,30 +8,7 @@ use ratatui::{
     Frame,
 };
 
-/// A message sent from the hook runner to the TUI for live streaming.
-#[derive(Debug, Clone)]
-pub enum HookOutputMessage {
-    /// A new hook step (copy/run/shell) has started.
-    StepStarted { step: String },
-    /// A line of output from the current step.
-    OutputLine {
-        step: String,
-        stream: String,
-        line: String,
-    },
-    /// A step completed (success or failure).
-    StepCompleted {
-        step: String,
-        success: bool,
-        duration: Duration,
-    },
-    /// The entire hook execution completed.
-    HookCompleted {
-        success: bool,
-        duration: Duration,
-        error: Option<String>,
-    },
-}
+pub use crate::hooks::types::HookOutputMessage;
 
 /// One section of the hook log, corresponding to a single step (copy/run/shell).
 #[derive(Debug, Clone)]
