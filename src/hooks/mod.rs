@@ -3,6 +3,7 @@ pub mod run;
 pub mod runner;
 pub mod shell;
 pub mod stream;
+pub mod types;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -121,7 +122,10 @@ mod tests {
         let env = build_env(&ctx, &HookEvent::PostCreate);
 
         assert_eq!(env.len(), 7);
-        assert_eq!(env["TRENCH_WORKTREE_PATH"], "/home/user/.worktrees/myrepo/feat-auth");
+        assert_eq!(
+            env["TRENCH_WORKTREE_PATH"],
+            "/home/user/.worktrees/myrepo/feat-auth"
+        );
         assert_eq!(env["TRENCH_WORKTREE_NAME"], "feat-auth");
         assert_eq!(env["TRENCH_BRANCH"], "feature/auth");
         assert_eq!(env["TRENCH_REPO_NAME"], "myrepo");
@@ -212,7 +216,10 @@ timeout_secs = 60
         );
         assert_eq!(
             post_create.run,
-            Some(vec!["bun install".to_string(), "bunx prisma generate".to_string()])
+            Some(vec![
+                "bun install".to_string(),
+                "bunx prisma generate".to_string()
+            ])
         );
         assert!(post_create.shell.is_none());
         assert_eq!(post_create.timeout_secs, Some(300));
@@ -221,7 +228,10 @@ timeout_secs = 60
         let pre_remove = get_hook_config(&hooks, &HookEvent::PreRemove).unwrap();
         assert!(pre_remove.copy.is_none());
         assert!(pre_remove.run.is_none());
-        assert_eq!(pre_remove.shell, Some("pkill -f 'next dev' || true".to_string()));
+        assert_eq!(
+            pre_remove.shell,
+            Some("pkill -f 'next dev' || true".to_string())
+        );
         assert_eq!(pre_remove.timeout_secs, Some(60));
 
         // unconfigured hooks return None

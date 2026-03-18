@@ -17,6 +17,7 @@ pub enum Screen {
     Help,
     SyncPicker,
     DeleteConfirm,
+    HookLog,
 }
 
 type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
@@ -35,11 +36,18 @@ pub fn run() -> Result<()> {
 
     let result = (|| -> Result<()> {
         while app.is_running() {
+            // Process any pending hook output messages
+            app.process_hook_messages();
+
             terminal.draw(|frame| app.ui(frame))?;
 
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.handle_key_event(key);
+            // Non-blocking poll: wait up to 50ms for key events, allowing
+            // hook messages to be processed between frames for live streaming.
+            if event::poll(std::time::Duration::from_millis(50))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind == KeyEventKind::Press {
+                        app.handle_key_event(key);
+                    }
                 }
             }
 
@@ -87,6 +95,8 @@ pub struct App {
     pub create_state: Option<screens::create::CreateState>,
     pub sync_picker_state: Option<screens::sync_picker::SyncPickerState>,
     pub delete_confirm_state: Option<screens::delete_confirm::DeleteConfirmState>,
+    pub hook_log_state: Option<screens::hook_log::HookLogState>,
+    pub hook_rx: Option<std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>>,
     pub editor_request: Option<String>,
 }
 
@@ -100,6 +110,8 @@ impl App {
             create_state: None,
             sync_picker_state: None,
             delete_confirm_state: None,
+            hook_log_state: None,
+            hook_rx: None,
             editor_request: None,
         }
     }
@@ -130,8 +142,8 @@ impl App {
                 if let Some(ref detail) = self.detail_state {
                     screens::detail::render(detail, frame, frame.area());
                 } else {
-                    let placeholder = Paragraph::new("trench TUI — press q to quit")
-                        .alignment(Alignment::Center);
+                    let placeholder =
+                        Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
                     frame.render_widget(placeholder, frame.area());
                 }
             }
@@ -159,6 +171,15 @@ impl App {
             Screen::Create => {
                 if let Some(ref create) = self.create_state {
                     screens::create::render(create, frame, frame.area());
+                } else {
+                    let placeholder =
+                        Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
+                    frame.render_widget(placeholder, frame.area());
+                }
+            }
+            Screen::HookLog => {
+                if let Some(ref hook_log) = self.hook_log_state {
+                    screens::hook_log::render(hook_log, frame, frame.area());
                 } else {
                     let placeholder =
                         Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
@@ -193,6 +214,11 @@ impl App {
                     screens::delete_confirm::render(confirm, frame, frame.area());
                 }
             }
+            Some(Screen::HookLog) => {
+                if let Some(ref hook_log) = self.hook_log_state {
+                    screens::hook_log::render(hook_log, frame, frame.area());
+                }
+            }
             _ => screens::list::render(&self.list_state, frame, frame.area()),
         }
     }
@@ -208,6 +234,15 @@ impl App {
         }
     }
 
+    /// Load hooks config from the project config.
+    fn load_hooks_config(cwd: &std::path::Path) -> Option<crate::config::HooksConfig> {
+        let repo_info = crate::git::discover_repo(cwd).ok()?;
+        let project_config = crate::config::load_project_config(&repo_info.path).ok()?;
+        let global_config = crate::config::load_global_config().ok()?;
+        let resolved = crate::config::resolve_config(None, project_config.as_ref(), &global_config);
+        resolved.hooks
+    }
+
     fn open_db() -> Option<(std::path::PathBuf, Database)> {
         let cwd = std::env::current_dir().ok()?;
         let db_path = paths::data_dir().ok()?.join("trench.db");
@@ -217,7 +252,9 @@ impl App {
 
     /// Reload worktree data from git + DB for the list screen.
     pub fn refresh_list(&mut self) {
-        let Some((cwd, db)) = Self::open_db() else { return };
+        let Some((cwd, db)) = Self::open_db() else {
+            return;
+        };
         if let Ok(rows) = screens::list::load_worktrees(&cwd, &db, &[]) {
             let prev_selected = self.list_state.selected;
             self.list_state = screens::list::ListState::new(rows);
@@ -227,12 +264,53 @@ impl App {
         }
     }
 
+    /// Set up the hook log screen with a receiver for live streaming.
+    pub fn start_hook_log(
+        &mut self,
+        title: &str,
+        rx: std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>,
+    ) {
+        self.hook_log_state = Some(screens::hook_log::HookLogState::new(title));
+        self.hook_rx = Some(rx);
+        self.push_screen(Screen::HookLog);
+    }
+
+    /// Drain pending messages from the hook output channel and update state.
+    /// Continues draining even after dismiss (hook_log_state is None) so that
+    /// HookCompleted triggers a final refresh_list.
+    pub fn process_hook_messages(&mut self) {
+        let Some(ref rx) = self.hook_rx else { return };
+        let mut received = false;
+        let mut completed = false;
+        while let Ok(msg) = rx.try_recv() {
+            if matches!(
+                &msg,
+                screens::hook_log::HookOutputMessage::HookCompleted { .. }
+            ) {
+                completed = true;
+            }
+            if let Some(ref mut state) = self.hook_log_state {
+                state.process_message(msg);
+                received = true;
+            }
+        }
+        if received {
+            if let Some(ref mut state) = self.hook_log_state {
+                state.auto_scroll(20);
+            }
+        }
+        if completed && self.hook_log_state.is_none() {
+            // Hook finished after user dismissed — refresh list to reflect changes
+            self.hook_rx = None;
+            self.refresh_list();
+        }
+    }
+
     fn is_create_branch_text_entry_active(&self) -> bool {
         self.active_screen() == Screen::Create
-            && self
-                .create_state
-                .as_ref()
-                .is_some_and(|s| !s.is_result_mode() && s.focused_field == screens::create::CreateField::Branch)
+            && self.create_state.as_ref().is_some_and(|s| {
+                !s.is_result_mode() && s.focused_field == screens::create::CreateField::Branch
+            })
     }
 
     fn clear_active_screen_state(&mut self) {
@@ -240,8 +318,29 @@ impl App {
             Screen::DeleteConfirm => self.delete_confirm_state = None,
             Screen::SyncPicker => self.sync_picker_state = None,
             Screen::Create => self.create_state = None,
+            Screen::HookLog => {
+                self.hook_log_state = None;
+                // Keep hook_rx alive for post-dismiss draining
+            }
             _ => {}
         }
+    }
+
+    /// Dismiss the hook log screen and unwind to List, clearing any
+    /// intermediate source dialog state (Create/Sync/Delete) so the
+    /// underlying operation cannot be re-triggered.
+    fn dismiss_hook_log(&mut self) {
+        self.hook_log_state = None;
+        // Keep hook_rx alive — process_hook_messages will drain it and
+        // call refresh_list when HookCompleted arrives after dismiss.
+        self.create_state = None;
+        self.sync_picker_state = None;
+        self.delete_confirm_state = None;
+        self.nav_stack.retain(|s| *s == Screen::List);
+        if self.nav_stack.is_empty() {
+            self.nav_stack.push(Screen::List);
+        }
+        self.refresh_list();
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
@@ -256,12 +355,20 @@ impl App {
                 }
             }
             (KeyCode::Esc, _) => {
-                self.clear_active_screen_state();
-                self.pop_screen();
+                if self.active_screen() == Screen::HookLog {
+                    self.dismiss_hook_log();
+                } else {
+                    self.clear_active_screen_state();
+                    self.pop_screen();
+                }
             }
             (KeyCode::Char('q'), _) if !self.is_create_branch_text_entry_active() => {
-                self.clear_active_screen_state();
-                self.pop_screen();
+                if self.active_screen() == Screen::HookLog {
+                    self.dismiss_hook_log();
+                } else {
+                    self.clear_active_screen_state();
+                    self.pop_screen();
+                }
             }
             _ => self.handle_screen_key(key),
         }
@@ -274,6 +381,7 @@ impl App {
             Screen::SyncPicker => self.handle_sync_picker_key(key),
             Screen::DeleteConfirm => self.handle_delete_confirm_key(key),
             Screen::Create => self.handle_create_key(key),
+            Screen::HookLog => {} // Esc/q handled globally; no screen-specific keys
             Screen::Help => {}
         }
     }
@@ -324,22 +432,95 @@ impl App {
             return;
         };
 
-        match crate::cli::commands::remove::execute(&worktree_name, &cwd, &db, false) {
-            Ok(result) => {
-                let msg = format!("Removed '{}'", result.name);
-                if let Some(ref mut c) = self.delete_confirm_state {
-                    c.result = Some(screens::delete_confirm::DeleteResultMessage {
-                        success: true,
-                        message: msg,
-                    });
+        // Check for hooks
+        let hooks_config = Self::load_hooks_config(&cwd);
+        let has_hooks = hooks_config
+            .as_ref()
+            .map(|h| h.pre_remove.is_some() || h.post_remove.is_some())
+            .unwrap_or(false);
+
+        if has_hooks {
+            // Resolve repo + worktree for background hook execution
+            let repo_info = match crate::git::discover_repo(&cwd) {
+                Ok(r) => r,
+                Err(e) => {
+                    if let Some(ref mut c) = self.delete_confirm_state {
+                        c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                            success: false,
+                            message: format!("Delete failed: {e:#}"),
+                        });
+                    }
+                    return;
                 }
-            }
-            Err(e) => {
-                if let Some(ref mut c) = self.delete_confirm_state {
-                    c.result = Some(screens::delete_confirm::DeleteResultMessage {
-                        success: false,
-                        message: format!("Delete failed: {e:#}"),
-                    });
+            };
+            let resolve = crate::adopt::resolve_or_adopt(&worktree_name, &repo_info, &db);
+            let (repo, wt) = match resolve {
+                Ok((r, w)) => (r, w),
+                Err(e) => {
+                    if let Some(ref mut c) = self.delete_confirm_state {
+                        c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                            success: false,
+                            message: format!("Delete failed: {e:#}"),
+                        });
+                    }
+                    return;
+                }
+            };
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let hooks = hooks_config.unwrap();
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                            success: false,
+                            duration: std::time::Duration::ZERO,
+                            error: Some(format!("Failed to start hook runtime: {e}")),
+                        });
+                        return;
+                    }
+                };
+                let result =
+                    rt.block_on(crate::cli::commands::remove::execute_resolved_with_hooks(
+                        &repo,
+                        &wt,
+                        &repo_info,
+                        &db,
+                        false,
+                        Some(&hooks),
+                        false,
+                        Some(&tx),
+                    ));
+                let (success, error) = match result {
+                    Ok(_) => (true, None),
+                    Err(ref e) => (false, Some(format!("{e:#}"))),
+                };
+                let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                    success,
+                    duration: std::time::Duration::ZERO,
+                    error,
+                });
+            });
+            self.start_hook_log("remove hooks", rx);
+        } else {
+            match crate::cli::commands::remove::execute(&worktree_name, &cwd, &db, false) {
+                Ok(result) => {
+                    let msg = format!("Removed '{}'", result.name);
+                    if let Some(ref mut c) = self.delete_confirm_state {
+                        c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                            success: true,
+                            message: msg,
+                        });
+                    }
+                }
+                Err(e) => {
+                    if let Some(ref mut c) = self.delete_confirm_state {
+                        c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                            success: false,
+                            message: format!("Delete failed: {e:#}"),
+                        });
+                    }
                 }
             }
         }
@@ -357,7 +538,9 @@ impl App {
             row.branch.clone()
         };
 
-        let Some((cwd, db)) = Self::open_db() else { return };
+        let Some((cwd, db)) = Self::open_db() else {
+            return;
+        };
         let repo_info = match crate::git::discover_repo(&cwd) {
             Ok(r) => r,
             Err(_) => return,
@@ -368,7 +551,9 @@ impl App {
 
     fn load_detail(&mut self, name: &str) -> bool {
         self.detail_state = None;
-        let Some((cwd, db)) = Self::open_db() else { return false };
+        let Some((cwd, db)) = Self::open_db() else {
+            return false;
+        };
         self.detail_state = Some(screens::detail::load_detail(name, &cwd, &db));
         true
     }
@@ -437,30 +622,74 @@ impl App {
             return;
         };
 
-        match crate::cli::commands::sync::execute(&worktree_name, &cwd, &db, strategy) {
-            Ok(result) => {
-                let msg = format!(
-                    "Synced '{}' via {}\nBefore: +{}/-{}  After: +{}/-{}",
-                    result.name,
-                    result.strategy,
-                    result.before_ahead,
-                    result.before_behind,
-                    result.after_ahead,
-                    result.after_behind,
-                );
-                if let Some(ref mut p) = self.sync_picker_state {
-                    p.result = Some(screens::sync_picker::SyncResultMessage {
-                        success: true,
-                        message: msg,
-                    });
+        // Check for hooks
+        let hooks_config = Self::load_hooks_config(&cwd);
+        let has_hooks = hooks_config
+            .as_ref()
+            .map(|h| h.pre_sync.is_some() || h.post_sync.is_some())
+            .unwrap_or(false);
+
+        if has_hooks {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let hooks = hooks_config.unwrap();
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                            success: false,
+                            duration: std::time::Duration::ZERO,
+                            error: Some(format!("Failed to start hook runtime: {e}")),
+                        });
+                        return;
+                    }
+                };
+                let result = rt.block_on(crate::cli::commands::sync::execute_with_hooks(
+                    &worktree_name,
+                    &cwd,
+                    &db,
+                    strategy,
+                    Some(&hooks),
+                    false,
+                    Some(&tx),
+                ));
+                let (success, error) = match result {
+                    Ok(_) => (true, None),
+                    Err(ref e) => (false, Some(format!("{e:#}"))),
+                };
+                let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                    success,
+                    duration: std::time::Duration::ZERO,
+                    error,
+                });
+            });
+            self.start_hook_log("sync hooks", rx);
+        } else {
+            match crate::cli::commands::sync::execute(&worktree_name, &cwd, &db, strategy) {
+                Ok(result) => {
+                    let msg = format!(
+                        "Synced '{}' via {}\nBefore: +{}/-{}  After: +{}/-{}",
+                        result.name,
+                        result.strategy,
+                        result.before_ahead,
+                        result.before_behind,
+                        result.after_ahead,
+                        result.after_behind,
+                    );
+                    if let Some(ref mut p) = self.sync_picker_state {
+                        p.result = Some(screens::sync_picker::SyncResultMessage {
+                            success: true,
+                            message: msg,
+                        });
+                    }
                 }
-            }
-            Err(e) => {
-                if let Some(ref mut p) = self.sync_picker_state {
-                    p.result = Some(screens::sync_picker::SyncResultMessage {
-                        success: false,
-                        message: format!("Sync failed: {e:#}"),
-                    });
+                Err(e) => {
+                    if let Some(ref mut p) = self.sync_picker_state {
+                        p.result = Some(screens::sync_picker::SyncResultMessage {
+                            success: false,
+                            message: format!("Sync failed: {e:#}"),
+                        });
+                    }
                 }
             }
         }
@@ -502,13 +731,12 @@ impl App {
             }
             KeyCode::Char('D') => {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
-                    self.delete_confirm_state = Some(
-                        screens::delete_confirm::DeleteConfirmState::new(
+                    self.delete_confirm_state =
+                        Some(screens::delete_confirm::DeleteConfirmState::new(
                             &row.name,
                             &row.path,
                             &row.branch,
-                        ),
-                    );
+                        ));
                     self.push_screen(Screen::DeleteConfirm);
                 }
             }
@@ -631,6 +859,7 @@ impl App {
 
         let branch = state.branch_input.clone();
         let base = state.selected_base_branch().map(|s| s.to_string());
+        let hooks_enabled = state.hooks_enabled;
 
         let Some((cwd, db)) = Self::open_db() else {
             state.result = Some(screens::create::CreateResultMessage {
@@ -651,30 +880,88 @@ impl App {
             }
         };
 
-        let template = &state.worktree_template;
-        match crate::cli::commands::create::execute(
-            &branch,
-            base.as_deref(),
-            &cwd,
-            &worktree_root,
-            template,
-            &db,
-        ) {
-            Ok(result) => {
-                let msg = format!("Created '{}' at {}", result.name, result.path.display());
-                if let Some(ref mut s) = self.create_state {
-                    s.result = Some(screens::create::CreateResultMessage {
-                        success: true,
-                        message: msg,
-                    });
+        // Load config to check for hooks
+        let hooks_config = if hooks_enabled {
+            Self::load_hooks_config(&cwd)
+        } else {
+            None
+        };
+
+        let has_hooks = hooks_config
+            .as_ref()
+            .map(|h| h.pre_create.is_some() || h.post_create.is_some())
+            .unwrap_or(false);
+
+        let template = state.worktree_template.clone();
+
+        if has_hooks {
+            // Background execution with live streaming
+            let (tx, rx) = std::sync::mpsc::channel();
+            let hooks = hooks_config.unwrap();
+            let branch_clone = branch.clone();
+            let base_clone = base.clone();
+
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                            success: false,
+                            duration: std::time::Duration::ZERO,
+                            error: Some(format!("Failed to start hook runtime: {e}")),
+                        });
+                        return;
+                    }
+                };
+                let result = rt.block_on(crate::cli::commands::create::execute_with_hooks(
+                    &branch_clone,
+                    base_clone.as_deref(),
+                    &cwd,
+                    &worktree_root,
+                    &template,
+                    &db,
+                    Some(&hooks),
+                    false,
+                    Some(&tx),
+                ));
+                let (success, error) = match result {
+                    Ok(_) => (true, None),
+                    Err(ref e) => (false, Some(format!("{e:#}"))),
+                };
+                let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                    success,
+                    duration: std::time::Duration::ZERO,
+                    error,
+                });
+            });
+
+            self.start_hook_log("create hooks", rx);
+        } else {
+            // Synchronous path without hooks
+            match crate::cli::commands::create::execute(
+                &branch,
+                base.as_deref(),
+                &cwd,
+                &worktree_root,
+                &template,
+                &db,
+            ) {
+                Ok(result) => {
+                    let msg = format!("Created '{}' at {}", result.name, result.path.display());
+                    if let Some(ref mut s) = self.create_state {
+                        s.result = Some(screens::create::CreateResultMessage {
+                            success: true,
+                            message: msg,
+                        });
+                    }
                 }
-            }
-            Err(e) => {
-                if let Some(ref mut s) = self.create_state {
-                    s.result = Some(screens::create::CreateResultMessage {
-                        success: false,
-                        message: format!("Create failed: {e:#}"),
-                    });
+                Err(e) => {
+                    if let Some(ref mut s) = self.create_state {
+                        s.result = Some(screens::create::CreateResultMessage {
+                            success: false,
+                            message: format!("Create failed: {e:#}"),
+                        });
+                    }
                 }
             }
         }
@@ -704,9 +991,16 @@ mod tests {
     }
 
     #[test]
-    fn screen_enum_has_six_variants() {
-        // Verify all six screen variants exist and are distinct
-        let screens = [Screen::List, Screen::Detail, Screen::Create, Screen::Help, Screen::SyncPicker, Screen::DeleteConfirm];
+    fn screen_enum_has_seven_variants() {
+        let screens = [
+            Screen::List,
+            Screen::Detail,
+            Screen::Create,
+            Screen::Help,
+            Screen::SyncPicker,
+            Screen::DeleteConfirm,
+            Screen::HookLog,
+        ];
         for (i, a) in screens.iter().enumerate() {
             for (j, b) in screens.iter().enumerate() {
                 if i == j {
@@ -716,6 +1010,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn hook_log_screen_can_be_pushed_and_popped() {
+        let mut app = App::new();
+        app.hook_log_state = Some(screens::hook_log::HookLogState::new("post_create"));
+        app.push_screen(Screen::HookLog);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+        assert_eq!(app.nav_stack_depth(), 2);
+
+        // Esc pops back
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
     }
 
     #[test]
@@ -1000,7 +1307,10 @@ mod tests {
         // Select second row
         app.list_state.selected = 1;
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
-        let state = app.sync_picker_state.as_ref().expect("sync_picker_state should be set");
+        let state = app
+            .sync_picker_state
+            .as_ref()
+            .expect("sync_picker_state should be set");
         assert_eq!(state.worktree_name, "feat-b");
     }
 
@@ -1018,7 +1328,10 @@ mod tests {
         let mut app = app_with_rows();
         app.list_state.selected = 1; // select feat-b
         app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
-        let state = app.delete_confirm_state.as_ref().expect("delete_confirm_state should be set");
+        let state = app
+            .delete_confirm_state
+            .as_ref()
+            .expect("delete_confirm_state should be set");
         assert_eq!(state.worktree_name, "feat-b");
         assert_eq!(state.worktree_path, "/tmp/wt/feat-b");
         assert_eq!(state.branch, "feat/b");
@@ -1145,7 +1458,10 @@ mod tests {
         assert_eq!(app.active_screen(), Screen::Create);
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::List);
-        assert!(app.create_state.is_none(), "create_state should be cleared on Esc");
+        assert!(
+            app.create_state.is_none(),
+            "create_state should be cleared on Esc"
+        );
     }
 
     #[test]
@@ -1258,7 +1574,10 @@ mod tests {
         // Without a real git repo, init_create_form will use fallback defaults
         app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Create);
-        assert!(app.create_state.is_some(), "create_state should be initialized");
+        assert!(
+            app.create_state.is_some(),
+            "create_state should be initialized"
+        );
     }
 
     #[test]
@@ -1299,7 +1618,10 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Create);
         let state = app.create_state.as_ref().unwrap();
-        assert!(state.is_result_mode(), "should be in result mode after execute attempt");
+        assert!(
+            state.is_result_mode(),
+            "should be in result mode after execute attempt"
+        );
     }
 
     #[test]
@@ -1311,7 +1633,11 @@ mod tests {
             message: "Created 'test'".into(),
         });
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Enter in result mode should pop to list"
+        );
         assert!(app.create_state.is_none(), "create_state should be cleared");
     }
 
@@ -1426,8 +1752,15 @@ mod tests {
         let mut app = App::new();
         // Empty list — no rows
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "s on empty list should stay on List");
-        assert!(app.sync_picker_state.is_none(), "sync_picker_state should remain None");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "s on empty list should stay on List"
+        );
+        assert!(
+            app.sync_picker_state.is_none(),
+            "sync_picker_state should remain None"
+        );
     }
 
     #[test]
@@ -1438,7 +1771,10 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::SyncPicker);
-        let picker = app.sync_picker_state.as_ref().expect("sync_picker_state should be set");
+        let picker = app
+            .sync_picker_state
+            .as_ref()
+            .expect("sync_picker_state should be set");
         assert_eq!(picker.worktree_name, "feat-a");
     }
 
@@ -1465,7 +1801,11 @@ mod tests {
         assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 1, "down should select Merge");
+        assert_eq!(
+            app.sync_picker_state.as_ref().unwrap().selected,
+            1,
+            "down should select Merge"
+        );
     }
 
     #[test]
@@ -1477,7 +1817,11 @@ mod tests {
         app.push_screen(Screen::SyncPicker);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0, "up should select Rebase");
+        assert_eq!(
+            app.sync_picker_state.as_ref().unwrap().selected,
+            0,
+            "up should select Rebase"
+        );
     }
 
     #[test]
@@ -1487,10 +1831,18 @@ mod tests {
         app.push_screen(Screen::SyncPicker);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 1, "j should move down");
+        assert_eq!(
+            app.sync_picker_state.as_ref().unwrap().selected,
+            1,
+            "j should move down"
+        );
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-        assert_eq!(app.sync_picker_state.as_ref().unwrap().selected, 0, "k should move up");
+        assert_eq!(
+            app.sync_picker_state.as_ref().unwrap().selected,
+            0,
+            "k should move up"
+        );
     }
 
     #[test]
@@ -1506,7 +1858,10 @@ mod tests {
         // Should still be on SyncPicker (showing result)
         assert_eq!(app.active_screen(), Screen::SyncPicker);
         let picker = app.sync_picker_state.as_ref().unwrap();
-        assert!(picker.is_result_mode(), "should be in result mode after Enter");
+        assert!(
+            picker.is_result_mode(),
+            "should be in result mode after Enter"
+        );
         assert!(picker.result.is_some());
     }
 
@@ -1522,8 +1877,15 @@ mod tests {
         app.push_screen(Screen::SyncPicker);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
-        assert!(app.sync_picker_state.is_none(), "sync_picker_state should be cleared");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Enter in result mode should pop to list"
+        );
+        assert!(
+            app.sync_picker_state.is_none(),
+            "sync_picker_state should be cleared"
+        );
     }
 
     #[test]
@@ -1542,8 +1904,15 @@ mod tests {
         assert_eq!(app.nav_stack_depth(), 3);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "should pop all the way to List, not Detail");
-        assert!(app.sync_picker_state.is_none(), "sync_picker_state should be cleared");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "should pop all the way to List, not Detail"
+        );
+        assert!(
+            app.sync_picker_state.is_none(),
+            "sync_picker_state should be cleared"
+        );
     }
 
     #[test]
@@ -1586,7 +1955,9 @@ mod tests {
     fn push_delete_confirm_screen_works() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
         assert_eq!(app.active_screen(), Screen::DeleteConfirm);
@@ -1599,7 +1970,9 @@ mod tests {
         // set a result message (failure) and stay on the DeleteConfirm screen.
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
 
@@ -1607,7 +1980,10 @@ mod tests {
 
         assert_eq!(app.active_screen(), Screen::DeleteConfirm);
         let state = app.delete_confirm_state.as_ref().unwrap();
-        assert!(state.is_result_mode(), "should be in result mode after Enter");
+        assert!(
+            state.is_result_mode(),
+            "should be in result mode after Enter"
+        );
         assert!(state.result.is_some());
     }
 
@@ -1615,7 +1991,9 @@ mod tests {
     fn y_on_delete_confirm_triggers_delete_and_sets_result() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
 
@@ -1630,21 +2008,32 @@ mod tests {
     fn n_on_delete_confirm_cancels_dialog() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
 
-        assert_eq!(app.active_screen(), Screen::List, "n should pop back to list");
-        assert!(app.delete_confirm_state.is_none(), "state should be cleared on cancel");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "n should pop back to list"
+        );
+        assert!(
+            app.delete_confirm_state.is_none(),
+            "state should be cleared on cancel"
+        );
     }
 
     #[test]
     fn enter_in_delete_result_mode_pops_to_list() {
         let mut app = App::new();
         let mut state = screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         );
         state.result = Some(screens::delete_confirm::DeleteResultMessage {
             success: true,
@@ -1654,15 +2043,24 @@ mod tests {
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
-        assert!(app.delete_confirm_state.is_none(), "state should be cleared");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Enter in result mode should pop to list"
+        );
+        assert!(
+            app.delete_confirm_state.is_none(),
+            "state should be cleared"
+        );
     }
 
     #[test]
     fn space_in_delete_result_mode_pops_to_list() {
         let mut app = App::new();
         let mut state = screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         );
         state.result = Some(screens::delete_confirm::DeleteResultMessage {
             success: true,
@@ -1672,7 +2070,11 @@ mod tests {
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Space in result mode should pop to list");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Space in result mode should pop to list"
+        );
         assert!(app.delete_confirm_state.is_none());
     }
 
@@ -1680,33 +2082,49 @@ mod tests {
     fn esc_on_delete_confirm_clears_state() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Esc should pop back to List");
-        assert!(app.delete_confirm_state.is_none(), "Esc should clear delete_confirm_state");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Esc should pop back to List"
+        );
+        assert!(
+            app.delete_confirm_state.is_none(),
+            "Esc should clear delete_confirm_state"
+        );
     }
 
     #[test]
     fn q_on_delete_confirm_clears_state() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         ));
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::List);
-        assert!(app.delete_confirm_state.is_none(), "q should clear delete_confirm_state");
+        assert!(
+            app.delete_confirm_state.is_none(),
+            "q should clear delete_confirm_state"
+        );
     }
 
     #[test]
     fn esc_on_delete_result_mode_clears_state() {
         let mut app = App::new();
         let mut state = screens::delete_confirm::DeleteConfirmState::new(
-            "feat-auth", "/tmp/wt/feat-auth", "feature/auth",
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
         );
         state.result = Some(screens::delete_confirm::DeleteResultMessage {
             success: true,
@@ -1716,8 +2134,15 @@ mod tests {
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List, "Esc in result mode should pop to List");
-        assert!(app.delete_confirm_state.is_none(), "Esc in result mode should clear state");
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "Esc in result mode should pop to List"
+        );
+        assert!(
+            app.delete_confirm_state.is_none(),
+            "Esc in result mode should clear state"
+        );
     }
 
     #[test]
@@ -1728,7 +2153,10 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::List);
-        assert!(app.sync_picker_state.is_none(), "Esc should clear sync_picker_state");
+        assert!(
+            app.sync_picker_state.is_none(),
+            "Esc should clear sync_picker_state"
+        );
     }
 
     #[test]
@@ -1744,8 +2172,7 @@ mod tests {
     fn help_over_sync_picker_renders_sync_picker_underneath() {
         let mut app = app_with_rows();
         // Push SyncPicker, then Help
-        app.sync_picker_state =
-            Some(screens::sync_picker::SyncPickerState::new("feat-a"));
+        app.sync_picker_state = Some(screens::sync_picker::SyncPickerState::new("feat-a"));
         app.push_screen(Screen::SyncPicker);
         app.push_screen(Screen::Help);
         assert_eq!(app.active_screen(), Screen::Help);
@@ -1804,6 +2231,158 @@ mod tests {
         assert!(
             app.create_state.as_ref().unwrap().error.is_some(),
             "empty input after backspace should revalidate and show error"
+        );
+    }
+
+    #[test]
+    fn process_hook_messages_updates_hook_log_state() {
+        use screens::hook_log::{HookLogState, HookOutputMessage};
+
+        let mut app = App::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.hook_log_state = Some(HookLogState::new("post_create"));
+        app.hook_rx = Some(rx);
+        app.push_screen(Screen::HookLog);
+
+        // Send messages through the channel
+        tx.send(HookOutputMessage::StepStarted { step: "run".into() })
+            .unwrap();
+        tx.send(HookOutputMessage::OutputLine {
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "hello".into(),
+        })
+        .unwrap();
+        tx.send(HookOutputMessage::StepCompleted {
+            step: "run".into(),
+            success: true,
+            duration: std::time::Duration::from_millis(100),
+        })
+        .unwrap();
+        tx.send(HookOutputMessage::HookCompleted {
+            success: true,
+            duration: std::time::Duration::from_secs(1),
+            error: None,
+        })
+        .unwrap();
+
+        // Process messages
+        app.process_hook_messages();
+
+        let state = app.hook_log_state.as_ref().unwrap();
+        assert_eq!(state.sections.len(), 1);
+        assert_eq!(state.sections[0].step, "run");
+        assert_eq!(state.sections[0].lines.len(), 1);
+        assert_eq!(state.sections[0].lines[0].text, "hello");
+        assert!(state.completed);
+        assert!(state.success);
+    }
+
+    #[test]
+    fn process_hook_messages_no_op_without_receiver() {
+        let mut app = App::new();
+        // No hook_rx set — should not panic
+        app.process_hook_messages();
+    }
+
+    #[test]
+    fn start_hook_log_sets_up_state_and_pushes_screen() {
+        let mut app = App::new();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("post_create", rx);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+        assert!(app.hook_log_state.is_some());
+        assert_eq!(app.hook_log_state.as_ref().unwrap().title, "post_create");
+        assert!(app.hook_rx.is_some());
+    }
+
+    #[test]
+    fn esc_on_hook_log_returns_to_list_and_clears_state() {
+        let mut app = App::new();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("post_create", rx);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.hook_log_state.is_none());
+        // hook_rx stays alive for post-dismiss draining
+        assert!(app.hook_rx.is_some());
+    }
+
+    #[test]
+    fn q_on_hook_log_returns_to_list() {
+        let mut app = App::new();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("post_create", rx);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.hook_log_state.is_none());
+    }
+
+    #[test]
+    fn dismiss_hook_log_returns_to_list_not_source() {
+        let mut app = App::new();
+        // Simulate: List → Create → HookLog (as happens during create-with-hooks)
+        app.create_state = Some(screens::create::CreateState::new(
+            vec![],
+            String::new(),
+            String::new(),
+        ));
+        app.push_screen(Screen::Create);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("create hooks", rx);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+        assert_eq!(app.nav_stack_depth(), 3); // List → Create → HookLog
+
+        // Esc should dismiss HookLog AND the source dialog, landing on List
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::List,
+            "dismiss from HookLog should return to List, not Create"
+        );
+        assert!(
+            app.hook_log_state.is_none(),
+            "hook_log_state should be cleared"
+        );
+        assert!(
+            app.create_state.is_none(),
+            "source dialog state should be cleared"
+        );
+    }
+
+    #[test]
+    fn process_hook_messages_drains_after_dismiss() {
+        use screens::hook_log::HookOutputMessage;
+
+        let mut app = App::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("test hooks", rx);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+
+        // Dismiss the hook log (user pressed Esc)
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.hook_log_state.is_none(), "state should be cleared");
+        // hook_rx should still be alive for draining
+        assert!(app.hook_rx.is_some(), "hook_rx should survive dismiss");
+
+        // Background thread sends completion after dismiss
+        tx.send(HookOutputMessage::HookCompleted {
+            success: true,
+            duration: std::time::Duration::from_secs(1),
+            error: None,
+        })
+        .unwrap();
+
+        // process_hook_messages should drain and clean up
+        app.process_hook_messages();
+        assert!(
+            app.hook_rx.is_none(),
+            "hook_rx should be cleaned up after HookCompleted"
         );
     }
 }
