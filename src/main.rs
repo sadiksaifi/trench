@@ -650,7 +650,7 @@ fn run_log(
     // --summary and --output are mutually exclusive
     if show_summary && show_output {
         eprintln!("error: --summary and --output cannot be used together");
-        ExitCode::MissingRequiredFlag.exit();
+        ExitCode::FlagConflict.exit();
     }
 
     // --output requires a worktree argument

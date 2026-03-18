@@ -743,8 +743,8 @@ fn log_summary_and_output_conflict() {
 
     assert_eq!(
         exit_code(output.status),
-        8,
-        "should exit 8 for conflicting flags, stderr: {}",
+        9,
+        "should exit 9 for conflicting flags, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
