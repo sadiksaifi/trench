@@ -539,14 +539,19 @@ impl App {
             if let Ok(repo_info) = crate::git::discover_repo(&cwd) {
                 repo_name = repo_info.name.clone();
                 // Collect local branches for the base selector
-                base_branches = crate::git::list_local_branches(&repo_info.path)
-                    .unwrap_or_else(|_| vec![repo_info.default_branch.clone()]);
-                // Ensure default branch is first
-                if let Some(pos) = base_branches.iter().position(|b| b == &repo_info.default_branch) {
+                base_branches =
+                    crate::git::list_local_branches(&repo_info.path).unwrap_or_default();
+                // Ensure the repo default exists and is first
+                if let Some(pos) = base_branches
+                    .iter()
+                    .position(|b| b == &repo_info.default_branch)
+                {
                     if pos != 0 {
                         let default = base_branches.remove(pos);
                         base_branches.insert(0, default);
                     }
+                } else {
+                    base_branches.insert(0, repo_info.default_branch.clone());
                 }
             }
         }
@@ -637,7 +642,7 @@ impl App {
             return;
         }
 
-        let branch = state.branch_input.trim().to_string();
+        let branch = state.branch_input.clone();
         let base = state.selected_base_branch().map(|s| s.to_string());
 
         let Some((cwd, db)) = Self::open_db() else {
