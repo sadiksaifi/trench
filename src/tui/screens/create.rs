@@ -72,6 +72,24 @@ impl CreateState {
         }
     }
 
+    /// Move focus to the next form field (Tab).
+    pub fn focus_next(&mut self) {
+        self.focused_field = match self.focused_field {
+            CreateField::Branch => CreateField::Base,
+            CreateField::Base => CreateField::Hooks,
+            CreateField::Hooks => CreateField::Branch,
+        };
+    }
+
+    /// Move focus to the previous form field (Shift-Tab).
+    pub fn focus_previous(&mut self) {
+        self.focused_field = match self.focused_field {
+            CreateField::Branch => CreateField::Hooks,
+            CreateField::Base => CreateField::Branch,
+            CreateField::Hooks => CreateField::Base,
+        };
+    }
+
     /// Move cursor one character to the right.
     pub fn cursor_right(&mut self) {
         if self.cursor_pos < self.branch_input.len() {
@@ -220,6 +238,53 @@ mod tests {
         state.cursor_pos = 3;
         state.cursor_right();
         assert_eq!(state.cursor_pos, 3);
+    }
+
+    #[test]
+    fn focus_next_moves_branch_to_base() {
+        let mut state = sample_state();
+        assert_eq!(state.focused_field, CreateField::Branch);
+        state.focus_next();
+        assert_eq!(state.focused_field, CreateField::Base);
+    }
+
+    #[test]
+    fn focus_next_moves_base_to_hooks() {
+        let mut state = sample_state();
+        state.focused_field = CreateField::Base;
+        state.focus_next();
+        assert_eq!(state.focused_field, CreateField::Hooks);
+    }
+
+    #[test]
+    fn focus_next_wraps_hooks_to_branch() {
+        let mut state = sample_state();
+        state.focused_field = CreateField::Hooks;
+        state.focus_next();
+        assert_eq!(state.focused_field, CreateField::Branch);
+    }
+
+    #[test]
+    fn focus_previous_moves_branch_to_hooks() {
+        let mut state = sample_state();
+        state.focus_previous();
+        assert_eq!(state.focused_field, CreateField::Hooks);
+    }
+
+    #[test]
+    fn focus_previous_moves_base_to_branch() {
+        let mut state = sample_state();
+        state.focused_field = CreateField::Base;
+        state.focus_previous();
+        assert_eq!(state.focused_field, CreateField::Branch);
+    }
+
+    #[test]
+    fn focus_previous_moves_hooks_to_base() {
+        let mut state = sample_state();
+        state.focused_field = CreateField::Hooks;
+        state.focus_previous();
+        assert_eq!(state.focused_field, CreateField::Base);
     }
 
     #[test]
