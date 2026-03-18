@@ -66,6 +66,24 @@ impl HookLogState {
         }
     }
 
+    /// Total number of renderable lines (section headers + output lines).
+    pub fn total_lines(&self) -> usize {
+        self.sections
+            .iter()
+            .map(|s| 1 + s.lines.len()) // 1 header per section + output lines
+            .sum()
+    }
+
+    /// Auto-scroll to keep the latest output visible.
+    pub fn auto_scroll(&mut self, visible_height: usize) {
+        let total = self.total_lines();
+        if total > visible_height {
+            self.scroll_offset = total - visible_height;
+        } else {
+            self.scroll_offset = 0;
+        }
+    }
+
     /// Process an incoming message from the hook runner, updating state.
     pub fn process_message(&mut self, msg: HookOutputMessage) {
         match msg {
@@ -343,5 +361,52 @@ mod tests {
         assert_eq!(state.sections[0].step, "copy");
         assert_eq!(state.sections[1].step, "run");
         assert_eq!(state.sections[1].lines.len(), 1);
+    }
+
+    #[test]
+    fn total_lines_counts_across_all_sections() {
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".into(), stream: "stdout".into(), line: "line1".into(),
+        });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".into(), stream: "stdout".into(), line: "line2".into(),
+        });
+        state.process_message(HookOutputMessage::StepStarted { step: "shell".into() });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "shell".into(), stream: "stdout".into(), line: "line3".into(),
+        });
+        // total_lines = output lines + section headers (1 per section)
+        assert_eq!(state.total_lines(), 5); // 2 headers + 3 output lines
+    }
+
+    #[test]
+    fn auto_scroll_advances_to_latest() {
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        for i in 0..20 {
+            state.process_message(HookOutputMessage::OutputLine {
+                step: "run".into(),
+                stream: "stdout".into(),
+                line: format!("line {i}"),
+            });
+        }
+        // After many lines, auto_scroll should set offset near the end
+        state.auto_scroll(10); // visible_height = 10
+        // scroll_offset should be total_lines - visible_height
+        let expected = state.total_lines().saturating_sub(10);
+        assert_eq!(state.scroll_offset, expected);
+    }
+
+    #[test]
+    fn auto_scroll_stays_zero_when_content_fits() {
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".into(), stream: "stdout".into(), line: "one".into(),
+        });
+        state.auto_scroll(20); // plenty of room
+        assert_eq!(state.scroll_offset, 0);
     }
 }
