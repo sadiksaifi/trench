@@ -646,6 +646,36 @@ mod tests {
         assert!(state.sections.iter().all(|s| s.completed));
     }
 
+    #[test]
+    fn from_hook_output_empty_lines_produces_empty_sections() {
+        let state = HookLogState::from_hook_output(&[], "hook:post_create", &None);
+
+        assert_eq!(state.title, "post_create");
+        assert!(state.completed);
+        assert!(state.sections.is_empty());
+    }
+
+    #[test]
+    fn from_hook_output_missing_step_grouped_as_unknown() {
+        use crate::state::HookOutputLine;
+
+        let lines = vec![
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "some output".into(),
+                step: None,
+                line_number: 1,
+                created_at: 1700000000,
+            },
+        ];
+
+        let state = HookLogState::from_hook_output(&lines, "hook:post_create", &None);
+
+        assert_eq!(state.sections.len(), 1);
+        assert_eq!(state.sections[0].step, "unknown");
+        assert_eq!(state.sections[0].lines.len(), 1);
+    }
+
     fn render_to_buffer(state: &HookLogState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
