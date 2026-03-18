@@ -127,6 +127,23 @@ impl CreateState {
         }
     }
 
+    /// Validate the form. Sets `self.error` on failure, clears it on success.
+    pub fn validate(&mut self) -> Result<(), ()> {
+        let trimmed = self.branch_input.trim();
+        if trimmed.is_empty() {
+            self.error = Some("Branch name is required".into());
+            return Err(());
+        }
+        // Sanitize and check if result is empty (e.g. ".." → "")
+        let sanitized = paths::sanitize_branch(trimmed);
+        if sanitized.is_empty() {
+            self.error = Some("Branch name is invalid".into());
+            return Err(());
+        }
+        self.error = None;
+        Ok(())
+    }
+
     /// Toggle hooks on/off.
     pub fn toggle_hooks(&mut self) {
         self.hooks_enabled = !self.hooks_enabled;
@@ -426,6 +443,42 @@ mod tests {
         assert!(!state.hooks_enabled);
         state.toggle_hooks();
         assert!(state.hooks_enabled);
+    }
+
+    #[test]
+    fn validate_empty_branch_returns_error() {
+        let mut state = sample_state();
+        let result = state.validate();
+        assert!(result.is_err());
+        assert!(state.error.is_some());
+        assert!(state.error.as_ref().unwrap().contains("Branch name"));
+    }
+
+    #[test]
+    fn validate_whitespace_only_branch_returns_error() {
+        let mut state = sample_state();
+        state.branch_input = "   ".into();
+        let result = state.validate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_valid_branch_clears_error() {
+        let mut state = sample_state();
+        state.branch_input = "feature/auth".into();
+        state.error = Some("old error".into());
+        let result = state.validate();
+        assert!(result.is_ok());
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn validate_branch_with_double_dots_returns_error() {
+        let mut state = sample_state();
+        state.branch_input = "..".into();
+        let result = state.validate();
+        assert!(result.is_err());
+        assert!(state.error.as_ref().unwrap().contains("invalid"));
     }
 
     #[test]
