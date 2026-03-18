@@ -600,7 +600,13 @@ impl App {
         };
         let event = match db.get_last_hook_event_for_worktree(repo.id, worktree_name) {
             Ok(Some(e)) => e,
-            _ => return false,
+            Ok(None) => {
+                // No hook history — show empty state
+                self.hook_log_state = Some(screens::hook_log::HookLogState::no_history());
+                self.push_screen(Screen::HookLog);
+                return true;
+            }
+            Err(_) => return false,
         };
         let lines = match db.get_hook_output(event.id) {
             Ok(l) => l,
@@ -2520,20 +2526,24 @@ mod tests {
     }
 
     #[test]
-    fn l_key_on_list_does_not_crash_without_db() {
+    fn l_key_on_list_does_not_crash() {
         let mut app = app_with_rows();
         assert_eq!(app.active_screen(), Screen::List);
 
-        // `l` triggers load_hook_log_replay which silently fails without a DB
+        // `l` triggers load_hook_log_replay. Depending on whether a real DB
+        // and repo are accessible, it either stays on List (DB unavailable)
+        // or pushes HookLog with "no history" message.
         app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        // Should still be on list (replay failed gracefully)
-        assert_eq!(app.active_screen(), Screen::List);
+        let screen = app.active_screen();
+        assert!(
+            screen == Screen::List || screen == Screen::HookLog,
+            "should be on List or HookLog, got: {screen:?}"
+        );
     }
 
     #[test]
-    fn l_key_on_detail_does_not_crash_without_db() {
+    fn l_key_on_detail_does_not_crash() {
         let mut app = app_with_rows();
-        // Set up a fake detail state
         app.detail_state = Some(screens::detail::DetailState {
             name: "feat-a".into(),
             branch: "feat/a".into(),
@@ -2551,8 +2561,11 @@ mod tests {
         assert_eq!(app.active_screen(), Screen::Detail);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        // Should still be on detail (replay failed gracefully)
-        assert_eq!(app.active_screen(), Screen::Detail);
+        let screen = app.active_screen();
+        assert!(
+            screen == Screen::Detail || screen == Screen::HookLog,
+            "should be on Detail or HookLog, got: {screen:?}"
+        );
     }
 
     #[test]

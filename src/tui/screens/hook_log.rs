@@ -111,6 +111,19 @@ impl HookLogState {
         }
     }
 
+    /// Create a state representing "no hook history" for a worktree.
+    pub fn no_history() -> Self {
+        Self {
+            title: "Hook Log".to_string(),
+            sections: Vec::new(),
+            completed: true,
+            success: true,
+            scroll_offset: 0,
+            error: Some("No hook history for this worktree.".to_string()),
+            replay: true,
+        }
+    }
+
     pub fn new(title: &str) -> Self {
         Self {
             title: title.to_string(),
@@ -782,6 +795,26 @@ mod tests {
         state.scroll_offset = 0;
         state.scroll_down(10);
         assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn no_hook_history_state_shows_message() {
+        let state = HookLogState::no_history();
+        assert!(state.completed);
+        assert!(state.replay);
+        assert!(state.sections.is_empty());
+        assert!(state.error.as_deref().unwrap().contains("No hook history"));
+    }
+
+    #[test]
+    fn render_no_history_shows_message() {
+        let state = HookLogState::no_history();
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("No hook history"),
+            "should show no history message, got: {text}"
+        );
     }
 
     #[test]
