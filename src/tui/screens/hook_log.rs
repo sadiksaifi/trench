@@ -597,6 +597,55 @@ mod tests {
         assert!(state.sections[0].completed);
     }
 
+    #[test]
+    fn from_hook_output_multiple_steps_creates_separate_sections() {
+        use crate::state::HookOutputLine;
+
+        let lines = vec![
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "copied .env".into(),
+                step: Some("copy".into()),
+                line_number: 1,
+                created_at: 1700000000,
+            },
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "installing deps".into(),
+                step: Some("run".into()),
+                line_number: 2,
+                created_at: 1700000001,
+            },
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "dep installed".into(),
+                step: Some("run".into()),
+                line_number: 3,
+                created_at: 1700000002,
+            },
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "migration done".into(),
+                step: Some("shell".into()),
+                line_number: 4,
+                created_at: 1700000003,
+            },
+        ];
+
+        let state =
+            HookLogState::from_hook_output(&lines, "hook:post_create", &None);
+
+        assert_eq!(state.sections.len(), 3);
+        assert_eq!(state.sections[0].step, "copy");
+        assert_eq!(state.sections[0].lines.len(), 1);
+        assert_eq!(state.sections[1].step, "run");
+        assert_eq!(state.sections[1].lines.len(), 2);
+        assert_eq!(state.sections[2].step, "shell");
+        assert_eq!(state.sections[2].lines.len(), 1);
+        // All sections completed
+        assert!(state.sections.iter().all(|s| s.completed));
+    }
+
     fn render_to_buffer(state: &HookLogState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
