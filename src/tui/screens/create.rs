@@ -40,6 +40,49 @@ impl CreateState {
             worktree_template,
         }
     }
+
+    /// Insert a character at the current cursor position.
+    pub fn insert_char(&mut self, ch: char) {
+        self.branch_input.insert(self.cursor_pos, ch);
+        self.cursor_pos += ch.len_utf8();
+    }
+
+    /// Delete the character before the cursor.
+    pub fn backspace(&mut self) {
+        if self.cursor_pos > 0 {
+            let prev = self.branch_input[..self.cursor_pos]
+                .chars()
+                .last()
+                .unwrap()
+                .len_utf8();
+            self.cursor_pos -= prev;
+            self.branch_input.remove(self.cursor_pos);
+        }
+    }
+
+    /// Move cursor one character to the left.
+    pub fn cursor_left(&mut self) {
+        if self.cursor_pos > 0 {
+            let prev = self.branch_input[..self.cursor_pos]
+                .chars()
+                .last()
+                .unwrap()
+                .len_utf8();
+            self.cursor_pos -= prev;
+        }
+    }
+
+    /// Move cursor one character to the right.
+    pub fn cursor_right(&mut self) {
+        if self.cursor_pos < self.branch_input.len() {
+            let next = self.branch_input[self.cursor_pos..]
+                .chars()
+                .next()
+                .unwrap()
+                .len_utf8();
+            self.cursor_pos += next;
+        }
+    }
 }
 
 pub fn render(_state: &CreateState, _frame: &mut Frame, _area: Rect) {
@@ -86,6 +129,97 @@ mod tests {
     fn create_state_no_error_initially() {
         let state = CreateState::new(vec!["main".into()], "repo".into(), "{{ repo }}/{{ branch | sanitize }}".into());
         assert!(state.error.is_none());
+    }
+
+    fn sample_state() -> CreateState {
+        CreateState::new(
+            vec!["main".into(), "develop".into()],
+            "repo".into(),
+            "{{ repo }}/{{ branch | sanitize }}".into(),
+        )
+    }
+
+    #[test]
+    fn insert_char_appends_to_branch_input() {
+        let mut state = sample_state();
+        state.insert_char('f');
+        state.insert_char('o');
+        state.insert_char('o');
+        assert_eq!(state.branch_input, "foo");
+        assert_eq!(state.cursor_pos, 3);
+    }
+
+    #[test]
+    fn backspace_removes_last_char() {
+        let mut state = sample_state();
+        state.insert_char('a');
+        state.insert_char('b');
+        state.backspace();
+        assert_eq!(state.branch_input, "a");
+        assert_eq!(state.cursor_pos, 1);
+    }
+
+    #[test]
+    fn backspace_on_empty_does_nothing() {
+        let mut state = sample_state();
+        state.backspace();
+        assert_eq!(state.branch_input, "");
+        assert_eq!(state.cursor_pos, 0);
+    }
+
+    #[test]
+    fn insert_char_at_middle_position() {
+        let mut state = sample_state();
+        state.insert_char('a');
+        state.insert_char('c');
+        state.cursor_pos = 1; // move cursor between 'a' and 'c'
+        state.insert_char('b');
+        assert_eq!(state.branch_input, "abc");
+        assert_eq!(state.cursor_pos, 2);
+    }
+
+    #[test]
+    fn backspace_at_middle_position() {
+        let mut state = sample_state();
+        state.branch_input = "abc".into();
+        state.cursor_pos = 2;
+        state.backspace();
+        assert_eq!(state.branch_input, "ac");
+        assert_eq!(state.cursor_pos, 1);
+    }
+
+    #[test]
+    fn cursor_left_moves_cursor_back() {
+        let mut state = sample_state();
+        state.branch_input = "abc".into();
+        state.cursor_pos = 3;
+        state.cursor_left();
+        assert_eq!(state.cursor_pos, 2);
+    }
+
+    #[test]
+    fn cursor_left_clamps_at_zero() {
+        let mut state = sample_state();
+        state.cursor_left();
+        assert_eq!(state.cursor_pos, 0);
+    }
+
+    #[test]
+    fn cursor_right_moves_cursor_forward() {
+        let mut state = sample_state();
+        state.branch_input = "abc".into();
+        state.cursor_pos = 1;
+        state.cursor_right();
+        assert_eq!(state.cursor_pos, 2);
+    }
+
+    #[test]
+    fn cursor_right_clamps_at_end() {
+        let mut state = sample_state();
+        state.branch_input = "abc".into();
+        state.cursor_pos = 3;
+        state.cursor_right();
+        assert_eq!(state.cursor_pos, 3);
     }
 
     #[test]
