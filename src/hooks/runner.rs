@@ -88,14 +88,6 @@ pub async fn execute_hook(
                 duration.as_secs_f64(),
                 &all_output,
             )?;
-            send_msg(
-                tx,
-                HookOutputMessage::HookCompleted {
-                    success: false,
-                    duration,
-                    error: Some(e.to_string()),
-                },
-            );
             return Err(e.context("copy step failed"));
         }
         let step_dur = step_start.elapsed();
@@ -158,14 +150,6 @@ pub async fn execute_hook(
                     duration.as_secs_f64(),
                     &all_output,
                 )?;
-                send_msg(
-                    tx,
-                    HookOutputMessage::HookCompleted {
-                        success: false,
-                        duration,
-                        error: Some(e.to_string()),
-                    },
-                );
                 return Err(e);
             }
             Err(_) => {
@@ -188,14 +172,6 @@ pub async fn execute_hook(
                     duration.as_secs_f64(),
                     &all_output,
                 )?;
-                send_msg(
-                    tx,
-                    HookOutputMessage::HookCompleted {
-                        success: false,
-                        duration,
-                        error: Some(format!("hook timed out after {timeout_secs}s")),
-                    },
-                );
                 return Err(HookTimeoutError { timeout_secs }.into());
             }
         }
@@ -252,14 +228,6 @@ pub async fn execute_hook(
                     duration.as_secs_f64(),
                     &all_output,
                 )?;
-                send_msg(
-                    tx,
-                    HookOutputMessage::HookCompleted {
-                        success: false,
-                        duration,
-                        error: Some(e.to_string()),
-                    },
-                );
                 return Err(e);
             }
             Err(_) => {
@@ -282,14 +250,6 @@ pub async fn execute_hook(
                     duration.as_secs_f64(),
                     &all_output,
                 )?;
-                send_msg(
-                    tx,
-                    HookOutputMessage::HookCompleted {
-                        success: false,
-                        duration,
-                        error: Some(format!("hook timed out after {timeout_secs}s")),
-                    },
-                );
                 return Err(HookTimeoutError { timeout_secs }.into());
             }
         }
@@ -305,15 +265,6 @@ pub async fn execute_hook(
         duration.as_secs_f64(),
         &all_output,
     )?;
-
-    send_msg(
-        tx,
-        HookOutputMessage::HookCompleted {
-            success: true,
-            duration,
-            error: None,
-        },
-    );
 
     Ok(HookResult {
         event_id,
@@ -946,10 +897,19 @@ mod tests {
             .any(|m| matches!(m, HookOutputMessage::OutputLine { line, .. } if line == "hello"));
         assert!(has_hello, "should have output line with 'hello'");
 
-        // Last should be HookCompleted
+        // execute_hook must NOT send HookCompleted — that's the orchestration's job
+        let has_hook_completed = messages
+            .iter()
+            .any(|m| matches!(m, HookOutputMessage::HookCompleted { .. }));
+        assert!(
+            !has_hook_completed,
+            "execute_hook should not send HookCompleted (reserved for orchestration)"
+        );
+
+        // Last should be StepCompleted
         assert!(matches!(
             messages.last().unwrap(),
-            HookOutputMessage::HookCompleted { success: true, .. }
+            HookOutputMessage::StepCompleted { success: true, .. }
         ));
     }
 

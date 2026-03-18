@@ -478,13 +478,15 @@ impl App {
                         false,
                         Some(&tx),
                     ));
-                if let Err(e) = result {
-                    let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
-                        success: false,
-                        duration: std::time::Duration::ZERO,
-                        error: Some(format!("{e:#}")),
-                    });
-                }
+                let (success, error) = match result {
+                    Ok(_) => (true, None),
+                    Err(ref e) => (false, Some(format!("{e:#}"))),
+                };
+                let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                    success,
+                    duration: std::time::Duration::ZERO,
+                    error,
+                });
             });
             self.start_hook_log("remove hooks", rx);
         } else {
@@ -637,13 +639,15 @@ impl App {
                     false,
                     Some(&tx),
                 ));
-                if let Err(e) = result {
-                    let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
-                        success: false,
-                        duration: std::time::Duration::ZERO,
-                        error: Some(format!("{e:#}")),
-                    });
-                }
+                let (success, error) = match result {
+                    Ok(_) => (true, None),
+                    Err(ref e) => (false, Some(format!("{e:#}"))),
+                };
+                let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                    success,
+                    duration: std::time::Duration::ZERO,
+                    error,
+                });
             });
             self.start_hook_log("sync hooks", rx);
         } else {
@@ -906,14 +910,15 @@ impl App {
                     false,
                     Some(&tx),
                 ));
-                // Send completion if not already sent by execute_hook
-                if let Err(e) = result {
-                    let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
-                        success: false,
-                        duration: std::time::Duration::ZERO,
-                        error: Some(format!("{e:#}")),
-                    });
-                }
+                let (success, error) = match result {
+                    Ok(_) => (true, None),
+                    Err(ref e) => (false, Some(format!("{e:#}"))),
+                };
+                let _ = tx.send(screens::hook_log::HookOutputMessage::HookCompleted {
+                    success,
+                    duration: std::time::Duration::ZERO,
+                    error,
+                });
             });
 
             self.start_hook_log("create hooks", rx);
