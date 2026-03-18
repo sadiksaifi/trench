@@ -90,6 +90,34 @@ impl CreateState {
         };
     }
 
+    /// Cycle base branch selection forward (wrapping).
+    pub fn select_next_base(&mut self) {
+        if !self.base_branches.is_empty() {
+            self.selected_base = (self.selected_base + 1) % self.base_branches.len();
+        }
+    }
+
+    /// Cycle base branch selection backward (wrapping).
+    pub fn select_previous_base(&mut self) {
+        if !self.base_branches.is_empty() {
+            self.selected_base = if self.selected_base == 0 {
+                self.base_branches.len() - 1
+            } else {
+                self.selected_base - 1
+            };
+        }
+    }
+
+    /// Return the currently selected base branch name, if any.
+    pub fn selected_base_branch(&self) -> Option<&str> {
+        self.base_branches.get(self.selected_base).map(|s| s.as_str())
+    }
+
+    /// Toggle hooks on/off.
+    pub fn toggle_hooks(&mut self) {
+        self.hooks_enabled = !self.hooks_enabled;
+    }
+
     /// Move cursor one character to the right.
     pub fn cursor_right(&mut self) {
         if self.cursor_pos < self.branch_input.len() {
@@ -285,6 +313,70 @@ mod tests {
         state.focused_field = CreateField::Hooks;
         state.focus_previous();
         assert_eq!(state.focused_field, CreateField::Base);
+    }
+
+    #[test]
+    fn select_next_base_cycles_forward() {
+        let mut state = CreateState::new(
+            vec!["main".into(), "develop".into(), "staging".into()],
+            "repo".into(),
+            "t".into(),
+        );
+        assert_eq!(state.selected_base, 0);
+        state.select_next_base();
+        assert_eq!(state.selected_base, 1);
+        state.select_next_base();
+        assert_eq!(state.selected_base, 2);
+        state.select_next_base();
+        assert_eq!(state.selected_base, 0, "should wrap around");
+    }
+
+    #[test]
+    fn select_previous_base_cycles_backward() {
+        let mut state = CreateState::new(
+            vec!["main".into(), "develop".into(), "staging".into()],
+            "repo".into(),
+            "t".into(),
+        );
+        state.select_previous_base();
+        assert_eq!(state.selected_base, 2, "should wrap to last");
+        state.select_previous_base();
+        assert_eq!(state.selected_base, 1);
+    }
+
+    #[test]
+    fn select_base_on_empty_list_does_nothing() {
+        let mut state = CreateState::new(vec![], "repo".into(), "t".into());
+        state.select_next_base();
+        assert_eq!(state.selected_base, 0);
+        state.select_previous_base();
+        assert_eq!(state.selected_base, 0);
+    }
+
+    #[test]
+    fn selected_base_branch_returns_current_selection() {
+        let state = CreateState::new(
+            vec!["main".into(), "develop".into()],
+            "repo".into(),
+            "t".into(),
+        );
+        assert_eq!(state.selected_base_branch(), Some("main"));
+    }
+
+    #[test]
+    fn selected_base_branch_returns_none_on_empty() {
+        let state = CreateState::new(vec![], "repo".into(), "t".into());
+        assert_eq!(state.selected_base_branch(), None);
+    }
+
+    #[test]
+    fn toggle_hooks_flips_enabled() {
+        let mut state = sample_state();
+        assert!(state.hooks_enabled);
+        state.toggle_hooks();
+        assert!(!state.hooks_enabled);
+        state.toggle_hooks();
+        assert!(state.hooks_enabled);
     }
 
     #[test]
