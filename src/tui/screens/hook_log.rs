@@ -65,6 +65,54 @@ impl HookLogState {
             error: None,
         }
     }
+
+    /// Process an incoming message from the hook runner, updating state.
+    pub fn process_message(&mut self, msg: HookOutputMessage) {
+        match msg {
+            HookOutputMessage::StepStarted { step } => {
+                self.sections.push(HookLogSection {
+                    step,
+                    lines: Vec::new(),
+                    completed: false,
+                    success: false,
+                    duration: None,
+                });
+            }
+            HookOutputMessage::OutputLine { step, stream, line } => {
+                let section = self
+                    .sections
+                    .iter_mut()
+                    .rfind(|s| s.step == step);
+                if let Some(section) = section {
+                    section.lines.push(HookLogLine { stream, text: line });
+                }
+            }
+            HookOutputMessage::StepCompleted {
+                step,
+                success,
+                duration,
+            } => {
+                let section = self
+                    .sections
+                    .iter_mut()
+                    .rfind(|s| s.step == step);
+                if let Some(section) = section {
+                    section.completed = true;
+                    section.success = success;
+                    section.duration = Some(duration);
+                }
+            }
+            HookOutputMessage::HookCompleted {
+                success,
+                error,
+                ..
+            } => {
+                self.completed = true;
+                self.success = success;
+                self.error = error;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -174,5 +222,126 @@ mod tests {
         assert!(!state.success);
         assert_eq!(state.scroll_offset, 0);
         assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn process_step_started_creates_new_section() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::StepStarted {
+            step: "copy".to_string(),
+        });
+        assert_eq!(state.sections.len(), 1);
+        assert_eq!(state.sections[0].step, "copy");
+        assert!(!state.sections[0].completed);
+    }
+
+    #[test]
+    fn process_output_line_adds_to_current_section() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::StepStarted {
+            step: "run".to_string(),
+        });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".to_string(),
+            stream: "stdout".to_string(),
+            line: "installing deps".to_string(),
+        });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".to_string(),
+            stream: "stderr".to_string(),
+            line: "warning: deprecated".to_string(),
+        });
+        assert_eq!(state.sections[0].lines.len(), 2);
+        assert_eq!(state.sections[0].lines[0].text, "installing deps");
+        assert_eq!(state.sections[0].lines[0].stream, "stdout");
+        assert_eq!(state.sections[0].lines[1].text, "warning: deprecated");
+        assert_eq!(state.sections[0].lines[1].stream, "stderr");
+    }
+
+    #[test]
+    fn process_step_completed_marks_section_done() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::StepStarted {
+            step: "run".to_string(),
+        });
+        state.process_message(HookOutputMessage::StepCompleted {
+            step: "run".to_string(),
+            success: true,
+            duration: Duration::from_millis(500),
+        });
+        assert!(state.sections[0].completed);
+        assert!(state.sections[0].success);
+        assert_eq!(state.sections[0].duration, Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn process_step_completed_failure() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::StepStarted {
+            step: "shell".to_string(),
+        });
+        state.process_message(HookOutputMessage::StepCompleted {
+            step: "shell".to_string(),
+            success: false,
+            duration: Duration::from_secs(2),
+        });
+        assert!(state.sections[0].completed);
+        assert!(!state.sections[0].success);
+    }
+
+    #[test]
+    fn process_hook_completed_marks_state_done() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::HookCompleted {
+            success: true,
+            duration: Duration::from_secs(3),
+            error: None,
+        });
+        assert!(state.completed);
+        assert!(state.success);
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn process_hook_completed_with_error() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::HookCompleted {
+            success: false,
+            duration: Duration::from_secs(1),
+            error: Some("exit code 1".to_string()),
+        });
+        assert!(state.completed);
+        assert!(!state.success);
+        assert_eq!(state.error.as_deref(), Some("exit code 1"));
+    }
+
+    #[test]
+    fn process_multiple_steps_creates_multiple_sections() {
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::StepStarted {
+            step: "copy".to_string(),
+        });
+        state.process_message(HookOutputMessage::StepCompleted {
+            step: "copy".to_string(),
+            success: true,
+            duration: Duration::from_millis(100),
+        });
+        state.process_message(HookOutputMessage::StepStarted {
+            step: "run".to_string(),
+        });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".to_string(),
+            stream: "stdout".to_string(),
+            line: "done".to_string(),
+        });
+        state.process_message(HookOutputMessage::StepCompleted {
+            step: "run".to_string(),
+            success: true,
+            duration: Duration::from_millis(800),
+        });
+        assert_eq!(state.sections.len(), 2);
+        assert_eq!(state.sections[0].step, "copy");
+        assert_eq!(state.sections[1].step, "run");
+        assert_eq!(state.sections[1].lines.len(), 1);
     }
 }
