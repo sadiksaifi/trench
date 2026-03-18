@@ -537,13 +537,13 @@ pub fn create_worktree(
 pub fn list_local_branches(repo_path: &Path) -> Result<Vec<String>, GitError> {
     let repo =
         git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
-    let branches = repo.branches(Some(git2::BranchType::Local))?;
-    let mut names: Vec<String> = branches
-        .filter_map(|b| {
-            b.ok()
-                .and_then(|(branch, _)| branch.name().ok().flatten().map(String::from))
-        })
-        .collect();
+    let mut names = Vec::new();
+    for branch_res in repo.branches(Some(git2::BranchType::Local))? {
+        let (branch, _) = branch_res?;
+        if let Some(name) = branch.name()?.map(str::to_owned) {
+            names.push(name);
+        }
+    }
     names.sort();
     Ok(names)
 }
