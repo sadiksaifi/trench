@@ -130,7 +130,7 @@ pub async fn execute_hook(
                 );
             }
             Ok(Err(e)) => {
-                let exit_code = extract_run_error_output(&e, &mut all_output);
+                let exit_code = extract_run_error_output(&e, &mut all_output, tx);
                 let step_dur = step_start.elapsed();
                 send_msg(
                     tx,
@@ -208,7 +208,7 @@ pub async fn execute_hook(
                 );
             }
             Ok(Err(e)) => {
-                let exit_code = extract_shell_error_output(&e, &mut all_output);
+                let exit_code = extract_shell_error_output(&e, &mut all_output, tx);
                 let step_dur = step_start.elapsed();
                 send_msg(
                     tx,
@@ -276,10 +276,17 @@ pub async fn execute_hook(
 fn extract_run_error_output(
     err: &anyhow::Error,
     all_output: &mut Vec<(String, String, String)>,
+    tx: Option<&Sender<HookOutputMessage>>,
 ) -> i32 {
     if let Some(run_err) = err.downcast_ref::<RunStepError>() {
         for cmd_output in &run_err.results.executed {
-            collect_output(all_output, "run", &cmd_output.stdout, &cmd_output.stderr);
+            collect_output_with_sender(
+                all_output,
+                "run",
+                &cmd_output.stdout,
+                &cmd_output.stderr,
+                tx,
+            );
         }
         run_err.exit_code
     } else {
@@ -291,27 +298,20 @@ fn extract_run_error_output(
 fn extract_shell_error_output(
     err: &anyhow::Error,
     all_output: &mut Vec<(String, String, String)>,
+    tx: Option<&Sender<HookOutputMessage>>,
 ) -> i32 {
     if let Some(shell_err) = err.downcast_ref::<ShellStepError>() {
-        collect_output(
+        collect_output_with_sender(
             all_output,
             "shell",
             &shell_err.output.stdout,
             &shell_err.output.stderr,
+            tx,
         );
         shell_err.exit_code
     } else {
         1
     }
-}
-
-fn collect_output(
-    all_output: &mut Vec<(String, String, String)>,
-    step: &str,
-    stdout: &str,
-    stderr: &str,
-) {
-    collect_output_with_sender(all_output, step, stdout, stderr, None);
 }
 
 fn collect_output_with_sender(
@@ -942,5 +942,47 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn extract_run_error_output_forwards_to_sender() {
+        use crate::hooks::run::{CommandOutput, RunResult, RunStepError};
+
+        let run_err = RunStepError {
+            command: "failing-cmd".to_string(),
+            exit_code: 1,
+            results: RunResult {
+                executed: vec![CommandOutput {
+                    command: "failing-cmd".to_string(),
+                    stdout: "some output".to_string(),
+                    stderr: "some error".to_string(),
+                    exit_code: 1,
+                }],
+            },
+        };
+        let err: anyhow::Error = run_err.into();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut all_output = Vec::new();
+        let _code = extract_run_error_output(&err, &mut all_output, Some(&tx));
+
+        let mut messages = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            messages.push(msg);
+        }
+
+        // Should have OutputLine messages for the error output
+        assert!(
+            !messages.is_empty(),
+            "extract_run_error_output should forward output to sender"
+        );
+        let has_stdout = messages
+            .iter()
+            .any(|m| matches!(m, HookOutputMessage::OutputLine { stream, line, .. } if stream == "stdout" && line == "some output"));
+        assert!(has_stdout, "should forward stdout to sender");
+        let has_stderr = messages
+            .iter()
+            .any(|m| matches!(m, HookOutputMessage::OutputLine { stream, line, .. } if stream == "stderr" && line == "some error"));
+        assert!(has_stderr, "should forward stderr to sender");
     }
 }
