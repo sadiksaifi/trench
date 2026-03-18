@@ -533,6 +533,21 @@ pub fn create_worktree(
     Ok(())
 }
 
+/// List all local branch names in a repository, sorted alphabetically.
+pub fn list_local_branches(repo_path: &Path) -> Result<Vec<String>, GitError> {
+    let repo =
+        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+    let mut names = Vec::new();
+    for branch_res in repo.branches(Some(git2::BranchType::Local))? {
+        let (branch, _) = branch_res?;
+        if let Some(name) = branch.name()?.map(str::to_owned) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 /// Enumerate all git worktrees for a repository, including the main worktree.
 ///
 /// Opens the repository at `repo_path` and discovers all worktrees: the main
@@ -1608,5 +1623,44 @@ mod tests {
         let entry = entries.iter().find(|e| e.name == "my-feature").unwrap();
         assert!(!entry.is_main);
         assert_eq!(entry.branch.as_deref(), Some("my-feature"));
+    }
+
+    #[test]
+    fn list_local_branches_returns_default_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(tmp.path());
+        let branches = list_local_branches(tmp.path()).unwrap();
+        assert!(!branches.is_empty(), "should have at least the default branch");
+    }
+
+    #[test]
+    fn list_local_branches_includes_created_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        // Create an additional branch
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature-x", &head, false).unwrap();
+        let branches = list_local_branches(tmp.path()).unwrap();
+        assert!(
+            branches.contains(&"feature-x".to_string()),
+            "should list 'feature-x', got: {branches:?}"
+        );
+    }
+
+    #[test]
+    fn list_local_branches_sorted_alphabetically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(tmp.path());
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("zzz", &head, false).unwrap();
+        repo.branch("aaa", &head, false).unwrap();
+        repo.branch("mmm", &head, false).unwrap();
+        let branches = list_local_branches(tmp.path()).unwrap();
+        let sorted: Vec<_> = {
+            let mut s = branches.clone();
+            s.sort();
+            s
+        };
+        assert_eq!(branches, sorted, "branches should be sorted");
     }
 }

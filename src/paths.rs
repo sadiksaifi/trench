@@ -171,6 +171,38 @@ pub fn sanitize_branch(branch: &str) -> String {
     result.trim_matches('-').to_string()
 }
 
+/// Validate a branch name against git ref naming rules.
+///
+/// Returns `Ok(())` if the name is valid, or `Err(reason)` describing why it's invalid.
+pub fn validate_branch_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Branch name is required".into());
+    }
+    if trimmed != name {
+        return Err("Branch name cannot have leading or trailing whitespace".into());
+    }
+    if trimmed.contains("..") {
+        return Err("Branch name cannot contain '..'".into());
+    }
+    if trimmed.ends_with(".lock") {
+        return Err("Branch name cannot end with '.lock'".into());
+    }
+    if trimmed.starts_with('.') || trimmed.ends_with('.') {
+        return Err("Branch name cannot start or end with '.'".into());
+    }
+    let invalid_chars = [' ', '~', '^', ':', '?', '*', '[', '\\'];
+    for ch in trimmed.chars() {
+        if ch.is_ascii_control() {
+            return Err("Branch name cannot contain control characters".into());
+        }
+        if invalid_chars.contains(&ch) {
+            return Err(format!("Branch name cannot contain '{ch}'"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +397,45 @@ mod tests {
         let expanded = expand_tilde("~");
         let home = dirs::home_dir().unwrap();
         assert_eq!(expanded, home.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn validate_branch_name_accepts_valid() {
+        assert!(validate_branch_name("feature-auth").is_ok());
+        assert!(validate_branch_name("fix/login-bug").is_ok());
+        assert!(validate_branch_name("my.branch").is_ok());
+    }
+
+    #[test]
+    fn validate_branch_name_rejects_spaces() {
+        assert!(validate_branch_name("foo bar").is_err());
+    }
+
+    #[test]
+    fn validate_branch_name_rejects_tilde() {
+        assert!(validate_branch_name("branch~1").is_err());
+    }
+
+    #[test]
+    fn validate_branch_name_rejects_lock_suffix() {
+        assert!(validate_branch_name("branch.lock").is_err());
+    }
+
+    #[test]
+    fn validate_branch_name_rejects_double_dots() {
+        assert!(validate_branch_name("foo..bar").is_err());
+    }
+
+    #[test]
+    fn validate_branch_name_rejects_empty() {
+        assert!(validate_branch_name("").is_err());
+        assert!(validate_branch_name("   ").is_err());
+    }
+
+    #[test]
+    fn validate_branch_name_rejects_leading_trailing_whitespace() {
+        assert!(validate_branch_name(" feature").is_err());
+        assert!(validate_branch_name("feature ").is_err());
+        assert!(validate_branch_name(" feature ").is_err());
     }
 }

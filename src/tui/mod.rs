@@ -84,6 +84,7 @@ pub struct App {
     nav_stack: Vec<Screen>,
     pub list_state: screens::list::ListState,
     pub detail_state: Option<screens::detail::DetailState>,
+    pub create_state: Option<screens::create::CreateState>,
     pub sync_picker_state: Option<screens::sync_picker::SyncPickerState>,
     pub delete_confirm_state: Option<screens::delete_confirm::DeleteConfirmState>,
     pub editor_request: Option<String>,
@@ -96,6 +97,7 @@ impl App {
             nav_stack: vec![Screen::List],
             list_state: screens::list::ListState::new(vec![]),
             detail_state: None,
+            create_state: None,
             sync_picker_state: None,
             delete_confirm_state: None,
             editor_request: None,
@@ -155,9 +157,13 @@ impl App {
                 screens::help::render(frame, frame.area());
             }
             Screen::Create => {
-                let placeholder =
-                    Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
-                frame.render_widget(placeholder, frame.area());
+                if let Some(ref create) = self.create_state {
+                    screens::create::render(create, frame, frame.area());
+                } else {
+                    let placeholder =
+                        Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
+                    frame.render_widget(placeholder, frame.area());
+                }
             }
         }
     }
@@ -172,9 +178,9 @@ impl App {
                 }
             }
             Some(Screen::Create) => {
-                let placeholder =
-                    Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
-                frame.render_widget(placeholder, frame.area());
+                if let Some(ref create) = self.create_state {
+                    screens::create::render(create, frame, frame.area());
+                }
             }
             Some(Screen::SyncPicker) => {
                 if let Some(ref picker) = self.sync_picker_state {
@@ -221,6 +227,23 @@ impl App {
         }
     }
 
+    fn is_create_branch_text_entry_active(&self) -> bool {
+        self.active_screen() == Screen::Create
+            && self
+                .create_state
+                .as_ref()
+                .is_some_and(|s| !s.is_result_mode() && s.focused_field == screens::create::CreateField::Branch)
+    }
+
+    fn clear_active_screen_state(&mut self) {
+        match self.active_screen() {
+            Screen::DeleteConfirm => self.delete_confirm_state = None,
+            Screen::SyncPicker => self.sync_picker_state = None,
+            Screen::Create => self.create_state = None,
+            _ => {}
+        }
+    }
+
     pub fn handle_key_event(&mut self, key: KeyEvent) {
         // Global keys handled at app level
         match (key.code, key.modifiers) {
@@ -232,16 +255,12 @@ impl App {
                     self.push_screen(Screen::Help);
                 }
             }
-            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
-                match self.active_screen() {
-                    Screen::DeleteConfirm => {
-                        self.delete_confirm_state = None;
-                    }
-                    Screen::SyncPicker => {
-                        self.sync_picker_state = None;
-                    }
-                    _ => {}
-                }
+            (KeyCode::Esc, _) => {
+                self.clear_active_screen_state();
+                self.pop_screen();
+            }
+            (KeyCode::Char('q'), _) if !self.is_create_branch_text_entry_active() => {
+                self.clear_active_screen_state();
                 self.pop_screen();
             }
             _ => self.handle_screen_key(key),
@@ -254,7 +273,7 @@ impl App {
             Screen::Detail => self.handle_detail_key(key),
             Screen::SyncPicker => self.handle_sync_picker_key(key),
             Screen::DeleteConfirm => self.handle_delete_confirm_key(key),
-            Screen::Create => {}
+            Screen::Create => self.handle_create_key(key),
             Screen::Help => {}
         }
     }
@@ -468,7 +487,10 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('n') => self.push_screen(Screen::Create),
+            KeyCode::Char('n') => {
+                self.init_create_form();
+                self.push_screen(Screen::Create);
+            }
             KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
             KeyCode::Char('s') => {
@@ -491,6 +513,170 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Initialize the create form state from the current repo context.
+    fn init_create_form(&mut self) {
+        let mut base_branches = vec!["main".to_string()];
+        let mut repo_name = String::new();
+        let template = paths::DEFAULT_WORKTREE_TEMPLATE.to_string();
+
+        if let Some((cwd, _db)) = Self::open_db() {
+            if let Ok(repo_info) = crate::git::discover_repo(&cwd) {
+                repo_name = repo_info.name.clone();
+                // Collect local branches for the base selector
+                base_branches =
+                    crate::git::list_local_branches(&repo_info.path).unwrap_or_default();
+                // Ensure the repo default exists and is first
+                if let Some(pos) = base_branches
+                    .iter()
+                    .position(|b| b == &repo_info.default_branch)
+                {
+                    if pos != 0 {
+                        let default = base_branches.remove(pos);
+                        base_branches.insert(0, default);
+                    }
+                } else {
+                    base_branches.insert(0, repo_info.default_branch.clone());
+                }
+            }
+        }
+        if base_branches.is_empty() {
+            base_branches.push("main".to_string());
+        }
+
+        self.create_state = Some(screens::create::CreateState::new(
+            base_branches,
+            repo_name,
+            template,
+        ));
+    }
+
+    fn handle_create_key(&mut self, key: KeyEvent) {
+        use screens::create::CreateField;
+
+        let in_result_mode = self
+            .create_state
+            .as_ref()
+            .is_some_and(|s| s.is_result_mode());
+
+        if in_result_mode {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.create_state = None;
+                    while self.active_screen() != Screen::List {
+                        self.pop_screen();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        let Some(ref mut state) = self.create_state else {
+            return;
+        };
+
+        match state.focused_field {
+            CreateField::Branch => match key.code {
+                KeyCode::Char(c) => {
+                    state.insert_char(c);
+                    state.update_path_preview();
+                    let _ = state.validate();
+                }
+                KeyCode::Backspace => {
+                    state.backspace();
+                    state.update_path_preview();
+                    let _ = state.validate();
+                }
+                KeyCode::Left => state.cursor_left(),
+                KeyCode::Right => state.cursor_right(),
+                KeyCode::Tab => state.focus_next(),
+                KeyCode::BackTab => state.focus_previous(),
+                KeyCode::Enter => state.focus_next(),
+                _ => {}
+            },
+            CreateField::Base => match key.code {
+                KeyCode::Left | KeyCode::Char('h') => state.select_previous_base(),
+                KeyCode::Right | KeyCode::Char('l') => state.select_next_base(),
+                KeyCode::Tab => state.focus_next(),
+                KeyCode::BackTab => state.focus_previous(),
+                KeyCode::Enter => state.focus_next(),
+                _ => {}
+            },
+            CreateField::Hooks => match key.code {
+                KeyCode::Char(' ') => state.toggle_hooks(),
+                KeyCode::Tab => state.focus_next(),
+                KeyCode::BackTab => state.focus_previous(),
+                KeyCode::Enter => {
+                    // On last field, Enter triggers create
+                    self.execute_create();
+                }
+                _ => {}
+            },
+        }
+    }
+
+    fn execute_create(&mut self) {
+        let state = match self.create_state.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Validate first
+        if state.validate().is_err() {
+            return;
+        }
+
+        let branch = state.branch_input.clone();
+        let base = state.selected_base_branch().map(|s| s.to_string());
+
+        let Some((cwd, db)) = Self::open_db() else {
+            state.result = Some(screens::create::CreateResultMessage {
+                success: false,
+                message: "Failed to open database".into(),
+            });
+            return;
+        };
+
+        let worktree_root = match paths::worktree_root() {
+            Ok(r) => r,
+            Err(e) => {
+                state.result = Some(screens::create::CreateResultMessage {
+                    success: false,
+                    message: format!("Failed to resolve worktree root: {e:#}"),
+                });
+                return;
+            }
+        };
+
+        let template = &state.worktree_template;
+        match crate::cli::commands::create::execute(
+            &branch,
+            base.as_deref(),
+            &cwd,
+            &worktree_root,
+            template,
+            &db,
+        ) {
+            Ok(result) => {
+                let msg = format!("Created '{}' at {}", result.name, result.path.display());
+                if let Some(ref mut s) = self.create_state {
+                    s.result = Some(screens::create::CreateResultMessage {
+                        success: true,
+                        message: msg,
+                    });
+                }
+            }
+            Err(e) => {
+                if let Some(ref mut s) = self.create_state {
+                    s.result = Some(screens::create::CreateResultMessage {
+                        success: false,
+                        message: format!("Create failed: {e:#}"),
+                    });
+                }
+            }
         }
     }
 }
@@ -927,6 +1113,236 @@ mod tests {
         );
     }
 
+    fn app_with_create_state() -> App {
+        let mut app = App::new();
+        app.create_state = Some(screens::create::CreateState::new(
+            vec!["main".into(), "develop".into()],
+            "my-project".into(),
+            "{{ repo }}/{{ branch | sanitize }}".into(),
+        ));
+        app.push_screen(Screen::Create);
+        app
+    }
+
+    #[test]
+    fn create_screen_renders_form_when_state_present() {
+        let app = app_with_create_state();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(
+            content.contains("Create Worktree"),
+            "Create screen with state should show form title, got: {:?}",
+            content.trim()
+        );
+    }
+
+    #[test]
+    fn esc_on_create_pops_to_list_and_clears_state() {
+        let mut app = app_with_create_state();
+        assert_eq!(app.active_screen(), Screen::Create);
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.create_state.is_none(), "create_state should be cleared on Esc");
+    }
+
+    #[test]
+    fn q_on_create_pops_when_not_in_branch_field() {
+        let mut app = app_with_create_state();
+        // Move focus to Base field so q acts as cancel
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.create_state.as_ref().unwrap().focused_field,
+            screens::create::CreateField::Base
+        );
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.create_state.is_none());
+    }
+
+    #[test]
+    fn typing_on_create_updates_branch_input() {
+        let mut app = app_with_create_state();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        let state = app.create_state.as_ref().unwrap();
+        assert_eq!(state.branch_input, "foo");
+    }
+
+    #[test]
+    fn typing_on_create_updates_path_preview() {
+        let mut app = app_with_create_state();
+        for c in "feature/auth".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let state = app.create_state.as_ref().unwrap();
+        assert_eq!(state.path_preview, "my-project/feature-auth");
+    }
+
+    #[test]
+    fn tab_on_create_moves_to_next_field() {
+        let mut app = app_with_create_state();
+        assert_eq!(
+            app.create_state.as_ref().unwrap().focused_field,
+            screens::create::CreateField::Branch
+        );
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.create_state.as_ref().unwrap().focused_field,
+            screens::create::CreateField::Base
+        );
+    }
+
+    #[test]
+    fn backtab_on_create_moves_to_previous_field() {
+        let mut app = app_with_create_state();
+        app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(
+            app.create_state.as_ref().unwrap().focused_field,
+            screens::create::CreateField::Hooks
+        );
+    }
+
+    #[test]
+    fn left_right_on_base_field_cycles_base_branches() {
+        let mut app = app_with_create_state();
+        // Move to Base field
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.create_state.as_ref().unwrap().focused_field,
+            screens::create::CreateField::Base
+        );
+        assert_eq!(app.create_state.as_ref().unwrap().selected_base, 0);
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.create_state.as_ref().unwrap().selected_base, 1);
+        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.create_state.as_ref().unwrap().selected_base, 0);
+    }
+
+    #[test]
+    fn space_on_hooks_field_toggles_hooks() {
+        let mut app = app_with_create_state();
+        // Move to Hooks field
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.create_state.as_ref().unwrap().focused_field,
+            screens::create::CreateField::Hooks
+        );
+        assert!(app.create_state.as_ref().unwrap().hooks_enabled);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!app.create_state.as_ref().unwrap().hooks_enabled);
+    }
+
+    #[test]
+    fn backspace_on_create_removes_char() {
+        let mut app = app_with_create_state();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.create_state.as_ref().unwrap().branch_input, "a");
+    }
+
+    #[test]
+    fn app_has_create_state_initially_none() {
+        let app = App::new();
+        assert!(app.create_state.is_none());
+    }
+
+    #[test]
+    fn n_on_list_sets_create_state() {
+        let mut app = App::new();
+        // Without a real git repo, init_create_form will use fallback defaults
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Create);
+        assert!(app.create_state.is_some(), "create_state should be initialized");
+    }
+
+    #[test]
+    fn enter_on_hooks_field_with_empty_branch_shows_validation_error() {
+        let mut app = app_with_create_state();
+        // Move to Hooks field
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.create_state.as_ref().unwrap().focused_field,
+            screens::create::CreateField::Hooks
+        );
+        // Try to create with empty branch
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // Should still be on Create screen with error
+        assert_eq!(app.active_screen(), Screen::Create);
+        assert!(
+            app.create_state.as_ref().unwrap().error.is_some(),
+            "should show validation error for empty branch"
+        );
+        assert!(
+            app.create_state.as_ref().unwrap().result.is_none(),
+            "should not have result yet"
+        );
+    }
+
+    #[test]
+    fn enter_on_hooks_field_with_branch_triggers_execute() {
+        let mut app = app_with_create_state();
+        // Type a branch name
+        for c in "test-branch".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        // Move to Hooks field
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        // Try to create — will fail without real git repo but should set result
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Create);
+        let state = app.create_state.as_ref().unwrap();
+        assert!(state.is_result_mode(), "should be in result mode after execute attempt");
+    }
+
+    #[test]
+    fn enter_in_create_result_mode_pops_to_list() {
+        let mut app = app_with_create_state();
+        // Set result directly
+        app.create_state.as_mut().unwrap().result = Some(screens::create::CreateResultMessage {
+            success: true,
+            message: "Created 'test'".into(),
+        });
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List, "Enter in result mode should pop to list");
+        assert!(app.create_state.is_none(), "create_state should be cleared");
+    }
+
+    #[test]
+    fn space_in_create_result_mode_pops_to_list() {
+        let mut app = app_with_create_state();
+        app.create_state.as_mut().unwrap().result = Some(screens::create::CreateResultMessage {
+            success: false,
+            message: "Create failed".into(),
+        });
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.create_state.is_none());
+    }
+
+    #[test]
+    fn create_result_mode_renders_result_message() {
+        let mut app = app_with_create_state();
+        app.create_state.as_mut().unwrap().result = Some(screens::create::CreateResultMessage {
+            success: true,
+            message: "Created 'feat-x' at /tmp/wt/feat-x".into(),
+        });
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(content.contains("Created"), "should show result message");
+        assert!(content.contains("dismiss"), "should show dismiss footer");
+    }
+
     #[test]
     fn help_screen_renders_help_overlay_not_placeholder() {
         let mut app = App::new();
@@ -1347,6 +1763,47 @@ mod tests {
             content.contains("Sync strategy for"),
             "should render SyncPicker underneath Help overlay, got: {:?}",
             content.trim()
+        );
+    }
+
+    #[test]
+    fn q_inserts_into_branch_field_on_create_screen() {
+        let mut app = app_with_create_state();
+        assert_eq!(app.active_screen(), Screen::Create);
+        // Branch field is focused by default
+        assert_eq!(
+            app.create_state.as_ref().unwrap().focused_field,
+            screens::create::CreateField::Branch
+        );
+
+        // Press 'q' — should insert into branch_input, NOT pop screen
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+
+        assert_eq!(
+            app.active_screen(),
+            Screen::Create,
+            "q should NOT pop the Create screen when Branch field is focused"
+        );
+        assert_eq!(
+            app.create_state.as_ref().unwrap().branch_input,
+            "q",
+            "q should be inserted into branch_input"
+        );
+    }
+
+    #[test]
+    fn backspace_to_empty_revalidates_and_shows_error() {
+        let mut app = app_with_create_state();
+        // Type a char then backspace — should revalidate and show error for empty
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(
+            app.create_state.as_ref().unwrap().error.is_none(),
+            "valid input should have no error"
+        );
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(
+            app.create_state.as_ref().unwrap().error.is_some(),
+            "empty input after backspace should revalidate and show error"
         );
     }
 }
