@@ -49,10 +49,50 @@ pub fn run() -> Result<()> {
     // Restore session state (selected worktree, scroll position) from last run
     app.restore_list_session();
 
+    // Initialize filesystem watcher if auto_refresh is enabled
+    {
+        let auto_refresh = if let Ok(global) = crate::config::load_global_config() {
+            let project = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| crate::git::discover_repo(&cwd).ok())
+                .and_then(|ri| crate::config::load_project_config(&ri.path).ok().flatten());
+            let resolved = crate::config::resolve_config(None, project.as_ref(), &global);
+            resolved.ui.auto_refresh
+        } else {
+            true // default to enabled
+        };
+
+        if auto_refresh {
+            // Collect worktree paths from the current list
+            let worktree_paths: Vec<std::path::PathBuf> = app
+                .list_state
+                .rows
+                .iter()
+                .map(|r| std::path::PathBuf::from(&r.path))
+                .collect();
+            let path_refs: Vec<&std::path::Path> =
+                worktree_paths.iter().map(|p| p.as_path()).collect();
+
+            // Also include the main repo path
+            let repo_path = app.repo_path.as_ref().map(std::path::PathBuf::from);
+            let mut all_refs = path_refs;
+            if let Some(ref rp) = repo_path {
+                all_refs.push(rp.as_path());
+            }
+
+            if let Ok(dw) = watcher::DebouncedWatcher::from_worktree_paths(&all_refs, watcher::DEBOUNCE_DURATION) {
+                app.watcher = Some(dw);
+            }
+        }
+    }
+
     let result = (|| -> Result<()> {
         while app.is_running() {
             // Process any pending hook output messages
             app.process_hook_messages();
+
+            // Check filesystem watcher for auto-refresh
+            app.check_watcher();
 
             terminal.draw(|frame| app.ui(frame))?;
 
@@ -115,6 +155,7 @@ pub struct App {
     pub hook_rx: Option<std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>>,
     pub editor_request: Option<String>,
     pub repo_path: Option<String>,
+    pub watcher: Option<watcher::DebouncedWatcher>,
 }
 
 impl App {
@@ -132,6 +173,7 @@ impl App {
             hook_rx: None,
             editor_request: None,
             repo_path: None,
+            watcher: None,
         }
     }
 
@@ -325,6 +367,41 @@ impl App {
                 self.list_state.selected = prev_selected;
             }
         }
+    }
+
+    /// Poll the filesystem watcher and refresh the list if needed.
+    ///
+    /// Only triggers a refresh when the active screen is List to avoid
+    /// disrupting user interactions on other screens.
+    pub fn check_watcher(&mut self) {
+        if self.active_screen() != Screen::List {
+            // Still drain events to avoid backlog, but don't refresh
+            if let Some(ref mut w) = self.watcher {
+                w.should_refresh();
+            }
+            return;
+        }
+        if let Some(ref mut w) = self.watcher {
+            if w.should_refresh() {
+                self.refresh_list();
+            }
+        }
+    }
+
+    /// Test helper: poll watcher and return whether a refresh was signaled.
+    /// Does NOT actually call refresh_list (safe for unit tests without a real repo).
+    #[cfg(test)]
+    pub fn check_watcher_returns_refresh(&mut self) -> bool {
+        if self.active_screen() != Screen::List {
+            if let Some(ref mut w) = self.watcher {
+                w.should_refresh();
+            }
+            return false;
+        }
+        if let Some(ref mut w) = self.watcher {
+            return w.should_refresh();
+        }
+        false
     }
 
     /// Set up the hook log screen with a receiver for live streaming.
@@ -2873,5 +2950,88 @@ mod tests {
             "replay dismiss should return to Detail, not List"
         );
         assert_eq!(app.nav_stack_depth(), 2);
+    }
+
+    #[test]
+    fn app_starts_with_no_watcher() {
+        let app = App::new();
+        assert!(app.watcher.is_none(), "watcher should be None initially");
+    }
+
+    #[test]
+    fn check_watcher_noop_without_watcher() {
+        let mut app = App::new();
+        // Should not panic or do anything
+        app.check_watcher();
+    }
+
+    #[test]
+    fn check_watcher_triggers_refresh_after_debounce() {
+        use std::time::Duration;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let dw = watcher::DebouncedWatcher::with_debounce(
+            &[dir.path()],
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        let mut app = app_with_rows();
+        app.watcher = Some(dw);
+
+        // Initial state: 3 rows
+        assert_eq!(app.list_state.rows.len(), 3);
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(100));
+        app.check_watcher();
+
+        // Create a file to trigger watcher event
+        std::fs::write(dir.path().join("trigger.txt"), "change").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        app.check_watcher(); // picks up event
+
+        // Wait for debounce to expire
+        std::thread::sleep(Duration::from_millis(100));
+
+        // check_watcher should request refresh (sets refresh_pending)
+        // Since we can't call refresh_list (no real repo), we test the flag
+        assert!(
+            app.check_watcher_returns_refresh(),
+            "should signal refresh after debounce"
+        );
+    }
+
+    #[test]
+    fn check_watcher_skips_refresh_on_non_list_screen() {
+        use std::time::Duration;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let dw = watcher::DebouncedWatcher::with_debounce(
+            &[dir.path()],
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        let mut app = app_with_rows();
+        app.watcher = Some(dw);
+        app.push_screen(Screen::Help); // not on List screen
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(100));
+        app.check_watcher();
+
+        // Trigger event
+        std::fs::write(dir.path().join("trigger.txt"), "change").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        app.check_watcher();
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Should NOT signal refresh while on non-List screen
+        assert!(
+            !app.check_watcher_returns_refresh(),
+            "should not refresh on non-List screen"
+        );
     }
 }

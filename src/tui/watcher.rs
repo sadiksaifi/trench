@@ -6,7 +6,7 @@ use anyhow::Result;
 use notify::{RecommendedWatcher, Watcher};
 
 /// Default debounce window: 500ms of quiet before triggering a refresh.
-const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+pub const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 
 /// Watches filesystem paths for changes and signals when a TUI refresh is needed.
 ///
