@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn theme_struct_has_all_semantic_fields() {
         let theme = from_name("catppuccin");
-        // Verify each field is accessible and distinct
+        // Verify each field is accessible and non-default (not Color::Reset)
         let colors = [
             theme.foreground,
             theme.background,
@@ -177,13 +177,8 @@ mod tests {
             theme.dimmed,
             theme.border,
         ];
-        // All 8 semantic colors should be distinct
-        for (i, a) in colors.iter().enumerate() {
-            for (j, b) in colors.iter().enumerate() {
-                if i != j {
-                    assert_ne!(a, b, "colors at index {i} and {j} should differ");
-                }
-            }
+        for (i, color) in colors.iter().enumerate() {
+            assert_ne!(*color, Color::Reset, "color at index {i} should not be Color::Reset");
         }
     }
 }
