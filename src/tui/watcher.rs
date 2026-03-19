@@ -32,10 +32,20 @@ impl FileWatcher {
             }
         })?;
 
+        let mut watched = 0;
+        let mut watch_errors = 0;
         for path in paths {
             if path.exists() {
-                watcher.watch(path, notify::RecursiveMode::Recursive)?;
+                if watcher.watch(path, notify::RecursiveMode::Recursive).is_ok() {
+                    watched += 1;
+                } else {
+                    watch_errors += 1;
+                }
             }
+        }
+
+        if watched == 0 && watch_errors > 0 {
+            anyhow::bail!("no paths could be watched");
         }
 
         Ok(Self {
@@ -524,4 +534,28 @@ mod tests {
             "should resolve relative gitdir path and watch it"
         );
     }
+
+    #[test]
+    fn watcher_succeeds_with_mix_of_good_and_bad_paths() {
+        let dir = TempDir::new().unwrap();
+        let bad_path = std::path::PathBuf::from("/nonexistent/path/that/does/not/exist");
+
+        // Should succeed even though one path is unwatchable
+        let watcher = FileWatcher::new(&[dir.path(), bad_path.as_path()]);
+        assert!(
+            watcher.is_ok(),
+            "should succeed with at least one good path"
+        );
+
+        let watcher = watcher.unwrap();
+
+        // Should still detect events on the valid path
+        fs::write(dir.path().join("test.txt"), "hello").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            watcher.drain_events(),
+            "should detect changes on valid watched path"
+        );
+    }
+
 }
