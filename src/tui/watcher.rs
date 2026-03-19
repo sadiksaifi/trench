@@ -86,6 +86,41 @@ impl DebouncedWatcher {
         })
     }
 
+    /// Create a debounced watcher from worktree paths, auto-discovering `.git` dirs.
+    ///
+    /// For each worktree path, also watches the `.git` directory (if it exists)
+    /// so that ref changes (commits, fetches, branch switches) trigger refresh.
+    pub fn from_worktree_paths(worktree_paths: &[&Path], debounce: Duration) -> Result<Self> {
+        let mut all_paths: Vec<std::path::PathBuf> = Vec::new();
+
+        for path in worktree_paths {
+            all_paths.push(path.to_path_buf());
+
+            // Check for .git directory (normal repo)
+            let git_dir = path.join(".git");
+            if git_dir.is_dir() {
+                all_paths.push(git_dir);
+            } else if git_dir.is_file() {
+                // Worktree: .git is a file pointing to the real git dir
+                if let Ok(content) = std::fs::read_to_string(&git_dir) {
+                    if let Some(gitdir) = content.strip_prefix("gitdir: ") {
+                        let real_git_dir = Path::new(gitdir.trim());
+                        if real_git_dir.is_dir() {
+                            all_paths.push(real_git_dir.to_path_buf());
+                        }
+                    }
+                }
+            }
+        }
+
+        let path_refs: Vec<&Path> = all_paths.iter().map(|p| p.as_path()).collect();
+        Ok(Self {
+            inner: FileWatcher::new(&path_refs)?,
+            last_event: None,
+            debounce,
+        })
+    }
+
     /// Poll for events and check if debounce period has elapsed.
     ///
     /// Call this every frame in the TUI event loop. Returns `true` when
@@ -286,6 +321,90 @@ mod tests {
 
         assert!(dw.should_refresh(), "first call should return true");
         assert!(!dw.should_refresh(), "second call should return false (cleared)");
+    }
+
+    #[test]
+    fn watcher_detects_git_ref_changes() {
+        let dir = TempDir::new().unwrap();
+
+        // Initialize a git repo
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        {
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let tree_id = repo.index().unwrap().write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+
+        let git_dir = dir.path().join(".git");
+        let watcher = FileWatcher::new(&[&git_dir]).unwrap();
+
+        // Drain startup events
+        std::thread::sleep(Duration::from_millis(200));
+        watcher.drain_events();
+
+        // Simulate a ref change (like after a fetch or commit)
+        let refs_dir = git_dir.join("refs").join("heads");
+        fs::write(refs_dir.join("test-branch"), "fake-sha\n").unwrap();
+
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(watcher.drain_events(), "should detect git ref changes");
+    }
+
+    #[test]
+    fn watcher_detects_head_change() {
+        let dir = TempDir::new().unwrap();
+        let _repo = git2::Repository::init(dir.path()).unwrap();
+
+        let git_dir = dir.path().join(".git");
+        let watcher = FileWatcher::new(&[&git_dir]).unwrap();
+
+        // Drain startup events
+        std::thread::sleep(Duration::from_millis(200));
+        watcher.drain_events();
+
+        // Simulate HEAD change (like switching branches)
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/other-branch\n").unwrap();
+
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(watcher.drain_events(), "should detect HEAD changes");
+    }
+
+    #[test]
+    fn debounced_watcher_from_worktree_paths_discovers_git_dirs() {
+        let dir = TempDir::new().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        {
+            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+            let tree_id = repo.index().unwrap().write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+
+        // Use the constructor that takes worktree paths and auto-discovers .git dirs
+        let mut dw = DebouncedWatcher::from_worktree_paths(
+            &[dir.path()],
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(200));
+        dw.should_refresh();
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh();
+
+        // Simulate a ref change inside .git
+        let refs_dir = dir.path().join(".git").join("refs").join("heads");
+        fs::write(refs_dir.join("new-branch"), "deadbeef\n").unwrap();
+
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh(); // picks up event
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(dw.should_refresh(), "should auto-discover and watch .git directory");
     }
 
     #[test]
