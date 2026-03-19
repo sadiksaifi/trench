@@ -860,12 +860,18 @@ impl App {
                 self.push_screen(Screen::Create);
             }
             KeyCode::Down | KeyCode::Char('j') => {
+                let prev = self.list_state.selected;
                 self.list_state.select_next();
-                self.save_list_session();
+                if self.list_state.selected != prev {
+                    self.save_list_session();
+                }
             }
             KeyCode::Up | KeyCode::Char('k') => {
+                let prev = self.list_state.selected;
                 self.list_state.select_previous();
-                self.save_list_session();
+                if self.list_state.selected != prev {
+                    self.save_list_session();
+                }
             }
             KeyCode::Char('s') => {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
