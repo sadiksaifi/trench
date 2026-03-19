@@ -45,6 +45,26 @@ impl ListState {
     pub fn select_previous(&mut self) {
         self.selected = self.selected.saturating_sub(1);
     }
+
+    /// Restore selection from session state. Tries to find the worktree by name;
+    /// if not found, falls back to `scroll_position` (clamped to bounds).
+    /// Returns `true` if the worktree was found by name.
+    pub fn restore_selection(&mut self, worktree_name: &str, scroll_position: usize) -> bool {
+        if self.rows.is_empty() {
+            self.selected = 0;
+            return false;
+        }
+        if let Some(idx) = self.rows.iter().position(|r| r.name == worktree_name) {
+            self.selected = idx;
+            true
+        } else if scroll_position < self.rows.len() {
+            self.selected = scroll_position;
+            false
+        } else {
+            self.selected = 0;
+            false
+        }
+    }
 }
 
 /// Load worktree data from the database and git, returning rows for the list view.
@@ -275,6 +295,41 @@ mod tests {
                 managed: false,
             },
         ]
+    }
+
+    #[test]
+    fn restore_selection_finds_worktree_by_name() {
+        let mut state = ListState::new(sample_rows());
+        // "fix-bug" is at index 1
+        let found = state.restore_selection("fix-bug", 0);
+        assert!(found, "should find worktree by name");
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn restore_selection_falls_back_to_scroll_position() {
+        let mut state = ListState::new(sample_rows());
+        // Name not found, but scroll position 2 is valid
+        let found = state.restore_selection("nonexistent", 2);
+        assert!(!found, "should not find nonexistent worktree");
+        assert_eq!(state.selected, 2, "should fall back to scroll position");
+    }
+
+    #[test]
+    fn restore_selection_clamps_scroll_position() {
+        let mut state = ListState::new(sample_rows());
+        // Name not found, scroll position 99 is out of bounds
+        let found = state.restore_selection("nonexistent", 99);
+        assert!(!found);
+        assert_eq!(state.selected, 0, "should clamp to 0 when out of bounds");
+    }
+
+    #[test]
+    fn restore_selection_on_empty_list() {
+        let mut state = ListState::new(vec![]);
+        let found = state.restore_selection("anything", 5);
+        assert!(!found);
+        assert_eq!(state.selected, 0);
     }
 
     #[test]
