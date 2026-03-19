@@ -110,6 +110,7 @@ pub struct App {
     pub hook_log_state: Option<screens::hook_log::HookLogState>,
     pub hook_rx: Option<std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>>,
     pub editor_request: Option<String>,
+    pub repo_path: Option<String>,
 }
 
 impl App {
@@ -126,6 +127,7 @@ impl App {
             hook_log_state: None,
             hook_rx: None,
             editor_request: None,
+            repo_path: None,
         }
     }
 
@@ -263,6 +265,42 @@ impl App {
         let db_path = paths::data_dir().ok()?.join("trench.db");
         let db = Database::open(&db_path).ok()?;
         Some((cwd, db))
+    }
+
+    /// Save the current list selection to the session table (testable variant).
+    pub fn save_list_session_to(&self, db: &Database) {
+        let Some(ref repo_path) = self.repo_path else {
+            return;
+        };
+        if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
+            let _ = db.save_list_session(repo_path, &row.name, self.list_state.selected);
+        }
+    }
+
+    /// Restore list selection from the session table (testable variant).
+    pub fn restore_list_session_from(&mut self, db: &Database) {
+        let Some(ref repo_path) = self.repo_path else {
+            return;
+        };
+        if let Ok(Some((name, pos))) = db.load_list_session(repo_path) {
+            self.list_state.restore_selection(&name, pos);
+        }
+    }
+
+    /// Save the current list selection to the session table.
+    fn save_list_session(&self) {
+        let Some((_, db)) = Self::open_db() else {
+            return;
+        };
+        self.save_list_session_to(&db);
+    }
+
+    /// Restore list selection from the session table.
+    fn restore_list_session(&mut self) {
+        let Some((_, db)) = Self::open_db() else {
+            return;
+        };
+        self.restore_list_session_from(&db);
     }
 
     /// Reload worktree data from git + DB for the list screen.
@@ -1070,6 +1108,88 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serial_test::serial;
+
+    #[test]
+    fn app_has_repo_path_initially_none() {
+        let app = App::new();
+        assert!(app.repo_path.is_none());
+    }
+
+    #[test]
+    fn save_list_session_to_db_persists_selection() {
+        let db = crate::state::Database::open_in_memory().unwrap();
+        let mut app = app_with_rows();
+        app.repo_path = Some("/repos/test".into());
+        app.list_state.selected = 1; // "feat-b"
+
+        app.save_list_session_to(&db);
+
+        let session = db.load_list_session("/repos/test").unwrap();
+        assert!(session.is_some());
+        let (name, pos) = session.unwrap();
+        assert_eq!(name, "feat-b");
+        assert_eq!(pos, 1);
+    }
+
+    #[test]
+    fn save_list_session_to_db_noop_without_repo_path() {
+        let db = crate::state::Database::open_in_memory().unwrap();
+        let mut app = app_with_rows();
+        app.list_state.selected = 2;
+        // repo_path is None — should not save
+
+        app.save_list_session_to(&db);
+
+        let session = db.load_list_session("").unwrap();
+        assert!(session.is_none(), "should not save without repo_path");
+    }
+
+    #[test]
+    fn restore_list_session_from_db_restores_selection() {
+        let db = crate::state::Database::open_in_memory().unwrap();
+        db.save_list_session("/repos/test", "feat-b", 1).unwrap();
+
+        let mut app = app_with_rows();
+        app.repo_path = Some("/repos/test".into());
+        app.restore_list_session_from(&db);
+
+        assert_eq!(app.list_state.selected, 1);
+    }
+
+    #[test]
+    fn restore_list_session_from_db_handles_stale_worktree() {
+        let db = crate::state::Database::open_in_memory().unwrap();
+        db.save_list_session("/repos/test", "deleted-worktree", 99).unwrap();
+
+        let mut app = app_with_rows();
+        app.repo_path = Some("/repos/test".into());
+        app.restore_list_session_from(&db);
+
+        assert_eq!(app.list_state.selected, 0, "should fall back to 0 for stale state");
+    }
+
+    #[test]
+    fn restore_list_session_noop_without_repo_path() {
+        let db = crate::state::Database::open_in_memory().unwrap();
+        db.save_list_session("/repos/test", "feat-b", 1).unwrap();
+
+        let mut app = app_with_rows();
+        // repo_path is None
+        app.restore_list_session_from(&db);
+
+        assert_eq!(app.list_state.selected, 0, "should not restore without repo_path");
+    }
+
+    #[test]
+    fn restore_list_session_noop_with_no_saved_session() {
+        let db = crate::state::Database::open_in_memory().unwrap();
+
+        let mut app = app_with_rows();
+        app.repo_path = Some("/repos/test".into());
+        app.restore_list_session_from(&db);
+
+        assert_eq!(app.list_state.selected, 0, "should stay at 0 with no saved session");
+    }
 
     #[test]
     fn app_starts_in_running_state() {
