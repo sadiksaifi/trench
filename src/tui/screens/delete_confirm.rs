@@ -103,7 +103,8 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, the
 
     // Warning
     let warning_text = if let Some(ref pw) = state.process_warning {
-        format!("⚠ {pw}")
+        let msg = pw.strip_prefix("warning: ").unwrap_or(pw);
+        format!("⚠ {msg}")
     } else {
         "⚠ Pre-remove hooks will run before deletion".to_string()
     };
@@ -525,6 +526,10 @@ mod tests {
         assert!(
             text.contains("2 processes running"),
             "should show process warning in dialog, got: {text}"
+        );
+        assert!(
+            !text.contains("⚠ warning:"),
+            "should strip redundant 'warning:' prefix, got: {text}"
         );
     }
 
