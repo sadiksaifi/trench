@@ -45,6 +45,9 @@ pub fn run() -> Result<()> {
     // Load worktree data before entering the event loop
     app.refresh_list();
 
+    // Restore session state (selected worktree, scroll position) from last run
+    app.restore_list_session();
+
     let result = (|| -> Result<()> {
         while app.is_running() {
             // Process any pending hook output messages
@@ -308,6 +311,12 @@ impl App {
         let Some((cwd, db)) = Self::open_db() else {
             return;
         };
+        // Discover and cache repo path for session scoping
+        if self.repo_path.is_none() {
+            if let Ok(repo_info) = crate::git::discover_repo(&cwd) {
+                self.repo_path = Some(repo_info.path.to_string_lossy().to_string());
+            }
+        }
         if let Ok(rows) = screens::list::load_worktrees(&cwd, &db, &[]) {
             let prev_selected = self.list_state.selected;
             self.list_state = screens::list::ListState::new(rows);
@@ -840,6 +849,7 @@ impl App {
                 }
                 // Load detail data for the selected worktree
                 if let Some(name) = identity {
+                    self.save_list_session();
                     if self.load_detail(&name) {
                         self.push_screen(Screen::Detail);
                     }
@@ -849,8 +859,14 @@ impl App {
                 self.init_create_form();
                 self.push_screen(Screen::Create);
             }
-            KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
-            KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.list_state.select_next();
+                self.save_list_session();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.list_state.select_previous();
+                self.save_list_session();
+            }
             KeyCode::Char('s') => {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
                     self.sync_picker_state =
