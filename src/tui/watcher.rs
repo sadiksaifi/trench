@@ -27,6 +27,7 @@ impl FileWatcher {
         let (tx, rx) = mpsc::channel();
         let event_tx = tx;
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            // TODO: log notify errors at warn level once a logging framework is added (#122)
             if res.is_ok() {
                 let _ = event_tx.send(());
             }
