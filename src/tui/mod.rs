@@ -55,35 +55,11 @@ pub fn run() -> Result<()> {
     app.restore_list_session();
 
     // Initialize filesystem watcher if auto_refresh is enabled
-    let auto_refresh = resolved_config
+    app.auto_refresh = resolved_config
         .as_ref()
         .map(|c| c.ui.auto_refresh)
         .unwrap_or(true);
-
-    if auto_refresh {
-        // Collect worktree paths from the current list
-        let worktree_paths: Vec<std::path::PathBuf> = app
-            .list_state
-            .rows
-            .iter()
-            .map(|r| std::path::PathBuf::from(&r.path))
-            .collect();
-        let path_refs: Vec<&std::path::Path> =
-            worktree_paths.iter().map(|p| p.as_path()).collect();
-
-        // Also include the main repo path
-        let repo_path = app.repo_path.as_ref().map(std::path::PathBuf::from);
-        let mut all_refs = path_refs;
-        if let Some(ref rp) = repo_path {
-            all_refs.push(rp.as_path());
-        }
-
-        if let Ok(dw) =
-            watcher::DebouncedWatcher::from_worktree_paths(&all_refs, watcher::DEBOUNCE_DURATION)
-        {
-            app.watcher = Some(dw);
-        }
-    }
+    app.rebuild_watcher();
 
     let result = (|| -> Result<()> {
         while app.is_running() {
@@ -154,6 +130,7 @@ pub struct App {
     pub hook_rx: Option<std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>>,
     pub editor_request: Option<String>,
     pub repo_path: Option<String>,
+    pub auto_refresh: bool,
     pub watcher: Option<watcher::DebouncedWatcher>,
 }
 
@@ -172,6 +149,7 @@ impl App {
             hook_rx: None,
             editor_request: None,
             repo_path: None,
+            auto_refresh: true,
             watcher: None,
         }
     }
@@ -365,6 +343,38 @@ impl App {
             if self.list_state.rows.len() > prev_selected {
                 self.list_state.selected = prev_selected;
             }
+        }
+        self.rebuild_watcher();
+    }
+
+    /// Rebuild the filesystem watcher from the current worktree list.
+    ///
+    /// Called after `refresh_list()` to keep watched paths in sync with
+    /// the current set of worktrees.
+    pub fn rebuild_watcher(&mut self) {
+        if !self.auto_refresh {
+            return;
+        }
+
+        let worktree_paths: Vec<std::path::PathBuf> = self
+            .list_state
+            .rows
+            .iter()
+            .map(|r| std::path::PathBuf::from(&r.path))
+            .collect();
+        let path_refs: Vec<&std::path::Path> =
+            worktree_paths.iter().map(|p| p.as_path()).collect();
+
+        let repo_path = self.repo_path.as_ref().map(std::path::PathBuf::from);
+        let mut all_refs = path_refs;
+        if let Some(ref rp) = repo_path {
+            all_refs.push(rp.as_path());
+        }
+
+        if let Ok(dw) =
+            watcher::DebouncedWatcher::from_worktree_paths(&all_refs, watcher::DEBOUNCE_DURATION)
+        {
+            self.watcher = Some(dw);
         }
     }
 
@@ -3031,6 +3041,89 @@ mod tests {
         assert!(
             !app.check_watcher_returns_refresh(),
             "should not refresh on non-List screen"
+        );
+    }
+
+    #[test]
+    fn rebuild_watcher_updates_watched_paths() {
+        use std::time::Duration;
+
+        let dir1 = tempfile::TempDir::new().unwrap();
+        let dir2 = tempfile::TempDir::new().unwrap();
+
+        let mut app = App::new();
+        app.auto_refresh = true;
+
+        // Simulate list_state with dir1 only
+        app.list_state = screens::list::ListState::new(vec![screens::list::WorktreeRow {
+            name: "wt1".to_string(),
+            branch: "main".to_string(),
+            path: dir1.path().to_string_lossy().to_string(),
+            status: String::new(),
+            ahead_behind: String::new(),
+            processes: String::new(),
+            managed: true,
+        }]);
+        app.rebuild_watcher();
+        assert!(app.watcher.is_some(), "watcher should be initialized");
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(200));
+        if let Some(ref mut w) = app.watcher {
+            w.should_refresh();
+        }
+
+        // Changes in dir2 should NOT be detected (not watched)
+        std::fs::write(dir2.path().join("test.txt"), "hello").unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !app.check_watcher_returns_refresh(),
+            "dir2 should not be watched yet"
+        );
+
+        // Now update list_state to include dir2
+        app.list_state = screens::list::ListState::new(vec![
+            screens::list::WorktreeRow {
+                name: "wt1".to_string(),
+                branch: "main".to_string(),
+                path: dir1.path().to_string_lossy().to_string(),
+                status: String::new(),
+                ahead_behind: String::new(),
+                processes: String::new(),
+                managed: true,
+            },
+            screens::list::WorktreeRow {
+                name: "wt2".to_string(),
+                branch: "feature".to_string(),
+                path: dir2.path().to_string_lossy().to_string(),
+                status: String::new(),
+                ahead_behind: String::new(),
+                processes: String::new(),
+                managed: true,
+            },
+        ]);
+        app.rebuild_watcher();
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(300));
+        if let Some(ref mut w) = app.watcher {
+            w.should_refresh();
+        }
+        std::thread::sleep(Duration::from_millis(600));
+        if let Some(ref mut w) = app.watcher {
+            w.should_refresh();
+        }
+
+        // Changes in dir2 should NOW be detected
+        std::fs::write(dir2.path().join("test2.txt"), "world").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        if let Some(ref mut w) = app.watcher {
+            w.should_refresh(); // picks up event
+        }
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            app.check_watcher_returns_refresh(),
+            "dir2 should be watched after rebuild"
         );
     }
 }
