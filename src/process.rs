@@ -26,6 +26,9 @@ fn within_worktree(cwd: &str, worktree_path: &str) -> bool {
         "" => "/",
         normalized => normalized,
     };
+    if wt == "/" {
+        return cwd.starts_with('/');
+    }
     cwd == wt || cwd.starts_with(&format!("{wt}/"))
 }
 
@@ -284,6 +287,7 @@ n/Users/sdk/.worktrees/myrepo/feature-branch/packages/app\n";
         assert!(result.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn scan_proc_finds_processes_with_matching_cwd() {
         // Create a fake /proc-like directory structure
@@ -328,6 +332,7 @@ n/Users/sdk/.worktrees/myrepo/feature-branch/packages/app\n";
         assert!(result.iter().any(|p| p.pid == 200 && p.name == "vite"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn scan_proc_handles_missing_comm() {
         let proc_dir = tempfile::tempdir().unwrap();
@@ -375,6 +380,14 @@ n/Users/sdk/.worktrees/myrepo/feature-branch/packages/app\n";
         assert!(within_worktree("/repo/wt/sub", "/repo/wt"));
         assert!(!within_worktree("/repo/other", "/repo/wt"));
         assert!(!within_worktree("/repo/wt-extra", "/repo/wt"));
+    }
+
+    #[test]
+    fn within_worktree_handles_root_path() {
+        // worktree_path = "/" should match any absolute path
+        assert!(within_worktree("/tmp", "/"));
+        assert!(within_worktree("/tmp/sub", "/"));
+        assert!(within_worktree("/", "/"));
     }
 
     #[test]
