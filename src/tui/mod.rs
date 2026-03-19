@@ -296,7 +296,7 @@ impl App {
         }
         if received {
             if let Some(ref mut state) = self.hook_log_state {
-                state.auto_scroll(20);
+                state.auto_scroll(state.last_body_height.get());
             }
         }
         if completed && self.hook_log_state.is_none() {
@@ -640,18 +640,13 @@ impl App {
     }
 
     fn handle_hook_log_key(&mut self, key: KeyEvent) {
-        // Use a default visible height for scroll calculations.
-        // The actual terminal height isn't available here, so 20 is a
-        // reasonable default; the important thing is that the scroll
-        // direction and clamping work correctly.
-        const VISIBLE_HEIGHT: usize = 20;
-
         if let Some(ref mut state) = self.hook_log_state {
+            let h = state.last_body_height.get();
             match key.code {
-                KeyCode::Down | KeyCode::Char('j') => state.scroll_down(VISIBLE_HEIGHT),
+                KeyCode::Down | KeyCode::Char('j') => state.scroll_down(h),
                 KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
-                KeyCode::PageDown => state.page_down(VISIBLE_HEIGHT),
-                KeyCode::PageUp => state.page_up(VISIBLE_HEIGHT),
+                KeyCode::PageDown => state.page_down(h),
+                KeyCode::PageUp => state.page_up(h),
                 _ => {}
             }
         }

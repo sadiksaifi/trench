@@ -37,6 +37,9 @@ pub struct HookLogState {
     pub error: Option<String>,
     /// True when viewing historical DB data (replay mode), false during live streaming.
     pub replay: bool,
+    /// Last rendered body height from `render()`. Used for scroll calculations.
+    /// Uses `Cell` for interior mutability so `render(&self)` can update it.
+    pub last_body_height: std::cell::Cell<usize>,
 }
 
 impl HookLogState {
@@ -108,6 +111,7 @@ impl HookLogState {
             scroll_offset: 0,
             error: None,
             replay: true,
+            last_body_height: std::cell::Cell::new(20),
         }
     }
 
@@ -121,6 +125,7 @@ impl HookLogState {
             scroll_offset: 0,
             error: Some("No hook history for this worktree.".to_string()),
             replay: true,
+            last_body_height: std::cell::Cell::new(20),
         }
     }
 
@@ -133,6 +138,7 @@ impl HookLogState {
             scroll_offset: 0,
             error: None,
             replay: false,
+            last_body_height: std::cell::Cell::new(20),
         }
     }
 
@@ -326,6 +332,7 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
 
     // Apply scroll offset
     let visible_height = chunks[1].height as usize;
+    state.last_body_height.set(visible_height);
     let skip = state.scroll_offset.min(lines.len());
     let visible_lines: Vec<Line> = lines.into_iter().skip(skip).take(visible_height).collect();
 
@@ -1087,5 +1094,37 @@ mod tests {
         });
         // With error: 3 content + 2 error lines (blank + "Error: ...") = 5
         assert_eq!(state.total_lines(), 5);
+    }
+
+    #[test]
+    fn scroll_down_clamps_to_last_body_height() {
+        let mut state = HookLogState::new("test");
+        // Add 30 output lines so total > any reasonable visible height
+        state.sections.push(HookLogSection {
+            step: "run".into(),
+            lines: (0..30)
+                .map(|i| HookLogLine {
+                    stream: "stdout".into(),
+                    text: format!("line {i}"),
+                })
+                .collect(),
+            completed: true,
+            success: true,
+            duration: None,
+        });
+        // total_lines = 1 header + 30 output = 31
+        assert_eq!(state.total_lines(), 31);
+
+        // Set last_body_height to 10 (simulating small terminal)
+        state.last_body_height.set(10);
+
+        // Scroll down repeatedly — should clamp at total_lines - 10 = 21
+        for _ in 0..25 {
+            state.scroll_down(state.last_body_height.get());
+        }
+        assert_eq!(
+            state.scroll_offset, 21,
+            "scroll_down should clamp based on last_body_height (10), not 20"
+        );
     }
 }
