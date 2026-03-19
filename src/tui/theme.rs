@@ -23,6 +23,7 @@ pub fn from_name(name: &str) -> Theme {
     match name {
         "catppuccin" => catppuccin(),
         "gruvbox" => gruvbox(),
+        "minimal" => minimal(),
         _ => catppuccin(),
     }
 }
@@ -52,6 +53,20 @@ fn gruvbox() -> Theme {
         warning: Color::Rgb(250, 189, 47),     // yellow
         dimmed: Color::Rgb(146, 131, 116),     // gray
         border: Color::Rgb(80, 73, 69),        // bg2
+    }
+}
+
+fn minimal() -> Theme {
+    // Basic ANSI colors only — works in any terminal
+    Theme {
+        foreground: Color::White,
+        background: Color::Reset,
+        accent: Color::Cyan,
+        success: Color::Green,
+        error: Color::Red,
+        warning: Color::Yellow,
+        dimmed: Color::DarkGray,
+        border: Color::Gray,
     }
 }
 
@@ -90,6 +105,48 @@ mod tests {
         let cat = from_name("catppuccin");
         let grv = from_name("gruvbox");
         assert_ne!(cat, grv, "gruvbox and catppuccin should be different themes");
+    }
+
+    #[test]
+    fn minimal_theme_uses_only_basic_ansi_colors() {
+        let theme = from_name("minimal");
+        let colors = [
+            theme.foreground,
+            theme.background,
+            theme.accent,
+            theme.success,
+            theme.error,
+            theme.warning,
+            theme.dimmed,
+            theme.border,
+        ];
+        for color in &colors {
+            match color {
+                Color::Rgb(_, _, _) => panic!("minimal theme must not use Rgb colors, found {color:?}"),
+                Color::Indexed(_) => panic!("minimal theme must not use indexed colors, found {color:?}"),
+                _ => {} // basic ANSI is fine
+            }
+        }
+    }
+
+    #[test]
+    fn minimal_theme_has_expected_values() {
+        let theme = from_name("minimal");
+        assert_eq!(theme.foreground, Color::White);
+        assert_eq!(theme.background, Color::Reset);
+        assert_eq!(theme.accent, Color::Cyan);
+        assert_eq!(theme.success, Color::Green);
+        assert_eq!(theme.error, Color::Red);
+        assert_eq!(theme.warning, Color::Yellow);
+        assert_eq!(theme.dimmed, Color::DarkGray);
+        assert_eq!(theme.border, Color::Gray);
+    }
+
+    #[test]
+    fn minimal_differs_from_catppuccin() {
+        let cat = from_name("catppuccin");
+        let min = from_name("minimal");
+        assert_ne!(cat, min, "minimal and catppuccin should be different themes");
     }
 
     #[test]
