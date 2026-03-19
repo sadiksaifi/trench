@@ -23,6 +23,8 @@ pub struct WorktreeRow {
     pub status: String,
     pub ahead_behind: String,
     pub managed: bool,
+    /// Comma-separated process names running in this worktree.
+    pub processes: String,
 }
 
 /// State for the worktree list screen.
@@ -93,6 +95,8 @@ pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Resul
 
     for wt in &db_worktrees {
         let status = compute_status(repo_path, &wt.branch, wt.base_branch.as_deref(), &wt.path);
+        let procs = crate::process::detect_processes(&wt.path);
+        let processes = procs.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ");
         rows.push(WorktreeRow {
             name: wt.name.clone(),
             branch: wt.branch.clone(),
@@ -100,6 +104,7 @@ pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Resul
             status: status.0,
             ahead_behind: status.1,
             managed: true,
+            processes,
         });
     }
 
@@ -113,13 +118,17 @@ pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Resul
                 None,
                 &gw.path.to_string_lossy(),
             );
+            let wt_path_str = gw.path.to_string_lossy().to_string();
+            let procs = crate::process::detect_processes(&wt_path_str);
+            let processes = procs.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ");
             rows.push(WorktreeRow {
                 name: gw.name.clone(),
                 branch,
-                path: gw.path.to_string_lossy().to_string(),
+                path: wt_path_str,
                 status: status.0,
                 ahead_behind: status.1,
                 managed: false,
+                processes,
             });
         }
     }
@@ -136,19 +145,23 @@ pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Resul
             if !seen_paths.contains(&sw.path) {
                 seen_paths.insert(sw.path.clone());
                 let branch = sw.branch.clone().unwrap_or_else(|| "(detached)".to_string());
+                let wt_path_str = sw.path.to_string_lossy().to_string();
                 let status = compute_status(
                     repo_path,
                     &branch,
                     None,
-                    &sw.path.to_string_lossy(),
+                    &wt_path_str,
                 );
+                let procs = crate::process::detect_processes(&wt_path_str);
+                let processes = procs.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ");
                 rows.push(WorktreeRow {
                     name: sw.name.clone(),
                     branch,
-                    path: sw.path.to_string_lossy().to_string(),
+                    path: wt_path_str,
                     status: status.0,
                     ahead_behind: status.1,
                     managed: false,
+                    processes,
                 });
             }
         }
@@ -200,7 +213,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
 
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
 
-    let header_cells = ["Name", "Branch", "Status", "Ahead/Behind", ""]
+    let header_cells = ["Name", "Branch", "Status", "Ahead/Behind", "Procs", ""]
         .iter()
         .map(|h| Cell::from(*h).style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)));
     let header = Row::new(header_cells).height(1);
@@ -220,6 +233,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
                 Cell::from(r.branch.clone()),
                 Cell::from(r.status.clone()),
                 Cell::from(r.ahead_behind.clone()),
+                Cell::from(r.processes.clone()),
                 Cell::from(badge),
             ])
             .style(style)
@@ -227,8 +241,9 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
         .collect();
 
     let widths = [
-        Constraint::Percentage(25),
-        Constraint::Percentage(25),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(10),
         Constraint::Percentage(15),
         Constraint::Percentage(15),
         Constraint::Percentage(20),
@@ -277,6 +292,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "+1/-0".into(),
                 managed: true,
+                processes: String::new(),
             },
             WorktreeRow {
                 name: "fix-bug".into(),
@@ -285,6 +301,7 @@ mod tests {
                 status: "~3".into(),
                 ahead_behind: "+0/-2".into(),
                 managed: true,
+                processes: String::new(),
             },
             WorktreeRow {
                 name: "main".into(),
@@ -293,6 +310,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "-".into(),
                 managed: false,
+                processes: String::new(),
             },
         ]
     }
@@ -510,6 +528,38 @@ mod tests {
             cell.fg, theme.foreground,
             "empty state text should use theme.foreground, got: {:?}",
             cell.fg
+        );
+    }
+
+    #[test]
+    fn renders_process_info_in_table() {
+        let rows = vec![
+            WorktreeRow {
+                name: "feature-auth".into(),
+                branch: "feature/auth".into(),
+                path: "/tmp/wt/feature-auth".into(),
+                status: "clean".into(),
+                ahead_behind: "+1/-0".into(),
+                managed: true,
+                processes: "node, vite".into(),
+            },
+            WorktreeRow {
+                name: "fix-bug".into(),
+                branch: "fix/bug".into(),
+                path: "/tmp/wt/fix-bug".into(),
+                status: "~3".into(),
+                ahead_behind: "+0/-2".into(),
+                managed: true,
+                processes: String::new(),
+            },
+        ];
+        let state = ListState::new(rows);
+        let buf = render_to_buffer(&state, 120, 10);
+        let text = buffer_text(&buf);
+
+        assert!(
+            text.contains("node, vite"),
+            "should show process names, got: {text}"
         );
     }
 

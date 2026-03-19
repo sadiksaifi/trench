@@ -1253,6 +1253,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "+0/-0".into(),
                 managed: true,
+                processes: String::new(),
             },
             screens::list::WorktreeRow {
                 name: "feat-c".into(),
@@ -1261,6 +1262,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "-".into(),
                 managed: true,
+                processes: String::new(),
             },
         ]);
         app2.repo_path = Some(repo_path.into());
@@ -1567,6 +1569,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "+0/-0".into(),
                 managed: true,
+                processes: String::new(),
             },
             WorktreeRow {
                 name: "feat-b".into(),
@@ -1575,6 +1578,7 @@ mod tests {
                 status: "~2".into(),
                 ahead_behind: "+1/-0".into(),
                 managed: true,
+                processes: String::new(),
             },
             WorktreeRow {
                 name: "main".into(),
@@ -1583,6 +1587,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "-".into(),
                 managed: false,
+                processes: String::new(),
             },
         ]);
         app

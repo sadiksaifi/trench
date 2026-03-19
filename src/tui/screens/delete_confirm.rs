@@ -466,6 +466,7 @@ mod tests {
             status: "clean".into(),
             ahead_behind: "+0/-0".into(),
             managed: true,
+            processes: String::new(),
         }]);
         app.delete_confirm_state = Some(DeleteConfirmState::new(
             "feat-a",
