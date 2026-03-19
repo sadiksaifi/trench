@@ -144,12 +144,7 @@ fn detect_via_lsof(worktree_path: &str) -> Vec<ProcessInfo> {
     parse_lsof_output(&stdout, worktree_path)
 }
 
-/// Format a warning message about running processes for display before
-/// destructive operations like `trench remove`.
-///
-/// Returns `None` if no processes are detected.
-pub fn format_process_warning(worktree_path: &str) -> Option<String> {
-    let procs = detect_processes(worktree_path);
+fn build_process_warning(procs: &[ProcessInfo]) -> Option<String> {
     if procs.is_empty() {
         return None;
     }
@@ -163,20 +158,19 @@ pub fn format_process_warning(worktree_path: &str) -> Option<String> {
     ))
 }
 
+/// Format a warning message about running processes for display before
+/// destructive operations like `trench remove`.
+///
+/// Returns `None` if no processes are detected.
+pub fn format_process_warning(worktree_path: &str) -> Option<String> {
+    let procs = detect_processes(worktree_path);
+    build_process_warning(&procs)
+}
+
 /// Build a warning string from already-detected processes (for TUI use
 /// where detection is done separately).
 pub fn format_process_warning_from(procs: &[ProcessInfo]) -> Option<String> {
-    if procs.is_empty() {
-        return None;
-    }
-
-    let names: Vec<&str> = procs.iter().map(|p| p.name.as_str()).collect();
-    let count = procs.len();
-    Some(format!(
-        "warning: {count} process{} running in this worktree: {}",
-        if count == 1 { "" } else { "es" },
-        names.join(", "),
-    ))
+    build_process_warning(procs)
 }
 
 #[cfg(test)]
@@ -210,6 +204,17 @@ mod tests {
     fn format_warning_returns_none_for_empty() {
         let warning = format_process_warning_from(&[]);
         assert!(warning.is_none());
+    }
+
+    #[test]
+    fn build_process_warning_shared_by_both_functions() {
+        let procs = vec![
+            ProcessInfo { pid: 1, name: "node".into() },
+            ProcessInfo { pid: 2, name: "vite".into() },
+        ];
+        let from_helper = build_process_warning(&procs);
+        let from_public = format_process_warning_from(&procs);
+        assert_eq!(from_helper, from_public);
     }
 
     #[test]
