@@ -6,6 +6,7 @@
 //! empty list, never an error.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 /// Information about a process running in a worktree directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +47,54 @@ pub fn parse_lsof_output(output: &str, worktree_path: &str) -> Vec<ProcessInfo> 
                     });
                 }
             }
+        }
+    }
+
+    results
+}
+
+/// Scan a `/proc`-style directory for processes whose cwd is within
+/// `worktree_path`. Used on Linux where `/proc/<pid>/cwd` is a symlink
+/// to the process's current working directory.
+pub fn scan_proc_dir(proc_path: &Path, worktree_path: &str) -> Vec<ProcessInfo> {
+    let mut results = Vec::new();
+
+    let entries = match std::fs::read_dir(proc_path) {
+        Ok(e) => e,
+        Err(_) => return results,
+    };
+
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name_str = file_name.to_string_lossy();
+
+        // Only look at numeric directories (PIDs)
+        let pid: u32 = match name_str.parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let cwd_link = entry.path().join("cwd");
+        let cwd = match std::fs::read_link(&cwd_link) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let cwd_str = cwd.to_string_lossy();
+        if cwd_str.as_ref() != worktree_path
+            && !cwd_str.starts_with(&format!("{worktree_path}/"))
+        {
+            continue;
+        }
+
+        let comm_path = entry.path().join("comm");
+        let comm = std::fs::read_to_string(&comm_path)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        if !comm.is_empty() {
+            results.push(ProcessInfo { pid, name: comm });
         }
     }
 
@@ -103,6 +152,56 @@ n/Users/sdk/.worktrees/myrepo/feature-branch/packages/app\n";
     fn parse_lsof_output_handles_malformed_input() {
         let output = "garbage\nmore garbage\n";
         let result = parse_lsof_output(output, "/some/path");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn scan_proc_finds_processes_with_matching_cwd() {
+        // Create a fake /proc-like directory structure
+        let proc_dir = tempfile::tempdir().unwrap();
+        let worktree_dir = tempfile::tempdir().unwrap();
+        let worktree_path = worktree_dir.path().to_str().unwrap();
+
+        // PID 100: cwd points to worktree (match)
+        let pid100 = proc_dir.path().join("100");
+        std::fs::create_dir(&pid100).unwrap();
+        std::fs::write(pid100.join("comm"), "node\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(worktree_path, pid100.join("cwd")).unwrap();
+
+        // PID 200: cwd points to subdirectory of worktree (match)
+        let subdir = worktree_dir.path().join("packages");
+        std::fs::create_dir(&subdir).unwrap();
+        let pid200 = proc_dir.path().join("200");
+        std::fs::create_dir(&pid200).unwrap();
+        std::fs::write(pid200.join("comm"), "vite\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(subdir.to_str().unwrap(), pid200.join("cwd")).unwrap();
+
+        // PID 300: cwd points elsewhere (no match)
+        let other_dir = tempfile::tempdir().unwrap();
+        let pid300 = proc_dir.path().join("300");
+        std::fs::create_dir(&pid300).unwrap();
+        std::fs::write(pid300.join("comm"), "bash\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            other_dir.path().to_str().unwrap(),
+            pid300.join("cwd"),
+        )
+        .unwrap();
+
+        // Non-numeric directory (should be skipped)
+        std::fs::create_dir(proc_dir.path().join("self")).unwrap();
+
+        let result = scan_proc_dir(proc_dir.path(), worktree_path);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|p| p.pid == 100 && p.name == "node"));
+        assert!(result.iter().any(|p| p.pid == 200 && p.name == "vite"));
+    }
+
+    #[test]
+    fn scan_proc_returns_empty_for_nonexistent_dir() {
+        let result = scan_proc_dir(std::path::Path::new("/nonexistent/proc"), "/some/path");
         assert!(result.is_empty());
     }
 
