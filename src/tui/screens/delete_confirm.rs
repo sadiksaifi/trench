@@ -36,6 +36,7 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, the
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
         .title(" Delete Worktree ")
         .title_alignment(Alignment::Center);
     let inner = block.inner(dialog_area);
@@ -130,6 +131,7 @@ fn render_result(
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
         .title(if result.success {
             " Removed "
         } else {
@@ -411,6 +413,41 @@ mod tests {
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
         assert!(text.contains("Space"), "result footer should mention Space key");
+    }
+
+    #[test]
+    fn confirm_dialog_uses_themed_border_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        let buf = render_to_buffer(&state, 80, 20);
+        // The dialog is centered in an 80x20 area with width=60, height=10.
+        // Centered: x_offset = (80-60)/2 = 10, y_offset = (20-10)/2 = 5
+        // Top-left border cell is at (10, 5)
+        let cell = buf.cell((10, 5)).unwrap();
+        assert_eq!(
+            cell.fg, theme.border,
+            "confirm dialog border should use theme.border color, got: {:?}",
+            cell.fg
+        );
+    }
+
+    #[test]
+    fn result_dialog_uses_themed_border_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        state.result = Some(DeleteResultMessage {
+            success: true,
+            message: "Removed successfully".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        // Result dialog: centered width=60, height=8
+        // x_offset = (80-60)/2 = 10, y_offset = (20-8)/2 = 6
+        let cell = buf.cell((10, 6)).unwrap();
+        assert_eq!(
+            cell.fg, theme.border,
+            "result dialog border should use theme.border color, got: {:?}",
+            cell.fg
+        );
     }
 
     #[test]
