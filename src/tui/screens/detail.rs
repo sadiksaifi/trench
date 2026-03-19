@@ -160,8 +160,8 @@ const METADATA_HEIGHT: u16 = 5;
 
 const DETAIL_FOOTER_KEYS: &str = " s sync  o open  l log  Esc back ";
 
-pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+pub fn render(state: &DetailState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
+    let bold = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
 
     let chunks = Layout::vertical([
         Constraint::Length(METADATA_HEIGHT),
@@ -239,7 +239,7 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
 
     // — Footer —
     let footer = Paragraph::new(Line::from(DETAIL_FOOTER_KEYS))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
     frame.render_widget(footer, chunks[3]);
 }
 
@@ -251,8 +251,9 @@ mod tests {
     fn render_to_buffer(state: &DetailState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
         terminal
-            .draw(|frame| render(state, frame, frame.area()))
+            .draw(|frame| render(state, frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
     }

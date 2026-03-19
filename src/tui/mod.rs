@@ -1,4 +1,5 @@
 pub mod screens;
+pub mod theme;
 
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +31,16 @@ pub fn run() -> Result<()> {
     install_panic_hook();
     let mut terminal = ratatui::init();
     let mut app = App::new();
+
+    // Load config and apply theme
+    if let Ok(global) = crate::config::load_global_config() {
+        let project = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::git::discover_repo(&cwd).ok())
+            .and_then(|ri| crate::config::load_project_config(&ri.path).ok().flatten());
+        let resolved = crate::config::resolve_config(None, project.as_ref(), &global);
+        app.theme = theme::from_name(&resolved.ui.theme);
+    }
 
     // Load worktree data before entering the event loop
     app.refresh_list();
@@ -90,6 +101,7 @@ fn restore_panic_hook() {
 pub struct App {
     running: bool,
     nav_stack: Vec<Screen>,
+    pub theme: theme::Theme,
     pub list_state: screens::list::ListState,
     pub detail_state: Option<screens::detail::DetailState>,
     pub create_state: Option<screens::create::CreateState>,
@@ -105,6 +117,7 @@ impl App {
         Self {
             running: true,
             nav_stack: vec![Screen::List],
+            theme: theme::from_name("catppuccin"),
             list_state: screens::list::ListState::new(vec![]),
             detail_state: None,
             create_state: None,
@@ -136,11 +149,12 @@ impl App {
     }
 
     pub fn ui(&self, frame: &mut Frame) {
+        let theme = &self.theme;
         match self.active_screen() {
-            Screen::List => screens::list::render(&self.list_state, frame, frame.area()),
+            Screen::List => screens::list::render(&self.list_state, frame, frame.area(), theme),
             Screen::Detail => {
                 if let Some(ref detail) = self.detail_state {
-                    screens::detail::render(detail, frame, frame.area());
+                    screens::detail::render(detail, frame, frame.area(), theme);
                 } else {
                     let placeholder =
                         Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
@@ -149,7 +163,7 @@ impl App {
             }
             Screen::SyncPicker => {
                 if let Some(ref picker) = self.sync_picker_state {
-                    screens::sync_picker::render(picker, frame, frame.area());
+                    screens::sync_picker::render(picker, frame, frame.area(), theme);
                 } else {
                     let placeholder =
                         Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
@@ -158,19 +172,19 @@ impl App {
             }
             Screen::DeleteConfirm => {
                 // Render list underneath, then overlay the dialog
-                screens::list::render(&self.list_state, frame, frame.area());
+                screens::list::render(&self.list_state, frame, frame.area(), theme);
                 if let Some(ref confirm) = self.delete_confirm_state {
-                    screens::delete_confirm::render(confirm, frame, frame.area());
+                    screens::delete_confirm::render(confirm, frame, frame.area(), theme);
                 }
             }
             Screen::Help => {
                 // Render underlying screen first, then overlay help
                 self.render_underlying_screen(frame);
-                screens::help::render(frame, frame.area());
+                screens::help::render(frame, frame.area(), theme);
             }
             Screen::Create => {
                 if let Some(ref create) = self.create_state {
-                    screens::create::render(create, frame, frame.area());
+                    screens::create::render(create, frame, frame.area(), theme);
                 } else {
                     let placeholder =
                         Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
@@ -179,7 +193,7 @@ impl App {
             }
             Screen::HookLog => {
                 if let Some(ref hook_log) = self.hook_log_state {
-                    screens::hook_log::render(hook_log, frame, frame.area());
+                    screens::hook_log::render(hook_log, frame, frame.area(), theme);
                 } else {
                     let placeholder =
                         Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
@@ -191,35 +205,36 @@ impl App {
 
     /// Render the screen underneath the current overlay (e.g. for Help).
     fn render_underlying_screen(&self, frame: &mut Frame) {
+        let theme = &self.theme;
         let underlying = self.nav_stack.iter().rev().nth(1).copied();
         match underlying {
             Some(Screen::Detail) => {
                 if let Some(ref detail) = self.detail_state {
-                    screens::detail::render(detail, frame, frame.area());
+                    screens::detail::render(detail, frame, frame.area(), theme);
                 }
             }
             Some(Screen::Create) => {
                 if let Some(ref create) = self.create_state {
-                    screens::create::render(create, frame, frame.area());
+                    screens::create::render(create, frame, frame.area(), theme);
                 }
             }
             Some(Screen::SyncPicker) => {
                 if let Some(ref picker) = self.sync_picker_state {
-                    screens::sync_picker::render(picker, frame, frame.area());
+                    screens::sync_picker::render(picker, frame, frame.area(), theme);
                 }
             }
             Some(Screen::DeleteConfirm) => {
-                screens::list::render(&self.list_state, frame, frame.area());
+                screens::list::render(&self.list_state, frame, frame.area(), theme);
                 if let Some(ref confirm) = self.delete_confirm_state {
-                    screens::delete_confirm::render(confirm, frame, frame.area());
+                    screens::delete_confirm::render(confirm, frame, frame.area(), theme);
                 }
             }
             Some(Screen::HookLog) => {
                 if let Some(ref hook_log) = self.hook_log_state {
-                    screens::hook_log::render(hook_log, frame, frame.area());
+                    screens::hook_log::render(hook_log, frame, frame.area(), theme);
                 }
             }
-            _ => screens::list::render(&self.list_state, frame, frame.area()),
+            _ => screens::list::render(&self.list_state, frame, frame.area(), theme),
         }
     }
 

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -248,7 +248,7 @@ fn format_duration(d: Duration) -> String {
 }
 
 /// Render the hook log screen.
-pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
+pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // title
         Constraint::Min(1),    // output area
@@ -266,14 +266,29 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
     } else {
         " — running..."
     };
+    let status_style = if state.completed {
+        if state.success {
+            Style::default().fg(theme.success)
+        } else {
+            Style::default().fg(theme.error)
+        }
+    } else {
+        Style::default().fg(theme.warning)
+    };
     let title = Line::from(vec![
         Span::styled(
             format!("Hook: {}", state.title),
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(status_text),
+        Span::styled(status_text, status_style),
     ]);
-    frame.render_widget(Paragraph::new(title), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(title)
+            .style(Style::default().fg(theme.foreground).bg(theme.background)),
+        chunks[0],
+    );
 
     // Build output lines with scrolling
     let mut lines: Vec<Line> = Vec::new();
@@ -283,14 +298,14 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
         let header_style = if section.completed {
             if section.success {
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(theme.success)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.error).add_modifier(Modifier::BOLD)
             }
         } else {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.warning)
                 .add_modifier(Modifier::BOLD)
         };
 
@@ -317,9 +332,9 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
         // Output lines
         for log_line in &section.lines {
             let style = if log_line.stream == "stderr" {
-                Style::default().fg(Color::Red)
+                Style::default().fg(theme.error)
             } else {
-                Style::default()
+                Style::default().fg(theme.foreground)
             };
             lines.push(Line::from(Span::styled(
                 format!("  {}", log_line.text),
@@ -333,7 +348,7 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("Error: {err}"),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
         )));
     }
 
@@ -343,7 +358,11 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
     let skip = state.scroll_offset.min(lines.len());
     let visible_lines: Vec<Line> = lines.into_iter().skip(skip).take(visible_height).collect();
 
-    frame.render_widget(Paragraph::new(visible_lines), chunks[1]);
+    frame.render_widget(
+        Paragraph::new(visible_lines)
+            .style(Style::default().fg(theme.foreground).bg(theme.background)),
+        chunks[1],
+    );
 
     // Footer
     let footer_text = if state.replay {
@@ -354,7 +373,7 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
         FOOTER_RUNNING
     };
     let footer = Paragraph::new(Line::from(footer_text))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
     frame.render_widget(footer, chunks[2]);
 }
 
@@ -935,8 +954,9 @@ mod tests {
     fn render_to_buffer(state: &HookLogState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
         terminal
-            .draw(|frame| render(state, frame, frame.area()))
+            .draw(|frame| render(state, frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
     }
@@ -1043,7 +1063,8 @@ mod tests {
     }
 
     #[test]
-    fn render_success_step_header_has_green_style() {
+    fn render_success_step_header_uses_theme_success_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
         let mut state = HookLogState::new("post_create");
         state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
         state.process_message(HookOutputMessage::StepCompleted {
@@ -1052,16 +1073,16 @@ mod tests {
             duration: Duration::from_millis(100),
         });
         let buf = render_to_buffer(&state, 80, 20);
-        // Find a cell in the header row that has green foreground
-        let has_green = buf
+        let has_success = buf
             .content()
             .iter()
-            .any(|cell| cell.fg == ratatui::style::Color::Green);
-        assert!(has_green, "successful step should have green-colored text");
+            .any(|cell| cell.fg == theme.success);
+        assert!(has_success, "successful step should use theme.success color");
     }
 
     #[test]
-    fn render_failure_step_header_has_red_style() {
+    fn render_failure_step_header_uses_theme_error_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
         let mut state = HookLogState::new("post_create");
         state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
         state.process_message(HookOutputMessage::StepCompleted {
@@ -1070,11 +1091,34 @@ mod tests {
             duration: Duration::from_millis(100),
         });
         let buf = render_to_buffer(&state, 80, 20);
-        let has_red = buf
+        let has_error = buf
             .content()
             .iter()
-            .any(|cell| cell.fg == ratatui::style::Color::Red);
-        assert!(has_red, "failed step should have red-colored text");
+            .any(|cell| cell.fg == theme.error);
+        assert!(has_error, "failed step should use theme.error color");
+    }
+
+    #[test]
+    fn render_with_minimal_theme_uses_ansi_colors() {
+        let theme = crate::tui::theme::from_name("minimal");
+        let mut state = HookLogState::new("post_create");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::StepCompleted {
+            step: "run".into(),
+            success: true,
+            duration: Duration::from_millis(100),
+        });
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(&state, frame, frame.area(), &theme))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let has_green = buf
+            .content()
+            .iter()
+            .any(|cell| cell.fg == ratatui::style::Color::Green);
+        assert!(has_green, "minimal theme should use basic ANSI Green for success");
     }
 
     #[test]
@@ -1166,6 +1210,47 @@ mod tests {
         assert!(
             !state.sections[1].success,
             "last section should be marked failed when exit_code != 0"
+        );
+    }
+
+    #[test]
+    fn title_uses_theme_foreground() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let state = HookLogState::new("post_create");
+        let buf = render_to_buffer(&state, 80, 20);
+        // Title is at row 0. "Hook:" starts at column 0.
+        let cell = buf.cell((0, 0)).unwrap();
+        assert_eq!(
+            cell.fg, theme.foreground,
+            "title 'Hook:' should use theme.foreground, got: {:?}",
+            cell.fg
+        );
+    }
+
+    #[test]
+    fn normal_log_line_uses_theme_foreground() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "hello world".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        // Output lines start after title (row 0-1) and section header.
+        // Section header at row 2, output line at row 3.
+        // Find a cell with "h" from "hello world"
+        let text = buffer_text(&buf);
+        let offset = text.find("hello").expect("should find 'hello' in output");
+        let width = 80usize;
+        let x = (offset % width) as u16;
+        let y = (offset / width) as u16;
+        let cell = buf.cell((x, y)).unwrap();
+        assert_eq!(
+            cell.fg, theme.foreground,
+            "stdout line should use theme.foreground, got: {:?}",
+            cell.fg
         );
     }
 }

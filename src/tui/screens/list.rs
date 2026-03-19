@@ -160,12 +160,18 @@ fn compute_status(
 
 const FOOTER_KEYS: &str = " n create  s sync  D delete  l log  Enter detail  q quit ";
 
-pub fn render(state: &ListState, frame: &mut Frame, area: Rect) {
+pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
+    let base_style = Style::default().fg(theme.foreground).bg(theme.background);
+    let footer_style = Style::default()
+        .fg(theme.background)
+        .bg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+
     if state.rows.is_empty() {
         let msg = Paragraph::new("No worktrees. Press n to create one.")
+            .style(base_style)
             .alignment(ratatui::layout::Alignment::Center);
-        let footer = Paragraph::new(Line::from(FOOTER_KEYS))
-            .style(Style::default().add_modifier(Modifier::REVERSED));
+        let footer = Paragraph::new(Line::from(FOOTER_KEYS)).style(footer_style);
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
         frame.render_widget(msg, chunks[0]);
         frame.render_widget(footer, chunks[1]);
@@ -176,7 +182,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect) {
 
     let header_cells = ["Name", "Branch", "Status", "Ahead/Behind", ""]
         .iter()
-        .map(|h| Cell::from(*h).style(Style::default().add_modifier(Modifier::BOLD)));
+        .map(|h| Cell::from(*h).style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)));
     let header = Row::new(header_cells).height(1);
 
     let rows: Vec<Row> = state
@@ -185,9 +191,9 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect) {
         .map(|r| {
             let badge = if r.managed { "" } else { "[unmanaged]" };
             let style = if r.managed {
-                Style::default()
+                base_style
             } else {
-                Style::default().add_modifier(Modifier::DIM)
+                Style::default().fg(theme.dimmed).bg(theme.background)
             };
             Row::new(vec![
                 Cell::from(r.name.clone()),
@@ -210,16 +216,16 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .style(base_style)
         .block(Block::default().borders(Borders::NONE))
-        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .row_highlight_style(Style::default().bg(theme.accent).fg(theme.background));
 
     let mut table_state = TableState::default();
     table_state.select(Some(state.selected));
 
     frame.render_stateful_widget(table, chunks[0], &mut table_state);
 
-    let footer = Paragraph::new(Line::from(FOOTER_KEYS))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+    let footer = Paragraph::new(Line::from(FOOTER_KEYS)).style(footer_style);
     frame.render_widget(footer, chunks[1]);
 }
 
@@ -231,8 +237,9 @@ mod tests {
     fn render_to_buffer(state: &ListState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
         terminal
-            .draw(|frame| render(state, frame, frame.area()))
+            .draw(|frame| render(state, frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
     }
@@ -356,16 +363,17 @@ mod tests {
     }
 
     #[test]
-    fn selected_row_has_reversed_style() {
+    fn selected_row_has_highlight_style() {
+        let theme = crate::tui::theme::from_name("catppuccin");
         let state = ListState::new(sample_rows());
         let buf = render_to_buffer(&state, 100, 10);
-        // Row 0 is selected by default — its first cell should have REVERSED modifier
+        // Row 0 is selected by default — its first cell should have theme accent bg
         // The header is row 0 in the buffer, data starts at row 1
         let cell = buf.cell((0, 1)).unwrap();
-        assert!(
-            cell.modifier.contains(Modifier::REVERSED),
-            "selected row should have REVERSED style, got: {:?}",
-            cell.modifier
+        assert_eq!(
+            cell.bg, theme.accent,
+            "selected row should have theme.accent background, got: {:?}",
+            cell.bg
         );
     }
 
@@ -381,15 +389,16 @@ mod tests {
     }
 
     #[test]
-    fn unmanaged_row_has_dim_style() {
+    fn unmanaged_row_has_dimmed_style() {
+        let theme = crate::tui::theme::from_name("catppuccin");
         let state = ListState::new(sample_rows());
         let buf = render_to_buffer(&state, 100, 10);
         // The unmanaged row is index 2 (third row), rendered at buffer row 3 (header=0, row0=1, row1=2, row2=3)
         let cell = buf.cell((0, 3)).unwrap();
-        assert!(
-            cell.modifier.contains(Modifier::DIM),
-            "unmanaged row should be DIM, got: {:?}",
-            cell.modifier
+        assert_eq!(
+            cell.fg, theme.dimmed,
+            "unmanaged row should use theme.dimmed color, got: {:?}",
+            cell.fg
         );
     }
 
@@ -427,6 +436,41 @@ mod tests {
         assert!(
             text.contains("n create"),
             "empty state should still show footer keybindings"
+        );
+    }
+
+    #[test]
+    fn empty_state_uses_theme_foreground() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let state = ListState::new(vec![]);
+        let buf = render_to_buffer(&state, 80, 5);
+        // Find a cell in the "No worktrees" message area (row 0, skip leading spaces)
+        let text = buffer_text(&buf);
+        let offset = text.find('N').expect("should find 'N' from 'No worktrees'");
+        let width = 80usize;
+        let x = (offset % width) as u16;
+        let y = (offset / width) as u16;
+        let cell = buf.cell((x, y)).unwrap();
+        assert_eq!(
+            cell.fg, theme.foreground,
+            "empty state text should use theme.foreground, got: {:?}",
+            cell.fg
+        );
+    }
+
+    #[test]
+    fn managed_row_uses_theme_foreground() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = ListState::new(sample_rows());
+        // Select row 1 so row 0 (managed) is NOT highlighted
+        state.selected = 1;
+        let buf = render_to_buffer(&state, 100, 10);
+        // Row 0 is at buffer row 1 (header at row 0)
+        let cell = buf.cell((0, 1)).unwrap();
+        assert_eq!(
+            cell.fg, theme.foreground,
+            "managed row should use theme.foreground, got: {:?}",
+            cell.fg
         );
     }
 }

@@ -9,11 +9,11 @@ use ratatui::{
 const CONFIRM_FOOTER: &str = " Enter/y confirm  Esc/n cancel ";
 const RESULT_FOOTER: &str = " Enter/Space dismiss ";
 
-pub fn render(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
+pub fn render(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
     if let Some(ref result) = state.result {
-        render_result(state, result, frame, area);
+        render_result(state, result, frame, area, theme);
     } else {
-        render_confirm(state, frame, area);
+        render_confirm(state, frame, area, theme);
     }
 }
 
@@ -28,7 +28,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     area
 }
 
-fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
+fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
     let bold = Style::default().add_modifier(Modifier::BOLD);
 
     let dialog_area = centered_rect(60, 10, area);
@@ -36,6 +36,7 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
         .title(" Delete Worktree ")
         .title_alignment(Alignment::Center);
     let inner = block.inner(dialog_area);
@@ -103,7 +104,7 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
     // Warning
     let warning = Line::from(Span::styled(
         "⚠ Pre-remove hooks will run before deletion",
-        Style::default().add_modifier(Modifier::DIM),
+        Style::default().fg(theme.warning),
     ));
     frame.render_widget(
         Paragraph::new(warning).alignment(Alignment::Center),
@@ -112,7 +113,7 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
 
     // Footer
     let footer = Paragraph::new(Line::from(CONFIRM_FOOTER))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
     frame.render_widget(footer, chunks[6]);
 }
 
@@ -121,14 +122,18 @@ fn render_result(
     result: &DeleteResultMessage,
     frame: &mut Frame,
     area: Rect,
+    theme: &crate::tui::theme::Theme,
 ) {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let status_style = Style::default()
+        .fg(if result.success { theme.success } else { theme.error })
+        .add_modifier(Modifier::BOLD);
 
     let dialog_area = centered_rect(60, 8, area);
     frame.render_widget(Clear, dialog_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
         .title(if result.success {
             " Removed "
         } else {
@@ -152,7 +157,7 @@ fn render_result(
         "Deletion failed"
     };
     let title_line = Line::from(vec![
-        Span::styled(status, bold),
+        Span::styled(status, status_style),
         Span::raw(" — "),
         Span::raw(&state.worktree_name),
     ]);
@@ -168,7 +173,7 @@ fn render_result(
     );
 
     let footer = Paragraph::new(Line::from(RESULT_FOOTER))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
     frame.render_widget(footer, chunks[3]);
 }
 
@@ -215,8 +220,9 @@ mod tests {
     fn render_to_buffer(state: &DeleteConfirmState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
         terminal
-            .draw(|frame| render(state, frame, frame.area()))
+            .draw(|frame| render(state, frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
     }
@@ -412,6 +418,41 @@ mod tests {
     }
 
     #[test]
+    fn confirm_dialog_uses_themed_border_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        let buf = render_to_buffer(&state, 80, 20);
+        // The dialog is centered in an 80x20 area with width=60, height=10.
+        // Centered: x_offset = (80-60)/2 = 10, y_offset = (20-10)/2 = 5
+        // Top-left border cell is at (10, 5)
+        let cell = buf.cell((10, 5)).unwrap();
+        assert_eq!(
+            cell.fg, theme.border,
+            "confirm dialog border should use theme.border color, got: {:?}",
+            cell.fg
+        );
+    }
+
+    #[test]
+    fn result_dialog_uses_themed_border_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        state.result = Some(DeleteResultMessage {
+            success: true,
+            message: "Removed successfully".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        // Result dialog: centered width=60, height=8
+        // x_offset = (80-60)/2 = 10, y_offset = (20-8)/2 = 6
+        let cell = buf.cell((10, 6)).unwrap();
+        assert_eq!(
+            cell.fg, theme.border,
+            "result dialog border should use theme.border color, got: {:?}",
+            cell.fg
+        );
+    }
+
+    #[test]
     fn confirm_dialog_renders_as_overlay_through_app() {
         // Verify the dialog renders ON TOP of the list (overlay, not full screen)
         use crate::tui::screens::list::{ListState, WorktreeRow};
@@ -442,5 +483,44 @@ mod tests {
         // Dialog content should be visible
         assert!(content.contains("Delete Worktree"), "dialog should be visible");
         assert!(content.contains("feat-a"), "dialog should show worktree name");
+    }
+
+    #[test]
+    fn result_success_title_uses_theme_success_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        state.result = Some(DeleteResultMessage {
+            success: true,
+            message: "Removed successfully".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        // Find the cell with 'W' from "Worktree removed" by scanning cells
+        let has_success_color = buf
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "W" && cell.fg == theme.success);
+        assert!(
+            has_success_color,
+            "success result title should have a 'W' cell with theme.success color"
+        );
+    }
+
+    #[test]
+    fn result_failure_title_uses_theme_error_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        state.result = Some(DeleteResultMessage {
+            success: false,
+            message: "pre_remove hook failed".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        let has_error_color = buf
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "D" && cell.fg == theme.error);
+        assert!(
+            has_error_color,
+            "failure result title should have a 'D' cell with theme.error color"
+        );
     }
 }

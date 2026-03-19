@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 
@@ -176,7 +176,12 @@ impl CreateState {
 const FOOTER_KEYS: &str = " Tab next field  Enter create  Esc cancel ";
 const FOOTER_RESULT: &str = " Enter dismiss ";
 
-pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
+pub fn render(state: &CreateState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
+    let footer_style = Style::default()
+        .fg(theme.background)
+        .bg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+
     // Result mode — show outcome + dismiss footer
     if let Some(ref result) = state.result {
         let chunks = Layout::vertical([
@@ -186,7 +191,7 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
         ])
         .split(area);
         let title = Paragraph::new(Line::from(vec![
-            Span::styled("Create Worktree", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("Create Worktree", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
         ]));
         frame.render_widget(title, chunks[0]);
         let msg = Paragraph::new(Line::from(vec![
@@ -194,8 +199,7 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
             Span::raw(&result.message),
         ]));
         frame.render_widget(msg, chunks[1]);
-        let footer = Paragraph::new(Line::from(FOOTER_RESULT))
-            .style(Style::default().add_modifier(Modifier::REVERSED));
+        let footer = Paragraph::new(Line::from(FOOTER_RESULT)).style(footer_style);
         frame.render_widget(footer, chunks[2]);
         return;
     }
@@ -216,13 +220,13 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
 
     // Title
     let title = Paragraph::new(Line::from(vec![
-        Span::styled("Create Worktree", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Create Worktree", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
     ]));
     frame.render_widget(title, chunks[0]);
 
     // Branch input
     let branch_style = if state.focused_field == CreateField::Branch {
-        Style::default().add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
@@ -245,7 +249,7 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
 
     // Base branch selector
     let base_style = if state.focused_field == CreateField::Base {
-        Style::default().add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
@@ -260,7 +264,7 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
 
     // Hooks toggle
     let hooks_style = if state.focused_field == CreateField::Hooks {
-        Style::default().add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
@@ -274,8 +278,8 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
     // Path preview
     if !state.path_preview.is_empty() {
         let preview = Paragraph::new(Line::from(vec![
-            Span::styled("  Path:   ", Style::default().add_modifier(Modifier::DIM)),
-            Span::styled(&state.path_preview, Style::default().add_modifier(Modifier::DIM)),
+            Span::styled("  Path:   ", Style::default().fg(theme.dimmed)),
+            Span::styled(&state.path_preview, Style::default().fg(theme.dimmed)),
         ]));
         frame.render_widget(preview, chunks[5]);
     }
@@ -284,14 +288,13 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
     if let Some(ref err) = state.error {
         let error_line = Paragraph::new(Line::from(vec![
             Span::raw("  "),
-            Span::styled(err.as_str(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(err.as_str(), Style::default().fg(theme.error).add_modifier(Modifier::BOLD)),
         ]));
         frame.render_widget(error_line, chunks[6]);
     }
 
     // Footer
-    let footer = Paragraph::new(Line::from(FOOTER_KEYS))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+    let footer = Paragraph::new(Line::from(FOOTER_KEYS)).style(footer_style);
     frame.render_widget(footer, chunks[8]);
 }
 
@@ -622,8 +625,9 @@ mod tests {
     fn render_to_buffer(state: &CreateState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
         terminal
-            .draw(|frame| render(state, frame, frame.area()))
+            .draw(|frame| render(state, frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
     }
