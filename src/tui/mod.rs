@@ -33,13 +33,18 @@ pub fn run() -> Result<()> {
     let mut terminal = ratatui::init();
     let mut app = App::new();
 
-    // Load config and apply theme
-    if let Ok(global) = crate::config::load_global_config() {
+    // Load config once and apply theme + auto_refresh
+    let resolved_config = if let Ok(global) = crate::config::load_global_config() {
         let project = std::env::current_dir()
             .ok()
             .and_then(|cwd| crate::git::discover_repo(&cwd).ok())
             .and_then(|ri| crate::config::load_project_config(&ri.path).ok().flatten());
-        let resolved = crate::config::resolve_config(None, project.as_ref(), &global);
+        Some(crate::config::resolve_config(None, project.as_ref(), &global))
+    } else {
+        None
+    };
+
+    if let Some(ref resolved) = resolved_config {
         app.theme = theme::from_name(&resolved.ui.theme);
     }
 
@@ -50,39 +55,33 @@ pub fn run() -> Result<()> {
     app.restore_list_session();
 
     // Initialize filesystem watcher if auto_refresh is enabled
-    {
-        let auto_refresh = if let Ok(global) = crate::config::load_global_config() {
-            let project = std::env::current_dir()
-                .ok()
-                .and_then(|cwd| crate::git::discover_repo(&cwd).ok())
-                .and_then(|ri| crate::config::load_project_config(&ri.path).ok().flatten());
-            let resolved = crate::config::resolve_config(None, project.as_ref(), &global);
-            resolved.ui.auto_refresh
-        } else {
-            true // default to enabled
-        };
+    let auto_refresh = resolved_config
+        .as_ref()
+        .map(|c| c.ui.auto_refresh)
+        .unwrap_or(true);
 
-        if auto_refresh {
-            // Collect worktree paths from the current list
-            let worktree_paths: Vec<std::path::PathBuf> = app
-                .list_state
-                .rows
-                .iter()
-                .map(|r| std::path::PathBuf::from(&r.path))
-                .collect();
-            let path_refs: Vec<&std::path::Path> =
-                worktree_paths.iter().map(|p| p.as_path()).collect();
+    if auto_refresh {
+        // Collect worktree paths from the current list
+        let worktree_paths: Vec<std::path::PathBuf> = app
+            .list_state
+            .rows
+            .iter()
+            .map(|r| std::path::PathBuf::from(&r.path))
+            .collect();
+        let path_refs: Vec<&std::path::Path> =
+            worktree_paths.iter().map(|p| p.as_path()).collect();
 
-            // Also include the main repo path
-            let repo_path = app.repo_path.as_ref().map(std::path::PathBuf::from);
-            let mut all_refs = path_refs;
-            if let Some(ref rp) = repo_path {
-                all_refs.push(rp.as_path());
-            }
+        // Also include the main repo path
+        let repo_path = app.repo_path.as_ref().map(std::path::PathBuf::from);
+        let mut all_refs = path_refs;
+        if let Some(ref rp) = repo_path {
+            all_refs.push(rp.as_path());
+        }
 
-            if let Ok(dw) = watcher::DebouncedWatcher::from_worktree_paths(&all_refs, watcher::DEBOUNCE_DURATION) {
-                app.watcher = Some(dw);
-            }
+        if let Ok(dw) =
+            watcher::DebouncedWatcher::from_worktree_paths(&all_refs, watcher::DEBOUNCE_DURATION)
+        {
+            app.watcher = Some(dw);
         }
     }
 
