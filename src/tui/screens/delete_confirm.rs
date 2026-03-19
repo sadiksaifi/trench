@@ -124,7 +124,9 @@ fn render_result(
     area: Rect,
     theme: &crate::tui::theme::Theme,
 ) {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let status_style = Style::default()
+        .fg(if result.success { theme.success } else { theme.error })
+        .add_modifier(Modifier::BOLD);
 
     let dialog_area = centered_rect(60, 8, area);
     frame.render_widget(Clear, dialog_area);
@@ -155,7 +157,7 @@ fn render_result(
         "Deletion failed"
     };
     let title_line = Line::from(vec![
-        Span::styled(status, bold),
+        Span::styled(status, status_style),
         Span::raw(" — "),
         Span::raw(&state.worktree_name),
     ]);
@@ -481,5 +483,44 @@ mod tests {
         // Dialog content should be visible
         assert!(content.contains("Delete Worktree"), "dialog should be visible");
         assert!(content.contains("feat-a"), "dialog should show worktree name");
+    }
+
+    #[test]
+    fn result_success_title_uses_theme_success_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        state.result = Some(DeleteResultMessage {
+            success: true,
+            message: "Removed successfully".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        // Find the cell with 'W' from "Worktree removed" by scanning cells
+        let has_success_color = buf
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "W" && cell.fg == theme.success);
+        assert!(
+            has_success_color,
+            "success result title should have a 'W' cell with theme.success color"
+        );
+    }
+
+    #[test]
+    fn result_failure_title_uses_theme_error_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        state.result = Some(DeleteResultMessage {
+            success: false,
+            message: "pre_remove hook failed".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        let has_error_color = buf
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "D" && cell.fg == theme.error);
+        assert!(
+            has_error_color,
+            "failure result title should have a 'D' cell with theme.error color"
+        );
     }
 }
