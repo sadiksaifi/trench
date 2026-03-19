@@ -348,11 +348,21 @@ impl Database {
     }
 
     /// Save TUI list session state for a repo (selected worktree name + scroll position).
+    ///
+    /// Both fields are written in a single transaction so they stay consistent.
     pub fn save_list_session(&self, repo_path: &str, worktree_name: &str, scroll_position: usize) -> Result<()> {
         let key_name = format!("{repo_path}:selected_worktree");
         let key_scroll = format!("{repo_path}:scroll_position");
-        self.set_session(&key_name, worktree_name)?;
-        self.set_session(&key_scroll, &scroll_position.to_string())?;
+        let updated_at = now();
+        let sql = "INSERT INTO session (key, value, updated_at) VALUES (?1, ?2, ?3)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at";
+        let tx = self.conn.unchecked_transaction()
+            .context("failed to begin session transaction")?;
+        tx.execute(sql, rusqlite::params![key_name, worktree_name, updated_at])
+            .context("failed to set selected_worktree")?;
+        tx.execute(sql, rusqlite::params![key_scroll, scroll_position.to_string(), updated_at])
+            .context("failed to set scroll_position")?;
+        tx.commit().context("failed to commit session")?;
         Ok(())
     }
 
@@ -872,6 +882,24 @@ mod tests {
         let (name_b, pos_b) = db.load_list_session("/repos/beta").unwrap().unwrap();
         assert_eq!(name_b, "wt-b");
         assert_eq!(pos_b, 7);
+    }
+
+    #[test]
+    fn save_list_session_writes_both_keys_atomically() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_list_session("/repos/atomic", "wt-x", 42).unwrap();
+
+        // Verify both keys individually via raw get_session
+        let name = db.get_session("/repos/atomic:selected_worktree").unwrap();
+        let scroll = db.get_session("/repos/atomic:scroll_position").unwrap();
+        assert_eq!(name.as_deref(), Some("wt-x"), "worktree name should be set");
+        assert_eq!(scroll.as_deref(), Some("42"), "scroll position should be set");
+
+        // Connection should be in autocommit mode (no dangling transaction)
+        assert!(
+            db.conn_for_test().is_autocommit(),
+            "connection should be in autocommit after save (no dangling tx)"
+        );
     }
 
     #[test]
