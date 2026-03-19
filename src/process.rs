@@ -100,14 +100,13 @@ pub fn scan_proc_dir(proc_path: &Path, worktree_path: &str) -> Vec<ProcessInfo> 
         }
 
         let comm_path = entry.path().join("comm");
-        let comm = std::fs::read_to_string(&comm_path)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let name = std::fs::read_to_string(&comm_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("<pid {pid}>"));
 
-        if !comm.is_empty() {
-            results.push(ProcessInfo { pid, name: comm });
-        }
+        results.push(ProcessInfo { pid, name });
     }
 
     results
@@ -327,6 +326,25 @@ n/Users/sdk/.worktrees/myrepo/feature-branch/packages/app\n";
         assert_eq!(result.len(), 2);
         assert!(result.iter().any(|p| p.pid == 100 && p.name == "node"));
         assert!(result.iter().any(|p| p.pid == 200 && p.name == "vite"));
+    }
+
+    #[test]
+    fn scan_proc_handles_missing_comm() {
+        let proc_dir = tempfile::tempdir().unwrap();
+        let worktree_dir = tempfile::tempdir().unwrap();
+        let worktree_path = worktree_dir.path().to_str().unwrap();
+
+        // PID 999: cwd matches but no comm file
+        let pid999 = proc_dir.path().join("999");
+        std::fs::create_dir(&pid999).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(worktree_path, pid999.join("cwd")).unwrap();
+        // deliberately no comm file
+
+        let result = scan_proc_dir(proc_dir.path(), worktree_path);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].pid, 999);
+        assert_eq!(result[0].name, "<pid 999>");
     }
 
     #[test]
