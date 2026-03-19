@@ -150,6 +150,20 @@ mod tests {
     }
 
     #[test]
+    fn invalid_theme_name_falls_back_to_catppuccin() {
+        let fallback = from_name("nonexistent");
+        let catppuccin = from_name("catppuccin");
+        assert_eq!(fallback, catppuccin, "unknown theme should fall back to catppuccin");
+    }
+
+    #[test]
+    fn empty_theme_name_falls_back_to_catppuccin() {
+        let fallback = from_name("");
+        let catppuccin = from_name("catppuccin");
+        assert_eq!(fallback, catppuccin);
+    }
+
+    #[test]
     fn theme_struct_has_all_semantic_fields() {
         let theme = from_name("catppuccin");
         // Verify each field is accessible and distinct
