@@ -101,6 +101,49 @@ pub fn scan_proc_dir(proc_path: &Path, worktree_path: &str) -> Vec<ProcessInfo> 
     results
 }
 
+/// Detect processes running in the given worktree directory.
+///
+/// Returns an empty `Vec` if detection fails or the path doesn't exist.
+/// This is intentionally graceful — process detection is informational,
+/// not critical.
+pub fn detect_processes(worktree_path: &str) -> Vec<ProcessInfo> {
+    if !Path::new(worktree_path).exists() {
+        return Vec::new();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        detect_via_lsof(worktree_path)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        scan_proc_dir(Path::new("/proc"), worktree_path)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Vec::new()
+    }
+}
+
+/// macOS: run `lsof -d cwd -F pcn` and filter for worktree path.
+#[cfg(target_os = "macos")]
+fn detect_via_lsof(worktree_path: &str) -> Vec<ProcessInfo> {
+    let output = match std::process::Command::new("lsof")
+        .args(["-d", "cwd", "-F", "pcn"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_lsof_output(&stdout, worktree_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +246,20 @@ n/Users/sdk/.worktrees/myrepo/feature-branch/packages/app\n";
     fn scan_proc_returns_empty_for_nonexistent_dir() {
         let result = scan_proc_dir(std::path::Path::new("/nonexistent/proc"), "/some/path");
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn detect_processes_returns_empty_for_nonexistent_path() {
+        let result = detect_processes("/nonexistent/worktree/path/xyz");
+        assert!(result.is_empty(), "should return empty for non-existent path");
+    }
+
+    #[test]
+    fn detect_processes_returns_empty_for_real_temp_dir() {
+        // A real directory with no processes running in it
+        let tmp = tempfile::tempdir().unwrap();
+        let result = detect_processes(tmp.path().to_str().unwrap());
+        assert!(result.is_empty(), "empty temp dir should have no processes");
     }
 
     #[test]
