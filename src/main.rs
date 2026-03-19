@@ -6,6 +6,7 @@ mod git;
 mod hooks;
 mod output;
 mod paths;
+mod process;
 mod state;
 mod tui;
 
