@@ -91,7 +91,9 @@ fn render_result(
     area: Rect,
     theme: &crate::tui::theme::Theme,
 ) {
-    let bold = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+    let status_style = Style::default()
+        .fg(if result.success { theme.success } else { theme.error })
+        .add_modifier(Modifier::BOLD);
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // title
@@ -103,7 +105,7 @@ fn render_result(
     // Title
     let status = if result.success { "Sync Complete" } else { "Sync Failed" };
     let title = Line::from(vec![
-        Span::styled(status, bold),
+        Span::styled(status, status_style),
         Span::raw(" — "),
         Span::raw(&state.worktree_name),
     ]);
@@ -351,6 +353,40 @@ mod tests {
         let buf = render_to_buffer(&state, 80, 15);
         let text = buffer_text(&buf);
         assert!(text.contains("failed"), "should show failure message");
+    }
+
+    #[test]
+    fn sync_result_success_uses_success_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = SyncPickerState::new("feat-auth");
+        state.result = Some(SyncResultMessage {
+            success: true,
+            message: "Synced".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 15);
+        // Find a cell containing "S" from "Sync Complete" and check its fg color
+        let cell = buf.content().iter().find(|c| c.symbol() == "S" && {
+            let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+            text.contains("Sync Complete")
+        }).expect("should find 'S' cell");
+        assert_eq!(cell.fg, theme.success, "success result should use theme.success color");
+    }
+
+    #[test]
+    fn sync_result_failure_uses_error_color() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = SyncPickerState::new("feat-auth");
+        state.result = Some(SyncResultMessage {
+            success: false,
+            message: "Failed".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 15);
+        // Find the "S" cell from "Sync Failed"
+        let cell = buf.content().iter().find(|c| c.symbol() == "S" && {
+            let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+            text.contains("Sync Failed")
+        }).expect("should find 'S' cell");
+        assert_eq!(cell.fg, theme.error, "failure result should use theme.error color");
     }
 
     #[test]
