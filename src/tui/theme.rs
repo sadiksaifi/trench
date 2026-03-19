@@ -22,6 +22,7 @@ pub struct Theme {
 pub fn from_name(name: &str) -> Theme {
     match name {
         "catppuccin" => catppuccin(),
+        "gruvbox" => gruvbox(),
         _ => catppuccin(),
     }
 }
@@ -40,6 +41,20 @@ fn catppuccin() -> Theme {
     }
 }
 
+fn gruvbox() -> Theme {
+    // Gruvbox Dark palette
+    Theme {
+        foreground: Color::Rgb(235, 219, 178), // fg
+        background: Color::Rgb(40, 40, 40),    // bg
+        accent: Color::Rgb(131, 165, 152),     // aqua
+        success: Color::Rgb(184, 187, 38),     // green
+        error: Color::Rgb(251, 73, 52),        // red
+        warning: Color::Rgb(250, 189, 47),     // yellow
+        dimmed: Color::Rgb(146, 131, 116),     // gray
+        border: Color::Rgb(80, 73, 69),        // bg2
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,6 +70,26 @@ mod tests {
         assert_eq!(theme.warning, Color::Rgb(249, 226, 175));
         assert_eq!(theme.dimmed, Color::Rgb(127, 132, 156));
         assert_eq!(theme.border, Color::Rgb(88, 91, 112));
+    }
+
+    #[test]
+    fn gruvbox_theme_has_expected_colors() {
+        let theme = from_name("gruvbox");
+        assert_eq!(theme.foreground, Color::Rgb(235, 219, 178));
+        assert_eq!(theme.background, Color::Rgb(40, 40, 40));
+        assert_eq!(theme.accent, Color::Rgb(131, 165, 152));
+        assert_eq!(theme.success, Color::Rgb(184, 187, 38));
+        assert_eq!(theme.error, Color::Rgb(251, 73, 52));
+        assert_eq!(theme.warning, Color::Rgb(250, 189, 47));
+        assert_eq!(theme.dimmed, Color::Rgb(146, 131, 116));
+        assert_eq!(theme.border, Color::Rgb(80, 73, 69));
+    }
+
+    #[test]
+    fn gruvbox_differs_from_catppuccin() {
+        let cat = from_name("catppuccin");
+        let grv = from_name("gruvbox");
+        assert_ne!(cat, grv, "gruvbox and catppuccin should be different themes");
     }
 
     #[test]
