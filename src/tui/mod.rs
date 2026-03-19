@@ -1208,6 +1208,94 @@ mod tests {
     }
 
     #[test]
+    fn session_full_round_trip_save_restart_restore() {
+        let db = crate::state::Database::open_in_memory().unwrap();
+        let repo_path = "/repos/round-trip";
+
+        // Simulate first TUI session: user navigates to "feat-b" (index 1)
+        let mut app1 = app_with_rows();
+        app1.repo_path = Some(repo_path.into());
+        app1.list_state.selected = 1;
+        app1.save_list_session_to(&db);
+
+        // Simulate TUI restart: new App, same rows, restore session
+        let mut app2 = app_with_rows();
+        app2.repo_path = Some(repo_path.into());
+        assert_eq!(app2.list_state.selected, 0, "new app starts at 0");
+        app2.restore_list_session_from(&db);
+        assert_eq!(app2.list_state.selected, 1, "should restore to feat-b");
+    }
+
+    #[test]
+    fn session_round_trip_with_stale_worktree() {
+        let db = crate::state::Database::open_in_memory().unwrap();
+        let repo_path = "/repos/stale";
+
+        // First session: user selects "feat-b" (index 1)
+        let mut app1 = app_with_rows();
+        app1.repo_path = Some(repo_path.into());
+        app1.list_state.selected = 1;
+        app1.save_list_session_to(&db);
+
+        // Restart with different rows — "feat-b" was removed
+        let mut app2 = App::new();
+        app2.list_state = screens::list::ListState::new(vec![
+            screens::list::WorktreeRow {
+                name: "feat-a".into(),
+                branch: "feat/a".into(),
+                path: "/tmp/wt/feat-a".into(),
+                status: "clean".into(),
+                ahead_behind: "+0/-0".into(),
+                managed: true,
+            },
+            screens::list::WorktreeRow {
+                name: "feat-c".into(),
+                branch: "feat/c".into(),
+                path: "/tmp/wt/feat-c".into(),
+                status: "clean".into(),
+                ahead_behind: "-".into(),
+                managed: true,
+            },
+        ]);
+        app2.repo_path = Some(repo_path.into());
+        app2.restore_list_session_from(&db);
+
+        // "feat-b" is gone. scroll_position (1) is still valid,
+        // so it falls back to index 1
+        assert_eq!(app2.list_state.selected, 1,
+            "should fall back to scroll position when worktree name not found");
+    }
+
+    #[test]
+    fn session_per_repo_isolation() {
+        let db = crate::state::Database::open_in_memory().unwrap();
+
+        // Save session for repo A
+        let mut app_a = app_with_rows();
+        app_a.repo_path = Some("/repos/alpha".into());
+        app_a.list_state.selected = 2; // "main"
+        app_a.save_list_session_to(&db);
+
+        // Save session for repo B
+        let mut app_b = app_with_rows();
+        app_b.repo_path = Some("/repos/beta".into());
+        app_b.list_state.selected = 0; // "feat-a"
+        app_b.save_list_session_to(&db);
+
+        // Restore repo A — should get index 2
+        let mut restore_a = app_with_rows();
+        restore_a.repo_path = Some("/repos/alpha".into());
+        restore_a.restore_list_session_from(&db);
+        assert_eq!(restore_a.list_state.selected, 2);
+
+        // Restore repo B — should get index 0
+        let mut restore_b = app_with_rows();
+        restore_b.repo_path = Some("/repos/beta".into());
+        restore_b.restore_list_session_from(&db);
+        assert_eq!(restore_b.list_state.selected, 0);
+    }
+
+    #[test]
     fn app_starts_in_running_state() {
         let app = App::new();
         assert!(app.is_running(), "newly created app should be running");
