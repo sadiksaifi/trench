@@ -354,7 +354,7 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, theme: &crate
         FOOTER_RUNNING
     };
     let footer = Paragraph::new(Line::from(footer_text))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
     frame.render_widget(footer, chunks[2]);
 }
 

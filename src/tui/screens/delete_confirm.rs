@@ -9,11 +9,11 @@ use ratatui::{
 const CONFIRM_FOOTER: &str = " Enter/y confirm  Esc/n cancel ";
 const RESULT_FOOTER: &str = " Enter/Space dismiss ";
 
-pub fn render(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, _theme: &crate::tui::theme::Theme) {
+pub fn render(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
     if let Some(ref result) = state.result {
-        render_result(state, result, frame, area);
+        render_result(state, result, frame, area, theme);
     } else {
-        render_confirm(state, frame, area);
+        render_confirm(state, frame, area, theme);
     }
 }
 
@@ -28,7 +28,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     area
 }
 
-fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
+fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
     let bold = Style::default().add_modifier(Modifier::BOLD);
 
     let dialog_area = centered_rect(60, 10, area);
@@ -103,7 +103,7 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
     // Warning
     let warning = Line::from(Span::styled(
         "⚠ Pre-remove hooks will run before deletion",
-        Style::default().add_modifier(Modifier::DIM),
+        Style::default().fg(theme.warning),
     ));
     frame.render_widget(
         Paragraph::new(warning).alignment(Alignment::Center),
@@ -112,7 +112,7 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect) {
 
     // Footer
     let footer = Paragraph::new(Line::from(CONFIRM_FOOTER))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
     frame.render_widget(footer, chunks[6]);
 }
 
@@ -121,6 +121,7 @@ fn render_result(
     result: &DeleteResultMessage,
     frame: &mut Frame,
     area: Rect,
+    theme: &crate::tui::theme::Theme,
 ) {
     let bold = Style::default().add_modifier(Modifier::BOLD);
 
@@ -168,7 +169,7 @@ fn render_result(
     );
 
     let footer = Paragraph::new(Line::from(RESULT_FOOTER))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
     frame.render_widget(footer, chunks[3]);
 }
 

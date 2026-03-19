@@ -54,12 +54,12 @@ pub fn keybinding_groups() -> &'static [KeybindingGroup] {
 }
 
 /// Render the help overlay centered within `area`.
-pub fn render(frame: &mut Frame, area: Rect, _theme: &crate::tui::theme::Theme) {
+pub fn render(frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
     let groups = keybinding_groups();
 
     // Build lines from keybinding data
-    let bold = Style::default().add_modifier(Modifier::BOLD);
-    let dim = Style::default().add_modifier(Modifier::DIM);
+    let bold = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(theme.dimmed);
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     for (i, group) in groups.iter().enumerate() {
@@ -91,6 +91,7 @@ pub fn render(frame: &mut Frame, area: Rect, _theme: &crate::tui::theme::Theme) 
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
         .title(" Help ")
         .title_alignment(Alignment::Center);
 

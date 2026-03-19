@@ -76,11 +76,11 @@ impl SyncPickerState {
 const SYNC_PICKER_FOOTER: &str = " ↑/↓ or j/k select  Enter confirm  Esc cancel ";
 const SYNC_RESULT_FOOTER: &str = " Enter/Space dismiss  Esc back ";
 
-pub fn render(state: &SyncPickerState, frame: &mut Frame, area: Rect, _theme: &crate::tui::theme::Theme) {
+pub fn render(state: &SyncPickerState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
     if let Some(ref result) = state.result {
-        render_result(state, result, frame, area);
+        render_result(state, result, frame, area, theme);
     } else {
-        render_picker(state, frame, area);
+        render_picker(state, frame, area, theme);
     }
 }
 
@@ -89,8 +89,9 @@ fn render_result(
     result: &SyncResultMessage,
     frame: &mut Frame,
     area: Rect,
+    theme: &crate::tui::theme::Theme,
 ) {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let bold = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // title
@@ -120,12 +121,12 @@ fn render_result(
 
     // Footer
     let footer = Paragraph::new(Line::from(SYNC_RESULT_FOOTER))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
     frame.render_widget(footer, chunks[2]);
 }
 
-fn render_picker(state: &SyncPickerState, frame: &mut Frame, area: Rect) {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+fn render_picker(state: &SyncPickerState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
+    let bold = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // title + blank line
@@ -150,7 +151,7 @@ fn render_picker(state: &SyncPickerState, frame: &mut Frame, area: Rect) {
     for (i, (label, desc)) in options.iter().enumerate() {
         let marker = if i == state.selected { "▸ " } else { "  " };
         let style = if i == state.selected {
-            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            Style::default().bg(theme.accent).fg(theme.background).add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -168,7 +169,7 @@ fn render_picker(state: &SyncPickerState, frame: &mut Frame, area: Rect) {
 
     // Footer
     let footer = Paragraph::new(Line::from(SYNC_PICKER_FOOTER))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
     frame.render_widget(footer, chunks[2]);
 }
 

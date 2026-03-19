@@ -160,8 +160,8 @@ const METADATA_HEIGHT: u16 = 5;
 
 const DETAIL_FOOTER_KEYS: &str = " s sync  o open  l log  Esc back ";
 
-pub fn render(state: &DetailState, frame: &mut Frame, area: Rect, _theme: &crate::tui::theme::Theme) {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+pub fn render(state: &DetailState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
+    let bold = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
 
     let chunks = Layout::vertical([
         Constraint::Length(METADATA_HEIGHT),
@@ -239,7 +239,7 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect, _theme: &crate
 
     // — Footer —
     let footer = Paragraph::new(Line::from(DETAIL_FOOTER_KEYS))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
     frame.render_widget(footer, chunks[3]);
 }
 
