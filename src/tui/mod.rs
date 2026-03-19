@@ -326,6 +326,22 @@ impl App {
         }
     }
 
+    /// Dismiss or pop the hook log screen. Replay mode simply pops back
+    /// to the previous screen; live mode unwinds to List (clearing dialog
+    /// state and keeping hook_rx alive for draining).
+    fn dismiss_or_pop_hook_log(&mut self) {
+        let is_replay = self
+            .hook_log_state
+            .as_ref()
+            .is_some_and(|s| s.replay);
+        if is_replay {
+            self.hook_log_state = None;
+            self.pop_screen();
+        } else {
+            self.dismiss_hook_log();
+        }
+    }
+
     /// Dismiss the hook log screen and unwind to List, clearing any
     /// intermediate source dialog state (Create/Sync/Delete) so the
     /// underlying operation cannot be re-triggered.
@@ -356,7 +372,7 @@ impl App {
             }
             (KeyCode::Esc, _) => {
                 if self.active_screen() == Screen::HookLog {
-                    self.dismiss_hook_log();
+                    self.dismiss_or_pop_hook_log();
                 } else {
                     self.clear_active_screen_state();
                     self.pop_screen();
@@ -364,7 +380,7 @@ impl App {
             }
             (KeyCode::Char('q'), _) if !self.is_create_branch_text_entry_active() => {
                 if self.active_screen() == Screen::HookLog {
-                    self.dismiss_hook_log();
+                    self.dismiss_or_pop_hook_log();
                 } else {
                     self.clear_active_screen_state();
                     self.pop_screen();
@@ -2586,5 +2602,30 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         // j scrolls down — scroll_offset might go back up or stay depending on total_lines
         // Just verify it didn't crash and the handler ran
+    }
+
+    #[test]
+    fn replay_dismiss_returns_to_detail_not_list() {
+        let mut app = app_with_rows();
+        // Navigate to Detail
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Detail);
+
+        // Simulate replay hook log pushed from Detail
+        let mut state = screens::hook_log::HookLogState::new("post_create");
+        state.replay = true;
+        app.hook_log_state = Some(state);
+        app.push_screen(Screen::HookLog);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+        assert_eq!(app.nav_stack_depth(), 3); // List → Detail → HookLog
+
+        // Esc should pop back to Detail (not unwind to List)
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::Detail,
+            "replay dismiss should return to Detail, not List"
+        );
+        assert_eq!(app.nav_stack_depth(), 2);
     }
 }
