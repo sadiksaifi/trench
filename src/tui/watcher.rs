@@ -104,9 +104,14 @@ impl DebouncedWatcher {
                 // Worktree: .git is a file pointing to the real git dir
                 if let Ok(content) = std::fs::read_to_string(&git_dir) {
                     if let Some(gitdir) = content.strip_prefix("gitdir: ") {
-                        let real_git_dir = Path::new(gitdir.trim());
+                        let gitdir_path = Path::new(gitdir.trim());
+                        let real_git_dir = if gitdir_path.is_relative() {
+                            path.join(gitdir_path)
+                        } else {
+                            gitdir_path.to_path_buf()
+                        };
                         if real_git_dir.is_dir() {
-                            all_paths.push(real_git_dir.to_path_buf());
+                            all_paths.push(real_git_dir);
                         }
                     }
                 }
@@ -479,5 +484,44 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         assert!(watcher.drain_events(), "should detect changes in second directory");
+    }
+
+    #[test]
+    fn from_worktree_paths_resolves_relative_gitdir() {
+        // Simulate a worktree where .git is a file pointing to a relative gitdir path
+        let dir = TempDir::new().unwrap();
+        let worktree_dir = dir.path().join("my-worktree");
+        fs::create_dir(&worktree_dir).unwrap();
+
+        // Create the real git dir at a sibling path (relative from worktree: ../real-git-dir)
+        let real_git_dir = dir.path().join("real-git-dir");
+        fs::create_dir(&real_git_dir).unwrap();
+
+        // Write a .git file with a relative gitdir path
+        let dot_git_file = worktree_dir.join(".git");
+        fs::write(&dot_git_file, "gitdir: ../real-git-dir\n").unwrap();
+
+        let mut dw = DebouncedWatcher::from_worktree_paths(
+            &[worktree_dir.as_path()],
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(200));
+        dw.should_refresh();
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh();
+
+        // Write a file inside the real git dir — should be detected if path was resolved
+        fs::write(real_git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh(); // picks up event
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            dw.should_refresh(),
+            "should resolve relative gitdir path and watch it"
+        );
     }
 }
