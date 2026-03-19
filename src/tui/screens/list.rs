@@ -161,6 +161,7 @@ fn compute_status(
 const FOOTER_KEYS: &str = " n create  s sync  D delete  l log  Enter detail  q quit ";
 
 pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
+    let base_style = Style::default().fg(theme.foreground).bg(theme.background);
     let footer_style = Style::default()
         .fg(theme.background)
         .bg(theme.accent)
@@ -168,6 +169,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
 
     if state.rows.is_empty() {
         let msg = Paragraph::new("No worktrees. Press n to create one.")
+            .style(base_style)
             .alignment(ratatui::layout::Alignment::Center);
         let footer = Paragraph::new(Line::from(FOOTER_KEYS)).style(footer_style);
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
@@ -189,9 +191,9 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
         .map(|r| {
             let badge = if r.managed { "" } else { "[unmanaged]" };
             let style = if r.managed {
-                Style::default()
+                base_style
             } else {
-                Style::default().fg(theme.dimmed)
+                Style::default().fg(theme.dimmed).bg(theme.background)
             };
             Row::new(vec![
                 Cell::from(r.name.clone()),
@@ -214,6 +216,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
 
     let table = Table::new(rows, widths)
         .header(header)
+        .style(base_style)
         .block(Block::default().borders(Borders::NONE))
         .row_highlight_style(Style::default().bg(theme.accent).fg(theme.background));
 
@@ -433,6 +436,41 @@ mod tests {
         assert!(
             text.contains("n create"),
             "empty state should still show footer keybindings"
+        );
+    }
+
+    #[test]
+    fn empty_state_uses_theme_foreground() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let state = ListState::new(vec![]);
+        let buf = render_to_buffer(&state, 80, 5);
+        // Find a cell in the "No worktrees" message area (row 0, skip leading spaces)
+        let text = buffer_text(&buf);
+        let offset = text.find('N').expect("should find 'N' from 'No worktrees'");
+        let width = 80usize;
+        let x = (offset % width) as u16;
+        let y = (offset / width) as u16;
+        let cell = buf.cell((x, y)).unwrap();
+        assert_eq!(
+            cell.fg, theme.foreground,
+            "empty state text should use theme.foreground, got: {:?}",
+            cell.fg
+        );
+    }
+
+    #[test]
+    fn managed_row_uses_theme_foreground() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = ListState::new(sample_rows());
+        // Select row 1 so row 0 (managed) is NOT highlighted
+        state.selected = 1;
+        let buf = render_to_buffer(&state, 100, 10);
+        // Row 0 is at buffer row 1 (header at row 0)
+        let cell = buf.cell((0, 1)).unwrap();
+        assert_eq!(
+            cell.fg, theme.foreground,
+            "managed row should use theme.foreground, got: {:?}",
+            cell.fg
         );
     }
 }
