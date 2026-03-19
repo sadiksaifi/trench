@@ -1,8 +1,12 @@
 use std::path::Path;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use notify::{RecommendedWatcher, Watcher};
+
+/// Default debounce window: 500ms of quiet before triggering a refresh.
+const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 
 /// Watches filesystem paths for changes and signals when a TUI refresh is needed.
 ///
@@ -49,6 +53,58 @@ impl FileWatcher {
         got_any
     }
 
+}
+
+/// Wraps a `FileWatcher` with trailing-edge debounce logic.
+///
+/// After the first filesystem event, waits until `DEBOUNCE_DURATION` (500ms)
+/// passes with no new events before signaling that a refresh is needed.
+/// This prevents excessive refreshes during rapid file changes (e.g. `git fetch`).
+pub struct DebouncedWatcher {
+    inner: FileWatcher,
+    last_event: Option<Instant>,
+    debounce: Duration,
+}
+
+impl DebouncedWatcher {
+    /// Create a debounced watcher monitoring the given paths.
+    pub fn new(paths: &[&Path]) -> Result<Self> {
+        Ok(Self {
+            inner: FileWatcher::new(paths)?,
+            last_event: None,
+            debounce: DEBOUNCE_DURATION,
+        })
+    }
+
+    /// Create with a custom debounce duration (for testing).
+    #[cfg(test)]
+    pub fn with_debounce(paths: &[&Path], debounce: Duration) -> Result<Self> {
+        Ok(Self {
+            inner: FileWatcher::new(paths)?,
+            last_event: None,
+            debounce,
+        })
+    }
+
+    /// Poll for events and check if debounce period has elapsed.
+    ///
+    /// Call this every frame in the TUI event loop. Returns `true` when
+    /// the debounce window has expired after events were detected,
+    /// indicating the TUI should refresh its data.
+    pub fn should_refresh(&mut self) -> bool {
+        if self.inner.drain_events() {
+            self.last_event = Some(Instant::now());
+        }
+
+        if let Some(last) = self.last_event {
+            if last.elapsed() >= self.debounce {
+                self.last_event = None;
+                return true;
+            }
+        }
+
+        false
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +173,119 @@ mod tests {
 
         // No changes made — should return false
         assert!(!watcher.drain_events(), "should return false with no pending events");
+    }
+
+    #[test]
+    fn debounced_watcher_no_refresh_without_events() {
+        let dir = TempDir::new().unwrap();
+        let mut dw = DebouncedWatcher::with_debounce(
+            &[dir.path()],
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        // Drain any startup noise
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh();
+        std::thread::sleep(Duration::from_millis(100));
+
+        assert!(!dw.should_refresh(), "should not refresh without events");
+    }
+
+    #[test]
+    fn debounced_watcher_no_refresh_during_debounce_window() {
+        let dir = TempDir::new().unwrap();
+        let mut dw = DebouncedWatcher::with_debounce(
+            &[dir.path()],
+            Duration::from_millis(300),
+        )
+        .unwrap();
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh();
+
+        // Create a file
+        fs::write(dir.path().join("test.txt"), "hello").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Event received but debounce window (300ms) not yet elapsed
+        assert!(!dw.should_refresh(), "should not refresh during debounce window");
+    }
+
+    #[test]
+    fn debounced_watcher_refreshes_after_debounce_window() {
+        let dir = TempDir::new().unwrap();
+        let mut dw = DebouncedWatcher::with_debounce(
+            &[dir.path()],
+            Duration::from_millis(100),
+        )
+        .unwrap();
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh();
+
+        // Create a file
+        fs::write(dir.path().join("test.txt"), "hello").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        dw.should_refresh(); // picks up event, starts debounce
+
+        // Wait for debounce to expire
+        std::thread::sleep(Duration::from_millis(150));
+
+        assert!(dw.should_refresh(), "should refresh after debounce window expires");
+    }
+
+    #[test]
+    fn debounced_watcher_resets_on_new_events() {
+        let dir = TempDir::new().unwrap();
+        let mut dw = DebouncedWatcher::with_debounce(
+            &[dir.path()],
+            Duration::from_millis(200),
+        )
+        .unwrap();
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh();
+
+        // First event
+        fs::write(dir.path().join("a.txt"), "a").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        dw.should_refresh(); // picks up event
+
+        // Second event before debounce expires — should reset timer
+        fs::write(dir.path().join("b.txt"), "b").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!dw.should_refresh(), "debounce should reset on new events");
+
+        // Wait for debounce to fully expire after the last event
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(dw.should_refresh(), "should refresh after events settle");
+    }
+
+    #[test]
+    fn debounced_watcher_clears_after_refresh() {
+        let dir = TempDir::new().unwrap();
+        let mut dw = DebouncedWatcher::with_debounce(
+            &[dir.path()],
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh();
+
+        // Trigger event and let debounce expire
+        fs::write(dir.path().join("test.txt"), "hello").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh(); // picks up event
+        std::thread::sleep(Duration::from_millis(100));
+
+        assert!(dw.should_refresh(), "first call should return true");
+        assert!(!dw.should_refresh(), "second call should return false (cleared)");
     }
 
     #[test]
