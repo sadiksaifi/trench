@@ -15,6 +15,20 @@ pub struct ProcessInfo {
     pub name: String,
 }
 
+/// Check whether `cwd` is equal to or a subdirectory of `worktree_path`,
+/// normalizing trailing slashes so `/repo/wt/` and `/repo/wt` are equivalent.
+fn within_worktree(cwd: &str, worktree_path: &str) -> bool {
+    let wt = match worktree_path.trim_end_matches('/') {
+        "" => "/",
+        normalized => normalized,
+    };
+    let cwd = match cwd.trim_end_matches('/') {
+        "" => "/",
+        normalized => normalized,
+    };
+    cwd == wt || cwd.starts_with(&format!("{wt}/"))
+}
+
 /// Parse `lsof -F pcn -d cwd` output into process entries whose cwd is
 /// within `worktree_path`.
 ///
@@ -38,7 +52,7 @@ pub fn parse_lsof_output(output: &str, worktree_path: &str) -> Vec<ProcessInfo> 
             current_name = Some(cmd.to_string());
         } else if let Some(path) = line.strip_prefix('n') {
             if let (Some(pid), Some(ref name)) = (current_pid, &current_name) {
-                if (path == worktree_path || path.starts_with(&format!("{worktree_path}/")))
+                if within_worktree(path, worktree_path)
                     && seen_pids.insert(pid)
                 {
                     results.push(ProcessInfo {
@@ -81,9 +95,7 @@ pub fn scan_proc_dir(proc_path: &Path, worktree_path: &str) -> Vec<ProcessInfo> 
         };
 
         let cwd_str = cwd.to_string_lossy();
-        if cwd_str.as_ref() != worktree_path
-            && !cwd_str.starts_with(&format!("{worktree_path}/"))
-        {
+        if !within_worktree(cwd_str.as_ref(), worktree_path) {
             continue;
         }
 
@@ -335,6 +347,25 @@ n/Users/sdk/.worktrees/myrepo/feature-branch/packages/app\n";
         let tmp = tempfile::tempdir().unwrap();
         let result = detect_processes(tmp.path().to_str().unwrap());
         assert!(result.is_empty(), "empty temp dir should have no processes");
+    }
+
+    #[test]
+    fn within_worktree_normalizes_trailing_slash() {
+        assert!(within_worktree("/repo/wt", "/repo/wt/"));
+        assert!(within_worktree("/repo/wt/", "/repo/wt"));
+        assert!(within_worktree("/repo/wt/sub", "/repo/wt/"));
+        assert!(within_worktree("/repo/wt/sub", "/repo/wt"));
+        assert!(!within_worktree("/repo/other", "/repo/wt"));
+        assert!(!within_worktree("/repo/wt-extra", "/repo/wt"));
+    }
+
+    #[test]
+    fn parse_lsof_output_handles_trailing_slash() {
+        let output = "p1234\ncnode\nn/repo/wt\n";
+        // worktree_path with trailing slash should still match
+        let result = parse_lsof_output(output, "/repo/wt/");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].pid, 1234);
     }
 
     #[test]
