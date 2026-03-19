@@ -102,8 +102,13 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, the
     );
 
     // Warning
+    let warning_text = if let Some(ref pw) = state.process_warning {
+        format!("⚠ {pw}")
+    } else {
+        "⚠ Pre-remove hooks will run before deletion".to_string()
+    };
     let warning = Line::from(Span::styled(
-        "⚠ Pre-remove hooks will run before deletion",
+        warning_text,
         Style::default().fg(theme.warning),
     ));
     frame.render_widget(
@@ -188,6 +193,8 @@ pub struct DeleteConfirmState {
     pub branch: String,
     /// Result message after deletion. None = confirm mode, Some = result mode.
     pub result: Option<DeleteResultMessage>,
+    /// Warning about running processes (if any detected).
+    pub process_warning: Option<String>,
 }
 
 /// Outcome displayed after a delete operation completes.
@@ -199,11 +206,13 @@ pub struct DeleteResultMessage {
 
 impl DeleteConfirmState {
     pub fn new(worktree_name: &str, worktree_path: &str, branch: &str) -> Self {
+        let process_warning = crate::process::format_process_warning(worktree_path);
         Self {
             worktree_name: worktree_name.to_string(),
             worktree_path: worktree_path.to_string(),
             branch: branch.to_string(),
             result: None,
+            process_warning,
         }
     }
 
@@ -503,6 +512,30 @@ mod tests {
         assert!(
             has_success_color,
             "success result title should have a 'W' cell with theme.success color"
+        );
+    }
+
+    #[test]
+    fn process_warning_shown_in_confirm_dialog() {
+        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        // Manually set process warning (since temp dir has no processes)
+        state.process_warning = Some("warning: 2 processes running in this worktree: node, vite".into());
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("2 processes running"),
+            "should show process warning in dialog, got: {text}"
+        );
+    }
+
+    #[test]
+    fn no_process_warning_shows_hook_warning() {
+        let state = DeleteConfirmState::new("feat-auth", "/nonexistent/path", "feature/auth");
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Pre-remove hooks"),
+            "should show hook warning when no process warning, got: {text}"
         );
     }
 

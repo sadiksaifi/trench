@@ -144,9 +144,79 @@ fn detect_via_lsof(worktree_path: &str) -> Vec<ProcessInfo> {
     parse_lsof_output(&stdout, worktree_path)
 }
 
+/// Format a warning message about running processes for display before
+/// destructive operations like `trench remove`.
+///
+/// Returns `None` if no processes are detected.
+pub fn format_process_warning(worktree_path: &str) -> Option<String> {
+    let procs = detect_processes(worktree_path);
+    if procs.is_empty() {
+        return None;
+    }
+
+    let names: Vec<&str> = procs.iter().map(|p| p.name.as_str()).collect();
+    let count = procs.len();
+    Some(format!(
+        "warning: {count} process{} running in this worktree: {}",
+        if count == 1 { "" } else { "es" },
+        names.join(", "),
+    ))
+}
+
+/// Build a warning string from already-detected processes (for TUI use
+/// where detection is done separately).
+pub fn format_process_warning_from(procs: &[ProcessInfo]) -> Option<String> {
+    if procs.is_empty() {
+        return None;
+    }
+
+    let names: Vec<&str> = procs.iter().map(|p| p.name.as_str()).collect();
+    let count = procs.len();
+    Some(format!(
+        "warning: {count} process{} running in this worktree: {}",
+        if count == 1 { "" } else { "es" },
+        names.join(", "),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_warning_with_single_process() {
+        let procs = vec![ProcessInfo { pid: 1234, name: "node".into() }];
+        let warning = format_process_warning_from(&procs);
+        assert_eq!(
+            warning.as_deref(),
+            Some("warning: 1 process running in this worktree: node"),
+        );
+    }
+
+    #[test]
+    fn format_warning_with_multiple_processes() {
+        let procs = vec![
+            ProcessInfo { pid: 1234, name: "node".into() },
+            ProcessInfo { pid: 5678, name: "vite".into() },
+        ];
+        let warning = format_process_warning_from(&procs);
+        assert_eq!(
+            warning.as_deref(),
+            Some("warning: 2 processes running in this worktree: node, vite"),
+        );
+    }
+
+    #[test]
+    fn format_warning_returns_none_for_empty() {
+        let warning = format_process_warning_from(&[]);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn format_process_warning_returns_none_for_nonexistent_path() {
+        let warning = format_process_warning("/nonexistent/path/xyz");
+        assert!(warning.is_none());
+    }
 
     #[test]
     fn parse_lsof_output_extracts_matching_processes() {
