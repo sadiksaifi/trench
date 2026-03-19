@@ -176,7 +176,7 @@ impl CreateState {
 const FOOTER_KEYS: &str = " Tab next field  Enter create  Esc cancel ";
 const FOOTER_RESULT: &str = " Enter dismiss ";
 
-pub fn render(state: &CreateState, frame: &mut Frame, area: Rect) {
+pub fn render(state: &CreateState, frame: &mut Frame, area: Rect, _theme: &crate::tui::theme::Theme) {
     // Result mode — show outcome + dismiss footer
     if let Some(ref result) = state.result {
         let chunks = Layout::vertical([
@@ -622,8 +622,9 @@ mod tests {
     fn render_to_buffer(state: &CreateState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
         terminal
-            .draw(|frame| render(state, frame, frame.area()))
+            .draw(|frame| render(state, frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
     }

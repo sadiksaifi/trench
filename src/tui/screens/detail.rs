@@ -160,7 +160,7 @@ const METADATA_HEIGHT: u16 = 5;
 
 const DETAIL_FOOTER_KEYS: &str = " s sync  o open  l log  Esc back ";
 
-pub fn render(state: &DetailState, frame: &mut Frame, area: Rect) {
+pub fn render(state: &DetailState, frame: &mut Frame, area: Rect, _theme: &crate::tui::theme::Theme) {
     let bold = Style::default().add_modifier(Modifier::BOLD);
 
     let chunks = Layout::vertical([
@@ -251,8 +251,9 @@ mod tests {
     fn render_to_buffer(state: &DetailState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
         terminal
-            .draw(|frame| render(state, frame, frame.area()))
+            .draw(|frame| render(state, frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
     }

@@ -76,7 +76,7 @@ impl SyncPickerState {
 const SYNC_PICKER_FOOTER: &str = " ↑/↓ or j/k select  Enter confirm  Esc cancel ";
 const SYNC_RESULT_FOOTER: &str = " Enter/Space dismiss  Esc back ";
 
-pub fn render(state: &SyncPickerState, frame: &mut Frame, area: Rect) {
+pub fn render(state: &SyncPickerState, frame: &mut Frame, area: Rect, _theme: &crate::tui::theme::Theme) {
     if let Some(ref result) = state.result {
         render_result(state, result, frame, area);
     } else {
@@ -234,8 +234,9 @@ mod tests {
     fn render_to_buffer(state: &SyncPickerState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
         terminal
-            .draw(|frame| render(state, frame, frame.area()))
+            .draw(|frame| render(state, frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
     }

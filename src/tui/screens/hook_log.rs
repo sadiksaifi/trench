@@ -248,7 +248,7 @@ fn format_duration(d: Duration) -> String {
 }
 
 /// Render the hook log screen.
-pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
+pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, _theme: &crate::tui::theme::Theme) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // title
         Constraint::Min(1),    // output area
@@ -935,8 +935,9 @@ mod tests {
     fn render_to_buffer(state: &HookLogState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
         terminal
-            .draw(|frame| render(state, frame, frame.area()))
+            .draw(|frame| render(state, frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
     }

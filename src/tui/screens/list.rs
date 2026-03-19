@@ -160,7 +160,7 @@ fn compute_status(
 
 const FOOTER_KEYS: &str = " n create  s sync  D delete  l log  Enter detail  q quit ";
 
-pub fn render(state: &ListState, frame: &mut Frame, area: Rect) {
+pub fn render(state: &ListState, frame: &mut Frame, area: Rect, _theme: &crate::tui::theme::Theme) {
     if state.rows.is_empty() {
         let msg = Paragraph::new("No worktrees. Press n to create one.")
             .alignment(ratatui::layout::Alignment::Center);
@@ -231,8 +231,9 @@ mod tests {
     fn render_to_buffer(state: &ListState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
         terminal
-            .draw(|frame| render(state, frame, frame.area()))
+            .draw(|frame| render(state, frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
     }

@@ -54,7 +54,7 @@ pub fn keybinding_groups() -> &'static [KeybindingGroup] {
 }
 
 /// Render the help overlay centered within `area`.
-pub fn render(frame: &mut Frame, area: Rect) {
+pub fn render(frame: &mut Frame, area: Rect, _theme: &crate::tui::theme::Theme) {
     let groups = keybinding_groups();
 
     // Build lines from keybinding data
@@ -117,8 +117,9 @@ mod tests {
     fn render_to_buffer(width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
         terminal
-            .draw(|frame| render(frame, frame.area()))
+            .draw(|frame| render(frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
     }
