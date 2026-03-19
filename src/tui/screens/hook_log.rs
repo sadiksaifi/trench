@@ -103,6 +103,13 @@ impl HookLogState {
             }
         }
 
+        // Mark the last section as failed when exit_code != 0
+        if !success {
+            if let Some(last) = sections.last_mut() {
+                last.success = false;
+            }
+        }
+
         Self {
             title: title.to_string(),
             sections,
@@ -1125,6 +1132,40 @@ mod tests {
         assert_eq!(
             state.scroll_offset, 21,
             "scroll_down should clamp based on last_body_height (10), not 20"
+        );
+    }
+
+    #[test]
+    fn from_hook_output_marks_last_section_failed_on_nonzero_exit() {
+        use crate::state::HookOutputLine;
+
+        let lines = vec![
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "copying files".into(),
+                step: Some("copy".into()),
+                line_number: 1,
+                created_at: 1000,
+            },
+            HookOutputLine {
+                stream: "stderr".into(),
+                line: "command failed".into(),
+                step: Some("run".into()),
+                line_number: 2,
+                created_at: 2000,
+            },
+        ];
+        let payload = Some(r#"{"exit_code": 1}"#.to_string());
+        let state = HookLogState::from_hook_output(&lines, "hook:post_create", &payload);
+
+        assert!(!state.success, "overall success should be false");
+        assert_eq!(state.sections.len(), 2);
+        // First section (copy) should remain success
+        assert!(state.sections[0].success, "first section should be success");
+        // Last section (run) should be marked as failed
+        assert!(
+            !state.sections[1].success,
+            "last section should be marked failed when exit_code != 0"
         );
     }
 }
