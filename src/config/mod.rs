@@ -162,7 +162,7 @@ pub struct ResolvedWorktreesConfig {
 impl Default for ResolvedUiConfig {
     fn default() -> Self {
         Self {
-            theme: "default".to_string(),
+            theme: "catppuccin".to_string(),
             date_format: "%Y-%m-%d %H:%M".to_string(),
             show_ahead_behind: true,
             show_dirty_count: true,
@@ -640,7 +640,7 @@ run = ["bun install"]
     fn resolve_defaults_only() {
         let resolved = resolve_config(None, None, &GlobalConfig::default());
 
-        assert_eq!(resolved.ui.theme, "default");
+        assert_eq!(resolved.ui.theme, "catppuccin");
         assert_eq!(resolved.ui.date_format, "%Y-%m-%d %H:%M");
         assert!(resolved.ui.show_ahead_behind);
         assert!(resolved.ui.show_dirty_count);
