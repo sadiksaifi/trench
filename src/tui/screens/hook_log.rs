@@ -266,14 +266,29 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, theme: &crate
     } else {
         " — running..."
     };
+    let status_style = if state.completed {
+        if state.success {
+            Style::default().fg(theme.success)
+        } else {
+            Style::default().fg(theme.error)
+        }
+    } else {
+        Style::default().fg(theme.warning)
+    };
     let title = Line::from(vec![
         Span::styled(
             format!("Hook: {}", state.title),
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(status_text),
+        Span::styled(status_text, status_style),
     ]);
-    frame.render_widget(Paragraph::new(title), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(title)
+            .style(Style::default().fg(theme.foreground).bg(theme.background)),
+        chunks[0],
+    );
 
     // Build output lines with scrolling
     let mut lines: Vec<Line> = Vec::new();
@@ -319,7 +334,7 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, theme: &crate
             let style = if log_line.stream == "stderr" {
                 Style::default().fg(theme.error)
             } else {
-                Style::default()
+                Style::default().fg(theme.foreground)
             };
             lines.push(Line::from(Span::styled(
                 format!("  {}", log_line.text),
@@ -343,7 +358,11 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, theme: &crate
     let skip = state.scroll_offset.min(lines.len());
     let visible_lines: Vec<Line> = lines.into_iter().skip(skip).take(visible_height).collect();
 
-    frame.render_widget(Paragraph::new(visible_lines), chunks[1]);
+    frame.render_widget(
+        Paragraph::new(visible_lines)
+            .style(Style::default().fg(theme.foreground).bg(theme.background)),
+        chunks[1],
+    );
 
     // Footer
     let footer_text = if state.replay {
@@ -1191,6 +1210,47 @@ mod tests {
         assert!(
             !state.sections[1].success,
             "last section should be marked failed when exit_code != 0"
+        );
+    }
+
+    #[test]
+    fn title_uses_theme_foreground() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let state = HookLogState::new("post_create");
+        let buf = render_to_buffer(&state, 80, 20);
+        // Title is at row 0. "Hook:" starts at column 0.
+        let cell = buf.cell((0, 0)).unwrap();
+        assert_eq!(
+            cell.fg, theme.foreground,
+            "title 'Hook:' should use theme.foreground, got: {:?}",
+            cell.fg
+        );
+    }
+
+    #[test]
+    fn normal_log_line_uses_theme_foreground() {
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "hello world".into(),
+        });
+        let buf = render_to_buffer(&state, 80, 20);
+        // Output lines start after title (row 0-1) and section header.
+        // Section header at row 2, output line at row 3.
+        // Find a cell with "h" from "hello world"
+        let text = buffer_text(&buf);
+        let offset = text.find("hello").expect("should find 'hello' in output");
+        let width = 80usize;
+        let x = (offset % width) as u16;
+        let y = (offset / width) as u16;
+        let cell = buf.cell((x, y)).unwrap();
+        assert_eq!(
+            cell.fg, theme.foreground,
+            "stdout line should use theme.foreground, got: {:?}",
+            cell.fg
         );
     }
 }
