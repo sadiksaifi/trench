@@ -1,4 +1,5 @@
 pub mod screens;
+pub mod theme;
 
 use std::sync::{Arc, Mutex};
 
