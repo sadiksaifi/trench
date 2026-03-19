@@ -408,6 +408,63 @@ mod tests {
     }
 
     #[test]
+    fn watcher_continues_after_error_events() {
+        // FileWatcher should log (or ignore) errors from notify without crashing.
+        // We simulate this by watching a directory, triggering events, then verifying
+        // that the watcher is still functional after errors would have occurred.
+        let dir = TempDir::new().unwrap();
+        let watcher = FileWatcher::new(&[dir.path()]).unwrap();
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(100));
+        watcher.drain_events();
+
+        // Create and immediately delete a file — may cause notify errors on some
+        // platforms when trying to stat a deleted file
+        let file = dir.path().join("ephemeral.txt");
+        fs::write(&file, "temp").unwrap();
+        fs::remove_file(&file).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        watcher.drain_events(); // should not panic
+
+        // Watcher should still be functional after potential errors
+        fs::write(dir.path().join("after.txt"), "still works").unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(watcher.drain_events(), "watcher should continue after error events");
+    }
+
+    #[test]
+    fn debounced_watcher_continues_after_watch_dir_removed() {
+        let dir = TempDir::new().unwrap();
+        let subdir = dir.path().join("watched");
+        fs::create_dir(&subdir).unwrap();
+
+        let mut dw = DebouncedWatcher::with_debounce(
+            &[dir.path()],
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        // Drain startup
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh();
+
+        // Remove the subdirectory — watcher should not crash
+        fs::remove_dir(&subdir).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        // should_refresh should not panic — just returns bool
+        let _ = dw.should_refresh();
+
+        // Watcher should still detect changes in the root dir
+        fs::write(dir.path().join("new.txt"), "data").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        dw.should_refresh();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(dw.should_refresh(), "debounced watcher should continue after watched dir removed");
+    }
+
+    #[test]
     fn watcher_watches_multiple_directories() {
         let dir1 = TempDir::new().unwrap();
         let dir2 = TempDir::new().unwrap();
