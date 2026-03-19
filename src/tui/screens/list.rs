@@ -158,7 +158,7 @@ fn compute_status(
     (status, ab)
 }
 
-const FOOTER_KEYS: &str = " n create  s sync  D delete  Enter detail  q quit ";
+const FOOTER_KEYS: &str = " n create  s sync  D delete  l log  Enter detail  q quit ";
 
 pub fn render(state: &ListState, frame: &mut Frame, area: Rect) {
     if state.rows.is_empty() {

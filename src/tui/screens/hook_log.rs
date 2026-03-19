@@ -35,9 +35,107 @@ pub struct HookLogState {
     pub success: bool,
     pub scroll_offset: usize,
     pub error: Option<String>,
+    /// True when viewing historical DB data (replay mode), false during live streaming.
+    pub replay: bool,
+    /// Last rendered body height from `render()`. Used for scroll calculations.
+    /// Uses `Cell` for interior mutability so `render(&self)` can update it.
+    pub last_body_height: std::cell::Cell<usize>,
 }
 
 impl HookLogState {
+    /// Build a completed HookLogState from stored DB hook output lines.
+    ///
+    /// Groups lines by step into sections, marks all sections as completed.
+    /// Used for replaying historical hook executions from the logs table.
+    pub fn from_hook_output(
+        lines: &[crate::state::HookOutputLine],
+        event_type: &str,
+        payload: &Option<String>,
+    ) -> Self {
+        let title = event_type.strip_prefix("hook:").unwrap_or(event_type);
+
+        // Extract success from payload exit_code
+        let exit_code = payload
+            .as_deref()
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+            .and_then(|v| v.get("exit_code")?.as_i64());
+        let success = exit_code.map_or(true, |c| c == 0);
+
+        // Track timestamps per section for duration computation
+        struct SectionTimestamps {
+            first: i64,
+            last: i64,
+        }
+        let mut sections: Vec<HookLogSection> = Vec::new();
+        let mut timestamps: Vec<SectionTimestamps> = Vec::new();
+
+        for line in lines {
+            let step = line.step.as_deref().unwrap_or("unknown");
+
+            let needs_new = sections.last().map_or(true, |s| s.step != step);
+            if needs_new {
+                sections.push(HookLogSection {
+                    step: step.to_string(),
+                    lines: Vec::new(),
+                    completed: true,
+                    success: true,
+                    duration: None,
+                });
+                timestamps.push(SectionTimestamps {
+                    first: line.created_at,
+                    last: line.created_at,
+                });
+            }
+
+            timestamps.last_mut().unwrap().last = line.created_at;
+
+            sections.last_mut().unwrap().lines.push(HookLogLine {
+                stream: line.stream.clone(),
+                text: line.line.clone(),
+            });
+        }
+
+        // Compute section durations from timestamps
+        for (section, ts) in sections.iter_mut().zip(timestamps.iter()) {
+            let delta = (ts.last - ts.first).max(0) as u64;
+            if delta > 0 {
+                section.duration = Some(Duration::from_secs(delta));
+            }
+        }
+
+        // Mark the last section as failed when exit_code != 0
+        if !success {
+            if let Some(last) = sections.last_mut() {
+                last.success = false;
+            }
+        }
+
+        Self {
+            title: title.to_string(),
+            sections,
+            completed: true,
+            success,
+            scroll_offset: 0,
+            error: None,
+            replay: true,
+            last_body_height: std::cell::Cell::new(20),
+        }
+    }
+
+    /// Create a state representing "no hook history" for a worktree.
+    pub fn no_history() -> Self {
+        Self {
+            title: "Hook Log".to_string(),
+            sections: Vec::new(),
+            completed: true,
+            success: true,
+            scroll_offset: 0,
+            error: Some("No hook history for this worktree.".to_string()),
+            replay: true,
+            last_body_height: std::cell::Cell::new(20),
+        }
+    }
+
     pub fn new(title: &str) -> Self {
         Self {
             title: title.to_string(),
@@ -46,6 +144,8 @@ impl HookLogState {
             success: false,
             scroll_offset: 0,
             error: None,
+            replay: false,
+            last_body_height: std::cell::Cell::new(20),
         }
     }
 
@@ -57,6 +157,32 @@ impl HookLogState {
             .map(|s| 1 + s.lines.len()) // 1 header per section + output lines
             .sum();
         content + if self.error.is_some() { 2 } else { 0 }
+    }
+
+    /// Scroll up by one line.
+    pub fn scroll_up(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+    }
+
+    /// Scroll down by one line, clamped to max scrollable range.
+    pub fn scroll_down(&mut self, visible_height: usize) {
+        let max = self.total_lines().saturating_sub(visible_height);
+        if self.scroll_offset < max {
+            self.scroll_offset += 1;
+        }
+    }
+
+    /// Page up by half the visible height.
+    pub fn page_up(&mut self, visible_height: usize) {
+        let step = visible_height / 2;
+        self.scroll_offset = self.scroll_offset.saturating_sub(step);
+    }
+
+    /// Page down by half the visible height, clamped to max.
+    pub fn page_down(&mut self, visible_height: usize) {
+        let step = visible_height / 2;
+        let max = self.total_lines().saturating_sub(visible_height);
+        self.scroll_offset = (self.scroll_offset + step).min(max);
     }
 
     /// Auto-scroll to keep the latest output visible.
@@ -110,6 +236,7 @@ impl HookLogState {
 
 const FOOTER_RUNNING: &str = " Esc back (hooks continue) ";
 const FOOTER_DONE: &str = " Esc back  Enter dismiss ";
+const FOOTER_REPLAY: &str = " ↑/↓ scroll  PgUp/PgDn page  Esc back ";
 
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs_f64();
@@ -212,13 +339,16 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect) {
 
     // Apply scroll offset
     let visible_height = chunks[1].height as usize;
+    state.last_body_height.set(visible_height);
     let skip = state.scroll_offset.min(lines.len());
     let visible_lines: Vec<Line> = lines.into_iter().skip(skip).take(visible_height).collect();
 
     frame.render_widget(Paragraph::new(visible_lines), chunks[1]);
 
     // Footer
-    let footer_text = if state.completed {
+    let footer_text = if state.replay {
+        FOOTER_REPLAY
+    } else if state.completed {
         FOOTER_DONE
     } else {
         FOOTER_RUNNING
@@ -515,6 +645,293 @@ mod tests {
         assert_eq!(state.scroll_offset, 0);
     }
 
+    #[test]
+    fn from_hook_output_single_step_creates_one_section() {
+        use crate::state::HookOutputLine;
+
+        let lines = vec![
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "installing deps".into(),
+                step: Some("run".into()),
+                line_number: 1,
+                created_at: 1700000000,
+            },
+            HookOutputLine {
+                stream: "stderr".into(),
+                line: "warning: peer dep".into(),
+                step: Some("run".into()),
+                line_number: 2,
+                created_at: 1700000001,
+            },
+        ];
+
+        let event_type = "hook:post_create";
+        let payload: Option<String> = None;
+
+        let state = HookLogState::from_hook_output(&lines, event_type, &payload);
+
+        assert_eq!(state.title, "post_create");
+        assert!(state.completed);
+        assert_eq!(state.sections.len(), 1);
+        assert_eq!(state.sections[0].step, "run");
+        assert_eq!(state.sections[0].lines.len(), 2);
+        assert_eq!(state.sections[0].lines[0].text, "installing deps");
+        assert_eq!(state.sections[0].lines[0].stream, "stdout");
+        assert_eq!(state.sections[0].lines[1].text, "warning: peer dep");
+        assert_eq!(state.sections[0].lines[1].stream, "stderr");
+        assert!(state.sections[0].completed);
+    }
+
+    #[test]
+    fn from_hook_output_multiple_steps_creates_separate_sections() {
+        use crate::state::HookOutputLine;
+
+        let lines = vec![
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "copied .env".into(),
+                step: Some("copy".into()),
+                line_number: 1,
+                created_at: 1700000000,
+            },
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "installing deps".into(),
+                step: Some("run".into()),
+                line_number: 2,
+                created_at: 1700000001,
+            },
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "dep installed".into(),
+                step: Some("run".into()),
+                line_number: 3,
+                created_at: 1700000002,
+            },
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "migration done".into(),
+                step: Some("shell".into()),
+                line_number: 4,
+                created_at: 1700000003,
+            },
+        ];
+
+        let state =
+            HookLogState::from_hook_output(&lines, "hook:post_create", &None);
+
+        assert_eq!(state.sections.len(), 3);
+        assert_eq!(state.sections[0].step, "copy");
+        assert_eq!(state.sections[0].lines.len(), 1);
+        assert_eq!(state.sections[1].step, "run");
+        assert_eq!(state.sections[1].lines.len(), 2);
+        assert_eq!(state.sections[2].step, "shell");
+        assert_eq!(state.sections[2].lines.len(), 1);
+        // All sections completed
+        assert!(state.sections.iter().all(|s| s.completed));
+    }
+
+    #[test]
+    fn scroll_down_increments_offset() {
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        for i in 0..30 {
+            state.process_message(HookOutputMessage::OutputLine {
+                step: "run".into(),
+                stream: "stdout".into(),
+                line: format!("line {i}"),
+            });
+        }
+        state.scroll_offset = 0;
+        state.scroll_down(10); // visible_height = 10
+        assert_eq!(state.scroll_offset, 1);
+    }
+
+    #[test]
+    fn scroll_up_decrements_offset() {
+        let mut state = HookLogState::new("test");
+        state.scroll_offset = 5;
+        state.scroll_up();
+        assert_eq!(state.scroll_offset, 4);
+    }
+
+    #[test]
+    fn scroll_up_does_not_go_below_zero() {
+        let mut state = HookLogState::new("test");
+        state.scroll_offset = 0;
+        state.scroll_up();
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn page_down_advances_by_half_page() {
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        for i in 0..50 {
+            state.process_message(HookOutputMessage::OutputLine {
+                step: "run".into(),
+                stream: "stdout".into(),
+                line: format!("line {i}"),
+            });
+        }
+        state.scroll_offset = 0;
+        state.page_down(20); // visible_height = 20
+        assert_eq!(state.scroll_offset, 10); // half of visible_height
+    }
+
+    #[test]
+    fn page_up_retreats_by_half_page() {
+        let mut state = HookLogState::new("test");
+        state.scroll_offset = 15;
+        state.page_up(20); // visible_height = 20
+        assert_eq!(state.scroll_offset, 5); // 15 - 10
+    }
+
+    #[test]
+    fn page_up_clamps_to_zero() {
+        let mut state = HookLogState::new("test");
+        state.scroll_offset = 3;
+        state.page_up(20);
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_down_clamps_to_max() {
+        let mut state = HookLogState::new("test");
+        state.process_message(HookOutputMessage::StepStarted { step: "run".into() });
+        state.process_message(HookOutputMessage::OutputLine {
+            step: "run".into(),
+            stream: "stdout".into(),
+            line: "only line".into(),
+        });
+        // total_lines = 2 (header + line), visible = 10 → no scrolling possible
+        state.scroll_offset = 0;
+        state.scroll_down(10);
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn no_hook_history_state_shows_message() {
+        let state = HookLogState::no_history();
+        assert!(state.completed);
+        assert!(state.replay);
+        assert!(state.sections.is_empty());
+        assert!(state.error.as_deref().unwrap().contains("No hook history"));
+    }
+
+    #[test]
+    fn render_no_history_shows_message() {
+        let state = HookLogState::no_history();
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("No hook history"),
+            "should show no history message, got: {text}"
+        );
+    }
+
+    #[test]
+    fn replay_footer_shows_scroll_hint() {
+        let state = HookLogState::from_hook_output(&[], "hook:post_create", &None);
+        assert!(state.replay, "from_hook_output should set replay flag");
+
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        // Replay footer should mention scrolling keys, not "hooks continue"
+        assert!(
+            !text.contains("hooks continue"),
+            "replay footer should not mention running hooks"
+        );
+        assert!(
+            text.contains("Esc"),
+            "replay footer should show Esc to go back"
+        );
+    }
+
+    #[test]
+    fn live_mode_does_not_set_replay_flag() {
+        let state = HookLogState::new("test");
+        assert!(!state.replay, "new() should not set replay flag");
+    }
+
+    #[test]
+    fn from_hook_output_success_from_payload_exit_code_zero() {
+        let payload = Some(r#"{"exit_code": 0, "duration_secs": 2.5}"#.to_string());
+        let state = HookLogState::from_hook_output(&[], "hook:post_create", &payload);
+
+        assert!(state.success);
+        assert!(state.completed);
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn from_hook_output_failure_from_payload_exit_code_nonzero() {
+        let payload = Some(r#"{"exit_code": 1, "duration_secs": 0.5}"#.to_string());
+        let state = HookLogState::from_hook_output(&[], "hook:post_create", &payload);
+
+        assert!(!state.success);
+        assert!(state.completed);
+    }
+
+    #[test]
+    fn from_hook_output_section_duration_computed_from_timestamps() {
+        use crate::state::HookOutputLine;
+
+        let lines = vec![
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "start".into(),
+                step: Some("run".into()),
+                line_number: 1,
+                created_at: 1700000000,
+            },
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "end".into(),
+                step: Some("run".into()),
+                line_number: 2,
+                created_at: 1700000003,
+            },
+        ];
+
+        let state = HookLogState::from_hook_output(&lines, "hook:post_create", &None);
+
+        assert_eq!(state.sections.len(), 1);
+        let duration = state.sections[0].duration.expect("should have duration");
+        assert_eq!(duration, std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn from_hook_output_empty_lines_produces_empty_sections() {
+        let state = HookLogState::from_hook_output(&[], "hook:post_create", &None);
+
+        assert_eq!(state.title, "post_create");
+        assert!(state.completed);
+        assert!(state.sections.is_empty());
+    }
+
+    #[test]
+    fn from_hook_output_missing_step_grouped_as_unknown() {
+        use crate::state::HookOutputLine;
+
+        let lines = vec![
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "some output".into(),
+                step: None,
+                line_number: 1,
+                created_at: 1700000000,
+            },
+        ];
+
+        let state = HookLogState::from_hook_output(&lines, "hook:post_create", &None);
+
+        assert_eq!(state.sections.len(), 1);
+        assert_eq!(state.sections[0].step, "unknown");
+        assert_eq!(state.sections[0].lines.len(), 1);
+    }
+
     fn render_to_buffer(state: &HookLogState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -684,5 +1101,71 @@ mod tests {
         });
         // With error: 3 content + 2 error lines (blank + "Error: ...") = 5
         assert_eq!(state.total_lines(), 5);
+    }
+
+    #[test]
+    fn scroll_down_clamps_to_last_body_height() {
+        let mut state = HookLogState::new("test");
+        // Add 30 output lines so total > any reasonable visible height
+        state.sections.push(HookLogSection {
+            step: "run".into(),
+            lines: (0..30)
+                .map(|i| HookLogLine {
+                    stream: "stdout".into(),
+                    text: format!("line {i}"),
+                })
+                .collect(),
+            completed: true,
+            success: true,
+            duration: None,
+        });
+        // total_lines = 1 header + 30 output = 31
+        assert_eq!(state.total_lines(), 31);
+
+        // Set last_body_height to 10 (simulating small terminal)
+        state.last_body_height.set(10);
+
+        // Scroll down repeatedly — should clamp at total_lines - 10 = 21
+        for _ in 0..25 {
+            state.scroll_down(state.last_body_height.get());
+        }
+        assert_eq!(
+            state.scroll_offset, 21,
+            "scroll_down should clamp based on last_body_height (10), not 20"
+        );
+    }
+
+    #[test]
+    fn from_hook_output_marks_last_section_failed_on_nonzero_exit() {
+        use crate::state::HookOutputLine;
+
+        let lines = vec![
+            HookOutputLine {
+                stream: "stdout".into(),
+                line: "copying files".into(),
+                step: Some("copy".into()),
+                line_number: 1,
+                created_at: 1000,
+            },
+            HookOutputLine {
+                stream: "stderr".into(),
+                line: "command failed".into(),
+                step: Some("run".into()),
+                line_number: 2,
+                created_at: 2000,
+            },
+        ];
+        let payload = Some(r#"{"exit_code": 1}"#.to_string());
+        let state = HookLogState::from_hook_output(&lines, "hook:post_create", &payload);
+
+        assert!(!state.success, "overall success should be false");
+        assert_eq!(state.sections.len(), 2);
+        // First section (copy) should remain success
+        assert!(state.sections[0].success, "first section should be success");
+        // Last section (run) should be marked as failed
+        assert!(
+            !state.sections[1].success,
+            "last section should be marked failed when exit_code != 0"
+        );
     }
 }

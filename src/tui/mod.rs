@@ -296,7 +296,7 @@ impl App {
         }
         if received {
             if let Some(ref mut state) = self.hook_log_state {
-                state.auto_scroll(20);
+                state.auto_scroll(state.last_body_height.get());
             }
         }
         if completed && self.hook_log_state.is_none() {
@@ -323,6 +323,22 @@ impl App {
                 // Keep hook_rx alive for post-dismiss draining
             }
             _ => {}
+        }
+    }
+
+    /// Dismiss or pop the hook log screen. Replay mode simply pops back
+    /// to the previous screen; live mode unwinds to List (clearing dialog
+    /// state and keeping hook_rx alive for draining).
+    fn dismiss_or_pop_hook_log(&mut self) {
+        let is_replay = self
+            .hook_log_state
+            .as_ref()
+            .is_some_and(|s| s.replay);
+        if is_replay {
+            self.hook_log_state = None;
+            self.pop_screen();
+        } else {
+            self.dismiss_hook_log();
         }
     }
 
@@ -356,7 +372,7 @@ impl App {
             }
             (KeyCode::Esc, _) => {
                 if self.active_screen() == Screen::HookLog {
-                    self.dismiss_hook_log();
+                    self.dismiss_or_pop_hook_log();
                 } else {
                     self.clear_active_screen_state();
                     self.pop_screen();
@@ -364,7 +380,7 @@ impl App {
             }
             (KeyCode::Char('q'), _) if !self.is_create_branch_text_entry_active() => {
                 if self.active_screen() == Screen::HookLog {
-                    self.dismiss_hook_log();
+                    self.dismiss_or_pop_hook_log();
                 } else {
                     self.clear_active_screen_state();
                     self.pop_screen();
@@ -381,7 +397,7 @@ impl App {
             Screen::SyncPicker => self.handle_sync_picker_key(key),
             Screen::DeleteConfirm => self.handle_delete_confirm_key(key),
             Screen::Create => self.handle_create_key(key),
-            Screen::HookLog => {} // Esc/q handled globally; no screen-specific keys
+            Screen::HookLog => self.handle_hook_log_key(key),
             Screen::Help => {}
         }
     }
@@ -572,7 +588,67 @@ impl App {
                     self.editor_request = Some(detail.path.clone());
                 }
             }
+            KeyCode::Char('l') => {
+                if let Some(ref detail) = self.detail_state {
+                    let name = detail.name.clone();
+                    self.load_hook_log_replay(&name);
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// Load hook log replay from DB for the given worktree and push HookLog screen.
+    ///
+    /// Returns `true` if the hook log was loaded, `false` if no hook history exists
+    /// or the DB is unavailable.
+    pub fn load_hook_log_replay(&mut self, worktree_name: &str) -> bool {
+        let Some((cwd, db)) = Self::open_db() else {
+            return false;
+        };
+        let repo_info = match crate::git::discover_repo(&cwd) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let repo = match db.get_repo_by_path(&repo_info.path.to_string_lossy()) {
+            Ok(Some(r)) => r,
+            _ => return false,
+        };
+        let event = match db.get_last_hook_event_for_worktree(repo.id, worktree_name) {
+            Ok(Some(e)) => e,
+            Ok(None) => {
+                // No hook history — show empty state
+                self.hook_log_state = Some(screens::hook_log::HookLogState::no_history());
+                self.push_screen(Screen::HookLog);
+                return true;
+            }
+            Err(_) => return false,
+        };
+        let lines = match db.get_hook_output(event.id) {
+            Ok(l) => l,
+            Err(_) => return false,
+        };
+
+        let state = screens::hook_log::HookLogState::from_hook_output(
+            &lines,
+            &event.event_type,
+            &event.payload,
+        );
+        self.hook_log_state = Some(state);
+        self.push_screen(Screen::HookLog);
+        true
+    }
+
+    fn handle_hook_log_key(&mut self, key: KeyEvent) {
+        if let Some(ref mut state) = self.hook_log_state {
+            let h = state.last_body_height.get();
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => state.scroll_down(h),
+                KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
+                KeyCode::PageDown => state.page_down(h),
+                KeyCode::PageUp => state.page_up(h),
+                _ => {}
+            }
         }
     }
 
@@ -738,6 +814,12 @@ impl App {
                             &row.branch,
                         ));
                     self.push_screen(Screen::DeleteConfirm);
+                }
+            }
+            KeyCode::Char('l') => {
+                if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
+                    let name = row.name.clone();
+                    self.load_hook_log_replay(&name);
                 }
             }
             _ => {}
@@ -2384,5 +2466,161 @@ mod tests {
             app.hook_rx.is_none(),
             "hook_rx should be cleaned up after HookCompleted"
         );
+    }
+
+    #[test]
+    fn hook_log_arrow_down_scrolls_state() {
+        let mut app = App::new();
+        let mut state = screens::hook_log::HookLogState::new("test");
+        state.process_message(screens::hook_log::HookOutputMessage::StepStarted {
+            step: "run".into(),
+        });
+        for i in 0..30 {
+            state.process_message(screens::hook_log::HookOutputMessage::OutputLine {
+                step: "run".into(),
+                stream: "stdout".into(),
+                line: format!("line {i}"),
+            });
+        }
+        state.scroll_offset = 0;
+        state.completed = true;
+        app.hook_log_state = Some(state);
+        app.push_screen(Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(
+            app.hook_log_state.as_ref().unwrap().scroll_offset > 0,
+            "Down arrow should scroll the hook log"
+        );
+    }
+
+    #[test]
+    fn hook_log_arrow_up_scrolls_state() {
+        let mut app = App::new();
+        let mut state = screens::hook_log::HookLogState::new("test");
+        state.scroll_offset = 5;
+        state.completed = true;
+        app.hook_log_state = Some(state);
+        app.push_screen(Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(
+            app.hook_log_state.as_ref().unwrap().scroll_offset, 4,
+            "Up arrow should decrement scroll offset"
+        );
+    }
+
+    #[test]
+    fn hook_log_page_down_scrolls_state() {
+        let mut app = App::new();
+        let mut state = screens::hook_log::HookLogState::new("test");
+        state.process_message(screens::hook_log::HookOutputMessage::StepStarted {
+            step: "run".into(),
+        });
+        for i in 0..50 {
+            state.process_message(screens::hook_log::HookOutputMessage::OutputLine {
+                step: "run".into(),
+                stream: "stdout".into(),
+                line: format!("line {i}"),
+            });
+        }
+        state.scroll_offset = 0;
+        state.completed = true;
+        app.hook_log_state = Some(state);
+        app.push_screen(Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert!(
+            app.hook_log_state.as_ref().unwrap().scroll_offset > 0,
+            "PageDown should scroll the hook log"
+        );
+    }
+
+    #[test]
+    fn l_key_on_list_does_not_crash() {
+        let mut app = app_with_rows();
+        assert_eq!(app.active_screen(), Screen::List);
+
+        // `l` triggers load_hook_log_replay. Depending on whether a real DB
+        // and repo are accessible, it either stays on List (DB unavailable)
+        // or pushes HookLog with "no history" message.
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let screen = app.active_screen();
+        assert!(
+            screen == Screen::List || screen == Screen::HookLog,
+            "should be on List or HookLog, got: {screen:?}"
+        );
+    }
+
+    #[test]
+    fn l_key_on_detail_does_not_crash() {
+        let mut app = app_with_rows();
+        app.detail_state = Some(screens::detail::DetailState {
+            name: "feat-a".into(),
+            branch: "feat/a".into(),
+            path: "/tmp/wt/feat-a".into(),
+            base_branch: "main".into(),
+            ahead_behind: "+0/-0".into(),
+            created: "2026-03-01".into(),
+            last_accessed: "-".into(),
+            hook_status: "-".into(),
+            hook_timestamp: "-".into(),
+            changed_files: vec![],
+            commits: vec![],
+        });
+        app.push_screen(Screen::Detail);
+        assert_eq!(app.active_screen(), Screen::Detail);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let screen = app.active_screen();
+        assert!(
+            screen == Screen::Detail || screen == Screen::HookLog,
+            "should be on Detail or HookLog, got: {screen:?}"
+        );
+    }
+
+    #[test]
+    fn hook_log_j_k_scroll_state() {
+        let mut app = App::new();
+        let mut state = screens::hook_log::HookLogState::new("test");
+        state.scroll_offset = 5;
+        state.completed = true;
+        app.hook_log_state = Some(state);
+        app.push_screen(Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(
+            app.hook_log_state.as_ref().unwrap().scroll_offset, 4,
+            "k should scroll up"
+        );
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        // j scrolls down — scroll_offset might go back up or stay depending on total_lines
+        // Just verify it didn't crash and the handler ran
+    }
+
+    #[test]
+    fn replay_dismiss_returns_to_detail_not_list() {
+        let mut app = app_with_rows();
+        // Navigate to Detail
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::Detail);
+
+        // Simulate replay hook log pushed from Detail
+        let mut state = screens::hook_log::HookLogState::new("post_create");
+        state.replay = true;
+        app.hook_log_state = Some(state);
+        app.push_screen(Screen::HookLog);
+        assert_eq!(app.active_screen(), Screen::HookLog);
+        assert_eq!(app.nav_stack_depth(), 3); // List → Detail → HookLog
+
+        // Esc should pop back to Detail (not unwind to List)
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            app.active_screen(),
+            Screen::Detail,
+            "replay dismiss should return to Detail, not List"
+        );
+        assert_eq!(app.nav_stack_depth(), 2);
     }
 }
