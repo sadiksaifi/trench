@@ -213,6 +213,8 @@ struct WorktreeJson {
     dirty: usize,
     managed: bool,
     tags: Vec<String>,
+    process_count: usize,
+    processes: Vec<String>,
 }
 
 impl PorcelainRecord for WorktreeJson {
@@ -266,6 +268,7 @@ fn render_table(
         "Path",
         "Status",
         "Ahead/Behind",
+        "Procs",
         "Tags",
     ]);
     let mut unmanaged_rows: Vec<bool> = Vec::new();
@@ -274,6 +277,12 @@ fn render_table(
         let status = compute_git_status(&repo_path, entry);
         let dirty_str = format_dirty(status.dirty);
         let ab_str = format_ahead_behind(status.ahead, status.behind);
+        let procs = crate::process::detect_processes(&entry.path);
+        let procs_str = if procs.is_empty() {
+            "-".to_string()
+        } else {
+            procs.len().to_string()
+        };
         let display_name = if entry.managed {
             entry.name.clone()
         } else {
@@ -285,6 +294,7 @@ fn render_table(
             &entry.path,
             &dirty_str,
             &ab_str,
+            &procs_str,
             &tags_str,
         ]);
         unmanaged_rows.push(!entry.managed);
@@ -319,6 +329,9 @@ fn render_table(
 
 /// Build a `WorktreeJson` from a list entry and computed git status.
 fn build_worktree_json(entry: &ListEntry, status: GitStatus) -> WorktreeJson {
+    let procs = crate::process::detect_processes(&entry.path);
+    let process_names: Vec<String> = procs.iter().map(|p| p.name.clone()).collect();
+    let process_count = procs.len();
     WorktreeJson {
         name: entry.name.clone(),
         branch: entry.branch.clone(),
@@ -329,6 +342,8 @@ fn build_worktree_json(entry: &ListEntry, status: GitStatus) -> WorktreeJson {
         dirty: status.dirty,
         managed: entry.managed,
         tags: entry.tags.clone(),
+        process_count,
+        processes: process_names,
     }
 }
 
@@ -778,18 +793,18 @@ mod tests {
         .unwrap();
 
         // List all — both should appear with tags
-        let all_output = execute(repo_dir.path(), &db, None, &[]).unwrap();
+        let all_output = render_table(repo_dir.path(), &db, None, None, &[]).unwrap();
         assert!(all_output.contains("feature-alpha"));
         assert!(all_output.contains("feature-beta"));
         assert!(all_output.contains("Tags"), "should have Tags header");
 
         // Filter by wip — both should appear
-        let wip_output = execute(repo_dir.path(), &db, Some("wip"), &[]).unwrap();
+        let wip_output = render_table(repo_dir.path(), &db, Some("wip"), None, &[]).unwrap();
         assert!(wip_output.contains("feature-alpha"));
         assert!(wip_output.contains("feature-beta"));
 
         // Filter by review — only alpha
-        let review_output = execute(repo_dir.path(), &db, Some("review"), &[]).unwrap();
+        let review_output = render_table(repo_dir.path(), &db, Some("review"), None, &[]).unwrap();
         assert!(review_output.contains("feature-alpha"));
         assert!(!review_output.contains("feature-beta"));
 
@@ -803,7 +818,7 @@ mod tests {
         .unwrap();
 
         // Filter by wip — only beta now
-        let wip_after = execute(repo_dir.path(), &db, Some("wip"), &[]).unwrap();
+        let wip_after = render_table(repo_dir.path(), &db, Some("wip"), None, &[]).unwrap();
         assert!(!wip_after.contains("feature-alpha"));
         assert!(wip_after.contains("feature-beta"));
 
@@ -1661,6 +1676,83 @@ mod tests {
         assert_eq!(
             count, 1,
             "known-wt should appear exactly once (deduplicated), found: {count}"
+        );
+    }
+
+    #[test]
+    fn list_table_includes_processes_column() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        db.insert_worktree(
+            db_repo.id,
+            "my-wt",
+            "my-branch",
+            repo_path.to_str().unwrap(),
+            Some("main"),
+        )
+        .unwrap();
+
+        let output = render_table(repo_dir.path(), &db, None, None, &[])
+            .expect("list should succeed");
+
+        assert!(
+            output.contains("Procs"),
+            "table should have Procs header, got: {output}"
+        );
+    }
+
+    #[test]
+    fn list_json_includes_process_info() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
+        let db_repo = db
+            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .unwrap();
+
+        db.insert_worktree(
+            db_repo.id,
+            "my-wt",
+            "my-branch",
+            repo_path.to_str().unwrap(),
+            Some("main"),
+        )
+        .unwrap();
+
+        let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+
+        let worktrees = parsed.as_array().expect("should be an array");
+        let wt = worktrees.iter().find(|w| w["name"] == "my-wt")
+            .expect("should find worktree");
+
+        // Should have process_count and processes fields
+        assert!(
+            wt.get("process_count").is_some(),
+            "JSON should have 'process_count' field, got: {wt}"
+        );
+        assert!(
+            wt.get("processes").is_some(),
+            "JSON should have 'processes' field, got: {wt}"
+        );
+        assert!(
+            wt["process_count"].is_number(),
+            "process_count should be a number"
+        );
+        assert!(
+            wt["processes"].is_array(),
+            "processes should be an array"
         );
     }
 

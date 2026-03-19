@@ -6,6 +6,7 @@ mod git;
 mod hooks;
 mod output;
 mod paths;
+mod process;
 mod state;
 mod tui;
 
@@ -472,6 +473,10 @@ fn run_remove(
     // If not forced, resolve the worktree (adopting if unmanaged) for the prompt
     let resolved = if !force {
         if let Ok((repo, wt)) = adopt::resolve_or_adopt(identifier, &repo_info, &db) {
+            // Warn about running processes before confirmation
+            if let Some(warning) = process::format_process_warning(&wt.path) {
+                eprintln!("{warning}");
+            }
             let prune_hint = if prune {
                 " (including remote branch)"
             } else {
