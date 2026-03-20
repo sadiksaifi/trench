@@ -50,6 +50,7 @@ pub struct GlobalConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
     pub editor: Option<EditorConfig>,
+    pub shell: Option<ShellConfig>,
     pub worktrees: Option<WorktreesConfig>,
     pub hooks: Option<HooksConfig>,
 }
@@ -60,6 +61,7 @@ pub struct ProjectConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
     pub editor: Option<EditorConfig>,
+    pub shell: Option<ShellConfig>,
     pub worktrees: Option<WorktreesConfig>,
     pub hooks: Option<HooksConfig>,
 }
@@ -89,6 +91,11 @@ pub struct EditorConfig {
 pub struct WorktreesConfig {
     pub root: Option<String>,
     pub scan: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq)]
+pub struct ShellConfig {
+    pub tmux: Option<bool>,
 }
 
 /// Read and parse an optional TOML config file.
@@ -1188,6 +1195,39 @@ command = "code"
     fn editor_config_none_when_not_set() {
         let resolved = resolve_config(None, None, &GlobalConfig::default());
         assert!(resolved.editor_command.is_none());
+    }
+
+    #[test]
+    fn shell_config_tmux_deserializes_from_global() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            r#"
+[shell]
+tmux = true
+"#,
+        );
+
+        let config = load_global_config_from(&path).unwrap();
+        let shell = config.shell.expect("shell section should be present");
+        assert_eq!(shell.tmux, Some(true));
+    }
+
+    #[test]
+    fn shell_config_tmux_deserializes_from_project() {
+        let toml_str = r#"
+[shell]
+tmux = true
+"#;
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        let shell = config.shell.expect("shell section should be present");
+        assert_eq!(shell.tmux, Some(true));
+    }
+
+    #[test]
+    fn shell_config_absent_by_default() {
+        let config = GlobalConfig::default();
+        assert!(config.shell.is_none());
     }
 
 }
