@@ -923,6 +923,7 @@ impl App {
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) {
+        self.list_state.status_message = None;
         match key.code {
             KeyCode::Enter => {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
@@ -1562,6 +1563,21 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(!app.is_running());
         assert!(app.switch_path.is_none(), "quit should not set switch_path");
+    }
+
+    #[test]
+    fn status_message_clears_on_keypress() {
+        let mut app = app_with_rows();
+        app.list_state.status_message = Some(screens::list::StatusMessage {
+            text: "test error".into(),
+            success: false,
+        });
+        // Press any key (j to move down)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(
+            app.list_state.status_message.is_none(),
+            "status message should be cleared after keypress"
+        );
     }
 
     #[test]
