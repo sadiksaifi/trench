@@ -216,10 +216,9 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
         let msg = Paragraph::new("No worktrees. Press n to create one.")
             .style(base_style)
             .alignment(ratatui::layout::Alignment::Center);
-        let footer = Paragraph::new(Line::from(FOOTER_KEYS)).style(footer_style);
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
         frame.render_widget(msg, chunks[0]);
-        frame.render_widget(footer, chunks[1]);
+        render_footer(state, frame, chunks[1], theme, &footer_style);
         return;
     }
 
@@ -272,8 +271,33 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
 
     frame.render_stateful_widget(table, chunks[0], &mut table_state);
 
-    let footer = Paragraph::new(Line::from(FOOTER_KEYS)).style(footer_style);
-    frame.render_widget(footer, chunks[1]);
+    render_footer(state, frame, chunks[1], theme, &footer_style);
+}
+
+/// Render the footer area: status message if active, otherwise keybinding hints.
+fn render_footer(
+    state: &ListState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+    footer_style: &Style,
+) {
+    if let Some(ref status) = state.status_message {
+        let color = if status.success {
+            theme.success
+        } else {
+            theme.error
+        };
+        let style = Style::default()
+            .fg(color)
+            .bg(theme.background)
+            .add_modifier(Modifier::BOLD);
+        let footer = Paragraph::new(Line::from(format!(" {}", status.text))).style(style);
+        frame.render_widget(footer, area);
+    } else {
+        let footer = Paragraph::new(Line::from(FOOTER_KEYS)).style(*footer_style);
+        frame.render_widget(footer, area);
+    }
 }
 
 #[cfg(test)]
@@ -594,5 +618,35 @@ mod tests {
     fn list_state_has_status_message_initially_none() {
         let state = ListState::new(vec![]);
         assert!(state.status_message.is_none());
+    }
+
+    #[test]
+    fn status_message_replaces_footer_when_set() {
+        let mut state = ListState::new(sample_rows());
+        state.status_message = Some(StatusMessage {
+            text: "Switch failed: worktree not found".into(),
+            success: false,
+        });
+        let buf = render_to_buffer(&state, 100, 10);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Switch failed"),
+            "should show status message text"
+        );
+        assert!(
+            !text.contains("Enter switch"),
+            "should not show footer keys when status is active"
+        );
+    }
+
+    #[test]
+    fn footer_shows_keys_when_no_status_message() {
+        let state = ListState::new(sample_rows());
+        let buf = render_to_buffer(&state, 100, 10);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Enter switch"),
+            "should show footer keys when no status"
+        );
     }
 }
