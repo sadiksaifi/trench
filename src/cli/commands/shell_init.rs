@@ -138,7 +138,7 @@ mod tests {
             "fish output should define function tn"
         );
         assert!(
-            !output.contains("\nfunction tr\n"),
+            !output.contains("function tr\n"),
             "fish output should not define old function tr"
         );
     }
