@@ -1563,6 +1563,14 @@ mod tests {
     }
 
     #[test]
+    fn quit_leaves_switch_path_none() {
+        let mut app = App::new();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!app.is_running());
+        assert!(app.switch_path.is_none(), "quit should not set switch_path");
+    }
+
+    #[test]
     fn q_on_non_root_screen_pops_back() {
         let mut app = App::new();
         // Push Help
