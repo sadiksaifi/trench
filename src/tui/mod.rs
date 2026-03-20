@@ -129,6 +129,7 @@ pub struct App {
     pub hook_rx: Option<std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>>,
     pub editor_request: Option<String>,
     pub repo_path: Option<String>,
+    pub switch_path: Option<String>,
     pub auto_refresh: bool,
     pub watcher: Option<watcher::DebouncedWatcher>,
 }
@@ -148,6 +149,7 @@ impl App {
             hook_rx: None,
             editor_request: None,
             repo_path: None,
+            switch_path: None,
             auto_refresh: true,
             watcher: None,
         }
@@ -1222,6 +1224,12 @@ mod tests {
     fn app_has_repo_path_initially_none() {
         let app = App::new();
         assert!(app.repo_path.is_none());
+    }
+
+    #[test]
+    fn app_has_switch_path_initially_none() {
+        let app = App::new();
+        assert!(app.switch_path.is_none());
     }
 
     #[test]
