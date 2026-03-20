@@ -1,6 +1,6 @@
-//! Generate shell function definitions for `tr()` shell integration.
+//! Generate shell function definitions for `tn()` shell integration.
 //!
-//! The `tr()` function wraps `trench switch --print-path` with `cd` so
+//! The `tn()` function wraps `trench switch --print-path` with `cd` so
 //! switching worktrees changes the shell's working directory. All other
 //! subcommands pass through to `trench` unmodified.
 
@@ -15,7 +15,7 @@ pub fn generate(shell: ShellType) -> &'static str {
 }
 
 fn generate_posix() -> &'static str {
-    r#"tr() {
+    r#"tn() {
     if [ "$1" = "switch" ]; then
         shift
         local dir
@@ -62,11 +62,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bash_output_defines_tr_function() {
+    fn bash_output_defines_tn_function() {
         let output = generate(ShellType::Bash);
         assert!(
-            output.contains("tr()"),
-            "bash output should define tr() function"
+            output.contains("tn()"),
+            "bash output should define tn() function"
+        );
+        assert!(
+            !output.contains("tr()"),
+            "bash output should not define old tr() function"
         );
     }
 
@@ -98,11 +102,15 @@ mod tests {
     }
 
     #[test]
-    fn zsh_output_defines_tr_function() {
+    fn zsh_output_defines_tn_function() {
         let output = generate(ShellType::Zsh);
         assert!(
-            output.contains("tr()"),
-            "zsh output should define tr() function"
+            output.contains("tn()"),
+            "zsh output should define tn() function"
+        );
+        assert!(
+            !output.contains("tr()"),
+            "zsh output should not define old tr() function"
         );
     }
 
