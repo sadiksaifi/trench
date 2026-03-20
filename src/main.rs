@@ -660,15 +660,24 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
 
     let repo_info = git::discover_repo(&cwd)?;
 
-    // When --tmux is passed, open a tmux window instead of the editor.
-    // Defer config loading so that malformed config files don't break --tmux.
-    if tmux_flag {
-        // Resolve the worktree (and auto-adopt if needed)
+    // Defer config loading: skip when --tmux is explicit (same as run_switch)
+    let config_tmux = if tmux_flag {
+        false // --tmux overrides config; skip loading
+    } else {
+        let project_config = config::load_project_config(&repo_info.path)?;
+        let global_config = config::load_global_config()?;
+        let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+        resolved.shell.tmux
+    };
+
+    let use_tmux = tmux_flag || config_tmux;
+
+    if use_tmux {
         let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, &db)?;
 
         let action = tmux::resolve_switch_action(
-            true, // force tmux
-            false,
+            tmux_flag,
+            config_tmux,
             tmux::is_inside_tmux(),
             &wt.path,
             &wt.name,
@@ -685,11 +694,13 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
                 }
                 cli::commands::open::record_open(&db, repo.id, wt.id)?;
             }
-            tmux::SwitchAction::PrintPath { .. } => {
-                eprintln!(
-                    "warning: --tmux specified but not running inside a tmux session, falling back to $EDITOR"
-                );
-                // Load config only for the editor fallback path
+            tmux::SwitchAction::PrintPath { warn_not_in_tmux } => {
+                if warn_not_in_tmux {
+                    eprintln!(
+                        "warning: --tmux specified but not running inside a tmux session, falling back to $EDITOR"
+                    );
+                }
+                // Fall back to editor — load config for editor_command
                 let project_config = config::load_project_config(&repo_info.path)?;
                 let global_config = config::load_global_config()?;
                 let resolved =
@@ -700,7 +711,7 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Non-tmux path: load config for editor_command
+    // Non-tmux path: config already loaded above (config_tmux was false)
     let project_config = config::load_project_config(&repo_info.path)?;
     let global_config = config::load_global_config()?;
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
