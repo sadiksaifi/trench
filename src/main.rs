@@ -613,7 +613,7 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
                 resolved.shell.tmux
             };
 
-            let action = tmux::resolve_switch_action(
+            let action = tmux::resolve_tmux_action(
                 tmux_flag,
                 config_tmux,
                 tmux::is_inside_tmux(),
@@ -622,16 +622,26 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
             );
 
             match action {
-                tmux::SwitchAction::TmuxNewWindow(cmd) => {
-                    let status = std::process::Command::new(&cmd[0])
+                tmux::TmuxAction::TmuxNewWindow(cmd) => {
+                    match std::process::Command::new(&cmd[0])
                         .args(&cmd[1..])
                         .status()
-                        .context("failed to execute tmux")?;
-                    if !status.success() {
-                        anyhow::bail!("tmux exited with status {}", status);
+                    {
+                        Ok(status) if !status.success() => {
+                            anyhow::bail!("tmux exited with status {}", status);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            eprintln!("warning: tmux not found, falling back to default behavior");
+                            println!(
+                                "Switched to worktree '{}' at {}",
+                                result.name, result.path
+                            );
+                        }
+                        Err(e) => return Err(e).context("failed to execute tmux"),
+                        Ok(_) => {}
                     }
                 }
-                tmux::SwitchAction::PrintPath { warn_not_in_tmux } => {
+                tmux::TmuxAction::Fallback { warn_not_in_tmux } => {
                     if warn_not_in_tmux {
                         eprintln!(
                             "warning: --tmux specified but not running inside a tmux session, falling back to default behavior"
@@ -660,14 +670,15 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
 
     let repo_info = git::discover_repo(&cwd)?;
 
-    // Defer config loading: skip when --tmux is explicit (same as run_switch)
-    let config_tmux = if tmux_flag {
-        false // --tmux overrides config; skip loading
+    // Load config once. When --tmux is explicit, skip loading so malformed
+    // config files don't break --tmux (same as run_switch).
+    let (config_tmux, editor_command) = if tmux_flag {
+        (false, None) // --tmux overrides config; defer editor lookup to fallback
     } else {
         let project_config = config::load_project_config(&repo_info.path)?;
         let global_config = config::load_global_config()?;
         let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-        resolved.shell.tmux
+        (resolved.shell.tmux, resolved.editor_command)
     };
 
     let use_tmux = tmux_flag || config_tmux;
@@ -675,7 +686,7 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
     if use_tmux {
         let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, &db)?;
 
-        let action = tmux::resolve_switch_action(
+        let action = tmux::resolve_tmux_action(
             tmux_flag,
             config_tmux,
             tmux::is_inside_tmux(),
@@ -684,38 +695,44 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
         );
 
         match action {
-            tmux::SwitchAction::TmuxNewWindow(cmd) => {
-                let status = std::process::Command::new(&cmd[0])
+            tmux::TmuxAction::TmuxNewWindow(cmd) => {
+                match std::process::Command::new(&cmd[0])
                     .args(&cmd[1..])
                     .status()
-                    .context("failed to execute tmux")?;
-                if !status.success() {
-                    anyhow::bail!("tmux exited with status {}", status);
+                {
+                    Ok(status) if !status.success() => {
+                        anyhow::bail!("tmux exited with status {}", status);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        eprintln!(
+                            "warning: tmux not found, falling back to $EDITOR"
+                        );
+                        return run_open_editor(
+                            identifier,
+                            &cwd,
+                            &db,
+                            editor_command.as_deref(),
+                        );
+                    }
+                    Err(e) => return Err(e).context("failed to execute tmux"),
+                    Ok(_) => {
+                        cli::commands::open::record_open(&db, repo.id, wt.id)?;
+                    }
                 }
-                cli::commands::open::record_open(&db, repo.id, wt.id)?;
             }
-            tmux::SwitchAction::PrintPath { warn_not_in_tmux } => {
+            tmux::TmuxAction::Fallback { warn_not_in_tmux } => {
                 if warn_not_in_tmux {
                     eprintln!(
                         "warning: --tmux specified but not running inside a tmux session, falling back to $EDITOR"
                     );
                 }
-                // Fall back to editor — load config for editor_command
-                let project_config = config::load_project_config(&repo_info.path)?;
-                let global_config = config::load_global_config()?;
-                let resolved =
-                    config::resolve_config(None, project_config.as_ref(), &global_config);
-                return run_open_editor(identifier, &cwd, &db, resolved.editor_command.as_deref());
+                return run_open_editor(identifier, &cwd, &db, editor_command.as_deref());
             }
         }
         return Ok(());
     }
 
-    // Non-tmux path: config already loaded above (config_tmux was false)
-    let project_config = config::load_project_config(&repo_info.path)?;
-    let global_config = config::load_global_config()?;
-    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-    run_open_editor(identifier, &cwd, &db, resolved.editor_command.as_deref())
+    run_open_editor(identifier, &cwd, &db, editor_command.as_deref())
 }
 
 fn run_open_editor(
