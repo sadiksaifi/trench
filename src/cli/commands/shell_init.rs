@@ -37,7 +37,7 @@ fn generate_posix() -> &'static str {
 }
 
 fn generate_fish() -> &'static str {
-    r#"function tr
+    r#"function tn
     if test (count $argv) -gt 0 -a "$argv[1]" = "switch"
         set -l rest $argv[2..-1]
         set -l dir (command trench switch --print-path $rest)
@@ -131,11 +131,15 @@ mod tests {
     }
 
     #[test]
-    fn fish_output_defines_tr_function() {
+    fn fish_output_defines_tn_function() {
         let output = generate(ShellType::Fish);
         assert!(
-            output.contains("function tr"),
-            "fish output should define function tr"
+            output.contains("function tn"),
+            "fish output should define function tn"
+        );
+        assert!(
+            !output.contains("\nfunction tr\n"),
+            "fish output should not define old function tr"
         );
     }
 
