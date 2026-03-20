@@ -586,6 +586,24 @@ fn run_remove(
     }
 }
 
+/// Execute a tmux command, returning whether it succeeded.
+///
+/// Returns `Ok(true)` on success, `Ok(false)` if `tmux` was not found on PATH
+/// (caller should fall back), or `Err` for other failures.
+fn execute_tmux_command(cmd: &[String]) -> anyhow::Result<bool> {
+    match std::process::Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .status()
+    {
+        Ok(status) if !status.success() => {
+            anyhow::bail!("tmux exited with status {}", status);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).context("failed to execute tmux"),
+        Ok(_) => Ok(true),
+    }
+}
+
 fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
@@ -623,22 +641,12 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
 
             match action {
                 tmux::TmuxAction::TmuxNewWindow(cmd) => {
-                    match std::process::Command::new(&cmd[0])
-                        .args(&cmd[1..])
-                        .status()
-                    {
-                        Ok(status) if !status.success() => {
-                            anyhow::bail!("tmux exited with status {}", status);
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            eprintln!("warning: tmux not found, falling back to default behavior");
-                            println!(
-                                "Switched to worktree '{}' at {}",
-                                result.name, result.path
-                            );
-                        }
-                        Err(e) => return Err(e).context("failed to execute tmux"),
-                        Ok(_) => {}
+                    if !execute_tmux_command(&cmd)? {
+                        eprintln!("warning: tmux not found, falling back to default behavior");
+                        println!(
+                            "Switched to worktree '{}' at {}",
+                            result.name, result.path
+                        );
                     }
                 }
                 tmux::TmuxAction::Fallback { warn_not_in_tmux } => {
@@ -696,28 +704,16 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
 
         match action {
             tmux::TmuxAction::TmuxNewWindow(cmd) => {
-                match std::process::Command::new(&cmd[0])
-                    .args(&cmd[1..])
-                    .status()
-                {
-                    Ok(status) if !status.success() => {
-                        anyhow::bail!("tmux exited with status {}", status);
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        eprintln!(
-                            "warning: tmux not found, falling back to $EDITOR"
-                        );
-                        return run_open_editor(
-                            identifier,
-                            &cwd,
-                            &db,
-                            editor_command.as_deref(),
-                        );
-                    }
-                    Err(e) => return Err(e).context("failed to execute tmux"),
-                    Ok(_) => {
-                        cli::commands::open::record_open(&db, repo.id, wt.id)?;
-                    }
+                if execute_tmux_command(&cmd)? {
+                    cli::commands::open::record_open(&db, repo.id, wt.id)?;
+                } else {
+                    eprintln!("warning: tmux not found, falling back to $EDITOR");
+                    return run_open_editor(
+                        identifier,
+                        &cwd,
+                        &db,
+                        editor_command.as_deref(),
+                    );
                 }
             }
             tmux::TmuxAction::Fallback { warn_not_in_tmux } => {
