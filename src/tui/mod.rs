@@ -931,19 +931,26 @@ impl App {
             KeyCode::Enter => {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
                     let name = row.name.clone();
-                    if let Some((cwd, db)) = Self::open_db() {
-                        match crate::cli::commands::switch::execute(&name, &cwd, &db) {
-                            Ok(result) => {
-                                self.switch_path = Some(result.path);
-                                self.running = false;
-                            }
-                            Err(e) => {
-                                self.list_state.status_message =
-                                    Some(screens::list::StatusMessage {
-                                        text: format!("Switch failed: {e}"),
-                                        success: false,
-                                    });
-                            }
+                    let Some((cwd, db)) = Self::open_db() else {
+                        self.list_state.status_message =
+                            Some(screens::list::StatusMessage {
+                                text: "Switch failed: could not access current repo state"
+                                    .into(),
+                                success: false,
+                            });
+                        return;
+                    };
+                    match crate::cli::commands::switch::execute(&name, &cwd, &db) {
+                        Ok(result) => {
+                            self.switch_path = Some(result.path);
+                            self.running = false;
+                        }
+                        Err(e) => {
+                            self.list_state.status_message =
+                                Some(screens::list::StatusMessage {
+                                    text: format!("Switch failed: {e}"),
+                                    success: false,
+                                });
                         }
                     }
                 }
