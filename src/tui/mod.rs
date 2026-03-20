@@ -934,7 +934,13 @@ impl App {
                                 self.switch_path = Some(result.path);
                                 self.running = false;
                             }
-                            Err(_) => {}
+                            Err(e) => {
+                                self.list_state.status_message =
+                                    Some(screens::list::StatusMessage {
+                                        text: format!("Switch failed: {e}"),
+                                        success: false,
+                                    });
+                            }
                         }
                     }
                 }
