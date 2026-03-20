@@ -28,7 +28,7 @@ type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
 static PREV_PANIC_HOOK: Mutex<Option<Arc<PanicHook>>> = Mutex::new(None);
 
 /// Launch the TUI. This is the single public entry point.
-pub fn run() -> Result<()> {
+pub fn run() -> Result<Option<String>> {
     install_panic_hook();
     let mut terminal = ratatui::init();
     let mut app = App::new();
@@ -60,7 +60,7 @@ pub fn run() -> Result<()> {
     // Restore session state (selected worktree, scroll position) from last run
     app.restore_list_session();
 
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<Option<String>> {
         while app.is_running() {
             // Process any pending hook output messages
             app.process_hook_messages();
@@ -89,7 +89,7 @@ pub fn run() -> Result<()> {
                 terminal = ratatui::init();
             }
         }
-        Ok(())
+        Ok(app.switch_path.take())
     })();
 
     ratatui::restore();
@@ -129,6 +129,7 @@ pub struct App {
     pub hook_rx: Option<std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>>,
     pub editor_request: Option<String>,
     pub repo_path: Option<String>,
+    pub switch_path: Option<String>,
     pub auto_refresh: bool,
     pub watcher: Option<watcher::DebouncedWatcher>,
 }
@@ -148,6 +149,7 @@ impl App {
             hook_rx: None,
             editor_request: None,
             repo_path: None,
+            switch_path: None,
             auto_refresh: true,
             watcher: None,
         }
@@ -509,6 +511,10 @@ impl App {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
+        if self.active_screen() == Screen::List {
+            self.list_state.status_message = None;
+        }
+
         // Global keys handled at app level
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
@@ -923,22 +929,29 @@ impl App {
     fn handle_list_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter => {
-                let identity = self
-                    .list_state
-                    .rows
-                    .get(self.list_state.selected)
-                    .map(|r| r.name.clone());
-                self.adopt_selected_if_unmanaged();
-                if let Some(ref name) = identity {
-                    if let Some(idx) = self.list_state.rows.iter().position(|r| r.name == *name) {
-                        self.list_state.selected = idx;
-                    }
-                }
-                // Load detail data for the selected worktree
-                if let Some(name) = identity {
-                    self.save_list_session();
-                    if self.load_detail(&name) {
-                        self.push_screen(Screen::Detail);
+                if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
+                    let name = row.name.clone();
+                    let Some((cwd, db)) = Self::open_db() else {
+                        self.list_state.status_message =
+                            Some(screens::list::StatusMessage {
+                                text: "Switch failed: could not access current repo state"
+                                    .into(),
+                                success: false,
+                            });
+                        return;
+                    };
+                    match crate::cli::commands::switch::execute(&name, &cwd, &db) {
+                        Ok(result) => {
+                            self.switch_path = Some(result.path);
+                            self.running = false;
+                        }
+                        Err(e) => {
+                            self.list_state.status_message =
+                                Some(screens::list::StatusMessage {
+                                    text: format!("Switch failed: {e}"),
+                                    success: false,
+                                });
+                        }
                     }
                 }
             }
@@ -982,6 +995,25 @@ impl App {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
                     let name = row.name.clone();
                     self.load_hook_log_replay(&name);
+                }
+            }
+            KeyCode::Char('d') => {
+                let identity = self
+                    .list_state
+                    .rows
+                    .get(self.list_state.selected)
+                    .map(|r| r.name.clone());
+                self.adopt_selected_if_unmanaged();
+                if let Some(ref name) = identity {
+                    if let Some(idx) = self.list_state.rows.iter().position(|r| r.name == *name) {
+                        self.list_state.selected = idx;
+                    }
+                }
+                if let Some(name) = identity {
+                    self.save_list_session();
+                    if self.load_detail(&name) {
+                        self.push_screen(Screen::Detail);
+                    }
                 }
             }
             _ => {}
@@ -1222,6 +1254,12 @@ mod tests {
     fn app_has_repo_path_initially_none() {
         let app = App::new();
         assert!(app.repo_path.is_none());
+    }
+
+    #[test]
+    fn app_has_switch_path_initially_none() {
+        let app = App::new();
+        assert!(app.switch_path.is_none());
     }
 
     #[test]
@@ -1477,7 +1515,7 @@ mod tests {
     fn question_mark_toggles_help_from_detail_screen() {
         let mut app = app_with_rows();
         // Navigate to detail
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
 
         // Open help from detail
@@ -1536,6 +1574,44 @@ mod tests {
     }
 
     #[test]
+    fn quit_leaves_switch_path_none() {
+        let mut app = App::new();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!app.is_running());
+        assert!(app.switch_path.is_none(), "quit should not set switch_path");
+    }
+
+    #[test]
+    fn status_message_clears_on_keypress() {
+        let mut app = app_with_rows();
+        app.list_state.status_message = Some(screens::list::StatusMessage {
+            text: "test error".into(),
+            success: false,
+        });
+        // Press any key (j to move down)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(
+            app.list_state.status_message.is_none(),
+            "status message should be cleared after keypress"
+        );
+    }
+
+    #[test]
+    fn status_message_clears_on_global_key() {
+        let mut app = app_with_rows();
+        app.list_state.status_message = Some(screens::list::StatusMessage {
+            text: "test error".into(),
+            success: false,
+        });
+        // Press ? (global key that opens Help)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(
+            app.list_state.status_message.is_none(),
+            "status message should be cleared by global keys too"
+        );
+    }
+
+    #[test]
     fn q_on_non_root_screen_pops_back() {
         let mut app = App::new();
         // Push Help
@@ -1560,15 +1636,15 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_list_with_rows_pushes_detail() {
+    fn d_on_list_with_rows_pushes_detail() {
         let mut app = app_with_rows();
         assert_eq!(app.active_screen(), Screen::List);
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(
             app.active_screen(),
             Screen::Detail,
-            "Enter on List with rows should push Detail screen"
+            "d on List with rows should push Detail screen"
         );
         assert_eq!(app.nav_stack_depth(), 2);
     }
@@ -1608,7 +1684,7 @@ mod tests {
     fn deep_stack_navigation_push_pop_sequence() {
         let mut app = app_with_rows();
         // List → Detail → Help → pop → pop → List
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
         assert_eq!(app.nav_stack_depth(), 2);
 
@@ -1636,7 +1712,7 @@ mod tests {
     fn question_mark_opens_help_from_detail_screen() {
         let mut app = app_with_rows();
         // Navigate to Detail first
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
 
         // ? should still open Help from Detail
@@ -2940,7 +3016,7 @@ mod tests {
     fn replay_dismiss_returns_to_detail_not_list() {
         let mut app = app_with_rows();
         // Navigate to Detail
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
 
         // Simulate replay hook log pushed from Detail

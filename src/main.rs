@@ -235,7 +235,10 @@ fn main() -> anyhow::Result<()> {
         std::io::stdin().is_terminal(),
         std::io::stdout().is_terminal(),
     ) {
-        return tui::run();
+        if let Some(path) = tui::run()? {
+            println!("{path}");
+        }
+        return Ok(());
     }
 
     let dry_run = cli.dry_run;
