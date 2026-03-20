@@ -27,15 +27,27 @@ pub struct WorktreeRow {
     pub processes: String,
 }
 
+/// A transient status message displayed in the list view footer area.
+/// Auto-cleared on the next keypress.
+pub struct StatusMessage {
+    pub text: String,
+    pub success: bool,
+}
+
 /// State for the worktree list screen.
 pub struct ListState {
     pub rows: Vec<WorktreeRow>,
     pub selected: usize,
+    pub status_message: Option<StatusMessage>,
 }
 
 impl ListState {
     pub fn new(rows: Vec<WorktreeRow>) -> Self {
-        Self { rows, selected: 0 }
+        Self {
+            rows,
+            selected: 0,
+            status_message: None,
+        }
     }
 
     pub fn select_next(&mut self) {
@@ -576,5 +588,11 @@ mod tests {
             "managed row should use theme.foreground, got: {:?}",
             cell.fg
         );
+    }
+
+    #[test]
+    fn list_state_has_status_message_initially_none() {
+        let state = ListState::new(vec![]);
+        assert!(state.status_message.is_none());
     }
 }
