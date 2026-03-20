@@ -1701,6 +1701,25 @@ mod tests {
     }
 
     #[test]
+    fn switch_subcommand_print_path_and_tmux_both_parse() {
+        let cli =
+            Cli::try_parse_from(["trench", "switch", "my-feature", "--print-path", "--tmux"])
+                .expect("switch with --print-path and --tmux should succeed");
+        match cli.command {
+            Some(Commands::Switch {
+                branch,
+                print_path,
+                tmux,
+            }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(print_path, "--print-path should be true");
+                assert!(tmux, "--tmux should be true");
+            }
+            _ => panic!("expected Commands::Switch"),
+        }
+    }
+
+    #[test]
     fn tag_subcommand_requires_branch() {
         let result = Cli::try_parse_from(["trench", "tag"]);
         assert!(result.is_err(), "tag without branch should fail");
