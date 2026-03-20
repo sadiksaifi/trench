@@ -48,18 +48,17 @@ pub fn run() -> Result<()> {
         app.theme = theme::from_name(&resolved.ui.theme);
     }
 
+    // Set auto_refresh before any refresh that may build a watcher
+    app.auto_refresh = resolved_config
+        .as_ref()
+        .map(|c| c.ui.auto_refresh)
+        .unwrap_or(true);
+
     // Load worktree data before entering the event loop
     app.refresh_list();
 
     // Restore session state (selected worktree, scroll position) from last run
     app.restore_list_session();
-
-    // Initialize filesystem watcher if auto_refresh is enabled
-    app.auto_refresh = resolved_config
-        .as_ref()
-        .map(|c| c.ui.auto_refresh)
-        .unwrap_or(true);
-    app.rebuild_watcher();
 
     let result = (|| -> Result<()> {
         while app.is_running() {
@@ -353,6 +352,7 @@ impl App {
     /// the current set of worktrees.
     pub fn rebuild_watcher(&mut self) {
         if !self.auto_refresh {
+            self.watcher = None;
             return;
         }
 
