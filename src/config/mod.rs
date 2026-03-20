@@ -50,6 +50,7 @@ pub struct GlobalConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
     pub editor: Option<EditorConfig>,
+    pub shell: Option<ShellConfig>,
     pub worktrees: Option<WorktreesConfig>,
     pub hooks: Option<HooksConfig>,
 }
@@ -60,6 +61,7 @@ pub struct ProjectConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
     pub editor: Option<EditorConfig>,
+    pub shell: Option<ShellConfig>,
     pub worktrees: Option<WorktreesConfig>,
     pub hooks: Option<HooksConfig>,
 }
@@ -89,6 +91,11 @@ pub struct EditorConfig {
 pub struct WorktreesConfig {
     pub root: Option<String>,
     pub scan: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq)]
+pub struct ShellConfig {
+    pub tmux: Option<bool>,
 }
 
 /// Read and parse an optional TOML config file.
@@ -135,8 +142,20 @@ pub struct ResolvedConfig {
     pub ui: ResolvedUiConfig,
     pub git: ResolvedGitConfig,
     pub editor_command: Option<String>,
+    pub shell: ResolvedShellConfig,
     pub worktrees: ResolvedWorktreesConfig,
     pub hooks: Option<HooksConfig>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ResolvedShellConfig {
+    pub tmux: bool,
+}
+
+impl Default for ResolvedShellConfig {
+    fn default() -> Self {
+        Self { tmux: false }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -220,6 +239,11 @@ pub fn resolve_config(
         .and_then(|e| e.command.clone())
         .or_else(|| g_editor.and_then(|e| e.command.clone()));
 
+    // Shell: project > global > defaults
+    let p_shell = project.and_then(|p| p.shell.as_ref());
+    let g_shell = global.shell.as_ref();
+    let defaults_shell = ResolvedShellConfig::default();
+
     // Hooks: project replaces global entirely (FR-2)
     let p_hooks = project.and_then(|p| p.hooks.as_ref());
     let hooks = p_hooks.or(global.hooks.as_ref()).cloned();
@@ -263,6 +287,12 @@ pub fn resolve_config(
                 .unwrap_or(defaults_git.fetch_on_open),
         },
         editor_command,
+        shell: ResolvedShellConfig {
+            tmux: p_shell
+                .and_then(|s| s.tmux)
+                .or_else(|| g_shell.and_then(|s| s.tmux))
+                .unwrap_or(defaults_shell.tmux),
+        },
         worktrees: ResolvedWorktreesConfig {
             root: cli
                 .and_then(|c| c.worktree_root.clone())
@@ -1188,6 +1218,75 @@ command = "code"
     fn editor_config_none_when_not_set() {
         let resolved = resolve_config(None, None, &GlobalConfig::default());
         assert!(resolved.editor_command.is_none());
+    }
+
+    #[test]
+    fn shell_config_tmux_deserializes_from_global() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            r#"
+[shell]
+tmux = true
+"#,
+        );
+
+        let config = load_global_config_from(&path).unwrap();
+        let shell = config.shell.expect("shell section should be present");
+        assert_eq!(shell.tmux, Some(true));
+    }
+
+    #[test]
+    fn shell_config_tmux_deserializes_from_project() {
+        let toml_str = r#"
+[shell]
+tmux = true
+"#;
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        let shell = config.shell.expect("shell section should be present");
+        assert_eq!(shell.tmux, Some(true));
+    }
+
+    #[test]
+    fn shell_config_absent_by_default() {
+        let config = GlobalConfig::default();
+        assert!(config.shell.is_none());
+    }
+
+    #[test]
+    fn shell_tmux_defaults_to_false_in_resolved() {
+        let resolved = resolve_config(None, None, &GlobalConfig::default());
+        assert!(!resolved.shell.tmux, "shell.tmux should default to false");
+    }
+
+    #[test]
+    fn shell_tmux_enabled_via_global_config() {
+        let global = GlobalConfig {
+            shell: Some(ShellConfig {
+                tmux: Some(true),
+            }),
+            ..GlobalConfig::default()
+        };
+        let resolved = resolve_config(None, None, &global);
+        assert!(resolved.shell.tmux, "shell.tmux should be true when set in global");
+    }
+
+    #[test]
+    fn shell_tmux_project_overrides_global() {
+        let global = GlobalConfig {
+            shell: Some(ShellConfig {
+                tmux: Some(true),
+            }),
+            ..GlobalConfig::default()
+        };
+        let project = ProjectConfig {
+            shell: Some(ShellConfig {
+                tmux: Some(false),
+            }),
+            ..ProjectConfig::default()
+        };
+        let resolved = resolve_config(None, Some(&project), &global);
+        assert!(!resolved.shell.tmux, "project shell.tmux should override global");
     }
 
 }

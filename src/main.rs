@@ -9,6 +9,7 @@ mod output;
 mod paths;
 mod process;
 mod state;
+mod tmux;
 mod tui;
 
 use anyhow::Context;
@@ -95,6 +96,10 @@ enum Commands {
         /// Print only the worktree path (for shell integration)
         #[arg(long)]
         print_path: bool,
+
+        /// Open worktree in a new tmux window (requires running inside tmux)
+        #[arg(long)]
+        tmux: bool,
     },
     /// Manage tags on a worktree
     Tag {
@@ -109,6 +114,10 @@ enum Commands {
     Open {
         /// Branch name or sanitized name of the worktree
         branch: String,
+
+        /// Open worktree in a new tmux window instead of $EDITOR (requires running inside tmux)
+        #[arg(long)]
+        tmux: bool,
     },
     /// List all worktrees
     List {
@@ -248,9 +257,16 @@ fn main() -> anyhow::Result<()> {
             prune,
             no_hooks,
         }) => run_remove(&branch, force, prune, no_hooks, dry_run, json),
-        Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
+        Some(Commands::Switch {
+            branch,
+            print_path,
+            tmux: tmux_flag,
+        }) => run_switch(&branch, print_path, tmux_flag),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
-        Some(Commands::Open { branch }) => run_open(&branch),
+        Some(Commands::Open {
+            branch,
+            tmux: tmux_flag,
+        }) => run_open(&branch, tmux_flag),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
         Some(Commands::Status { branch }) => run_status(
             branch.as_deref(),
@@ -570,17 +586,77 @@ fn run_remove(
     }
 }
 
-fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
+/// Execute a tmux command, returning whether it succeeded.
+///
+/// Returns `Ok(true)` on success, `Ok(false)` if `tmux` was not found on PATH
+/// (caller should fall back), or `Err` for other failures.
+fn execute_tmux_command(cmd: &[String]) -> anyhow::Result<bool> {
+    match std::process::Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .status()
+    {
+        Ok(status) if !status.success() => {
+            anyhow::bail!("tmux exited with status {}", status);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).context("failed to execute tmux"),
+        Ok(_) => Ok(true),
+    }
+}
+
+fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
     match cli::commands::switch::execute(identifier, &cwd, &db) {
         Ok(result) => {
+            // --print-path must always write to stdout (shell-init depends on it),
+            // so short-circuit before any tmux resolution.
             if print_path {
                 println!("{}", result.path);
+                return Ok(());
+            }
+
+            // Defer config loading until after early-exit paths so that
+            // malformed config files don't break --print-path or --tmux.
+            let config_tmux = if tmux_flag {
+                false // --tmux overrides config; skip loading
             } else {
-                println!("Switched to worktree '{}' at {}", result.name, result.path);
+                let repo_info = git::discover_repo(&cwd)?;
+                let project_config = config::load_project_config(&repo_info.path)?;
+                let global_config = config::load_global_config()?;
+                let resolved =
+                    config::resolve_config(None, project_config.as_ref(), &global_config);
+                resolved.shell.tmux
+            };
+
+            let action = tmux::resolve_tmux_action(
+                tmux_flag,
+                config_tmux,
+                tmux::is_inside_tmux(),
+                &result.path,
+                &result.name,
+            );
+
+            match action {
+                tmux::TmuxAction::TmuxNewWindow(cmd) => {
+                    if !execute_tmux_command(&cmd)? {
+                        eprintln!("warning: tmux not found, falling back to default behavior");
+                        println!(
+                            "Switched to worktree '{}' at {}",
+                            result.name, result.path
+                        );
+                    }
+                }
+                tmux::TmuxAction::Fallback { warn_not_in_tmux } => {
+                    if warn_not_in_tmux {
+                        eprintln!(
+                            "warning: --tmux specified but not running inside a tmux session, falling back to default behavior"
+                        );
+                    }
+                    println!("Switched to worktree '{}' at {}", result.name, result.path);
+                }
             }
             Ok(())
         }
@@ -595,17 +671,73 @@ fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
     }
 }
 
-fn run_open(identifier: &str) -> anyhow::Result<()> {
+fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
     let repo_info = git::discover_repo(&cwd)?;
-    let project_config = config::load_project_config(&repo_info.path)?;
-    let global_config = config::load_global_config()?;
-    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
 
-    match cli::commands::open::resolve(identifier, &cwd, &db, resolved.editor_command.as_deref()) {
+    // Load config once. When --tmux is explicit, skip loading so malformed
+    // config files don't break --tmux (same as run_switch).
+    let (config_tmux, editor_command) = if tmux_flag {
+        (false, None) // --tmux overrides config; defer editor lookup to fallback
+    } else {
+        let project_config = config::load_project_config(&repo_info.path)?;
+        let global_config = config::load_global_config()?;
+        let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+        (resolved.shell.tmux, resolved.editor_command)
+    };
+
+    let use_tmux = tmux_flag || config_tmux;
+
+    if use_tmux {
+        let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, &db)?;
+
+        let action = tmux::resolve_tmux_action(
+            tmux_flag,
+            config_tmux,
+            tmux::is_inside_tmux(),
+            &wt.path,
+            &wt.name,
+        );
+
+        match action {
+            tmux::TmuxAction::TmuxNewWindow(cmd) => {
+                if execute_tmux_command(&cmd)? {
+                    cli::commands::open::record_open(&db, repo.id, wt.id)?;
+                } else {
+                    eprintln!("warning: tmux not found, falling back to $EDITOR");
+                    return run_open_editor(
+                        identifier,
+                        &cwd,
+                        &db,
+                        editor_command.as_deref(),
+                    );
+                }
+            }
+            tmux::TmuxAction::Fallback { warn_not_in_tmux } => {
+                if warn_not_in_tmux {
+                    eprintln!(
+                        "warning: --tmux specified but not running inside a tmux session, falling back to $EDITOR"
+                    );
+                }
+                return run_open_editor(identifier, &cwd, &db, editor_command.as_deref());
+            }
+        }
+        return Ok(());
+    }
+
+    run_open_editor(identifier, &cwd, &db, editor_command.as_deref())
+}
+
+fn run_open_editor(
+    identifier: &str,
+    cwd: &std::path::Path,
+    db: &state::Database,
+    editor_command: Option<&str>,
+) -> anyhow::Result<()> {
+    match cli::commands::open::resolve(identifier, cwd, db, editor_command) {
         Ok(result) => {
             let parts = shell_words::split(&result.editor)
                 .with_context(|| format!("invalid editor command: '{}'", result.editor))?;
@@ -623,8 +755,7 @@ fn run_open(identifier: &str) -> anyhow::Result<()> {
                 ExitCode::GeneralError.exit();
             }
 
-            // Record DB side-effects only after a successful launch
-            cli::commands::open::record_open(&db, result.repo_id, result.wt_id)?;
+            cli::commands::open::record_open(db, result.repo_id, result.wt_id)?;
 
             Ok(())
         }
@@ -1305,8 +1436,22 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "open", "my-feature"])
             .expect("open with branch should succeed");
         match cli.command {
-            Some(Commands::Open { branch }) => {
+            Some(Commands::Open { branch, tmux }) => {
                 assert_eq!(branch, "my-feature");
+                assert!(!tmux);
+            }
+            _ => panic!("expected Commands::Open"),
+        }
+    }
+
+    #[test]
+    fn open_subcommand_accepts_tmux_flag() {
+        let cli = Cli::try_parse_from(["trench", "open", "my-feature", "--tmux"])
+            .expect("open with --tmux should succeed");
+        match cli.command {
+            Some(Commands::Open { branch, tmux }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(tmux);
             }
             _ => panic!("expected Commands::Open"),
         }
@@ -1519,9 +1664,14 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "switch", "my-feature"])
             .expect("switch with branch should succeed");
         match cli.command {
-            Some(Commands::Switch { branch, print_path }) => {
+            Some(Commands::Switch {
+                branch,
+                print_path,
+                tmux,
+            }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(!print_path);
+                assert!(!tmux);
             }
             _ => panic!("expected Commands::Switch"),
         }
@@ -1532,9 +1682,51 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "switch", "my-feature", "--print-path"])
             .expect("switch with --print-path should succeed");
         match cli.command {
-            Some(Commands::Switch { branch, print_path }) => {
+            Some(Commands::Switch {
+                branch,
+                print_path,
+                tmux,
+            }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(print_path);
+                assert!(!tmux);
+            }
+            _ => panic!("expected Commands::Switch"),
+        }
+    }
+
+    #[test]
+    fn switch_subcommand_accepts_tmux_flag() {
+        let cli = Cli::try_parse_from(["trench", "switch", "my-feature", "--tmux"])
+            .expect("switch with --tmux should succeed");
+        match cli.command {
+            Some(Commands::Switch {
+                branch,
+                print_path,
+                tmux,
+            }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(!print_path);
+                assert!(tmux);
+            }
+            _ => panic!("expected Commands::Switch"),
+        }
+    }
+
+    #[test]
+    fn switch_subcommand_print_path_and_tmux_both_parse() {
+        let cli =
+            Cli::try_parse_from(["trench", "switch", "my-feature", "--print-path", "--tmux"])
+                .expect("switch with --print-path and --tmux should succeed");
+        match cli.command {
+            Some(Commands::Switch {
+                branch,
+                print_path,
+                tmux,
+            }) => {
+                assert_eq!(branch, "my-feature");
+                assert!(print_path, "--print-path should be true");
+                assert!(tmux, "--tmux should be true");
             }
             _ => panic!("expected Commands::Switch"),
         }
