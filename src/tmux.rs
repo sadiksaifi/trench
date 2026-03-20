@@ -65,27 +65,54 @@ pub fn resolve_switch_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::ffi::OsString;
+
+    /// RAII guard that saves the current value of an env var and restores it on drop.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let prev = std::env::var_os(key);
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
+    #[serial]
     fn is_inside_tmux_returns_false_when_unset() {
-        std::env::remove_var("TMUX");
+        let _guard = EnvGuard::set("TMUX", None);
         assert!(!is_inside_tmux());
     }
 
     #[test]
+    #[serial]
     fn is_inside_tmux_returns_false_when_empty() {
-        std::env::set_var("TMUX", "");
-        let result = is_inside_tmux();
-        std::env::remove_var("TMUX");
-        assert!(!result);
+        let _guard = EnvGuard::set("TMUX", Some(""));
+        assert!(!is_inside_tmux());
     }
 
     #[test]
+    #[serial]
     fn is_inside_tmux_returns_true_when_set() {
-        std::env::set_var("TMUX", "/tmp/tmux-501/default,12345,0");
-        let result = is_inside_tmux();
-        std::env::remove_var("TMUX");
-        assert!(result);
+        let _guard = EnvGuard::set("TMUX", Some("/tmp/tmux-501/default,12345,0"));
+        assert!(is_inside_tmux());
     }
 
     #[test]
