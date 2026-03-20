@@ -36,10 +36,12 @@ pub fn keybinding_groups() -> &'static [KeybindingGroup] {
             bindings: &[
                 KeybindingEntry { key: "j / ↓", description: "Move down" },
                 KeybindingEntry { key: "k / ↑", description: "Move up" },
-                KeybindingEntry { key: "Enter", description: "Open detail view" },
+                KeybindingEntry { key: "Enter", description: "Switch to worktree" },
+                KeybindingEntry { key: "d", description: "Open detail view" },
                 KeybindingEntry { key: "n", description: "Create worktree" },
                 KeybindingEntry { key: "s", description: "Sync worktree" },
                 KeybindingEntry { key: "D", description: "Delete worktree" },
+                KeybindingEntry { key: "l", description: "View hook log" },
             ],
         },
         KeybindingGroup {
@@ -201,5 +203,15 @@ mod tests {
         let keys: Vec<&str> = global.bindings.iter().map(|b| b.key).collect();
         assert!(keys.contains(&"?"), "Global group missing '?' keybinding");
         assert!(keys.contains(&"q / Esc"), "Global group missing quit keybinding");
+    }
+
+    #[test]
+    fn list_group_contains_switch_detail_and_log_bindings() {
+        let groups = keybinding_groups();
+        let list = groups.iter().find(|g| g.context == "List").unwrap();
+        let descs: Vec<&str> = list.bindings.iter().map(|b| b.description).collect();
+        assert!(descs.contains(&"Switch to worktree"), "List group missing switch binding");
+        assert!(descs.contains(&"Open detail view"), "List group missing detail binding");
+        assert!(descs.contains(&"View hook log"), "List group missing log binding");
     }
 }
