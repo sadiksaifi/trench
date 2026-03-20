@@ -44,6 +44,10 @@ globset = "0.4"
 # Paths
 dirs = "6"
 
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # Watch
 notify = "7"
 shell-words = "1.1.1"

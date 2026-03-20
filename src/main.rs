@@ -4,6 +4,7 @@ mod config;
 mod exit_code;
 mod git;
 mod hooks;
+mod logging;
 mod output;
 mod paths;
 mod process;
@@ -219,6 +220,8 @@ impl Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    logging::init()?;
+
     let cli = Cli::parse();
     let output_config = cli.output_config();
 
