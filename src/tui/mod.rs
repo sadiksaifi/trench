@@ -511,6 +511,10 @@ impl App {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
+        if self.active_screen() == Screen::List {
+            self.list_state.status_message = None;
+        }
+
         // Global keys handled at app level
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
@@ -923,7 +927,6 @@ impl App {
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) {
-        self.list_state.status_message = None;
         match key.code {
             KeyCode::Enter => {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
@@ -1583,6 +1586,21 @@ mod tests {
         assert!(
             app.list_state.status_message.is_none(),
             "status message should be cleared after keypress"
+        );
+    }
+
+    #[test]
+    fn status_message_clears_on_global_key() {
+        let mut app = app_with_rows();
+        app.list_state.status_message = Some(screens::list::StatusMessage {
+            text: "test error".into(),
+            success: false,
+        });
+        // Press ? (global key that opens Help)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(
+            app.list_state.status_message.is_none(),
+            "status message should be cleared by global keys too"
         );
     }
 
