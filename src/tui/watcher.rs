@@ -3,10 +3,23 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use notify::{RecommendedWatcher, Watcher};
+use notify::{Event, RecommendedWatcher, Watcher};
 
 /// Default debounce window: 500ms of quiet before triggering a refresh.
 pub const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+
+/// Handle a notify watch event: forward successful events to the channel,
+/// log errors at warn level.
+fn handle_watch_event(res: notify::Result<Event>, tx: &mpsc::Sender<()>) {
+    match res {
+        Ok(_) => {
+            let _ = tx.send(());
+        }
+        Err(err) => {
+            tracing::warn!("file watch error: {err}");
+        }
+    }
+}
 
 /// Watches filesystem paths for changes and signals when a TUI refresh is needed.
 ///
@@ -26,11 +39,8 @@ impl FileWatcher {
     pub fn new(paths: &[&Path]) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
         let event_tx = tx;
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            // TODO: log notify errors at warn level once a logging framework is added (#122)
-            if res.is_ok() {
-                let _ = event_tx.send(());
-            }
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+            handle_watch_event(res, &event_tx);
         })?;
 
         let mut watched = 0;
@@ -177,6 +187,7 @@ impl DebouncedWatcher {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Read as _;
     use tempfile::TempDir;
 
     #[test]
@@ -574,4 +585,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn handle_watch_event_logs_notify_errors() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("test.log");
+        let file = std::fs::File::options()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .unwrap();
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
+            .finish();
+
+        let (tx, _rx) = mpsc::channel();
+        let err = notify::Error::generic("synthetic test error");
+
+        tracing::subscriber::with_default(subscriber, || {
+            handle_watch_event(Err(err), &tx);
+        });
+
+        let mut contents = String::new();
+        std::fs::File::open(&log_path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+
+        assert!(
+            contents.contains("synthetic test error"),
+            "notify errors should be logged: got {contents:?}"
+        );
+    }
 }
