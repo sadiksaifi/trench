@@ -591,12 +591,6 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
     let db_path = paths::data_dir()?.join("trench.db");
     let db = state::Database::open(&db_path)?;
 
-    // Load config for shell.tmux setting
-    let repo_info = git::discover_repo(&cwd)?;
-    let project_config = config::load_project_config(&repo_info.path)?;
-    let global_config = config::load_global_config()?;
-    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-
     match cli::commands::switch::execute(identifier, &cwd, &db) {
         Ok(result) => {
             // --print-path must always write to stdout (shell-init depends on it),
@@ -606,9 +600,22 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
                 return Ok(());
             }
 
+            // Defer config loading until after early-exit paths so that
+            // malformed config files don't break --print-path or --tmux.
+            let config_tmux = if tmux_flag {
+                false // --tmux overrides config; skip loading
+            } else {
+                let repo_info = git::discover_repo(&cwd)?;
+                let project_config = config::load_project_config(&repo_info.path)?;
+                let global_config = config::load_global_config()?;
+                let resolved =
+                    config::resolve_config(None, project_config.as_ref(), &global_config);
+                resolved.shell.tmux
+            };
+
             let action = tmux::resolve_switch_action(
                 tmux_flag,
-                resolved.shell.tmux,
+                config_tmux,
                 tmux::is_inside_tmux(),
                 &result.path,
                 &result.name,
@@ -630,10 +637,7 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
                             "warning: --tmux specified but not running inside a tmux session, falling back to default behavior"
                         );
                     }
-                    println!(
-                        "Switched to worktree '{}' at {}",
-                        result.name, result.path
-                    );
+                    println!("Switched to worktree '{}' at {}", result.name, result.path);
                 }
             }
             Ok(())
@@ -655,14 +659,10 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
     let db = state::Database::open(&db_path)?;
 
     let repo_info = git::discover_repo(&cwd)?;
-    let project_config = config::load_project_config(&repo_info.path)?;
-    let global_config = config::load_global_config()?;
-    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
 
-    // When --tmux is passed, open a tmux window instead of the editor
-    let use_tmux = tmux_flag;
-
-    if use_tmux {
+    // When --tmux is passed, open a tmux window instead of the editor.
+    // Defer config loading so that malformed config files don't break --tmux.
+    if tmux_flag {
         // Resolve the worktree (and auto-adopt if needed)
         let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, &db)?;
 
@@ -689,12 +689,21 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
                 eprintln!(
                     "warning: --tmux specified but not running inside a tmux session, falling back to $EDITOR"
                 );
+                // Load config only for the editor fallback path
+                let project_config = config::load_project_config(&repo_info.path)?;
+                let global_config = config::load_global_config()?;
+                let resolved =
+                    config::resolve_config(None, project_config.as_ref(), &global_config);
                 return run_open_editor(identifier, &cwd, &db, resolved.editor_command.as_deref());
             }
         }
         return Ok(());
     }
 
+    // Non-tmux path: load config for editor_command
+    let project_config = config::load_project_config(&repo_info.path)?;
+    let global_config = config::load_global_config()?;
+    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
     run_open_editor(identifier, &cwd, &db, resolved.editor_command.as_deref())
 }
 
