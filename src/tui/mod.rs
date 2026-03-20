@@ -925,22 +925,16 @@ impl App {
     fn handle_list_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter => {
-                let identity = self
-                    .list_state
-                    .rows
-                    .get(self.list_state.selected)
-                    .map(|r| r.name.clone());
-                self.adopt_selected_if_unmanaged();
-                if let Some(ref name) = identity {
-                    if let Some(idx) = self.list_state.rows.iter().position(|r| r.name == *name) {
-                        self.list_state.selected = idx;
-                    }
-                }
-                // Load detail data for the selected worktree
-                if let Some(name) = identity {
-                    self.save_list_session();
-                    if self.load_detail(&name) {
-                        self.push_screen(Screen::Detail);
+                if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
+                    let name = row.name.clone();
+                    if let Some((cwd, db)) = Self::open_db() {
+                        match crate::cli::commands::switch::execute(&name, &cwd, &db) {
+                            Ok(result) => {
+                                self.switch_path = Some(result.path);
+                                self.running = false;
+                            }
+                            Err(_) => {}
+                        }
                     }
                 }
             }
