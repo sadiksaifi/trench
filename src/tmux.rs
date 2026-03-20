@@ -49,7 +49,7 @@ pub fn resolve_switch_action(
 
     if use_tmux && inside_tmux {
         SwitchAction::TmuxNewWindow(build_new_window_command(worktree_path, window_name))
-    } else if use_tmux && tmux_flag && !inside_tmux {
+    } else if tmux_flag && !inside_tmux {
         // User explicitly asked for tmux but we're not in a session
         SwitchAction::PrintPath {
             warn_not_in_tmux: true,
