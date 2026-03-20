@@ -47,7 +47,7 @@ pub fn init() -> Result<()> {
 
     let subscriber = build_subscriber(file);
 
-    // May fail if another test already set the global subscriber — that's OK.
+    // May fail if a global subscriber is already set — that's OK, first one wins.
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     Ok(())
