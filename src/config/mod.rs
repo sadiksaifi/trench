@@ -70,6 +70,7 @@ pub struct UiConfig {
     pub date_format: Option<String>,
     pub show_ahead_behind: Option<bool>,
     pub show_dirty_count: Option<bool>,
+    pub auto_refresh: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -144,6 +145,7 @@ pub struct ResolvedUiConfig {
     pub date_format: String,
     pub show_ahead_behind: bool,
     pub show_dirty_count: bool,
+    pub auto_refresh: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -166,6 +168,7 @@ impl Default for ResolvedUiConfig {
             date_format: "%Y-%m-%d %H:%M".to_string(),
             show_ahead_behind: true,
             show_dirty_count: true,
+            auto_refresh: true,
         }
     }
 }
@@ -239,6 +242,10 @@ pub fn resolve_config(
                 .and_then(|u| u.show_dirty_count)
                 .or_else(|| g_ui.and_then(|u| u.show_dirty_count))
                 .unwrap_or(defaults_ui.show_dirty_count),
+            auto_refresh: p_ui
+                .and_then(|u| u.auto_refresh)
+                .or_else(|| g_ui.and_then(|u| u.auto_refresh))
+                .unwrap_or(defaults_ui.auto_refresh),
         },
         git: ResolvedGitConfig {
             default_base: cli
@@ -316,6 +323,59 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, content).unwrap();
         path
+    }
+
+    #[test]
+    fn auto_refresh_defaults_to_true() {
+        let resolved = resolve_config(None, None, &GlobalConfig::default());
+        assert!(resolved.ui.auto_refresh, "auto_refresh should default to true");
+    }
+
+    #[test]
+    fn auto_refresh_can_be_disabled_via_global_config() {
+        let global = GlobalConfig {
+            ui: Some(UiConfig {
+                auto_refresh: Some(false),
+                ..UiConfig::default()
+            }),
+            ..GlobalConfig::default()
+        };
+        let resolved = resolve_config(None, None, &global);
+        assert!(!resolved.ui.auto_refresh, "auto_refresh should be false when disabled in global config");
+    }
+
+    #[test]
+    fn auto_refresh_from_toml() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            r#"
+[ui]
+auto_refresh = false
+"#,
+        );
+        let config = load_global_config_from(&path).unwrap();
+        assert_eq!(config.ui.unwrap().auto_refresh, Some(false));
+    }
+
+    #[test]
+    fn auto_refresh_project_overrides_global() {
+        let global = GlobalConfig {
+            ui: Some(UiConfig {
+                auto_refresh: Some(true),
+                ..UiConfig::default()
+            }),
+            ..GlobalConfig::default()
+        };
+        let project = ProjectConfig {
+            ui: Some(UiConfig {
+                auto_refresh: Some(false),
+                ..UiConfig::default()
+            }),
+            ..ProjectConfig::default()
+        };
+        let resolved = resolve_config(None, Some(&project), &global);
+        assert!(!resolved.ui.auto_refresh, "project auto_refresh should override global");
     }
 
     #[test]
@@ -666,6 +726,7 @@ run = ["bun install"]
                 date_format: None,
                 show_ahead_behind: Some(false),
                 show_dirty_count: None,
+                auto_refresh: None,
             }),
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
@@ -706,6 +767,7 @@ run = ["bun install"]
                 date_format: Some("%d/%m/%Y".to_string()),
                 show_ahead_behind: None,
                 show_dirty_count: None,
+                auto_refresh: None,
             }),
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
@@ -721,6 +783,7 @@ run = ["bun install"]
                 date_format: None, // not overridden — should fall through to global
                 show_ahead_behind: Some(false),
                 show_dirty_count: None,
+                auto_refresh: None,
             }),
             git: Some(GitConfig {
                 default_base: Some("staging".to_string()),
