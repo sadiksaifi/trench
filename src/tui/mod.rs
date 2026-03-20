@@ -384,9 +384,9 @@ impl App {
     /// disrupting user interactions on other screens.
     pub fn check_watcher(&mut self) {
         if self.active_screen() != Screen::List {
-            // Still drain events to avoid backlog, but don't refresh
+            // Drain events but preserve pending refresh for when we return to List
             if let Some(ref mut w) = self.watcher {
-                w.should_refresh();
+                w.poll_events();
             }
             return;
         }
@@ -403,7 +403,7 @@ impl App {
     pub fn check_watcher_returns_refresh(&mut self) -> bool {
         if self.active_screen() != Screen::List {
             if let Some(ref mut w) = self.watcher {
-                w.should_refresh();
+                w.poll_events();
             }
             return false;
         }
@@ -3124,6 +3124,45 @@ mod tests {
         assert!(
             app.check_watcher_returns_refresh(),
             "dir2 should be watched after rebuild"
+        );
+    }
+
+    #[test]
+    fn check_watcher_preserves_pending_refresh_on_non_list_screen() {
+        use std::time::Duration;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let dw = watcher::DebouncedWatcher::with_debounce(
+            &[dir.path()],
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        let mut app = app_with_rows();
+        app.watcher = Some(dw);
+        app.push_screen(Screen::Help); // not on List screen
+
+        // Drain startup noise
+        std::thread::sleep(Duration::from_millis(100));
+        app.check_watcher();
+
+        // Trigger event while on Help screen
+        std::fs::write(dir.path().join("trigger.txt"), "change").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        app.check_watcher(); // drains event
+
+        // Wait for debounce to expire while still on Help screen
+        std::thread::sleep(Duration::from_millis(100));
+        app.check_watcher(); // debounce expires — should NOT lose the pending refresh
+
+        // Now return to List screen
+        app.nav_stack.pop(); // back to List
+        assert_eq!(app.active_screen(), Screen::List);
+
+        // The pending refresh should still be available
+        assert!(
+            app.check_watcher_returns_refresh(),
+            "pending refresh should be preserved when returning to List screen"
         );
     }
 }

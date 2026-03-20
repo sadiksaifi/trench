@@ -74,6 +74,7 @@ impl FileWatcher {
 pub struct DebouncedWatcher {
     inner: FileWatcher,
     last_event: Option<Instant>,
+    pending_refresh: bool,
     debounce: Duration,
 }
 
@@ -83,6 +84,7 @@ impl DebouncedWatcher {
         Ok(Self {
             inner: FileWatcher::new(paths)?,
             last_event: None,
+            pending_refresh: false,
             debounce: DEBOUNCE_DURATION,
         })
     }
@@ -93,6 +95,7 @@ impl DebouncedWatcher {
         Ok(Self {
             inner: FileWatcher::new(paths)?,
             last_event: None,
+            pending_refresh: false,
             debounce,
         })
     }
@@ -133,16 +136,16 @@ impl DebouncedWatcher {
         Ok(Self {
             inner: FileWatcher::new(&path_refs)?,
             last_event: None,
+            pending_refresh: false,
             debounce,
         })
     }
 
-    /// Poll for events and check if debounce period has elapsed.
+    /// Drain pending filesystem events and update internal state.
     ///
-    /// Call this every frame in the TUI event loop. Returns `true` when
-    /// the debounce window has expired after events were detected,
-    /// indicating the TUI should refresh its data.
-    pub fn should_refresh(&mut self) -> bool {
+    /// Call this every frame to keep the event queue clear. Does NOT
+    /// consume the pending refresh — use `should_refresh()` for that.
+    pub fn poll_events(&mut self) {
         if self.inner.drain_events() {
             self.last_event = Some(Instant::now());
         }
@@ -150,10 +153,22 @@ impl DebouncedWatcher {
         if let Some(last) = self.last_event {
             if last.elapsed() >= self.debounce {
                 self.last_event = None;
-                return true;
+                self.pending_refresh = true;
             }
         }
+    }
 
+    /// Check if a refresh is pending and consume it.
+    ///
+    /// Returns `true` once after the debounce window expires following
+    /// detected events. Clears the pending state so subsequent calls
+    /// return `false` until new events arrive.
+    pub fn should_refresh(&mut self) -> bool {
+        self.poll_events();
+        if self.pending_refresh {
+            self.pending_refresh = false;
+            return true;
+        }
         false
     }
 }
