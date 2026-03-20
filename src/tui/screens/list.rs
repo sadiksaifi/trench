@@ -191,7 +191,7 @@ fn compute_status(
     (status, ab)
 }
 
-const FOOTER_KEYS: &str = " n create  s sync  D delete  l log  Enter detail  q quit ";
+const FOOTER_KEYS: &str = " Enter switch  d detail  n create  s sync  D delete  l log  q quit ";
 
 pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
     let base_style = Style::default().fg(theme.foreground).bg(theme.background);
@@ -480,13 +480,12 @@ mod tests {
         let state = ListState::new(sample_rows());
         let buf = render_to_buffer(&state, 100, 10);
         let text = buffer_text(&buf);
+        assert!(text.contains("Enter switch"), "footer should show Enter switch");
+        assert!(text.contains("d detail"), "footer should show d detail");
         assert!(text.contains("n create"), "footer should show n create");
         assert!(text.contains("s sync"), "footer should show s sync");
         assert!(text.contains("D delete"), "footer should show D delete");
-        assert!(
-            text.contains("Enter detail"),
-            "footer should show Enter detail"
-        );
+        assert!(text.contains("l log"), "footer should show l log");
         assert!(text.contains("q quit"), "footer should show q quit");
     }
 
