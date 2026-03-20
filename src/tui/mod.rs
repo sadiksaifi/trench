@@ -986,6 +986,25 @@ impl App {
                     self.load_hook_log_replay(&name);
                 }
             }
+            KeyCode::Char('d') => {
+                let identity = self
+                    .list_state
+                    .rows
+                    .get(self.list_state.selected)
+                    .map(|r| r.name.clone());
+                self.adopt_selected_if_unmanaged();
+                if let Some(ref name) = identity {
+                    if let Some(idx) = self.list_state.rows.iter().position(|r| r.name == *name) {
+                        self.list_state.selected = idx;
+                    }
+                }
+                if let Some(name) = identity {
+                    self.save_list_session();
+                    if self.load_detail(&name) {
+                        self.push_screen(Screen::Detail);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1485,7 +1504,7 @@ mod tests {
     fn question_mark_toggles_help_from_detail_screen() {
         let mut app = app_with_rows();
         // Navigate to detail
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
 
         // Open help from detail
@@ -1568,15 +1587,15 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_list_with_rows_pushes_detail() {
+    fn d_on_list_with_rows_pushes_detail() {
         let mut app = app_with_rows();
         assert_eq!(app.active_screen(), Screen::List);
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(
             app.active_screen(),
             Screen::Detail,
-            "Enter on List with rows should push Detail screen"
+            "d on List with rows should push Detail screen"
         );
         assert_eq!(app.nav_stack_depth(), 2);
     }
@@ -1616,7 +1635,7 @@ mod tests {
     fn deep_stack_navigation_push_pop_sequence() {
         let mut app = app_with_rows();
         // List → Detail → Help → pop → pop → List
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
         assert_eq!(app.nav_stack_depth(), 2);
 
@@ -1644,7 +1663,7 @@ mod tests {
     fn question_mark_opens_help_from_detail_screen() {
         let mut app = app_with_rows();
         // Navigate to Detail first
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
 
         // ? should still open Help from Detail
@@ -2948,7 +2967,7 @@ mod tests {
     fn replay_dismiss_returns_to_detail_not_list() {
         let mut app = app_with_rows();
         // Navigate to Detail
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(app.active_screen(), Screen::Detail);
 
         // Simulate replay hook log pushed from Detail
