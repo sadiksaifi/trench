@@ -47,11 +47,15 @@ impl FileWatcher {
         let mut watch_errors = 0;
         for path in paths {
             if path.exists() {
-                if watcher.watch(path, notify::RecursiveMode::Recursive).is_ok() {
-                    watched += 1;
-                } else {
-                    watch_errors += 1;
+                match watcher.watch(path, notify::RecursiveMode::Recursive) {
+                    Ok(()) => watched += 1,
+                    Err(err) => {
+                        tracing::warn!(path = %path.display(), "failed to watch path: {err}");
+                        watch_errors += 1;
+                    }
                 }
+            } else {
+                tracing::warn!(path = %path.display(), "path does not exist, skipping");
             }
         }
 
@@ -582,6 +586,41 @@ mod tests {
         assert!(
             watcher.drain_events(),
             "should detect changes on valid watched path"
+        );
+    }
+
+    #[test]
+    fn new_logs_warning_for_nonexistent_paths() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("test.log");
+        let file = std::fs::File::options()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .unwrap();
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
+            .finish();
+
+        let good_dir = TempDir::new().unwrap();
+        let bad_path = std::path::PathBuf::from("/nonexistent/path/that/does/not/exist");
+
+        tracing::subscriber::with_default(subscriber, || {
+            let _watcher = FileWatcher::new(&[good_dir.path(), bad_path.as_path()]).unwrap();
+        });
+
+        let mut contents = String::new();
+        std::fs::File::open(&log_path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+
+        assert!(
+            contents.contains("path does not exist, skipping"),
+            "should log warning for nonexistent paths: got {contents:?}"
         );
     }
 
