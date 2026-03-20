@@ -599,6 +599,13 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
 
     match cli::commands::switch::execute(identifier, &cwd, &db) {
         Ok(result) => {
+            // --print-path must always write to stdout (shell-init depends on it),
+            // so short-circuit before any tmux resolution.
+            if print_path {
+                println!("{}", result.path);
+                return Ok(());
+            }
+
             let action = tmux::resolve_switch_action(
                 tmux_flag,
                 resolved.shell.tmux,
@@ -623,14 +630,10 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
                             "warning: --tmux specified but not running inside a tmux session, falling back to default behavior"
                         );
                     }
-                    if print_path {
-                        println!("{}", result.path);
-                    } else {
-                        println!(
-                            "Switched to worktree '{}' at {}",
-                            result.name, result.path
-                        );
-                    }
+                    println!(
+                        "Switched to worktree '{}' at {}",
+                        result.name, result.path
+                    );
                 }
             }
             Ok(())
