@@ -28,7 +28,7 @@ type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
 static PREV_PANIC_HOOK: Mutex<Option<Arc<PanicHook>>> = Mutex::new(None);
 
 /// Launch the TUI. This is the single public entry point.
-pub fn run() -> Result<()> {
+pub fn run() -> Result<Option<String>> {
     install_panic_hook();
     let mut terminal = ratatui::init();
     let mut app = App::new();
@@ -60,7 +60,7 @@ pub fn run() -> Result<()> {
     // Restore session state (selected worktree, scroll position) from last run
     app.restore_list_session();
 
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<Option<String>> {
         while app.is_running() {
             // Process any pending hook output messages
             app.process_hook_messages();
@@ -89,7 +89,7 @@ pub fn run() -> Result<()> {
                 terminal = ratatui::init();
             }
         }
-        Ok(())
+        Ok(app.switch_path.take())
     })();
 
     ratatui::restore();
