@@ -4,6 +4,7 @@ mod config;
 mod exit_code;
 mod git;
 mod hooks;
+mod logging;
 mod output;
 mod paths;
 mod process;
