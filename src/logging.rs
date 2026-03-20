@@ -38,7 +38,11 @@ fn build_subscriber<W: Write + Send + 'static>(writer: W) -> impl tracing::Subsc
 /// Writes logs to `$XDG_STATE_HOME/trench/trench.log`. Defaults to `warn`
 /// level; override with the `TRENCH_LOG` environment variable.
 pub fn init() -> Result<()> {
-    let log_path = paths::state_dir()?.join(LOG_FILENAME);
+    init_with_log_dir(&paths::state_dir()?)
+}
+
+fn init_with_log_dir(log_dir: &std::path::Path) -> Result<()> {
+    let log_path = log_dir.join(LOG_FILENAME);
     let file = File::options()
         .create(true)
         .append(true)
@@ -59,17 +63,15 @@ mod tests {
     use std::io::Read as _;
 
     #[test]
-    fn init_creates_log_file_in_state_dir() {
-        let state_dir = paths::state_dir().expect("state_dir should succeed");
-        let log_path = state_dir.join("trench.log");
+    fn init_creates_log_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
 
-        // Remove any pre-existing log file so we can verify init creates it
-        let _ = std::fs::remove_file(&log_path);
         assert!(!log_path.exists(), "log file should not exist before init");
 
-        // init() may fail if the global subscriber is already set (parallel tests),
+        // init_with_log_dir may fail to set the global subscriber (parallel tests),
         // but the log file should still be created.
-        let _ = init();
+        let _ = init_with_log_dir(dir.path());
 
         assert!(log_path.exists(), "log file should exist after init");
     }
