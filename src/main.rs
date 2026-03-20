@@ -663,18 +663,8 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
     let use_tmux = tmux_flag;
 
     if use_tmux {
-        // Resolve the worktree without needing an editor
-        let (repo, wt) = {
-            let repo_path_str = repo_info
-                .path
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
-            let repo = db
-                .get_repo_by_path(repo_path_str)?
-                .ok_or_else(|| anyhow::anyhow!("repository not tracked by trench"))?;
-            let wt = crate::adopt::resolve_or_adopt(identifier, &repo_info, &db)?.1;
-            (repo, wt)
-        };
+        // Resolve the worktree (and auto-adopt if needed)
+        let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, &db)?;
 
         let action = tmux::resolve_switch_action(
             true, // force tmux
