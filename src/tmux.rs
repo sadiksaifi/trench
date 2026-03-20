@@ -1,7 +1,7 @@
-/// Tmux integration for worktree switching.
+/// Tmux integration for worktree operations.
 ///
-/// When enabled, `trench switch` opens a new tmux window in the worktree
-/// directory instead of just printing the path.
+/// When enabled, `trench switch` and `trench open` open a new tmux window
+/// in the worktree directory instead of their default behavior.
 
 /// Check whether the current process is running inside a tmux session.
 pub fn is_inside_tmux() -> bool {
@@ -23,40 +23,41 @@ pub fn build_new_window_command(worktree_path: &str, window_name: &str) -> Vec<S
     ]
 }
 
-/// The action that `run_switch` should take after resolving the worktree.
+/// The action that a command should take after resolving tmux intent.
 #[derive(Debug, PartialEq)]
-pub enum SwitchAction {
+pub enum TmuxAction {
     /// Open a new tmux window. Contains the argv for `tmux new-window`.
     TmuxNewWindow(Vec<String>),
-    /// Print path or message (normal behavior). Includes a warning if
-    /// the user explicitly asked for tmux but we're not inside a session.
-    PrintPath { warn_not_in_tmux: bool },
+    /// Fall back to default behavior (print path for switch, open editor for
+    /// open). Includes a warning if the user explicitly asked for tmux but
+    /// we're not inside a session.
+    Fallback { warn_not_in_tmux: bool },
 }
 
-/// Decide what action to take for a switch operation.
+/// Decide what action to take based on tmux flags and environment.
 ///
 /// `tmux_flag`: whether `--tmux` was passed on the CLI.
 /// `config_tmux`: whether `[shell] tmux = true` is set in config.
 /// `inside_tmux`: whether we're currently inside a tmux session.
-pub fn resolve_switch_action(
+pub fn resolve_tmux_action(
     tmux_flag: bool,
     config_tmux: bool,
     inside_tmux: bool,
     worktree_path: &str,
     window_name: &str,
-) -> SwitchAction {
+) -> TmuxAction {
     let use_tmux = tmux_flag || config_tmux;
 
     if use_tmux && inside_tmux {
-        SwitchAction::TmuxNewWindow(build_new_window_command(worktree_path, window_name))
+        TmuxAction::TmuxNewWindow(build_new_window_command(worktree_path, window_name))
     } else if tmux_flag && !inside_tmux {
         // User explicitly asked for tmux but we're not in a session
-        SwitchAction::PrintPath {
+        TmuxAction::Fallback {
             warn_not_in_tmux: true,
         }
     } else {
         // Not using tmux (either not enabled, or config-only and not in tmux)
-        SwitchAction::PrintPath {
+        TmuxAction::Fallback {
             warn_not_in_tmux: false,
         }
     }
@@ -139,14 +140,14 @@ mod tests {
         assert_eq!(cmd[5], "/wt/feat-login");
     }
 
-    // --- resolve_switch_action tests ---
+    // --- resolve_tmux_action tests ---
 
     #[test]
     fn action_tmux_flag_inside_tmux_opens_window() {
-        let action = resolve_switch_action(true, false, true, "/wt/feat", "feat");
+        let action = resolve_tmux_action(true, false, true, "/wt/feat", "feat");
         assert_eq!(
             action,
-            SwitchAction::TmuxNewWindow(vec![
+            TmuxAction::TmuxNewWindow(vec![
                 "tmux".into(),
                 "new-window".into(),
                 "-n".into(),
@@ -159,10 +160,10 @@ mod tests {
 
     #[test]
     fn action_config_tmux_inside_tmux_opens_window() {
-        let action = resolve_switch_action(false, true, true, "/wt/feat", "feat");
+        let action = resolve_tmux_action(false, true, true, "/wt/feat", "feat");
         assert_eq!(
             action,
-            SwitchAction::TmuxNewWindow(vec![
+            TmuxAction::TmuxNewWindow(vec![
                 "tmux".into(),
                 "new-window".into(),
                 "-n".into(),
@@ -175,10 +176,10 @@ mod tests {
 
     #[test]
     fn action_tmux_flag_not_in_tmux_warns_and_falls_back() {
-        let action = resolve_switch_action(true, false, false, "/wt/feat", "feat");
+        let action = resolve_tmux_action(true, false, false, "/wt/feat", "feat");
         assert_eq!(
             action,
-            SwitchAction::PrintPath {
+            TmuxAction::Fallback {
                 warn_not_in_tmux: true
             }
         );
@@ -186,32 +187,32 @@ mod tests {
 
     #[test]
     fn action_config_tmux_not_in_tmux_silent_fallback() {
-        let action = resolve_switch_action(false, true, false, "/wt/feat", "feat");
+        let action = resolve_tmux_action(false, true, false, "/wt/feat", "feat");
         assert_eq!(
             action,
-            SwitchAction::PrintPath {
+            TmuxAction::Fallback {
                 warn_not_in_tmux: false
             }
         );
     }
 
     #[test]
-    fn action_no_tmux_at_all_prints_path() {
-        let action = resolve_switch_action(false, false, false, "/wt/feat", "feat");
+    fn action_no_tmux_at_all_falls_back() {
+        let action = resolve_tmux_action(false, false, false, "/wt/feat", "feat");
         assert_eq!(
             action,
-            SwitchAction::PrintPath {
+            TmuxAction::Fallback {
                 warn_not_in_tmux: false
             }
         );
     }
 
     #[test]
-    fn action_no_tmux_even_inside_tmux_prints_path() {
-        let action = resolve_switch_action(false, false, true, "/wt/feat", "feat");
+    fn action_no_tmux_even_inside_tmux_falls_back() {
+        let action = resolve_tmux_action(false, false, true, "/wt/feat", "feat");
         assert_eq!(
             action,
-            SwitchAction::PrintPath {
+            TmuxAction::Fallback {
                 warn_not_in_tmux: false
             }
         );
@@ -219,10 +220,10 @@ mod tests {
 
     #[test]
     fn action_both_flag_and_config_inside_tmux_opens_window() {
-        let action = resolve_switch_action(true, true, true, "/wt/feat", "feat");
+        let action = resolve_tmux_action(true, true, true, "/wt/feat", "feat");
         assert_eq!(
             action,
-            SwitchAction::TmuxNewWindow(vec![
+            TmuxAction::TmuxNewWindow(vec![
                 "tmux".into(),
                 "new-window".into(),
                 "-n".into(),
