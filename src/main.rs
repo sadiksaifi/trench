@@ -220,6 +220,8 @@ impl Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    logging::init()?;
+
     let cli = Cli::parse();
     let output_config = cli.output_config();
 
