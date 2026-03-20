@@ -9,6 +9,7 @@ mod output;
 mod paths;
 mod process;
 mod state;
+mod tmux;
 mod tui;
 
 use anyhow::Context;
