@@ -141,7 +141,7 @@ info "model: ${CLAUDE_MODEL}"
 
 claude --dangerously-skip-permissions \
   --model "$CLAUDE_MODEL" \
-  -p "/tdd ${PROMPT}" \
+  -p "${PROMPT}" \
   --verbose \
   --output-format stream-json | cclean
 
