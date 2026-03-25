@@ -942,9 +942,16 @@ impl App {
         match action {
             crate::tmux::TmuxAction::TmuxNewWindow(argv) => {
                 if argv.len() > 1 {
-                    let _ = std::process::Command::new(&argv[0])
+                    if let Err(e) = std::process::Command::new(&argv[0])
                         .args(&argv[1..])
-                        .spawn();
+                        .spawn()
+                    {
+                        self.list_state.status_message =
+                            Some(screens::list::StatusMessage {
+                                text: format!("Failed to spawn tmux window: {e}"),
+                                success: false,
+                            });
+                    }
                 }
                 true
             }
@@ -1347,6 +1354,32 @@ mod tests {
         assert!(
             app.switch_path.is_none(),
             "tmux new-window should not set switch_path"
+        );
+    }
+
+    #[test]
+    fn apply_switch_result_tmux_spawn_failure_shows_status_message() {
+        let mut app = App::new();
+        let result = crate::cli::commands::switch::SwitchResult {
+            path: "/tmp/wt/feat-z".into(),
+            name: "feat-z".into(),
+        };
+        // Use a non-existent binary to force a spawn failure.
+        let action = crate::tmux::TmuxAction::TmuxNewWindow(vec![
+            "/nonexistent/binary".into(),
+            "arg".into(),
+        ]);
+        let needs_refresh = app.apply_switch_result(result, action);
+        assert!(needs_refresh, "should still request refresh on spawn failure");
+        let msg = app
+            .list_state
+            .status_message
+            .as_ref()
+            .expect("status_message should be set on spawn failure");
+        assert!(!msg.success, "status_message should indicate failure");
+        assert!(
+            msg.text.contains("tmux"),
+            "status_message should mention tmux"
         );
     }
 
