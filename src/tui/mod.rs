@@ -46,6 +46,7 @@ pub fn run() -> Result<Option<String>> {
 
     if let Some(ref resolved) = resolved_config {
         app.theme = theme::from_name(&resolved.ui.theme);
+        app.tmux_enabled = resolved.shell.tmux;
     }
 
     // Set auto_refresh before any refresh that may build a watcher
@@ -130,6 +131,7 @@ pub struct App {
     pub editor_request: Option<String>,
     pub repo_path: Option<String>,
     pub switch_path: Option<String>,
+    pub tmux_enabled: bool,
     pub auto_refresh: bool,
     pub watcher: Option<watcher::DebouncedWatcher>,
 }
@@ -150,6 +152,7 @@ impl App {
             editor_request: None,
             repo_path: None,
             switch_path: None,
+            tmux_enabled: false,
             auto_refresh: true,
             watcher: None,
         }
@@ -926,6 +929,40 @@ impl App {
         }
     }
 
+    /// Handle the outcome of a switch operation, considering tmux context.
+    ///
+    /// Returns `true` if the caller should refresh the list (tmux window was
+    /// spawned and the TUI stays open). Returns `false` when the TUI should
+    /// exit and return the switch path to the shell wrapper.
+    fn apply_switch_result(
+        &mut self,
+        result: crate::cli::commands::switch::SwitchResult,
+        action: crate::tmux::TmuxAction,
+    ) -> bool {
+        match action {
+            crate::tmux::TmuxAction::TmuxNewWindow(argv) => {
+                if argv.len() > 1 {
+                    if let Err(e) = std::process::Command::new(&argv[0])
+                        .args(&argv[1..])
+                        .spawn()
+                    {
+                        self.list_state.status_message =
+                            Some(screens::list::StatusMessage {
+                                text: format!("Failed to spawn tmux window: {e}"),
+                                success: false,
+                            });
+                    }
+                }
+                true
+            }
+            crate::tmux::TmuxAction::Fallback { .. } => {
+                self.switch_path = Some(result.path);
+                self.running = false;
+                false
+            }
+        }
+    }
+
     fn handle_list_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter => {
@@ -942,8 +979,16 @@ impl App {
                     };
                     match crate::cli::commands::switch::execute(&name, &cwd, &db) {
                         Ok(result) => {
-                            self.switch_path = Some(result.path);
-                            self.running = false;
+                            let action = crate::tmux::resolve_tmux_action(
+                                false,
+                                self.tmux_enabled,
+                                crate::tmux::is_inside_tmux(),
+                                &result.path,
+                                &result.name,
+                            );
+                            if self.apply_switch_result(result, action) {
+                                self.refresh_list();
+                            }
                         }
                         Err(e) => {
                             self.list_state.status_message =
@@ -1260,6 +1305,82 @@ mod tests {
     fn app_has_switch_path_initially_none() {
         let app = App::new();
         assert!(app.switch_path.is_none());
+    }
+
+    #[test]
+    fn app_has_tmux_enabled_initially_false() {
+        let app = App::new();
+        assert!(!app.tmux_enabled, "tmux_enabled should default to false");
+    }
+
+    #[test]
+    fn apply_switch_result_fallback_sets_switch_path_and_stops() {
+        let mut app = App::new();
+        let result = crate::cli::commands::switch::SwitchResult {
+            path: "/tmp/wt/feat-x".into(),
+            name: "feat-x".into(),
+        };
+        let action = crate::tmux::TmuxAction::Fallback {
+            warn_not_in_tmux: false,
+        };
+        let needs_refresh = app.apply_switch_result(result, action);
+        assert!(!needs_refresh, "fallback should not request refresh");
+        assert!(!app.is_running(), "fallback should stop the app");
+        assert_eq!(
+            app.switch_path.as_deref(),
+            Some("/tmp/wt/feat-x"),
+            "fallback should set switch_path"
+        );
+    }
+
+    #[test]
+    fn apply_switch_result_tmux_new_window_stays_running() {
+        let mut app = App::new();
+        let result = crate::cli::commands::switch::SwitchResult {
+            path: "/tmp/wt/feat-y".into(),
+            name: "feat-y".into(),
+        };
+        let action = crate::tmux::TmuxAction::TmuxNewWindow(vec![
+            "tmux".into(),
+            "new-window".into(),
+            "-n".into(),
+            "feat-y".into(),
+            "-c".into(),
+            "/tmp/wt/feat-y".into(),
+        ]);
+        let needs_refresh = app.apply_switch_result(result, action);
+        assert!(needs_refresh, "tmux new-window should request refresh");
+        assert!(app.is_running(), "tmux new-window should keep app running");
+        assert!(
+            app.switch_path.is_none(),
+            "tmux new-window should not set switch_path"
+        );
+    }
+
+    #[test]
+    fn apply_switch_result_tmux_spawn_failure_shows_status_message() {
+        let mut app = App::new();
+        let result = crate::cli::commands::switch::SwitchResult {
+            path: "/tmp/wt/feat-z".into(),
+            name: "feat-z".into(),
+        };
+        // Use a non-existent binary to force a spawn failure.
+        let action = crate::tmux::TmuxAction::TmuxNewWindow(vec![
+            "/nonexistent/binary".into(),
+            "arg".into(),
+        ]);
+        let needs_refresh = app.apply_switch_result(result, action);
+        assert!(needs_refresh, "should still request refresh on spawn failure");
+        let msg = app
+            .list_state
+            .status_message
+            .as_ref()
+            .expect("status_message should be set on spawn failure");
+        assert!(!msg.success, "status_message should indicate failure");
+        assert!(
+            msg.text.contains("tmux"),
+            "status_message should mention tmux"
+        );
     }
 
     #[test]
