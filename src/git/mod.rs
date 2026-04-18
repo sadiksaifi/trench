@@ -516,11 +516,12 @@ pub fn create_worktree(
 
     // Create the new branch from base and add the worktree.
     // If worktree creation fails, clean up the orphaned branch.
+    let worktree_name = crate::paths::sanitize_branch(branch);
     let worktree_result = {
         let new_branch = repo.branch(branch, &base_commit, false)?;
         let mut opts = git2::WorktreeAddOptions::new();
         opts.reference(Some(new_branch.get()));
-        repo.worktree(branch, target_path, Some(&opts))
+        repo.worktree(&worktree_name, target_path, Some(&opts))
     };
 
     if let Err(e) = worktree_result {
@@ -945,6 +946,32 @@ mod tests {
         assert!(
             target.join(".git").exists(),
             "worktree should have .git entry"
+        );
+    }
+
+    #[test]
+    fn create_worktree_allows_branch_names_with_slashes() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = head_branch(&repo);
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("feature-auth");
+
+        create_worktree(repo_dir.path(), "feature/auth", &base, &target)
+            .expect("should create worktree for slash branch");
+
+        let new_branch = repo
+            .find_branch("feature/auth", git2::BranchType::Local)
+            .expect("branch should exist");
+        assert_eq!(
+            new_branch.name().unwrap(),
+            Some("feature/auth"),
+            "should preserve raw branch ref name"
+        );
+        assert!(target.join(".git").exists(), "worktree should exist");
+        assert!(
+            repo.path().join("worktrees").join("feature-auth").exists(),
+            "worktree admin dir should use sanitized name"
         );
     }
 
