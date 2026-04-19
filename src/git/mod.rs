@@ -343,6 +343,10 @@ pub struct GitWorktreeEntry {
     pub is_main: bool,
 }
 
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Errors specific to git operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -560,9 +564,7 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeEntry>, GitErro
             .head()
             .ok()
             .and_then(|r| r.shorthand().map(String::from));
-        let canonical = workdir
-            .canonicalize()
-            .unwrap_or_else(|_| workdir.to_path_buf());
+        let canonical = canonical_or_original(workdir);
         let name = canonical
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -577,10 +579,26 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeEntry>, GitErro
 
     // Additional worktrees
     if let Ok(worktrees) = repo.worktrees() {
+        // Best-effort prune stale admin entries so deleted worktrees stop
+        // surfacing as detached ghost rows in later callers.
+        for wt_name in worktrees.iter().flatten() {
+            if let Ok(wt) = repo.find_worktree(wt_name) {
+                let _ = wt.prune(Some(
+                    git2::WorktreePruneOptions::new()
+                        .working_tree(false)
+                        .valid(false)
+                        .locked(false),
+                ));
+            }
+        }
+
         for wt_name in worktrees.iter().flatten() {
             if let Ok(wt) = repo.find_worktree(wt_name) {
                 let wt_path = wt.path().to_path_buf();
-                let canonical = wt_path.canonicalize().unwrap_or_else(|_| wt_path.clone());
+                let canonical = canonical_or_original(&wt_path);
+                if !canonical.exists() {
+                    continue;
+                }
                 // Open as repository to get HEAD branch
                 let branch = if let Ok(wt_repo) = git2::Repository::open(&canonical) {
                     wt_repo
@@ -601,6 +619,38 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeEntry>, GitErro
     }
 
     Ok(entries)
+}
+
+/// Return the short upstream branch name for a local branch in a worktree.
+///
+/// Examples:
+/// - local upstream `main` -> `Some("main")`
+/// - remote upstream `origin/main` -> `Some("main")`
+pub fn upstream_branch_name(
+    worktree_path: &Path,
+    branch: &str,
+) -> Result<Option<String>, GitError> {
+    let repo =
+        git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
+
+    let local = match repo.find_branch(branch, git2::BranchType::Local) {
+        Ok(branch) => branch,
+        Err(_) => return Ok(None),
+    };
+
+    let upstream = match local.upstream() {
+        Ok(upstream) => upstream,
+        Err(_) => return Ok(None),
+    };
+
+    let name = match upstream.name()? {
+        Some(name) => name,
+        None => return Ok(None),
+    };
+
+    Ok(Some(
+        name.strip_prefix("origin/").unwrap_or(name).to_string(),
+    ))
 }
 
 /// Scan additional directory paths for git worktrees (FR-30).
@@ -632,7 +682,7 @@ pub fn scan_directories(scan_paths: &[String]) -> Vec<GitWorktreeEntry> {
             }
             // Try to open as a git repository
             if let Ok(repo) = git2::Repository::open(&child) {
-                let canonical = child.canonicalize().unwrap_or_else(|_| child.clone());
+                let canonical = canonical_or_original(&child);
                 let branch = repo
                     .head()
                     .ok()
@@ -1451,6 +1501,24 @@ mod tests {
         assert_eq!(additional.path, target.canonicalize().unwrap());
         assert_eq!(additional.branch.as_deref(), Some("extra-wt"));
         assert!(!additional.is_main);
+    }
+
+    #[test]
+    fn list_worktrees_skips_deleted_additional_worktrees() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = head_branch(&repo);
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("extra-wt");
+
+        create_worktree(repo_dir.path(), "extra-wt", &base, &target)
+            .expect("should create worktree");
+        std::fs::remove_dir_all(&target).expect("manual delete should succeed");
+
+        let worktrees = list_worktrees(repo_dir.path()).expect("should list worktrees");
+
+        assert_eq!(worktrees.len(), 1, "only main worktree should remain");
+        assert!(worktrees.iter().all(|worktree| worktree.path != target));
     }
 
     #[test]

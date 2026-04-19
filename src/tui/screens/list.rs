@@ -1,5 +1,4 @@
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 
@@ -92,103 +91,34 @@ pub fn load_worktrees(
 ) -> Result<Vec<WorktreeRow>> {
     let repo_info = git::discover_repo(cwd)?;
     let repo_path = &repo_info.path;
-    let repo_path_str = repo_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
-
-    let repo = db.get_repo_by_path(repo_path_str)?;
-    let db_worktrees = match repo {
-        Some(ref r) => db.list_worktrees(r.id)?,
-        None => Vec::new(),
-    };
-
-    let managed_paths: HashSet<PathBuf> = db_worktrees
-        .iter()
-        .filter_map(|wt| Path::new(&wt.path).canonicalize().ok())
-        .collect();
+    let live_worktrees = crate::live_worktree::list(&repo_info, db, scan_paths)?;
 
     let mut rows = Vec::new();
 
-    for wt in &db_worktrees {
-        let status = compute_status(repo_path, &wt.branch, wt.base_branch.as_deref(), &wt.path);
-        let procs = crate::process::detect_processes(&wt.path);
+    for worktree in live_worktrees {
+        let branch = worktree
+            .entry
+            .branch
+            .clone()
+            .unwrap_or_else(|| "(detached)".to_string());
+        let path = worktree.entry.path.to_string_lossy().to_string();
+        let base_branch = Some(crate::live_worktree::base_branch(&repo_info, &worktree));
+        let status = compute_status(repo_path, &branch, base_branch.as_deref(), &path);
+        let procs = crate::process::detect_processes(&path);
         let processes = procs
             .iter()
             .map(|p| p.name.clone())
             .collect::<Vec<_>>()
             .join(", ");
         rows.push(WorktreeRow {
-            name: wt.name.clone(),
-            branch: wt.branch.clone(),
-            path: wt.path.clone(),
+            name: worktree.entry.name.clone(),
+            branch,
+            path,
             status: status.0,
             ahead_behind: status.1,
             managed: true,
             processes,
         });
-    }
-
-    let git_worktrees = git::list_worktrees(repo_path)?;
-    for gw in &git_worktrees {
-        if !managed_paths.contains(&gw.path) {
-            let branch = gw
-                .branch
-                .clone()
-                .unwrap_or_else(|| "(detached)".to_string());
-            let status = compute_status(repo_path, &branch, None, &gw.path.to_string_lossy());
-            let wt_path_str = gw.path.to_string_lossy().to_string();
-            let procs = crate::process::detect_processes(&wt_path_str);
-            let processes = procs
-                .iter()
-                .map(|p| p.name.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-            rows.push(WorktreeRow {
-                name: gw.name.clone(),
-                branch,
-                path: wt_path_str,
-                status: status.0,
-                ahead_behind: status.1,
-                managed: false,
-                processes,
-            });
-        }
-    }
-
-    // Scan additional directories for worktrees (FR-30)
-    if !scan_paths.is_empty() {
-        let mut seen_paths: HashSet<PathBuf> = managed_paths;
-        for gw in &git_worktrees {
-            seen_paths.insert(gw.path.clone());
-        }
-
-        let scanned = git::scan_directories(scan_paths);
-        for sw in scanned {
-            if !seen_paths.contains(&sw.path) {
-                seen_paths.insert(sw.path.clone());
-                let branch = sw
-                    .branch
-                    .clone()
-                    .unwrap_or_else(|| "(detached)".to_string());
-                let wt_path_str = sw.path.to_string_lossy().to_string();
-                let status = compute_status(repo_path, &branch, None, &wt_path_str);
-                let procs = crate::process::detect_processes(&wt_path_str);
-                let processes = procs
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                rows.push(WorktreeRow {
-                    name: sw.name.clone(),
-                    branch,
-                    path: wt_path_str,
-                    status: status.0,
-                    ahead_behind: status.1,
-                    managed: false,
-                    processes,
-                });
-            }
-        }
     }
 
     Ok(rows)
@@ -243,7 +173,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
     }
 
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
-    let header_cells = ["Name", "Branch", "Status", "Ahead/Behind", "Procs", ""]
+    let header_cells = ["Name", "Branch", "Status", "Ahead/Behind", "Procs"]
         .iter()
         .map(|h| {
             Cell::from(*h).style(
@@ -258,21 +188,14 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
         .rows
         .iter()
         .map(|r| {
-            let badge = if r.managed { "" } else { "[unmanaged]" };
-            let style = if r.managed {
-                base_style
-            } else {
-                Style::default().fg(theme.fg_muted).bg(theme.bg)
-            };
             Row::new(vec![
                 Cell::from(r.name.clone()),
                 Cell::from(r.branch.clone()),
                 Cell::from(r.status.clone()),
                 Cell::from(r.ahead_behind.clone()),
                 Cell::from(r.processes.clone()),
-                Cell::from(badge),
             ])
-            .style(style)
+            .style(base_style)
         })
         .collect();
 
@@ -280,11 +203,10 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
         rows,
         [
             Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(10),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(20),
+            Constraint::Percentage(24),
+            Constraint::Percentage(12),
+            Constraint::Percentage(18),
+            Constraint::Percentage(26),
         ],
     )
     .header(header)
@@ -343,8 +265,6 @@ fn render_summary_bar(
     area: Rect,
     theme: &crate::tui::theme::Theme,
 ) {
-    let managed = state.rows.iter().filter(|row| row.managed).count();
-    let unmanaged = state.rows.len().saturating_sub(managed);
     let line = Line::from(vec![
         Span::styled(
             "Worktree Cockpit",
@@ -357,18 +277,6 @@ fn render_summary_bar(
             theme,
             &format!("{} total", state.rows.len()),
             crate::tui::chrome::Tone::Muted,
-        ),
-        Span::raw("  "),
-        crate::tui::chrome::pill(
-            theme,
-            &format!("{managed} managed"),
-            crate::tui::chrome::Tone::Success,
-        ),
-        Span::raw("  "),
-        crate::tui::chrome::pill(
-            theme,
-            &format!("{unmanaged} unmanaged"),
-            crate::tui::chrome::Tone::Warning,
         ),
     ]);
     frame.render_widget(
@@ -393,7 +301,6 @@ fn render_table(
         titles.push(Cell::from("Ahead/Behind"));
     }
     titles.push(Cell::from("Procs"));
-    titles.push(Cell::from(""));
 
     let header = Row::new(titles.into_iter().map(|cell| {
         cell.style(
@@ -420,17 +327,8 @@ fn render_table(
             } else {
                 row.processes.clone()
             }));
-            cells.push(Cell::from(if row.managed {
-                String::new()
-            } else {
-                "[unmanaged]".to_string()
-            }));
 
-            Row::new(cells).style(if row.managed {
-                Style::default().fg(theme.fg).bg(theme.bg_panel)
-            } else {
-                Style::default().fg(theme.fg_muted).bg(theme.bg_panel)
-            })
+            Row::new(cells).style(Style::default().fg(theme.fg).bg(theme.bg_panel))
         })
         .collect();
 
@@ -488,11 +386,6 @@ fn render_inspector(
     } else {
         selected.processes.clone()
     };
-    let management = if selected.managed {
-        "managed"
-    } else {
-        "unmanaged"
-    };
     let mut lines = vec![
         Line::from(Span::styled(
             selected.name.clone(),
@@ -508,30 +401,17 @@ fn render_inspector(
             &display_status(&selected.status, options.show_dirty_count),
             theme,
         ),
-        metric_line("Mode", management, theme),
     ];
     if options.show_ahead_behind {
         lines.push(metric_line("Ahead/Behind", &selected.ahead_behind, theme));
     }
     lines.push(metric_line("Processes", &process_text, theme));
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        crate::tui::chrome::pill(
-            theme,
-            management,
-            if selected.managed {
-                crate::tui::chrome::Tone::Success
-            } else {
-                crate::tui::chrome::Tone::Warning
-            },
-        ),
-        Span::raw(" "),
-        crate::tui::chrome::pill(
-            theme,
-            &display_status(&selected.status, options.show_dirty_count),
-            status_tone(&selected.status),
-        ),
-    ]));
+    lines.push(Line::from(vec![crate::tui::chrome::pill(
+        theme,
+        &display_status(&selected.status, options.show_dirty_count),
+        status_tone(&selected.status),
+    )]));
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
         inner,
@@ -628,6 +508,7 @@ fn render_legacy_footer(
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use std::path::Path;
 
     fn render_to_buffer(state: &ListState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, height);
@@ -673,6 +554,17 @@ mod tests {
                 processes: String::new(),
             },
         ]
+    }
+
+    fn init_repo_with_commit(dir: &Path) -> git2::Repository {
+        let repo = git2::Repository::init(dir).expect("failed to init repo");
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[])
+            .unwrap();
+        drop(tree);
+        repo
     }
 
     #[test]
@@ -811,26 +703,23 @@ mod tests {
     }
 
     #[test]
-    fn unmanaged_worktree_shows_badge() {
+    fn worktree_rows_do_not_show_unmanaged_badge() {
         let state = ListState::new(sample_rows());
         let buf = render_to_buffer(&state, 100, 10);
         let text = buffer_text(&buf);
-        assert!(
-            text.contains("[unmanaged]"),
-            "unmanaged row should show badge"
-        );
+        assert!(!text.contains("[unmanaged]"));
     }
 
     #[test]
-    fn unmanaged_row_has_dimmed_style() {
+    fn non_selected_row_uses_theme_foreground() {
         let theme = crate::tui::theme::from_name("catppuccin");
         let state = ListState::new(sample_rows());
         let buf = render_to_buffer(&state, 100, 10);
-        // The unmanaged row is index 2 (third row), rendered at buffer row 3 (header=0, row0=1, row1=2, row2=3)
+        // Third row is not highlighted and should use the normal foreground.
         let cell = buf.cell((0, 3)).unwrap();
         assert_eq!(
-            cell.fg, theme.fg_muted,
-            "unmanaged row should use theme.fg_muted color, got: {:?}",
+            cell.fg, theme.fg,
+            "non-selected row should use theme.fg color, got: {:?}",
             cell.fg
         );
     }
@@ -890,6 +779,36 @@ mod tests {
             cell.fg, theme.fg,
             "empty state text should use theme.fg, got: {:?}",
             cell.fg
+        );
+    }
+
+    #[test]
+    fn load_worktrees_hides_externally_deleted_worktree() {
+        use crate::cli::commands::create;
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        let created = create::execute(
+            "ephemeral",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        std::fs::remove_dir_all(&created.path).expect("manual delete should succeed");
+
+        let rows = load_worktrees(repo_dir.path(), &db, &[]).expect("load should succeed");
+
+        assert!(
+            rows.iter().all(|row| row.name != "ephemeral"),
+            "externally deleted worktree should not appear: {rows:?}"
         );
     }
 

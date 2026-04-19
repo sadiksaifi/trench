@@ -43,24 +43,14 @@ pub fn parse_tag_args(args: &[String]) -> Result<Vec<TagOp>> {
 /// Returns a formatted string for display.
 pub fn execute(identifier: &str, tags: &[String], cwd: &Path, db: &Database) -> Result<String> {
     let repo_info = git::discover_repo(cwd)?;
-    let repo_path_str = repo_info
-        .path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
-
-    let repo = db
-        .get_repo_by_path(repo_path_str)?
-        .ok_or_else(|| anyhow::anyhow!("repo not tracked by trench: {repo_path_str}"))?;
-
-    let wt = db
-        .find_worktree_by_identifier(repo.id, identifier)?
-        .ok_or_else(|| anyhow::anyhow!("worktree not found: {identifier}"))?;
+    let live = crate::live_worktree::resolve(identifier, &repo_info, db)?;
+    let (_repo, wt) = crate::live_worktree::ensure_metadata(db, &repo_info, &live.entry)?;
 
     if tags.is_empty() {
         // List mode
         let current_tags = db.list_tags(wt.id)?;
         if current_tags.is_empty() {
-            return Ok(format!("No tags on worktree '{}'.\n", wt.name));
+            return Ok(format!("No tags on worktree '{}'.\n", live.entry.name));
         }
         return Ok(current_tags.join(", ") + "\n");
     }
@@ -75,11 +65,14 @@ pub fn execute(identifier: &str, tags: &[String], cwd: &Path, db: &Database) -> 
 
     let current_tags = db.list_tags(wt.id)?;
     if current_tags.is_empty() {
-        Ok(format!("All tags removed from worktree '{}'.\n", wt.name))
+        Ok(format!(
+            "All tags removed from worktree '{}'.\n",
+            live.entry.name
+        ))
     } else {
         Ok(format!(
             "Tags on '{}': {}\n",
-            wt.name,
+            live.entry.name,
             current_tags.join(", ")
         ))
     }
@@ -88,6 +81,24 @@ pub fn execute(identifier: &str, tags: &[String], cwd: &Path, db: &Database) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn create_live_worktree(
+        repo_dir: &Path,
+        db: &Database,
+        branch: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let wt_root = tempfile::tempdir().unwrap();
+        let result = crate::cli::commands::create::execute(
+            branch,
+            None,
+            repo_dir,
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            db,
+        )
+        .expect("create should succeed");
+        (wt_root, result.path)
+    }
 
     #[test]
     fn parse_add_tags() {
@@ -136,18 +147,10 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
-        let db_repo = db
-            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
-            .unwrap();
-        let wt = db
-            .insert_worktree(db_repo.id, "my-wt", "my-branch", "/wt/my-wt", Some("main"))
-            .unwrap();
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-branch");
 
         let output = execute(
-            "my-wt",
+            "my-branch",
             &["+wip".to_string(), "+review".to_string()],
             repo_dir.path(),
             &db,
@@ -161,6 +164,15 @@ mod tests {
         );
 
         // Verify in DB
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let db_repo = db
+            .get_repo_by_path(repo_path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let wt = db
+            .find_worktree_by_identifier(db_repo.id, "my-branch")
+            .unwrap()
+            .unwrap();
         let tags = db.list_tags(wt.id).unwrap();
         assert_eq!(tags, vec!["review", "wip"]); // sorted alphabetically
     }
@@ -170,19 +182,19 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-branch");
         let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
         let db_repo = db
-            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .get_repo_by_path(repo_path.to_str().unwrap())
+            .unwrap()
             .unwrap();
         let wt = db
-            .insert_worktree(db_repo.id, "my-wt", "my-branch", "/wt/my-wt", Some("main"))
+            .find_worktree_by_identifier(db_repo.id, "my-branch")
+            .unwrap()
             .unwrap();
-
         db.add_tag(wt.id, "wip").unwrap();
 
-        let output = execute("my-wt", &[], repo_dir.path(), &db).unwrap();
+        let output = execute("my-branch", &[], repo_dir.path(), &db).unwrap();
         assert!(output.contains("wip"));
     }
 
@@ -191,16 +203,9 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-branch");
 
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
-        let db_repo = db
-            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
-            .unwrap();
-        db.insert_worktree(db_repo.id, "my-wt", "my-branch", "/wt/my-wt", Some("main"))
-            .unwrap();
-
-        let output = execute("my-wt", &[], repo_dir.path(), &db).unwrap();
+        let output = execute("my-branch", &[], repo_dir.path(), &db).unwrap();
         assert!(output.contains("No tags"));
     }
 
@@ -209,20 +214,20 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-branch");
         let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
         let db_repo = db
-            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .get_repo_by_path(repo_path.to_str().unwrap())
+            .unwrap()
             .unwrap();
         let wt = db
-            .insert_worktree(db_repo.id, "my-wt", "my-branch", "/wt/my-wt", Some("main"))
+            .find_worktree_by_identifier(db_repo.id, "my-branch")
+            .unwrap()
             .unwrap();
-
         db.add_tag(wt.id, "wip").unwrap();
         db.add_tag(wt.id, "review").unwrap();
 
-        let output = execute("my-wt", &["-wip".to_string()], repo_dir.path(), &db).unwrap();
+        let output = execute("my-branch", &["-wip".to_string()], repo_dir.path(), &db).unwrap();
 
         assert!(!output.contains("wip"), "wip should be removed");
         assert!(output.contains("review"), "review should remain");
@@ -236,19 +241,19 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-branch");
         let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
         let db_repo = db
-            .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
+            .get_repo_by_path(repo_path.to_str().unwrap())
+            .unwrap()
             .unwrap();
         let wt = db
-            .insert_worktree(db_repo.id, "my-wt", "my-branch", "/wt/my-wt", Some("main"))
+            .find_worktree_by_identifier(db_repo.id, "my-branch")
+            .unwrap()
             .unwrap();
-
         db.add_tag(wt.id, "wip").unwrap();
 
-        let output = execute("my-wt", &["-wip".to_string()], repo_dir.path(), &db).unwrap();
+        let output = execute("my-branch", &["-wip".to_string()], repo_dir.path(), &db).unwrap();
 
         assert!(
             output.contains("All tags removed"),

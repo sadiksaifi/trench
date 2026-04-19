@@ -20,8 +20,8 @@ pub struct SwitchResult {
 /// If the worktree is unmanaged (not in DB), it is silently adopted.
 pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<SwitchResult> {
     let repo_info = crate::git::discover_repo(cwd)?;
-
-    let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
+    let live = crate::live_worktree::resolve(identifier, &repo_info, db)?;
+    let (repo, wt) = crate::live_worktree::ensure_metadata(db, &repo_info, &live.entry)?;
 
     // Update last_accessed timestamp
     let now = crate::state::unix_epoch_secs() as i64;
@@ -34,14 +34,14 @@ pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<SwitchResu
     )?;
 
     // Update session state
-    db.set_session("current_worktree", &wt.name)?;
+    db.set_session("current_worktree", &live.entry.name)?;
 
     // Record "switched" event
     db.insert_event(repo.id, Some(wt.id), "switched", None)?;
 
     Ok(SwitchResult {
-        path: wt.path.clone(),
-        name: wt.name.clone(),
+        path: live.entry.path.to_string_lossy().to_string(),
+        name: live.entry.name.clone(),
     })
 }
 
@@ -63,30 +63,35 @@ mod tests {
         repo
     }
 
+    fn create_live_worktree(
+        repo_dir: &Path,
+        db: &Database,
+        branch: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let wt_root = tempfile::tempdir().unwrap();
+        let result = crate::cli::commands::create::execute(
+            branch,
+            None,
+            repo_dir,
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            db,
+        )
+        .expect("create should succeed");
+        (wt_root, result.path)
+    }
+
     #[test]
     fn switch_resolves_by_branch_name() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "my-feature",
-            "my-feature",
-            "/wt/my-feature",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, wt_path) = create_live_worktree(repo_dir.path(), &db, "my-feature");
 
         let result = execute("my-feature", repo_dir.path(), &db);
         let switch = result.expect("switch should succeed");
 
-        assert_eq!(switch.path, "/wt/my-feature");
+        assert_eq!(switch.path, wt_path.to_string_lossy());
         assert_eq!(switch.name, "my-feature");
     }
 
@@ -95,31 +100,18 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "feature-auth",
-            "feature/auth",
-            "/wt/feature-auth",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, wt_path) = create_live_worktree(repo_dir.path(), &db, "feature/auth");
 
         // Switch using the original branch name (with slash)
         let switch = execute("feature/auth", repo_dir.path(), &db)
             .expect("switch by branch name should succeed");
-        assert_eq!(switch.path, "/wt/feature-auth");
+        assert_eq!(switch.path, wt_path.to_string_lossy());
         assert_eq!(switch.name, "feature-auth");
 
         // Switch using the sanitized name
         let switch = execute("feature-auth", repo_dir.path(), &db)
             .expect("switch by sanitized name should succeed");
-        assert_eq!(switch.path, "/wt/feature-auth");
+        assert_eq!(switch.path, wt_path.to_string_lossy());
         assert_eq!(switch.name, "feature-auth");
     }
 
@@ -129,26 +121,12 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        // DB only has the sanitized name, not the slashed branch
-        db.insert_worktree(
-            db_repo.id,
-            "feat-login",
-            "feat-login",
-            "/wt/feat-login",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, wt_path) = create_live_worktree(repo_dir.path(), &db, "feat-login");
 
         // User passes "feat/login" which sanitizes to "feat-login"
         let switch = execute("feat/login", repo_dir.path(), &db)
             .expect("switch by sanitized fallback should succeed");
-        assert_eq!(switch.path, "/wt/feat-login");
+        assert_eq!(switch.path, wt_path.to_string_lossy());
     }
 
     #[test]
@@ -156,20 +134,15 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
         let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
         let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
+            .get_repo_by_path(repo_path.to_str().unwrap())
+            .unwrap()
             .unwrap();
         let wt = db
-            .insert_worktree(
-                db_repo.id,
-                "my-feature",
-                "my-feature",
-                "/wt/my-feature",
-                Some("main"),
-            )
+            .find_worktree_by_identifier(db_repo.id, "my-feature")
+            .unwrap()
             .unwrap();
 
         assert!(
@@ -195,20 +168,7 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "my-feature",
-            "my-feature",
-            "/wt/my-feature",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
 
         // No session state initially
         assert!(db.get_session("current_worktree").unwrap().is_none());

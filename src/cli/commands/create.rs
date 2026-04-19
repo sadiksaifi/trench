@@ -320,7 +320,10 @@ pub fn execute(
     };
 
     let sanitized_name = paths::sanitize_branch(branch);
-    let worktree_path_str = path_to_utf8(&worktree_path)?;
+    let canonical_worktree_path = worktree_path
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", worktree_path.display()))?;
+    let worktree_path_str = path_to_utf8(&canonical_worktree_path)?;
     let wt = db.insert_worktree(
         repo.id,
         &sanitized_name,
@@ -334,7 +337,7 @@ pub fn execute(
     Ok(CreateResult {
         name: sanitized_name,
         branch: branch.to_string(),
-        path: worktree_path,
+        path: canonical_worktree_path,
         base_branch: base.to_string(),
     })
 }
@@ -418,7 +421,7 @@ mod tests {
             .unwrap()
             .to_string();
         let expected_path = wt_root.path().join(&repo_name).join("my-feature");
-        assert_eq!(*path, expected_path);
+        assert_eq!(*path, expected_path.canonicalize().unwrap());
 
         // DB: repo record exists
         let repo_path_str = repo_dir

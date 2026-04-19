@@ -4,6 +4,7 @@ mod config;
 mod exit_code;
 mod git;
 mod hooks;
+mod live_worktree;
 mod logging;
 mod output;
 mod paths;
@@ -744,20 +745,20 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
     let use_tmux = tmux_flag || config_tmux;
 
     if use_tmux {
-        let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, &db)?;
+        let live = crate::live_worktree::resolve(identifier, &repo_info, &db)?;
 
         let action = tmux::resolve_tmux_action(
             tmux_flag,
             config_tmux,
             tmux::is_inside_tmux(),
-            &wt.path,
-            &wt.name,
+            &live.entry.path.to_string_lossy(),
+            &live.entry.name,
         );
 
         match action {
             tmux::TmuxAction::TmuxNewWindow(cmd) => {
                 if execute_tmux_command(&cmd)? {
-                    cli::commands::open::record_open(&db, repo.id, wt.id)?;
+                    cli::commands::open::record_open_for_identifier(identifier, &cwd, &db)?;
                 } else {
                     eprintln!("warning: tmux not found, falling back to $EDITOR");
                     return run_open_editor(identifier, &cwd, &db, editor_command.as_deref());
@@ -802,7 +803,7 @@ fn run_open_editor(
                 ExitCode::GeneralError.exit();
             }
 
-            cli::commands::open::record_open(db, result.repo_id, result.wt_id)?;
+            cli::commands::open::record_open_for_identifier(identifier, cwd, db)?;
 
             Ok(())
         }

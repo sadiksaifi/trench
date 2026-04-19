@@ -291,6 +291,37 @@ impl Database {
         Ok(wt)
     }
 
+    /// Find an active worktree by its stored path.
+    pub fn find_worktree_by_path(&self, repo_id: i64, path: &str) -> Result<Option<Worktree>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo_id, name, branch, path, base_branch, managed, adopted_at, last_accessed, removed_at, created_at
+             FROM worktrees
+             WHERE repo_id = ?1 AND path = ?2 AND removed_at IS NULL
+             LIMIT 1",
+        ).context("failed to prepare find_worktree_by_path query")?;
+
+        let wt = stmt
+            .query_row(rusqlite::params![repo_id, path], |row| {
+                Ok(Worktree {
+                    id: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    name: row.get(2)?,
+                    branch: row.get(3)?,
+                    path: row.get(4)?,
+                    base_branch: row.get(5)?,
+                    managed: row.get::<_, i64>(6)? != 0,
+                    adopted_at: row.get(7)?,
+                    last_accessed: row.get(8)?,
+                    removed_at: row.get(9)?,
+                    created_at: row.get(10)?,
+                })
+            })
+            .optional()
+            .context("failed to find worktree by path")?;
+
+        Ok(wt)
+    }
+
     /// Insert an event and return its id.
     pub fn insert_event(
         &self,
@@ -530,6 +561,39 @@ impl Database {
             logs.push(row.context("failed to read log row")?);
         }
         Ok(logs)
+    }
+
+    /// Delete all metadata for a worktree, including tags, events, and logs.
+    pub fn delete_worktree_metadata(&self, worktree_id: i64) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("failed to begin delete_worktree_metadata transaction")?;
+
+        tx.execute(
+            "DELETE FROM logs WHERE event_id IN (SELECT id FROM events WHERE worktree_id = ?1)",
+            rusqlite::params![worktree_id],
+        )
+        .context("failed to delete logs for worktree metadata purge")?;
+        tx.execute(
+            "DELETE FROM events WHERE worktree_id = ?1",
+            rusqlite::params![worktree_id],
+        )
+        .context("failed to delete events for worktree metadata purge")?;
+        tx.execute(
+            "DELETE FROM tags WHERE worktree_id = ?1",
+            rusqlite::params![worktree_id],
+        )
+        .context("failed to delete tags for worktree metadata purge")?;
+        tx.execute(
+            "DELETE FROM worktrees WHERE id = ?1",
+            rusqlite::params![worktree_id],
+        )
+        .context("failed to delete worktree metadata row")?;
+
+        tx.commit()
+            .context("failed to commit delete_worktree_metadata transaction")?;
+        Ok(())
     }
 
     /// Count events for a worktree, optionally filtered by event type.

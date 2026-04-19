@@ -13,10 +13,6 @@ pub struct OpenResult {
     pub path: String,
     /// Editor command that should be used to open the worktree.
     pub editor: String,
-    /// Repo ID (for deferred DB writes after editor launch).
-    pub repo_id: i64,
-    /// Worktree ID (for deferred DB writes after editor launch).
-    pub wt_id: i64,
 }
 
 /// Resolve the editor command from the fallback chain:
@@ -53,37 +49,13 @@ pub fn resolve(
     config_editor: Option<&str>,
 ) -> Result<OpenResult> {
     let repo_info = crate::git::discover_repo(cwd)?;
-    let repo_path_str = repo_info
-        .path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
-
-    let repo = db
-        .get_repo_by_path(repo_path_str)?
-        .ok_or_else(|| anyhow::anyhow!("repository not tracked by trench"))?;
-
-    // Try the identifier as-is first, then try sanitizing it
-    let wt = match db.find_worktree_by_identifier(repo.id, identifier)? {
-        Some(wt) => wt,
-        None => {
-            let sanitized = crate::paths::sanitize_branch(identifier);
-            if sanitized != identifier {
-                db.find_worktree_by_identifier(repo.id, &sanitized)?
-            } else {
-                None
-            }
-            .ok_or_else(|| anyhow::anyhow!("worktree not found: {identifier}"))?
-        }
-    };
-
+    let live = crate::live_worktree::resolve(identifier, &repo_info, db)?;
     let editor = resolve_editor(config_editor)?;
 
     Ok(OpenResult {
-        name: wt.name.clone(),
-        path: wt.path.clone(),
+        name: live.entry.name.clone(),
+        path: live.entry.path.to_string_lossy().to_string(),
         editor,
-        repo_id: repo.id,
-        wt_id: wt.id,
     })
 }
 
@@ -101,6 +73,13 @@ pub fn record_open(db: &Database, repo_id: i64, wt_id: i64) -> Result<()> {
     )?;
     db.insert_event(repo_id, Some(wt_id), "opened", None)?;
     Ok(())
+}
+
+pub fn record_open_for_identifier(identifier: &str, cwd: &Path, db: &Database) -> Result<()> {
+    let repo_info = crate::git::discover_repo(cwd)?;
+    let live = crate::live_worktree::resolve(identifier, &repo_info, db)?;
+    let (repo, wt) = crate::live_worktree::ensure_metadata(db, &repo_info, &live.entry)?;
+    record_open(db, repo.id, wt.id)
 }
 
 #[cfg(test)]
@@ -148,30 +127,35 @@ mod tests {
         repo
     }
 
+    fn create_live_worktree(
+        repo_dir: &Path,
+        db: &Database,
+        branch: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let wt_root = tempfile::tempdir().unwrap();
+        let result = crate::cli::commands::create::execute(
+            branch,
+            None,
+            repo_dir,
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            db,
+        )
+        .expect("create should succeed");
+        (wt_root, result.path)
+    }
+
     #[test]
     fn resolve_returns_worktree_path_and_config_editor() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "my-feature",
-            "my-feature",
-            "/wt/my-feature",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, wt_path) = create_live_worktree(repo_dir.path(), &db, "my-feature");
 
         let result = resolve("my-feature", repo_dir.path(), &db, Some("code")).unwrap();
 
         assert_eq!(result.name, "my-feature");
-        assert_eq!(result.path, "/wt/my-feature");
+        assert_eq!(result.path, wt_path.to_string_lossy());
         assert_eq!(result.editor, "code");
     }
 
@@ -181,20 +165,7 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "my-feature",
-            "my-feature",
-            "/wt/my-feature",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
 
         let _editor = EnvGuard::set("EDITOR", Some("vim"));
         let _visual = EnvGuard::set("VISUAL", None);
@@ -209,20 +180,7 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "my-feature",
-            "my-feature",
-            "/wt/my-feature",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
 
         let _editor = EnvGuard::set("EDITOR", None);
         let _visual = EnvGuard::set("VISUAL", Some("nano"));
@@ -237,20 +195,7 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "my-feature",
-            "my-feature",
-            "/wt/my-feature",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
 
         let _editor = EnvGuard::set("EDITOR", None);
         let _visual = EnvGuard::set("VISUAL", None);
@@ -269,20 +214,7 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "my-feature",
-            "my-feature",
-            "/wt/my-feature",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
 
         let _editor = EnvGuard::set("EDITOR", Some("vim"));
         let _visual = EnvGuard::set("VISUAL", Some("nano"));
@@ -315,20 +247,15 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
         let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
         let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
+            .get_repo_by_path(repo_path.to_str().unwrap())
+            .unwrap()
             .unwrap();
         let wt = db
-            .insert_worktree(
-                db_repo.id,
-                "my-feature",
-                "my-feature",
-                "/wt/my-feature",
-                Some("main"),
-            )
+            .find_worktree_by_identifier(db_repo.id, "my-feature")
+            .unwrap()
             .unwrap();
 
         resolve("my-feature", repo_dir.path(), &db, Some("vim")).unwrap();
@@ -372,25 +299,64 @@ mod tests {
     }
 
     #[test]
+    fn resolve_git_only_worktree_does_not_create_db_row() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("git-only");
+
+        crate::git::create_worktree(repo_dir.path(), "git-only", &base, &wt_path).unwrap();
+
+        let result = resolve("git-only", repo_dir.path(), &db, Some("code")).unwrap();
+        assert_eq!(
+            result.path,
+            wt_path.canonicalize().unwrap().to_string_lossy()
+        );
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        assert!(
+            db.get_repo_by_path(repo_path.to_str().unwrap())
+                .unwrap()
+                .is_none(),
+            "resolve should not create metadata for git-only worktrees"
+        );
+    }
+
+    #[test]
+    fn record_open_for_identifier_creates_metadata_for_git_only_worktree() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let db = Database::open_in_memory().unwrap();
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("git-only");
+
+        crate::git::create_worktree(repo_dir.path(), "git-only", &base, &wt_path).unwrap();
+
+        record_open_for_identifier("git-only", repo_dir.path(), &db).unwrap();
+
+        let repo_path = repo_dir.path().canonicalize().unwrap();
+        let db_repo = db
+            .get_repo_by_path(repo_path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let wt = db
+            .find_worktree_by_identifier(db_repo.id, "git-only")
+            .unwrap()
+            .unwrap();
+        assert!(wt.last_accessed.is_some());
+        assert_eq!(db.count_events(wt.id, Some("opened")).unwrap(), 1);
+    }
+
+    #[test]
     #[serial_test::serial]
     fn resolve_editor_trims_whitespace_config() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "my-feature",
-            "my-feature",
-            "/wt/my-feature",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
 
         let _editor = EnvGuard::set("EDITOR", None);
         let _visual = EnvGuard::set("VISUAL", None);
@@ -410,20 +376,7 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "my-feature",
-            "my-feature",
-            "/wt/my-feature",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
 
         let _editor = EnvGuard::set("EDITOR", None);
         let _visual = EnvGuard::set("VISUAL", None);
@@ -443,20 +396,7 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "my-feature",
-            "my-feature",
-            "/wt/my-feature",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
 
         // Whitespace-only EDITOR should fall through to VISUAL
         let _editor = EnvGuard::set("EDITOR", Some("  \t "));
@@ -471,25 +411,12 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-        db.insert_worktree(
-            db_repo.id,
-            "feature-auth",
-            "feature/auth",
-            "/wt/feature-auth",
-            Some("main"),
-        )
-        .unwrap();
+        let (_wt_root, wt_path) = create_live_worktree(repo_dir.path(), &db, "feature/auth");
 
         // Resolve using original branch name (with slash)
         let result = resolve("feature/auth", repo_dir.path(), &db, Some("vim")).unwrap();
         assert_eq!(result.name, "feature-auth");
-        assert_eq!(result.path, "/wt/feature-auth");
+        assert_eq!(result.path, wt_path.to_string_lossy());
 
         // Resolve using sanitized name
         let result = resolve("feature-auth", repo_dir.path(), &db, Some("vim")).unwrap();
