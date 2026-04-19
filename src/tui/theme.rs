@@ -31,20 +31,20 @@ pub fn from_name(name: &str) -> Theme {
 
 fn ops() -> Theme {
     Theme {
-        fg: Color::Rgb(222, 226, 232),
-        fg_muted: Color::Rgb(132, 146, 166),
-        bg: Color::Rgb(9, 12, 17),
-        bg_elevated: Color::Rgb(15, 21, 31),
-        bg_panel: Color::Rgb(19, 27, 39),
-        accent: Color::Rgb(78, 201, 176),
-        accent_soft: Color::Rgb(33, 82, 87),
-        success: Color::Rgb(93, 217, 131),
-        error: Color::Rgb(232, 101, 113),
-        warning: Color::Rgb(255, 196, 82),
-        border: Color::Rgb(38, 58, 79),
-        border_active: Color::Rgb(78, 201, 176),
-        selection_bg: Color::Rgb(24, 60, 66),
-        selection_fg: Color::Rgb(246, 252, 252),
+        fg: Color::Rgb(250, 249, 245),
+        fg_muted: Color::Rgb(176, 174, 165),
+        bg: Color::Rgb(20, 20, 19),
+        bg_elevated: Color::Rgb(28, 27, 24),
+        bg_panel: Color::Rgb(34, 33, 30),
+        accent: Color::Rgb(217, 119, 87),
+        accent_soft: Color::Rgb(88, 63, 55),
+        success: Color::Rgb(120, 140, 93),
+        error: Color::Rgb(201, 95, 77),
+        warning: Color::Rgb(201, 154, 99),
+        border: Color::Rgb(62, 58, 51),
+        border_active: Color::Rgb(106, 155, 204),
+        selection_bg: Color::Rgb(60, 44, 39),
+        selection_fg: Color::Rgb(250, 249, 245),
     }
 }
 
@@ -112,10 +112,10 @@ mod tests {
     #[test]
     fn ops_theme_has_expected_anchor_colors() {
         let theme = from_name("ops");
-        assert_eq!(theme.fg, Color::Rgb(222, 226, 232));
-        assert_eq!(theme.bg, Color::Rgb(9, 12, 17));
-        assert_eq!(theme.accent, Color::Rgb(78, 201, 176));
-        assert_eq!(theme.selection_fg, Color::Rgb(246, 252, 252));
+        assert_eq!(theme.fg, Color::Rgb(250, 249, 245));
+        assert_eq!(theme.bg, Color::Rgb(20, 20, 19));
+        assert_eq!(theme.accent, Color::Rgb(217, 119, 87));
+        assert_eq!(theme.selection_fg, Color::Rgb(250, 249, 245));
     }
 
     #[test]

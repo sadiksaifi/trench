@@ -182,10 +182,10 @@ pub fn keybar_line(theme: &Theme, items: &[(&str, &str)]) -> Line<'static> {
 pub fn pill(theme: &Theme, label: &str, tone: Tone) -> Span<'static> {
     let (fg, bg) = match tone {
         Tone::Accent => (theme.selection_fg, theme.accent_soft),
-        Tone::Success => (theme.selection_fg, theme.success),
-        Tone::Warning => (theme.selection_fg, theme.warning),
-        Tone::Error => (theme.selection_fg, theme.error),
-        Tone::Muted => (theme.fg, theme.bg_elevated),
+        Tone::Success => (theme.success, theme.bg_panel),
+        Tone::Warning => (theme.warning, theme.bg_panel),
+        Tone::Error => (theme.error, theme.bg_panel),
+        Tone::Muted => (theme.fg_muted, theme.bg_panel),
     };
     Span::styled(
         format!(" {label} "),
