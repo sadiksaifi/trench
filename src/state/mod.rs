@@ -344,9 +344,7 @@ mod tests {
     fn insert_event_stores_json_payload() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
-        let wt = db
-            .insert_worktree(repo.id, "wt", "b", "/wt", None)
-            .unwrap();
+        let wt = db.insert_worktree(repo.id, "wt", "b", "/wt", None).unwrap();
 
         let payload = serde_json::json!({"from": "main", "strategy": "rebase"});
         let event_id = db
@@ -525,7 +523,10 @@ mod tests {
         assert!(repo.is_ok(), "recovered DB should accept inserts");
 
         let fetched = db.get_repo_by_path("/test").unwrap();
-        assert!(fetched.is_some(), "recovered DB should return inserted data");
+        assert!(
+            fetched.is_some(),
+            "recovered DB should return inserted data"
+        );
     }
 
     #[test]
@@ -570,8 +571,14 @@ mod tests {
     fn find_worktree_by_identifier_matches_sanitized_name() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
-        db.insert_worktree(repo.id, "feature-auth", "feature/auth", "/wt/feature-auth", Some("main"))
-            .unwrap();
+        db.insert_worktree(
+            repo.id,
+            "feature-auth",
+            "feature/auth",
+            "/wt/feature-auth",
+            Some("main"),
+        )
+        .unwrap();
 
         let found = db
             .find_worktree_by_identifier(repo.id, "feature-auth")
@@ -586,8 +593,14 @@ mod tests {
     fn find_worktree_by_identifier_matches_branch_name() {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
-        db.insert_worktree(repo.id, "feature-auth", "feature/auth", "/wt/feature-auth", Some("main"))
-            .unwrap();
+        db.insert_worktree(
+            repo.id,
+            "feature-auth",
+            "feature/auth",
+            "/wt/feature-auth",
+            Some("main"),
+        )
+        .unwrap();
 
         let found = db
             .find_worktree_by_identifier(repo.id, "feature/auth")
@@ -603,7 +616,9 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let repo = db.insert_repo("r", "/r", None).unwrap();
 
-        let found = db.find_worktree_by_identifier(repo.id, "nonexistent").unwrap();
+        let found = db
+            .find_worktree_by_identifier(repo.id, "nonexistent")
+            .unwrap();
         assert!(found.is_none());
     }
 
@@ -809,14 +824,23 @@ mod tests {
             .insert_event(repo.id, Some(wt.id), "hook:post_create", None)
             .unwrap();
 
-        db.insert_log(event_id, "stdout", "hello world", 1, Some("run")).unwrap();
-        db.insert_log(event_id, "stderr", "warning: something", 2, Some("run")).unwrap();
-        db.insert_log(event_id, "stdout", "done", 3, Some("shell")).unwrap();
+        db.insert_log(event_id, "stdout", "hello world", 1, Some("run"))
+            .unwrap();
+        db.insert_log(event_id, "stderr", "warning: something", 2, Some("run"))
+            .unwrap();
+        db.insert_log(event_id, "stdout", "done", 3, Some("shell"))
+            .unwrap();
 
         let logs = db.get_logs(event_id).unwrap();
         assert_eq!(logs.len(), 3);
-        assert_eq!(logs[0], ("stdout".to_string(), "hello world".to_string(), 1));
-        assert_eq!(logs[1], ("stderr".to_string(), "warning: something".to_string(), 2));
+        assert_eq!(
+            logs[0],
+            ("stdout".to_string(), "hello world".to_string(), 1)
+        );
+        assert_eq!(
+            logs[1],
+            ("stderr".to_string(), "warning: something".to_string(), 2)
+        );
         assert_eq!(logs[2], ("stdout".to_string(), "done".to_string(), 3));
     }
 
@@ -832,9 +856,12 @@ mod tests {
             .insert_event(repo.id, Some(wt.id), "hook:post_create", None)
             .unwrap();
 
-        db.insert_log(event_id, "stdout", "hello", 1, Some("run")).unwrap();
-        db.insert_log(event_id, "stderr", "warn", 2, Some("run")).unwrap();
-        db.insert_log(event_id, "stdout", "done", 3, Some("shell")).unwrap();
+        db.insert_log(event_id, "stdout", "hello", 1, Some("run"))
+            .unwrap();
+        db.insert_log(event_id, "stderr", "warn", 2, Some("run"))
+            .unwrap();
+        db.insert_log(event_id, "stdout", "done", 3, Some("shell"))
+            .unwrap();
 
         let lines = db.get_hook_output(event_id).unwrap();
         assert_eq!(lines.len(), 3);
@@ -863,21 +890,27 @@ mod tests {
             .insert_event(repo.id, Some(wt.id), "hook:post_create", None)
             .unwrap();
 
-        db.insert_log(event_id, "stdout", "line1", 1, Some("run")).unwrap();
-        db.insert_log(event_id, "stderr", "line2", 2, Some("shell")).unwrap();
+        db.insert_log(event_id, "stdout", "line1", 1, Some("run"))
+            .unwrap();
+        db.insert_log(event_id, "stderr", "line2", 2, Some("shell"))
+            .unwrap();
         db.insert_log(event_id, "stdout", "line3", 3, None).unwrap();
 
         // Verify step is stored via raw query
-        let mut stmt = db.conn_for_test().prepare(
-            "SELECT step FROM logs WHERE event_id = ?1 ORDER BY line_number"
-        ).unwrap();
+        let mut stmt = db
+            .conn_for_test()
+            .prepare("SELECT step FROM logs WHERE event_id = ?1 ORDER BY line_number")
+            .unwrap();
         let steps: Vec<Option<String>> = stmt
             .query_map(rusqlite::params![event_id], |row| row.get(0))
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
 
-        assert_eq!(steps, vec![Some("run".to_string()), Some("shell".to_string()), None]);
+        assert_eq!(
+            steps,
+            vec![Some("run".to_string()), Some("shell".to_string()), None]
+        );
     }
 
     #[test]
@@ -981,7 +1014,11 @@ mod tests {
         }
 
         let entries = db.list_events_filtered(repo.id, None, None).unwrap();
-        assert_eq!(entries.len(), 1500, "should return all events without a cap");
+        assert_eq!(
+            entries.len(),
+            1500,
+            "should return all events without a cap"
+        );
     }
 
     #[test]
@@ -999,11 +1036,8 @@ mod tests {
         // Bypass the trigger to insert a cross-repo event:
         // event belongs to repo_a but references repo_b's worktree_id.
         let conn = db.conn_for_test();
-        conn.execute(
-            "DROP TRIGGER events_check_worktree_repo_consistency",
-            [],
-        )
-        .unwrap();
+        conn.execute("DROP TRIGGER events_check_worktree_repo_consistency", [])
+            .unwrap();
         let created_at = unix_epoch_secs() as i64;
         conn.execute(
             "INSERT INTO events (repo_id, worktree_id, event_type, payload, created_at)
@@ -1026,9 +1060,13 @@ mod tests {
     #[test]
     fn get_repo_by_path_returns_existing_repo() {
         let db = Database::open_in_memory().unwrap();
-        let repo = db.insert_repo("my-project", "/home/user/my-project", Some("main")).unwrap();
+        let repo = db
+            .insert_repo("my-project", "/home/user/my-project", Some("main"))
+            .unwrap();
 
-        let found = db.get_repo_by_path("/home/user/my-project").unwrap()
+        let found = db
+            .get_repo_by_path("/home/user/my-project")
+            .unwrap()
             .expect("should find repo by path");
 
         assert_eq!(found.id, repo.id);

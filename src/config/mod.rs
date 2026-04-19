@@ -109,10 +109,8 @@ fn load_optional_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Opt
             return Ok(None);
         }
         Err(e) => {
-            return Err(
-                anyhow::Error::new(e)
-                    .context(format!("failed to read config file: {}", path.display())),
-            );
+            return Err(anyhow::Error::new(e)
+                .context(format!("failed to read config file: {}", path.display())));
         }
     };
     let config: T = toml::from_str(&contents)
@@ -183,7 +181,7 @@ pub struct ResolvedWorktreesConfig {
 impl Default for ResolvedUiConfig {
     fn default() -> Self {
         Self {
-            theme: "catppuccin".to_string(),
+            theme: "ops".to_string(),
             date_format: "%Y-%m-%d %H:%M".to_string(),
             show_ahead_behind: true,
             show_dirty_count: true,
@@ -358,7 +356,10 @@ mod tests {
     #[test]
     fn auto_refresh_defaults_to_true() {
         let resolved = resolve_config(None, None, &GlobalConfig::default());
-        assert!(resolved.ui.auto_refresh, "auto_refresh should default to true");
+        assert!(
+            resolved.ui.auto_refresh,
+            "auto_refresh should default to true"
+        );
     }
 
     #[test]
@@ -371,7 +372,10 @@ mod tests {
             ..GlobalConfig::default()
         };
         let resolved = resolve_config(None, None, &global);
-        assert!(!resolved.ui.auto_refresh, "auto_refresh should be false when disabled in global config");
+        assert!(
+            !resolved.ui.auto_refresh,
+            "auto_refresh should be false when disabled in global config"
+        );
     }
 
     #[test]
@@ -405,7 +409,10 @@ auto_refresh = false
             ..ProjectConfig::default()
         };
         let resolved = resolve_config(None, Some(&project), &global);
-        assert!(!resolved.ui.auto_refresh, "project auto_refresh should override global");
+        assert!(
+            !resolved.ui.auto_refresh,
+            "project auto_refresh should override global"
+        );
     }
 
     #[test]
@@ -671,10 +678,7 @@ run = ["bun install"]
             .expect("should not error")
             .expect("should return Some for existing file");
 
-        assert_eq!(
-            config.git.unwrap().default_base.as_deref(),
-            Some("develop")
-        );
+        assert_eq!(config.git.unwrap().default_base.as_deref(), Some("develop"));
         assert!(config.hooks.unwrap().post_create.is_some());
     }
 
@@ -711,10 +715,7 @@ run = ["bun install"]
             .expect("should not error")
             .expect("should find .trench.toml");
 
-        assert_eq!(
-            config.git.unwrap().default_base.as_deref(),
-            Some("develop")
-        );
+        assert_eq!(config.git.unwrap().default_base.as_deref(), Some("develop"));
     }
 
     #[test]
@@ -730,7 +731,7 @@ run = ["bun install"]
     fn resolve_defaults_only() {
         let resolved = resolve_config(None, None, &GlobalConfig::default());
 
-        assert_eq!(resolved.ui.theme, "catppuccin");
+        assert_eq!(resolved.ui.theme, "ops");
         assert_eq!(resolved.ui.date_format, "%Y-%m-%d %H:%M");
         assert!(resolved.ui.show_ahead_behind);
         assert!(resolved.ui.show_dirty_count);
@@ -777,10 +778,7 @@ run = ["bun install"]
         assert!(!resolved.ui.show_ahead_behind);
         assert_eq!(resolved.git.default_base, "develop");
         assert!(resolved.git.auto_prune);
-        assert_eq!(
-            resolved.worktrees.root,
-            "custom/{{ repo }}/{{ branch }}"
-        );
+        assert_eq!(resolved.worktrees.root, "custom/{{ repo }}/{{ branch }}");
         assert_eq!(resolved.worktrees.scan, vec!["/extra".to_string()]);
 
         // Fallback to defaults
@@ -1042,12 +1040,10 @@ shell = "echo global-cleanup"
             .expect("should load project config")
             .expect("project config should exist");
 
-        let global = load_global_config_from(&global_path)
-            .expect("should load global config");
+        let global = load_global_config_from(&global_path).expect("should load global config");
 
         // Discover repo to verify git wiring
-        let repo_info = crate::git::discover_repo(repo_dir.path())
-            .expect("should discover repo");
+        let repo_info = crate::git::discover_repo(repo_dir.path()).expect("should discover repo");
         assert_eq!(repo_info.path, repo_dir.path().canonicalize().unwrap());
 
         // Resolve the full chain
@@ -1123,7 +1119,10 @@ shell = "echo cleanup"
 
         let err = load_project_config_from(&path).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("invalid TOML"), "error should mention 'invalid TOML': {msg}");
+        assert!(
+            msg.contains("invalid TOML"),
+            "error should mention 'invalid TOML': {msg}"
+        );
     }
 
     #[test]
@@ -1154,10 +1153,7 @@ run = ["make setup"]
         let config: ProjectConfig = toml::from_str(toml_str).unwrap();
 
         assert_eq!(config.ui.unwrap().theme.as_deref(), Some("nord"));
-        assert_eq!(
-            config.git.unwrap().default_base.as_deref(),
-            Some("develop")
-        );
+        assert_eq!(config.git.unwrap().default_base.as_deref(), Some("develop"));
         assert_eq!(
             config.worktrees.unwrap().root.as_deref(),
             Some("custom/{{ repo }}/{{ branch | sanitize }}")
@@ -1262,31 +1258,30 @@ tmux = true
     #[test]
     fn shell_tmux_enabled_via_global_config() {
         let global = GlobalConfig {
-            shell: Some(ShellConfig {
-                tmux: Some(true),
-            }),
+            shell: Some(ShellConfig { tmux: Some(true) }),
             ..GlobalConfig::default()
         };
         let resolved = resolve_config(None, None, &global);
-        assert!(resolved.shell.tmux, "shell.tmux should be true when set in global");
+        assert!(
+            resolved.shell.tmux,
+            "shell.tmux should be true when set in global"
+        );
     }
 
     #[test]
     fn shell_tmux_project_overrides_global() {
         let global = GlobalConfig {
-            shell: Some(ShellConfig {
-                tmux: Some(true),
-            }),
+            shell: Some(ShellConfig { tmux: Some(true) }),
             ..GlobalConfig::default()
         };
         let project = ProjectConfig {
-            shell: Some(ShellConfig {
-                tmux: Some(false),
-            }),
+            shell: Some(ShellConfig { tmux: Some(false) }),
             ..ProjectConfig::default()
         };
         let resolved = resolve_config(None, Some(&project), &global);
-        assert!(!resolved.shell.tmux, "project shell.tmux should override global");
+        assert!(
+            !resolved.shell.tmux,
+            "project shell.tmux should override global"
+        );
     }
-
 }

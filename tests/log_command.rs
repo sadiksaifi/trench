@@ -124,8 +124,7 @@ fn log_shows_events_after_create_and_remove() {
     );
 
     let stdout = String::from_utf8_lossy(&log_output.stdout);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&stdout).expect("should be valid JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
     let arr = parsed.as_array().expect("should be a JSON array");
 
     // Should have at least a "created" and "removed" event
@@ -262,13 +261,21 @@ fn log_scoped_to_worktree_filters_events() {
         .current_dir(tmp.path())
         .output()
         .expect("create alpha");
-    assert!(out.status.success(), "trench create alpha failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "trench create alpha failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let out = Command::new(trench_bin())
         .args(["create", "beta-branch", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("create beta");
-    assert!(out.status.success(), "trench create beta failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "trench create beta failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Log scoped to alpha — JSON output
     let output = Command::new(trench_bin())
@@ -308,13 +315,21 @@ fn log_tail_limits_output() {
         .current_dir(tmp.path())
         .output()
         .expect("create");
-    assert!(out.status.success(), "trench create failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "trench create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let out = Command::new(trench_bin())
         .args(["remove", "tail-test", "--force", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("remove");
-    assert!(out.status.success(), "trench remove failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "trench remove failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // tail 1 — JSON
     let output = Command::new(trench_bin())
@@ -341,13 +356,21 @@ fn log_scoped_and_tail_combined() {
         .current_dir(tmp.path())
         .output()
         .expect("create combo-a");
-    assert!(out.status.success(), "trench create combo-a failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "trench create combo-a failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let out = Command::new(trench_bin())
         .args(["create", "combo-b", "--no-hooks"])
         .current_dir(tmp.path())
         .output()
         .expect("create combo-b");
-    assert!(out.status.success(), "trench create combo-b failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "trench create combo-b failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Remove combo-a to generate more events for it
     let out = Command::new(trench_bin())
@@ -355,7 +378,11 @@ fn log_scoped_and_tail_combined() {
         .current_dir(tmp.path())
         .output()
         .expect("remove combo-a");
-    assert!(out.status.success(), "trench remove combo-a failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "trench remove combo-a failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // combo-a should have at least 2 events (created + removed), tail to 1
     let output = Command::new(trench_bin())
@@ -504,11 +531,16 @@ timeout_secs = 30
     assert!(!lines.is_empty(), "should have at least one output line");
 
     // Find the line containing our output
-    let has_output = lines.iter().any(|l| l["line"].as_str() == Some("json_test_output"));
+    let has_output = lines
+        .iter()
+        .any(|l| l["line"].as_str() == Some("json_test_output"));
     assert!(has_output, "should contain our hook output, got: {parsed}");
 
     // Check step label
-    let run_line = lines.iter().find(|l| l["line"].as_str() == Some("json_test_output")).unwrap();
+    let run_line = lines
+        .iter()
+        .find(|l| l["line"].as_str() == Some("json_test_output"))
+        .unwrap();
     assert_eq!(run_line["step"], "run");
     assert_eq!(run_line["stream"], "stdout");
 }
@@ -602,8 +634,7 @@ fn log_summary_json_empty_state_returns_zeroed_stats() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&stdout).expect("should be valid JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
     assert_eq!(parsed["total_events"], 0);
     assert_eq!(parsed["hook_runs"], 0);
@@ -666,22 +697,15 @@ run = ["echo hello"]
     );
 
     let stdout = String::from_utf8_lossy(&summary_output.stdout);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&stdout).expect("should be valid JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
     // Should have at least 4 events (2 created + 2 hook:post_create)
     let total = parsed["total_events"].as_u64().unwrap();
-    assert!(
-        total >= 4,
-        "should have at least 4 events, got {total}"
-    );
+    assert!(total >= 4, "should have at least 4 events, got {total}");
 
     // Should have at least 2 hook runs
     let hooks = parsed["hook_runs"].as_u64().unwrap();
-    assert!(
-        hooks >= 2,
-        "should have at least 2 hook runs, got {hooks}"
-    );
+    assert!(hooks >= 2, "should have at least 2 hook runs, got {hooks}");
 
     // Hook duration should be > 0
     let avg = parsed["avg_hook_duration_secs"].as_f64().unwrap();
@@ -710,7 +734,10 @@ run = ["echo hello"]
         "when event counts tie, most_active_worktree should use lexicographic name tie-break"
     );
     assert!(
-        parsed["most_active_worktree"]["event_count"].as_u64().unwrap() >= 2,
+        parsed["most_active_worktree"]["event_count"]
+            .as_u64()
+            .unwrap()
+            >= 2,
         "most_active_worktree should have at least 2 events"
     );
 
@@ -723,12 +750,30 @@ run = ["echo hello"]
     assert!(human_output.status.success());
 
     let human_stdout = String::from_utf8_lossy(&human_output.stdout);
-    assert!(human_stdout.contains("Total events:"), "should have Total events label");
-    assert!(human_stdout.contains("Hook runs:"), "should have Hook runs label");
-    assert!(human_stdout.contains("Avg hook duration:"), "should have Avg hook duration label");
-    assert!(human_stdout.contains("Successes:"), "should have Successes label");
-    assert!(human_stdout.contains("Failures:"), "should have Failures label");
-    assert!(human_stdout.contains("Most active:"), "should have Most active label");
+    assert!(
+        human_stdout.contains("Total events:"),
+        "should have Total events label"
+    );
+    assert!(
+        human_stdout.contains("Hook runs:"),
+        "should have Hook runs label"
+    );
+    assert!(
+        human_stdout.contains("Avg hook duration:"),
+        "should have Avg hook duration label"
+    );
+    assert!(
+        human_stdout.contains("Successes:"),
+        "should have Successes label"
+    );
+    assert!(
+        human_stdout.contains("Failures:"),
+        "should have Failures label"
+    );
+    assert!(
+        human_stdout.contains("Most active:"),
+        "should have Most active label"
+    );
 }
 
 #[test]

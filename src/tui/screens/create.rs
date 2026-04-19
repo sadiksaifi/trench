@@ -130,7 +130,9 @@ impl CreateState {
 
     /// Return the currently selected base branch name, if any.
     pub fn selected_base_branch(&self) -> Option<&str> {
-        self.base_branches.get(self.selected_base).map(|s| s.as_str())
+        self.base_branches
+            .get(self.selected_base)
+            .map(|s| s.as_str())
     }
 
     /// Recompute the path preview from the current branch input and repo name.
@@ -139,7 +141,11 @@ impl CreateState {
             self.path_preview.clear();
             return;
         }
-        match paths::render_worktree_path(&self.worktree_template, &self.repo_name, &self.branch_input) {
+        match paths::render_worktree_path(
+            &self.worktree_template,
+            &self.repo_name,
+            &self.branch_input,
+        ) {
             Ok(p) => self.path_preview = p.to_string_lossy().into_owned(),
             Err(_) => self.path_preview.clear(),
         }
@@ -173,15 +179,12 @@ impl CreateState {
     }
 }
 
-const FOOTER_KEYS: &str = " Tab next field  Enter create  Esc cancel ";
-const FOOTER_RESULT: &str = " Enter dismiss ";
-
-pub fn render(state: &CreateState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
-    let footer_style = Style::default()
-        .fg(theme.background)
-        .bg(theme.accent)
-        .add_modifier(Modifier::BOLD);
-
+pub fn render(
+    state: &CreateState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
     // Result mode — show outcome + dismiss footer
     if let Some(ref result) = state.result {
         let chunks = Layout::vertical([
@@ -190,17 +193,25 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect, theme: &crate:
             Constraint::Length(1),
         ])
         .split(area);
-        let title = Paragraph::new(Line::from(vec![
-            Span::styled("Create Worktree", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
-        ]));
+        let title = Paragraph::new(Line::from(vec![Span::styled(
+            "Create Worktree",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )]));
         frame.render_widget(title, chunks[0]);
-        let msg = Paragraph::new(Line::from(vec![
-            Span::raw("  "),
-            Span::raw(&result.message),
-        ]));
-        frame.render_widget(msg, chunks[1]);
-        let footer = Paragraph::new(Line::from(FOOTER_RESULT)).style(footer_style);
-        frame.render_widget(footer, chunks[2]);
+        let block = crate::tui::chrome::panel(" Result ", theme);
+        let inner = block.inner(chunks[1]);
+        frame.render_widget(block, chunks[1]);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw("  "),
+                Span::raw(&result.message),
+            ]))
+            .style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+            inner,
+        );
+        crate::tui::chrome::render_keybar(frame, chunks[2], theme, &[("Enter", "dismiss")]);
         return;
     }
 
@@ -213,29 +224,41 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect, theme: &crate:
         Constraint::Length(1), // separator
         Constraint::Length(1), // path preview
         Constraint::Length(1), // error
-        Constraint::Min(0),   // spacer
+        Constraint::Min(0),    // spacer
         Constraint::Length(1), // footer
     ])
     .split(area);
 
     // Title
     let title = Paragraph::new(Line::from(vec![
-        Span::styled("Create Worktree", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Create Worktree",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        crate::tui::chrome::pill(theme, "form", crate::tui::chrome::Tone::Accent),
     ]));
     frame.render_widget(title, chunks[0]);
 
     // Branch input
     let branch_style = if state.focused_field == CreateField::Branch {
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
-    } else {
         Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg)
     };
     let branch_spans = if state.focused_field == CreateField::Branch && !state.is_result_mode() {
         let (before, after) = state.branch_input.split_at(state.cursor_pos);
         vec![
             Span::styled("  Branch: ", branch_style),
             Span::raw(before.to_string()),
-            Span::styled("\u{2588}", Style::default().add_modifier(Modifier::REVERSED)),
+            Span::styled(
+                "\u{2588}",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ),
             Span::raw(after.to_string()),
         ]
     } else {
@@ -249,13 +272,13 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect, theme: &crate:
 
     // Base branch selector
     let base_style = if state.focused_field == CreateField::Base {
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
-    } else {
         Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg)
     };
-    let base_value = state
-        .selected_base_branch()
-        .unwrap_or("-");
+    let base_value = state.selected_base_branch().unwrap_or("-");
     let base_label = Paragraph::new(Line::from(vec![
         Span::styled("  Base:   ", base_style),
         Span::raw(format!("< {} >", base_value)),
@@ -264,9 +287,11 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect, theme: &crate:
 
     // Hooks toggle
     let hooks_style = if state.focused_field == CreateField::Hooks {
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
-    } else {
         Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg)
     };
     let hooks_value = if state.hooks_enabled { "ON" } else { "OFF" };
     let hooks_label = Paragraph::new(Line::from(vec![
@@ -278,8 +303,8 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect, theme: &crate:
     // Path preview
     if !state.path_preview.is_empty() {
         let preview = Paragraph::new(Line::from(vec![
-            Span::styled("  Path:   ", Style::default().fg(theme.dimmed)),
-            Span::styled(&state.path_preview, Style::default().fg(theme.dimmed)),
+            Span::styled("  Path:   ", Style::default().fg(theme.fg_muted)),
+            Span::styled(&state.path_preview, Style::default().fg(theme.fg_muted)),
         ]));
         frame.render_widget(preview, chunks[5]);
     }
@@ -288,14 +313,26 @@ pub fn render(state: &CreateState, frame: &mut Frame, area: Rect, theme: &crate:
     if let Some(ref err) = state.error {
         let error_line = Paragraph::new(Line::from(vec![
             Span::raw("  "),
-            Span::styled(err.as_str(), Style::default().fg(theme.error).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                err.as_str(),
+                Style::default()
+                    .fg(theme.error)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         frame.render_widget(error_line, chunks[6]);
     }
 
-    // Footer
-    let footer = Paragraph::new(Line::from(FOOTER_KEYS)).style(footer_style);
-    frame.render_widget(footer, chunks[8]);
+    crate::tui::chrome::render_keybar(
+        frame,
+        chunks[8],
+        theme,
+        &[
+            ("Tab", "next field"),
+            ("Enter", "create"),
+            ("Esc", "cancel"),
+        ],
+    );
 }
 
 #[cfg(test)]
@@ -304,39 +341,63 @@ mod tests {
 
     #[test]
     fn create_state_defaults_hooks_enabled() {
-        let state = CreateState::new(vec!["main".into()], "repo".into(), "{{ repo }}/{{ branch | sanitize }}".into());
+        let state = CreateState::new(
+            vec!["main".into()],
+            "repo".into(),
+            "{{ repo }}/{{ branch | sanitize }}".into(),
+        );
         assert!(state.hooks_enabled, "hooks should be enabled by default");
     }
 
     #[test]
     fn create_state_starts_on_branch_field() {
-        let state = CreateState::new(vec!["main".into()], "repo".into(), "{{ repo }}/{{ branch | sanitize }}".into());
+        let state = CreateState::new(
+            vec!["main".into()],
+            "repo".into(),
+            "{{ repo }}/{{ branch | sanitize }}".into(),
+        );
         assert_eq!(state.focused_field, CreateField::Branch);
     }
 
     #[test]
     fn create_state_branch_input_starts_empty() {
-        let state = CreateState::new(vec!["main".into()], "repo".into(), "{{ repo }}/{{ branch | sanitize }}".into());
+        let state = CreateState::new(
+            vec!["main".into()],
+            "repo".into(),
+            "{{ repo }}/{{ branch | sanitize }}".into(),
+        );
         assert!(state.branch_input.is_empty());
         assert_eq!(state.cursor_pos, 0);
     }
 
     #[test]
     fn create_state_selected_base_starts_at_zero() {
-        let state = CreateState::new(vec!["main".into(), "develop".into()], "repo".into(), "{{ repo }}/{{ branch | sanitize }}".into());
+        let state = CreateState::new(
+            vec!["main".into(), "develop".into()],
+            "repo".into(),
+            "{{ repo }}/{{ branch | sanitize }}".into(),
+        );
         assert_eq!(state.selected_base, 0);
     }
 
     #[test]
     fn create_state_stores_base_branches() {
         let branches = vec!["main".into(), "develop".into(), "staging".into()];
-        let state = CreateState::new(branches.clone(), "repo".into(), "{{ repo }}/{{ branch | sanitize }}".into());
+        let state = CreateState::new(
+            branches.clone(),
+            "repo".into(),
+            "{{ repo }}/{{ branch | sanitize }}".into(),
+        );
         assert_eq!(state.base_branches, branches);
     }
 
     #[test]
     fn create_state_no_error_initially() {
-        let state = CreateState::new(vec!["main".into()], "repo".into(), "{{ repo }}/{{ branch | sanitize }}".into());
+        let state = CreateState::new(
+            vec!["main".into()],
+            "repo".into(),
+            "{{ repo }}/{{ branch | sanitize }}".into(),
+        );
         assert!(state.error.is_none());
     }
 
@@ -641,7 +702,10 @@ mod tests {
         let state = sample_state();
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("Create Worktree"), "should show title, got: {text}");
+        assert!(
+            text.contains("Create Worktree"),
+            "should show title, got: {text}"
+        );
     }
 
     #[test]
@@ -658,7 +722,10 @@ mod tests {
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
         assert!(text.contains("Base"), "should show Base label");
-        assert!(text.contains("main"), "should show selected base branch 'main'");
+        assert!(
+            text.contains("main"),
+            "should show selected base branch 'main'"
+        );
     }
 
     #[test]
@@ -690,7 +757,10 @@ mod tests {
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
         assert!(text.contains("Path"), "should show Path label");
-        assert!(text.contains("repo/feature-auth"), "should show path preview");
+        assert!(
+            text.contains("repo/feature-auth"),
+            "should show path preview"
+        );
     }
 
     #[test]
@@ -699,7 +769,10 @@ mod tests {
         state.error = Some("Branch name is required".into());
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("Branch name is required"), "should show error");
+        assert!(
+            text.contains("Branch name is required"),
+            "should show error"
+        );
     }
 
     #[test]

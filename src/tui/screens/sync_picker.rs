@@ -73,10 +73,12 @@ impl SyncPickerState {
     }
 }
 
-const SYNC_PICKER_FOOTER: &str = " ↑/↓ or j/k select  Enter confirm  Esc cancel ";
-const SYNC_RESULT_FOOTER: &str = " Enter/Space dismiss  Esc back ";
-
-pub fn render(state: &SyncPickerState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
+pub fn render(
+    state: &SyncPickerState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
     if let Some(ref result) = state.result {
         render_result(state, result, frame, area, theme);
     } else {
@@ -92,18 +94,26 @@ fn render_result(
     theme: &crate::tui::theme::Theme,
 ) {
     let status_style = Style::default()
-        .fg(if result.success { theme.success } else { theme.error })
+        .fg(if result.success {
+            theme.success
+        } else {
+            theme.error
+        })
         .add_modifier(Modifier::BOLD);
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // title
-        Constraint::Min(1),   // result message
+        Constraint::Min(1),    // result message
         Constraint::Length(1), // footer
     ])
     .split(area);
 
     // Title
-    let status = if result.success { "Sync Complete" } else { "Sync Failed" };
+    let status = if result.success {
+        "Sync Complete"
+    } else {
+        "Sync Failed"
+    };
     let title = Line::from(vec![
         Span::styled(status, status_style),
         Span::raw(" — "),
@@ -122,22 +132,35 @@ fn render_result(
     );
 
     // Footer
-    let footer = Paragraph::new(Line::from(SYNC_RESULT_FOOTER))
-        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
-    frame.render_widget(footer, chunks[2]);
+    crate::tui::chrome::render_keybar(
+        frame,
+        chunks[2],
+        theme,
+        &[("Enter", "dismiss"), ("Space", "dismiss"), ("Esc", "back")],
+    );
 }
 
-fn render_picker(state: &SyncPickerState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
-    let bold = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+fn render_picker(
+    state: &SyncPickerState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
+    let bold = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // title + blank line
-        Constraint::Min(1),   // options
+        Constraint::Min(1),    // options
         Constraint::Length(1), // footer
     ])
     .split(area);
 
-    // Title
+    let block = crate::tui::chrome::panel(" Sync Strategy ", theme);
+    let inner = block.inner(chunks[1]);
+    frame.render_widget(block, chunks[1]);
+
     let title = Line::from(vec![
         Span::styled("Sync strategy for ", bold),
         Span::styled(&state.worktree_name, bold),
@@ -153,26 +176,33 @@ fn render_picker(state: &SyncPickerState, frame: &mut Frame, area: Rect, theme: 
     for (i, (label, desc)) in options.iter().enumerate() {
         let marker = if i == state.selected { "▸ " } else { "  " };
         let style = if i == state.selected {
-            Style::default().bg(theme.accent).fg(theme.background).add_modifier(Modifier::BOLD)
-        } else {
             Style::default()
+                .bg(theme.selection_bg)
+                .fg(theme.selection_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg)
         };
+        lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
         lines.push(Line::from(Span::styled(
-            format!("{marker}{label}"),
-            style,
+            format!("    {desc}"),
+            Style::default().fg(theme.fg_muted),
         )));
-        lines.push(Line::from(format!("    {desc}")));
         lines.push(Line::from(""));
     }
     frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        chunks[1],
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+        inner,
     );
 
-    // Footer
-    let footer = Paragraph::new(Line::from(SYNC_PICKER_FOOTER))
-        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
-    frame.render_widget(footer, chunks[2]);
+    crate::tui::chrome::render_keybar(
+        frame,
+        chunks[2],
+        theme,
+        &[("↑/↓", "select"), ("Enter", "confirm"), ("Esc", "cancel")],
+    );
 }
 
 #[cfg(test)]
@@ -234,7 +264,11 @@ mod tests {
         assert_eq!(state.selected, 0, "should stay at Rebase");
     }
 
-    fn render_to_buffer(state: &SyncPickerState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    fn render_to_buffer(
+        state: &SyncPickerState,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let theme = crate::tui::theme::from_name("catppuccin");
@@ -271,8 +305,14 @@ mod tests {
         let state = SyncPickerState::new("feat-auth");
         let buf = render_to_buffer(&state, 80, 15);
         let text = buffer_text(&buf);
-        assert!(text.contains("Replay your commits"), "should show Rebase description");
-        assert!(text.contains("merge commit"), "should show Merge description");
+        assert!(
+            text.contains("Replay your commits"),
+            "should show Rebase description"
+        );
+        assert!(
+            text.contains("merge commit"),
+            "should show Merge description"
+        );
     }
 
     #[test]
@@ -280,7 +320,10 @@ mod tests {
         let state = SyncPickerState::new("feat-auth");
         let buf = render_to_buffer(&state, 80, 15);
         let text = buffer_text(&buf);
-        assert!(text.contains("Enter confirm"), "footer should show Enter confirm");
+        assert!(
+            text.contains("Enter confirm"),
+            "footer should show Enter confirm"
+        );
         assert!(text.contains("Esc cancel"), "footer should show Esc cancel");
     }
 
@@ -340,7 +383,10 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("Synced"), "should show sync result message");
         assert!(text.contains("rebase"), "should show strategy used");
-        assert!(!text.contains("▸"), "should NOT show picker marker in result mode");
+        assert!(
+            !text.contains("▸"),
+            "should NOT show picker marker in result mode"
+        );
     }
 
     #[test]
@@ -365,11 +411,20 @@ mod tests {
         });
         let buf = render_to_buffer(&state, 80, 15);
         // Find a cell containing "S" from "Sync Complete" and check its fg color
-        let cell = buf.content().iter().find(|c| c.symbol() == "S" && {
-            let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-            text.contains("Sync Complete")
-        }).expect("should find 'S' cell");
-        assert_eq!(cell.fg, theme.success, "success result should use theme.success color");
+        let cell = buf
+            .content()
+            .iter()
+            .find(|c| {
+                c.symbol() == "S" && {
+                    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+                    text.contains("Sync Complete")
+                }
+            })
+            .expect("should find 'S' cell");
+        assert_eq!(
+            cell.fg, theme.success,
+            "success result should use theme.success color"
+        );
     }
 
     #[test]
@@ -382,11 +437,20 @@ mod tests {
         });
         let buf = render_to_buffer(&state, 80, 15);
         // Find the "S" cell from "Sync Failed"
-        let cell = buf.content().iter().find(|c| c.symbol() == "S" && {
-            let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-            text.contains("Sync Failed")
-        }).expect("should find 'S' cell");
-        assert_eq!(cell.fg, theme.error, "failure result should use theme.error color");
+        let cell = buf
+            .content()
+            .iter()
+            .find(|c| {
+                c.symbol() == "S" && {
+                    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+                    text.contains("Sync Failed")
+                }
+            })
+            .expect("should find 'S' cell");
+        assert_eq!(
+            cell.fg, theme.error,
+            "failure result should use theme.error color"
+        );
     }
 
     #[test]
@@ -398,6 +462,9 @@ mod tests {
         });
         let buf = render_to_buffer(&state, 80, 15);
         let text = buffer_text(&buf);
-        assert!(text.contains("Enter"), "result footer should show Enter to dismiss");
+        assert!(
+            text.contains("Enter"),
+            "result footer should show Enter to dismiss"
+        );
     }
 }

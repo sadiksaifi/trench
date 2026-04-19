@@ -71,9 +71,17 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
-        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
             .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "my-feature",
+            "my-feature",
+            "/wt/my-feature",
+            Some("main"),
+        )
+        .unwrap();
 
         let result = execute("my-feature", repo_dir.path(), &db);
         let switch = result.expect("switch should succeed");
@@ -90,7 +98,9 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
         db.insert_worktree(
             db_repo.id,
             "feature-auth",
@@ -122,7 +132,9 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
         // DB only has the sanitized name, not the slashed branch
         db.insert_worktree(
             db_repo.id,
@@ -147,12 +159,23 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
         let wt = db
-            .insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .insert_worktree(
+                db_repo.id,
+                "my-feature",
+                "my-feature",
+                "/wt/my-feature",
+                Some("main"),
+            )
             .unwrap();
 
-        assert!(wt.last_accessed.is_none(), "last_accessed should be None initially");
+        assert!(
+            wt.last_accessed.is_none(),
+            "last_accessed should be None initially"
+        );
 
         execute("my-feature", repo_dir.path(), &db).expect("switch should succeed");
 
@@ -175,9 +198,17 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
-        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
             .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "my-feature",
+            "my-feature",
+            "/wt/my-feature",
+            Some("main"),
+        )
+        .unwrap();
 
         // No session state initially
         assert!(db.get_session("current_worktree").unwrap().is_none());
@@ -250,7 +281,8 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
 
         let result = execute("nonexistent", repo_dir.path(), &db);
         let err = result.expect_err("should error for nonexistent worktree");
@@ -300,7 +332,10 @@ mod tests {
         let found = db
             .find_worktree_by_identifier(db_repo.id, "manual-feature")
             .unwrap();
-        assert!(found.is_none(), "worktree should NOT be in DB before switch");
+        assert!(
+            found.is_none(),
+            "worktree should NOT be in DB before switch"
+        );
 
         // Step 4: Switch to the manually-created worktree
         let switch = execute("manual-feature", repo_dir.path(), &db)
@@ -357,8 +392,7 @@ mod tests {
         );
 
         // Switch to the worktree
-        let switch = execute("my-feature", repo_dir.path(), &db)
-            .expect("switch should succeed");
+        let switch = execute("my-feature", repo_dir.path(), &db).expect("switch should succeed");
         assert_eq!(switch.name, "my-feature");
         assert_eq!(switch.path, create_result.path.to_str().unwrap());
 

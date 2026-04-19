@@ -31,11 +31,7 @@ pub struct DetailState {
 ///
 /// Best-effort: fields that fail to load are replaced with fallback values
 /// so the detail screen always renders something.
-pub fn load_detail(
-    name: &str,
-    cwd: &Path,
-    db: &Database,
-) -> DetailState {
+pub fn load_detail(name: &str, cwd: &Path, db: &Database, date_format: &str) -> DetailState {
     let repo_info = git::discover_repo(cwd).ok();
     let repo_path = repo_info.as_ref().map(|r| r.path.clone());
 
@@ -62,19 +58,23 @@ pub fn load_detail(
 
     let ahead_behind = repo_path
         .as_ref()
-        .and_then(|rp| git::ahead_behind(rp, &branch, Some(&base_branch)).ok().flatten())
+        .and_then(|rp| {
+            git::ahead_behind(rp, &branch, Some(&base_branch))
+                .ok()
+                .flatten()
+        })
         .map(|(a, b)| format!("+{a}/-{b}"))
         .unwrap_or_else(|| "-".to_string());
 
     let created = db_wt
         .as_ref()
-        .map(|w| format_timestamp(w.created_at))
+        .map(|w| format_timestamp(w.created_at, date_format))
         .unwrap_or_else(|| "-".to_string());
 
     let last_accessed = db_wt
         .as_ref()
         .and_then(|w| w.last_accessed)
-        .map(format_timestamp)
+        .map(|ts| format_timestamp(ts, date_format))
         .unwrap_or_else(|| "never".to_string());
 
     // Hook status from most recent event
@@ -83,7 +83,10 @@ pub fn load_detail(
         .and_then(|w| {
             db.list_events(w.id, 1).ok().and_then(|events| {
                 events.into_iter().next().map(|e| {
-                    (e.event_type.clone(), format_timestamp(e.created_at))
+                    (
+                        e.event_type.clone(),
+                        format_timestamp(e.created_at, date_format),
+                    )
                 })
             })
         })
@@ -125,20 +128,28 @@ pub fn load_detail(
     }
 }
 
-fn format_timestamp(ts: i64) -> String {
+fn format_timestamp(ts: i64, format: &str) -> String {
     if ts < 0 {
         return "-".to_string();
     }
-    // Simple formatting: seconds since epoch to YYYY-MM-DD HH:MM
     let secs = ts;
     let days = secs / 86400;
     let time_of_day = secs % 86400;
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
 
-    // Convert days since epoch to date using a simple algorithm
     let (year, month, day) = days_to_date(days);
-    format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
+    let mut rendered = format.to_string();
+    for (token, value) in [
+        ("%Y", format!("{year:04}")),
+        ("%m", format!("{month:02}")),
+        ("%d", format!("{day:02}")),
+        ("%H", format!("{hours:02}")),
+        ("%M", format!("{minutes:02}")),
+    ] {
+        rendered = rendered.replace(token, &value);
+    }
+    rendered
 }
 
 fn days_to_date(days_since_epoch: i64) -> (i64, i64, i64) {
@@ -156,22 +167,23 @@ fn days_to_date(days_since_epoch: i64) -> (i64, i64, i64) {
     (y, m, d)
 }
 
-const METADATA_HEIGHT: u16 = 5;
-
-const DETAIL_FOOTER_KEYS: &str = " s sync  o open  l log  Esc back ";
-
-pub fn render(state: &DetailState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
-    let bold = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
-
+pub fn render(
+    state: &DetailState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
+    let bold = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
     let chunks = Layout::vertical([
-        Constraint::Length(METADATA_HEIGHT),
-        Constraint::Length(1), // separator
-        Constraint::Min(1),   // body (files + commits)
-        Constraint::Length(1), // footer
+        Constraint::Length(5),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
     ])
     .split(area);
 
-    // — Metadata section —
     let metadata_lines = vec![
         Line::from(vec![
             Span::styled("Branch: ", bold),
@@ -180,10 +192,7 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect, theme: &crate:
             Span::styled("Name: ", bold),
             Span::raw(&state.name),
         ]),
-        Line::from(vec![
-            Span::styled("Path:   ", bold),
-            Span::raw(&state.path),
-        ]),
+        Line::from(vec![Span::styled("Path:   ", bold), Span::raw(&state.path)]),
         Line::from(vec![
             Span::styled("Base:   ", bold),
             Span::raw(&state.base_branch),
@@ -208,14 +217,9 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect, theme: &crate:
     ];
     frame.render_widget(Paragraph::new(metadata_lines), chunks[0]);
 
-    // Split body into files and commits
-    let body_chunks = Layout::vertical([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ])
-    .split(chunks[2]);
+    let body_chunks =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(chunks[2]);
 
-    // — Changed files section —
     let mut file_lines: Vec<Line> = vec![Line::from(Span::styled("Changed Files", bold))];
     if state.changed_files.is_empty() {
         file_lines.push(Line::from("  No changes"));
@@ -226,7 +230,6 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect, theme: &crate:
     }
     frame.render_widget(Paragraph::new(file_lines), body_chunks[0]);
 
-    // — Recent commits section —
     let mut commit_lines: Vec<Line> = vec![Line::from(Span::styled("Recent Commits", bold))];
     if state.commits.is_empty() {
         commit_lines.push(Line::from("  No commits"));
@@ -237,10 +240,166 @@ pub fn render(state: &DetailState, frame: &mut Frame, area: Rect, theme: &crate:
     }
     frame.render_widget(Paragraph::new(commit_lines), body_chunks[1]);
 
-    // — Footer —
-    let footer = Paragraph::new(Line::from(DETAIL_FOOTER_KEYS))
-        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
-    frame.render_widget(footer, chunks[3]);
+    frame.render_widget(
+        Paragraph::new(Line::from(" s sync  o open  l log  Esc back ")).style(
+            Style::default()
+                .fg(theme.selection_fg)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        chunks[3],
+    );
+}
+
+pub fn render_with_options(
+    state: &DetailState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+    options: &crate::tui::chrome::UiOptions,
+) {
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(7),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "Worktree Detail",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            crate::tui::chrome::pill(theme, &state.branch, crate::tui::chrome::Tone::Accent),
+            Span::raw("  "),
+            crate::tui::chrome::pill(theme, &state.base_branch, crate::tui::chrome::Tone::Muted),
+        ]))
+        .style(Style::default().fg(theme.fg).bg(theme.bg)),
+        chunks[0],
+    );
+
+    render_summary_card(state, frame, chunks[1], theme, options);
+
+    let body_chunks = if chunks[2].width >= 120 {
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[2])
+    } else {
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(chunks[2])
+    };
+    render_file_card(state, frame, body_chunks[0], theme);
+    render_commit_card(state, frame, body_chunks[1], theme);
+    crate::tui::chrome::render_keybar(
+        frame,
+        chunks[3],
+        theme,
+        &[("s", "sync"), ("o", "open"), ("l", "log"), ("Esc", "back")],
+    );
+}
+
+fn render_summary_card(
+    state: &DetailState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+    options: &crate::tui::chrome::UiOptions,
+) {
+    let block = crate::tui::chrome::panel(" Summary ", theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = vec![
+        metric_line("Name", &state.name, theme),
+        metric_line("Branch", &state.branch, theme),
+        metric_line("Path", &state.path, theme),
+        metric_line("Base", &state.base_branch, theme),
+    ];
+    if options.show_ahead_behind {
+        lines.push(metric_line("Ahead/Behind", &state.ahead_behind, theme));
+    }
+    lines.push(metric_line("Created", &state.created, theme));
+    lines.push(metric_line("Last Accessed", &state.last_accessed, theme));
+    lines.push(metric_line("Hook", &state.hook_status, theme));
+    lines.push(metric_line("Hook At", &state.hook_timestamp, theme));
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+        inner,
+    );
+}
+
+fn render_file_card(
+    state: &DetailState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
+    let block = crate::tui::chrome::panel(" Changed Files ", theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = vec![Line::from(vec![crate::tui::chrome::pill(
+        theme,
+        &format!("{} files", state.changed_files.len()),
+        crate::tui::chrome::Tone::Muted,
+    )])];
+    if state.changed_files.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("No changes"));
+    } else {
+        for (path, status) in &state.changed_files {
+            lines.push(Line::from(format!("{status:>10}  {path}")));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+        inner,
+    );
+}
+
+fn render_commit_card(
+    state: &DetailState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
+    let block = crate::tui::chrome::panel(" Recent Commits ", theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = vec![Line::from(vec![crate::tui::chrome::pill(
+        theme,
+        &format!("{} commits", state.commits.len()),
+        crate::tui::chrome::Tone::Muted,
+    )])];
+    if state.commits.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("No commits"));
+    } else {
+        for (hash, message) in &state.commits {
+            lines.push(Line::from(format!("{hash}  {message}")));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+        inner,
+    );
+}
+
+fn metric_line(label: &str, value: &str, theme: &crate::tui::theme::Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<14}"),
+            Style::default()
+                .fg(theme.fg_muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(value.to_string()),
+    ])
 }
 
 #[cfg(test)]
@@ -307,14 +466,20 @@ mod tests {
     fn detail_state_holds_changed_files() {
         let state = sample_detail();
         assert_eq!(state.changed_files.len(), 2);
-        assert_eq!(state.changed_files[0], ("src/auth.rs".into(), "modified".into()));
+        assert_eq!(
+            state.changed_files[0],
+            ("src/auth.rs".into(), "modified".into())
+        );
     }
 
     #[test]
     fn detail_state_holds_commits() {
         let state = sample_detail();
         assert_eq!(state.commits.len(), 2);
-        assert_eq!(state.commits[0], ("abc1234".into(), "feat: add auth module".into()));
+        assert_eq!(
+            state.commits[0],
+            ("abc1234".into(), "feat: add auth module".into())
+        );
     }
 
     #[test]
@@ -341,7 +506,10 @@ mod tests {
         let state = sample_detail();
         let buf = render_to_buffer(&state, 100, 30);
         let text = buffer_text(&buf);
-        assert!(text.contains("feature/auth"), "should show branch, got: {text}");
+        assert!(
+            text.contains("feature/auth"),
+            "should show branch, got: {text}"
+        );
         assert!(text.contains("feature-auth"), "should show worktree name");
     }
 
@@ -359,8 +527,14 @@ mod tests {
         let state = sample_detail();
         let buf = render_to_buffer(&state, 100, 30);
         let text = buffer_text(&buf);
-        assert!(text.contains("2026-03-10 14:30"), "should show created date");
-        assert!(text.contains("2026-03-11 09:15"), "should show last accessed");
+        assert!(
+            text.contains("2026-03-10 14:30"),
+            "should show created date"
+        );
+        assert!(
+            text.contains("2026-03-11 09:15"),
+            "should show last accessed"
+        );
     }
 
     #[test]
@@ -369,9 +543,15 @@ mod tests {
         let buf = render_to_buffer(&state, 100, 30);
         let text = buffer_text(&buf);
         assert!(text.contains("Changed Files"), "should show section header");
-        assert!(text.contains("src/auth.rs"), "should show first changed file");
+        assert!(
+            text.contains("src/auth.rs"),
+            "should show first changed file"
+        );
         assert!(text.contains("modified"), "should show file status");
-        assert!(text.contains("tests/auth_test.rs"), "should show second file");
+        assert!(
+            text.contains("tests/auth_test.rs"),
+            "should show second file"
+        );
         assert!(text.contains("new"), "should show second file status");
     }
 
@@ -381,7 +561,10 @@ mod tests {
         state.changed_files = vec![];
         let buf = render_to_buffer(&state, 100, 30);
         let text = buffer_text(&buf);
-        assert!(text.contains("No changes"), "should show empty state message");
+        assert!(
+            text.contains("No changes"),
+            "should show empty state message"
+        );
     }
 
     #[test]
@@ -389,9 +572,15 @@ mod tests {
         let state = sample_detail();
         let buf = render_to_buffer(&state, 100, 30);
         let text = buffer_text(&buf);
-        assert!(text.contains("Recent Commits"), "should show commits header");
+        assert!(
+            text.contains("Recent Commits"),
+            "should show commits header"
+        );
         assert!(text.contains("abc1234"), "should show first commit hash");
-        assert!(text.contains("feat: add auth module"), "should show first commit message");
+        assert!(
+            text.contains("feat: add auth module"),
+            "should show first commit message"
+        );
         assert!(text.contains("def5678"), "should show second commit hash");
     }
 
@@ -401,7 +590,10 @@ mod tests {
         state.commits = vec![];
         let buf = render_to_buffer(&state, 100, 30);
         let text = buffer_text(&buf);
-        assert!(text.contains("No commits"), "should show empty commits message");
+        assert!(
+            text.contains("No commits"),
+            "should show empty commits message"
+        );
     }
 
     #[test]
@@ -411,7 +603,10 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("Hook"), "should show hook label");
         assert!(text.contains("success"), "should show hook status value");
-        assert!(text.contains("2026-03-10 14:31"), "should show hook timestamp");
+        assert!(
+            text.contains("2026-03-10 14:31"),
+            "should show hook timestamp"
+        );
     }
 
     #[test]
@@ -445,12 +640,15 @@ mod tests {
         for col in 0..100 {
             last_line.push_str(buf.cell((col, last_row)).unwrap().symbol());
         }
-        assert!(last_line.contains("s sync"), "last line should contain keybindings, got: {last_line}");
+        assert!(
+            last_line.contains("s sync"),
+            "last line should contain keybindings, got: {last_line}"
+        );
     }
 
     #[test]
     fn format_timestamp_returns_dash_for_negative_input() {
-        let result = super::format_timestamp(-3600);
+        let result = super::format_timestamp(-3600, "%Y-%m-%d %H:%M");
         assert_eq!(result, "-", "negative timestamps should return dash");
     }
 
@@ -458,7 +656,7 @@ mod tests {
     fn format_timestamp_converts_epoch_to_readable() {
         // 2026-03-11 00:00 UTC = 1773187200
         let ts = 1773187200_i64;
-        let result = super::format_timestamp(ts);
+        let result = super::format_timestamp(ts, "%Y-%m-%d %H:%M");
         assert!(
             result.starts_with("2026-03-11"),
             "should format as 2026-03-11, got: {result}"
@@ -470,7 +668,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         // load_detail with a cwd that isn't a git repo — should return safe fallbacks
         let tmp = tempfile::tempdir().unwrap();
-        let state = load_detail("nonexistent", tmp.path(), &db);
+        let state = load_detail("nonexistent", tmp.path(), &db, "%Y-%m-%d %H:%M");
         assert_eq!(state.name, "nonexistent");
         assert_eq!(state.path, "-", "missing path should show dash fallback");
         assert_eq!(state.hook_status, "none");

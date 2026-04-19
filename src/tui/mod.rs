@@ -1,3 +1,4 @@
+pub mod chrome;
 pub mod screens;
 pub mod theme;
 pub mod watcher;
@@ -22,6 +23,20 @@ pub enum Screen {
     HookLog,
 }
 
+impl Screen {
+    fn label(self) -> &'static str {
+        match self {
+            Screen::List => "worktrees",
+            Screen::Detail => "detail",
+            Screen::Create => "create",
+            Screen::Help => "help",
+            Screen::SyncPicker => "sync",
+            Screen::DeleteConfirm => "delete",
+            Screen::HookLog => "hooks",
+        }
+    }
+}
+
 type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
 
 /// Stores the pre-TUI panic hook so `restore_panic_hook` can put it back.
@@ -39,13 +54,23 @@ pub fn run() -> Result<Option<String>> {
             .ok()
             .and_then(|cwd| crate::git::discover_repo(&cwd).ok())
             .and_then(|ri| crate::config::load_project_config(&ri.path).ok().flatten());
-        Some(crate::config::resolve_config(None, project.as_ref(), &global))
+        Some(crate::config::resolve_config(
+            None,
+            project.as_ref(),
+            &global,
+        ))
     } else {
         None
     };
 
     if let Some(ref resolved) = resolved_config {
         app.theme = theme::from_name(&resolved.ui.theme);
+        app.ui_options = chrome::UiOptions {
+            theme_name: resolved.ui.theme.clone(),
+            date_format: resolved.ui.date_format.clone(),
+            show_ahead_behind: resolved.ui.show_ahead_behind,
+            show_dirty_count: resolved.ui.show_dirty_count,
+        };
         app.tmux_enabled = resolved.shell.tmux;
     }
 
@@ -121,6 +146,7 @@ pub struct App {
     running: bool,
     nav_stack: Vec<Screen>,
     pub theme: theme::Theme,
+    pub ui_options: chrome::UiOptions,
     pub list_state: screens::list::ListState,
     pub detail_state: Option<screens::detail::DetailState>,
     pub create_state: Option<screens::create::CreateState>,
@@ -141,7 +167,8 @@ impl App {
         Self {
             running: true,
             nav_stack: vec![Screen::List],
-            theme: theme::from_name("catppuccin"),
+            theme: theme::from_name("ops"),
+            ui_options: chrome::UiOptions::default(),
             list_state: screens::list::ListState::new(vec![]),
             detail_state: None,
             create_state: None,
@@ -179,91 +206,143 @@ impl App {
 
     pub fn ui(&self, frame: &mut Frame) {
         let theme = &self.theme;
+        let repo_name = self.repo_path.as_deref().and_then(|path| {
+            std::path::Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+        });
+        let content_area = chrome::render_app_frame(
+            frame,
+            frame.area(),
+            theme,
+            &chrome::AppStatus {
+                repo_name,
+                screen_label: self.active_screen().label(),
+                theme_name: &self.ui_options.theme_name,
+                auto_refresh: self.auto_refresh,
+            },
+        );
         match self.active_screen() {
-            Screen::List => screens::list::render(&self.list_state, frame, frame.area(), theme),
+            Screen::List => screens::list::render_with_options(
+                &self.list_state,
+                frame,
+                content_area,
+                theme,
+                &self.ui_options,
+            ),
             Screen::Detail => {
                 if let Some(ref detail) = self.detail_state {
-                    screens::detail::render(detail, frame, frame.area(), theme);
+                    screens::detail::render_with_options(
+                        detail,
+                        frame,
+                        content_area,
+                        theme,
+                        &self.ui_options,
+                    );
                 } else {
                     let placeholder =
                         Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
-                    frame.render_widget(placeholder, frame.area());
+                    frame.render_widget(placeholder, content_area);
                 }
             }
             Screen::SyncPicker => {
                 if let Some(ref picker) = self.sync_picker_state {
-                    screens::sync_picker::render(picker, frame, frame.area(), theme);
+                    screens::sync_picker::render(picker, frame, content_area, theme);
                 } else {
                     let placeholder =
                         Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
-                    frame.render_widget(placeholder, frame.area());
+                    frame.render_widget(placeholder, content_area);
                 }
             }
             Screen::DeleteConfirm => {
                 // Render list underneath, then overlay the dialog
-                screens::list::render(&self.list_state, frame, frame.area(), theme);
+                screens::list::render_with_options(
+                    &self.list_state,
+                    frame,
+                    content_area,
+                    theme,
+                    &self.ui_options,
+                );
                 if let Some(ref confirm) = self.delete_confirm_state {
-                    screens::delete_confirm::render(confirm, frame, frame.area(), theme);
+                    screens::delete_confirm::render(confirm, frame, content_area, theme);
                 }
             }
             Screen::Help => {
                 // Render underlying screen first, then overlay help
-                self.render_underlying_screen(frame);
-                screens::help::render(frame, frame.area(), theme);
+                self.render_underlying_screen(frame, content_area);
+                screens::help::render(frame, content_area, theme);
             }
             Screen::Create => {
                 if let Some(ref create) = self.create_state {
-                    screens::create::render(create, frame, frame.area(), theme);
+                    screens::create::render(create, frame, content_area, theme);
                 } else {
                     let placeholder =
                         Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
-                    frame.render_widget(placeholder, frame.area());
+                    frame.render_widget(placeholder, content_area);
                 }
             }
             Screen::HookLog => {
                 if let Some(ref hook_log) = self.hook_log_state {
-                    screens::hook_log::render(hook_log, frame, frame.area(), theme);
+                    screens::hook_log::render(hook_log, frame, content_area, theme);
                 } else {
                     let placeholder =
                         Paragraph::new("trench TUI — press q to quit").alignment(Alignment::Center);
-                    frame.render_widget(placeholder, frame.area());
+                    frame.render_widget(placeholder, content_area);
                 }
             }
         }
     }
 
     /// Render the screen underneath the current overlay (e.g. for Help).
-    fn render_underlying_screen(&self, frame: &mut Frame) {
+    fn render_underlying_screen(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
         let theme = &self.theme;
         let underlying = self.nav_stack.iter().rev().nth(1).copied();
         match underlying {
             Some(Screen::Detail) => {
                 if let Some(ref detail) = self.detail_state {
-                    screens::detail::render(detail, frame, frame.area(), theme);
+                    screens::detail::render_with_options(
+                        detail,
+                        frame,
+                        area,
+                        theme,
+                        &self.ui_options,
+                    );
                 }
             }
             Some(Screen::Create) => {
                 if let Some(ref create) = self.create_state {
-                    screens::create::render(create, frame, frame.area(), theme);
+                    screens::create::render(create, frame, area, theme);
                 }
             }
             Some(Screen::SyncPicker) => {
                 if let Some(ref picker) = self.sync_picker_state {
-                    screens::sync_picker::render(picker, frame, frame.area(), theme);
+                    screens::sync_picker::render(picker, frame, area, theme);
                 }
             }
             Some(Screen::DeleteConfirm) => {
-                screens::list::render(&self.list_state, frame, frame.area(), theme);
+                screens::list::render_with_options(
+                    &self.list_state,
+                    frame,
+                    area,
+                    theme,
+                    &self.ui_options,
+                );
                 if let Some(ref confirm) = self.delete_confirm_state {
-                    screens::delete_confirm::render(confirm, frame, frame.area(), theme);
+                    screens::delete_confirm::render(confirm, frame, area, theme);
                 }
             }
             Some(Screen::HookLog) => {
                 if let Some(ref hook_log) = self.hook_log_state {
-                    screens::hook_log::render(hook_log, frame, frame.area(), theme);
+                    screens::hook_log::render(hook_log, frame, area, theme);
                 }
             }
-            _ => screens::list::render(&self.list_state, frame, frame.area(), theme),
+            _ => screens::list::render_with_options(
+                &self.list_state,
+                frame,
+                area,
+                theme,
+                &self.ui_options,
+            ),
         }
     }
 
@@ -367,8 +446,7 @@ impl App {
             .iter()
             .map(|r| std::path::PathBuf::from(&r.path))
             .collect();
-        let path_refs: Vec<&std::path::Path> =
-            worktree_paths.iter().map(|p| p.as_path()).collect();
+        let path_refs: Vec<&std::path::Path> = worktree_paths.iter().map(|p| p.as_path()).collect();
 
         let repo_path = self.repo_path.as_ref().map(std::path::PathBuf::from);
         let mut all_refs = path_refs;
@@ -484,10 +562,7 @@ impl App {
     /// to the previous screen; live mode unwinds to List (clearing dialog
     /// state and keeping hook_rx alive for draining).
     fn dismiss_or_pop_hook_log(&mut self) {
-        let is_replay = self
-            .hook_log_state
-            .as_ref()
-            .is_some_and(|s| s.replay);
+        let is_replay = self.hook_log_state.as_ref().is_some_and(|s| s.replay);
         if is_replay {
             self.hook_log_state = None;
             self.pop_screen();
@@ -728,7 +803,12 @@ impl App {
         let Some((cwd, db)) = Self::open_db() else {
             return false;
         };
-        self.detail_state = Some(screens::detail::load_detail(name, &cwd, &db));
+        self.detail_state = Some(screens::detail::load_detail(
+            name,
+            &cwd,
+            &db,
+            &self.ui_options.date_format,
+        ));
         true
     }
 
@@ -946,11 +1026,10 @@ impl App {
                         .args(&argv[1..])
                         .spawn()
                     {
-                        self.list_state.status_message =
-                            Some(screens::list::StatusMessage {
-                                text: format!("Failed to spawn tmux window: {e}"),
-                                success: false,
-                            });
+                        self.list_state.status_message = Some(screens::list::StatusMessage {
+                            text: format!("Failed to spawn tmux window: {e}"),
+                            success: false,
+                        });
                     }
                 }
                 true
@@ -969,12 +1048,10 @@ impl App {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
                     let name = row.name.clone();
                     let Some((cwd, db)) = Self::open_db() else {
-                        self.list_state.status_message =
-                            Some(screens::list::StatusMessage {
-                                text: "Switch failed: could not access current repo state"
-                                    .into(),
-                                success: false,
-                            });
+                        self.list_state.status_message = Some(screens::list::StatusMessage {
+                            text: "Switch failed: could not access current repo state".into(),
+                            success: false,
+                        });
                         return;
                     };
                     match crate::cli::commands::switch::execute(&name, &cwd, &db) {
@@ -991,11 +1068,10 @@ impl App {
                             }
                         }
                         Err(e) => {
-                            self.list_state.status_message =
-                                Some(screens::list::StatusMessage {
-                                    text: format!("Switch failed: {e}"),
-                                    success: false,
-                                });
+                            self.list_state.status_message = Some(screens::list::StatusMessage {
+                                text: format!("Switch failed: {e}"),
+                                success: false,
+                            });
                         }
                     }
                 }
@@ -1370,7 +1446,10 @@ mod tests {
             "arg".into(),
         ]);
         let needs_refresh = app.apply_switch_result(result, action);
-        assert!(needs_refresh, "should still request refresh on spawn failure");
+        assert!(
+            needs_refresh,
+            "should still request refresh on spawn failure"
+        );
         let msg = app
             .list_state
             .status_message
@@ -1427,13 +1506,17 @@ mod tests {
     #[test]
     fn restore_list_session_from_db_handles_stale_worktree() {
         let db = crate::state::Database::open_in_memory().unwrap();
-        db.save_list_session("/repos/test", "deleted-worktree", 99).unwrap();
+        db.save_list_session("/repos/test", "deleted-worktree", 99)
+            .unwrap();
 
         let mut app = app_with_rows();
         app.repo_path = Some("/repos/test".into());
         app.restore_list_session_from(&db);
 
-        assert_eq!(app.list_state.selected, 0, "should fall back to 0 for stale state");
+        assert_eq!(
+            app.list_state.selected, 0,
+            "should fall back to 0 for stale state"
+        );
     }
 
     #[test]
@@ -1445,7 +1528,10 @@ mod tests {
         // repo_path is None
         app.restore_list_session_from(&db);
 
-        assert_eq!(app.list_state.selected, 0, "should not restore without repo_path");
+        assert_eq!(
+            app.list_state.selected, 0,
+            "should not restore without repo_path"
+        );
     }
 
     #[test]
@@ -1456,7 +1542,10 @@ mod tests {
         app.repo_path = Some("/repos/test".into());
         app.restore_list_session_from(&db);
 
-        assert_eq!(app.list_state.selected, 0, "should stay at 0 with no saved session");
+        assert_eq!(
+            app.list_state.selected, 0,
+            "should stay at 0 with no saved session"
+        );
     }
 
     #[test]
@@ -1516,8 +1605,10 @@ mod tests {
 
         // "feat-b" is gone. scroll_position (1) is still valid,
         // so it falls back to index 1
-        assert_eq!(app2.list_state.selected, 1,
-            "should fall back to scroll position when worktree name not found");
+        assert_eq!(
+            app2.list_state.selected, 1,
+            "should fall back to scroll position when worktree name not found"
+        );
     }
 
     #[test]
@@ -3039,7 +3130,8 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(
-            app.hook_log_state.as_ref().unwrap().scroll_offset, 4,
+            app.hook_log_state.as_ref().unwrap().scroll_offset,
+            4,
             "Up arrow should decrement scroll offset"
         );
     }
@@ -3124,7 +3216,8 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         assert_eq!(
-            app.hook_log_state.as_ref().unwrap().scroll_offset, 4,
+            app.hook_log_state.as_ref().unwrap().scroll_offset,
+            4,
             "k should scroll up"
         );
 
@@ -3176,11 +3269,8 @@ mod tests {
         use std::time::Duration;
 
         let dir = tempfile::TempDir::new().unwrap();
-        let dw = watcher::DebouncedWatcher::with_debounce(
-            &[dir.path()],
-            Duration::from_millis(50),
-        )
-        .unwrap();
+        let dw = watcher::DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(50))
+            .unwrap();
 
         let mut app = app_with_rows();
         app.watcher = Some(dw);
@@ -3213,11 +3303,8 @@ mod tests {
         use std::time::Duration;
 
         let dir = tempfile::TempDir::new().unwrap();
-        let dw = watcher::DebouncedWatcher::with_debounce(
-            &[dir.path()],
-            Duration::from_millis(50),
-        )
-        .unwrap();
+        let dw = watcher::DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(50))
+            .unwrap();
 
         let mut app = app_with_rows();
         app.watcher = Some(dw);
@@ -3329,11 +3416,8 @@ mod tests {
         use std::time::Duration;
 
         let dir = tempfile::TempDir::new().unwrap();
-        let dw = watcher::DebouncedWatcher::with_debounce(
-            &[dir.path()],
-            Duration::from_millis(50),
-        )
-        .unwrap();
+        let dw = watcher::DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(50))
+            .unwrap();
 
         let mut app = app_with_rows();
         app.watcher = Some(dw);

@@ -15,8 +15,8 @@ pub struct RepoInfo {
 /// non-clean status (modified, new, deleted, renamed, typechanged).
 /// Returns 0 for a clean worktree.
 pub fn dirty_count(worktree_path: &Path) -> Result<usize, GitError> {
-    let repo = git2::Repository::open(worktree_path)
-        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+    let repo =
+        git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
 
     let statuses = repo.statuses(Some(
         git2::StatusOptions::new()
@@ -40,8 +40,8 @@ pub struct ChangedFile {
 /// typechanged. Each entry includes the file path and a human-readable
 /// status string.
 pub fn changed_files(worktree_path: &Path) -> Result<Vec<ChangedFile>, GitError> {
-    let repo = git2::Repository::open(worktree_path)
-        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+    let repo =
+        git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
 
     let statuses = repo.statuses(Some(
         git2::StatusOptions::new()
@@ -87,8 +87,8 @@ pub struct CommitInfo {
 /// Opens the repository at `worktree_path` and walks HEAD to collect
 /// up to `limit` commits.
 pub fn recent_commits(worktree_path: &Path, limit: usize) -> Result<Vec<CommitInfo>, GitError> {
-    let repo = git2::Repository::open(worktree_path)
-        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+    let repo =
+        git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
 
     let head = match repo.head() {
         Ok(h) => h,
@@ -112,10 +112,7 @@ pub fn recent_commits(worktree_path: &Path, limit: usize) -> Result<Vec<CommitIn
         let commit = repo.find_commit(rev_oid)?;
         let oid_str = rev_oid.to_string();
         let short_hash = &oid_str[..oid_str.len().min(7)];
-        let message = commit
-            .summary()
-            .unwrap_or("(no message)")
-            .to_string();
+        let message = commit.summary().unwrap_or("(no message)").to_string();
         commits.push(CommitInfo {
             hash: short_hash.to_string(),
             message,
@@ -134,8 +131,7 @@ pub fn ahead_behind(
     branch: &str,
     base_branch: Option<&str>,
 ) -> Result<Option<(usize, usize)>, GitError> {
-    let repo =
-        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+    let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
 
     let local = match repo.find_branch(branch, git2::BranchType::Local) {
         Ok(b) => b,
@@ -178,8 +174,7 @@ pub fn ahead_behind(
 /// Best-effort: if no remote exists or the fetch fails, the error is
 /// returned so callers can decide whether to proceed.
 pub fn fetch_remote(repo_path: &Path) -> Result<(), GitError> {
-    let repo =
-        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+    let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
 
     let remote_name = "origin";
     let mut remote = match repo.find_remote(remote_name) {
@@ -198,13 +193,9 @@ pub fn fetch_remote(repo_path: &Path) -> Result<(), GitError> {
 ///
 /// Opens the repository at `worktree_path` and rebases the current branch
 /// onto `origin/<base_branch>` (or local `<base_branch>` if no remote ref).
-pub fn sync_rebase(
-    worktree_path: &Path,
-    branch: &str,
-    base_branch: &str,
-) -> Result<(), GitError> {
-    let repo = git2::Repository::open(worktree_path)
-        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+pub fn sync_rebase(worktree_path: &Path, branch: &str, base_branch: &str) -> Result<(), GitError> {
+    let repo =
+        git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
 
     let upstream_oid = resolve_upstream_oid(&repo, base_branch)?;
     let branch_oid = repo
@@ -260,13 +251,9 @@ pub fn sync_rebase(
 ///
 /// Opens the repository at `worktree_path` and merges
 /// `origin/<base_branch>` (or local `<base_branch>`) into the current branch.
-pub fn sync_merge(
-    worktree_path: &Path,
-    branch: &str,
-    base_branch: &str,
-) -> Result<(), GitError> {
-    let repo = git2::Repository::open(worktree_path)
-        .map_err(|e| map_repo_open_error(e, worktree_path))?;
+pub fn sync_merge(worktree_path: &Path, branch: &str, base_branch: &str) -> Result<(), GitError> {
+    let repo =
+        git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
 
     let _branch_ref = repo
         .find_branch(branch, git2::BranchType::Local)
@@ -322,10 +309,7 @@ pub fn sync_merge(
 }
 
 /// Resolve the OID for a base branch, preferring origin/<base> over local.
-fn resolve_upstream_oid(
-    repo: &git2::Repository,
-    base_branch: &str,
-) -> Result<git2::Oid, GitError> {
+fn resolve_upstream_oid(repo: &git2::Repository, base_branch: &str) -> Result<git2::Oid, GitError> {
     let remote_ref = format!("origin/{base_branch}");
     match repo.find_branch(&remote_ref, git2::BranchType::Remote) {
         Ok(branch) => {
@@ -409,8 +393,7 @@ fn map_repo_open_error(e: git2::Error, path: &Path) -> GitError {
 /// Returns a `RepoInfo` with the repo name (derived from the working directory),
 /// the canonical repo path, optional origin remote URL, and the default branch.
 pub fn discover_repo(path: &Path) -> Result<RepoInfo, GitError> {
-    let repo =
-        git2::Repository::discover(path).map_err(|e| map_repo_open_error(e, path))?;
+    let repo = git2::Repository::discover(path).map_err(|e| map_repo_open_error(e, path))?;
 
     let workdir = repo
         .workdir()
@@ -464,14 +447,10 @@ pub fn create_worktree(
     base: &str,
     target_path: &Path,
 ) -> Result<(), GitError> {
-    let repo =
-        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+    let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
 
     // Check if branch already exists locally
-    if repo
-        .find_branch(branch, git2::BranchType::Local)
-        .is_ok()
-    {
+    if repo.find_branch(branch, git2::BranchType::Local).is_ok() {
         return Err(GitError::BranchAlreadyExists {
             branch: branch.to_string(),
         });
@@ -536,8 +515,7 @@ pub fn create_worktree(
 
 /// List all local branch names in a repository, sorted alphabetically.
 pub fn list_local_branches(repo_path: &Path) -> Result<Vec<String>, GitError> {
-    let repo =
-        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+    let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
     let mut names = Vec::new();
     for branch_res in repo.branches(Some(git2::BranchType::Local))? {
         let (branch, _) = branch_res?;
@@ -555,8 +533,7 @@ pub fn list_local_branches(repo_path: &Path) -> Result<Vec<String>, GitError> {
 /// working directory plus any additional worktrees created via `git worktree add`.
 /// Returns each worktree's name, path, current branch, and whether it is the main worktree.
 pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeEntry>, GitError> {
-    let repo =
-        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+    let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
     let mut entries = Vec::new();
 
     // Main worktree
@@ -585,12 +562,13 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeEntry>, GitErro
         for wt_name in worktrees.iter().flatten() {
             if let Ok(wt) = repo.find_worktree(wt_name) {
                 let wt_path = wt.path().to_path_buf();
-                let canonical = wt_path
-                    .canonicalize()
-                    .unwrap_or_else(|_| wt_path.clone());
+                let canonical = wt_path.canonicalize().unwrap_or_else(|_| wt_path.clone());
                 // Open as repository to get HEAD branch
                 let branch = if let Ok(wt_repo) = git2::Repository::open(&canonical) {
-                    wt_repo.head().ok().and_then(|h| h.shorthand().map(String::from))
+                    wt_repo
+                        .head()
+                        .ok()
+                        .and_then(|h| h.shorthand().map(String::from))
                 } else {
                     None
                 };
@@ -673,8 +651,7 @@ pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(), Git
     std::fs::remove_dir_all(worktree_path)?;
 
     // Open repo and prune stale worktree references
-    let repo =
-        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+    let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
 
     // Iterate worktrees and prune any that point to missing directories
     if let Ok(worktrees) = repo.worktrees() {
@@ -703,8 +680,7 @@ pub fn delete_remote_branch(
     remote_name: &str,
     branch: &str,
 ) -> Result<(), GitError> {
-    let repo =
-        git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+    let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
 
     let mut remote = repo.find_remote(remote_name)?;
 
@@ -1006,7 +982,9 @@ mod tests {
 
         // Create a distinct commit to use as the remote tracking branch tip
         let head = repo.head().unwrap().peel_to_commit().unwrap();
-        let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+        let tree = repo
+            .find_tree(repo.index().unwrap().write_tree().unwrap())
+            .unwrap();
         let release_oid = repo
             .commit(None, &sig, &sig, "release commit", &tree, &[&head])
             .unwrap();
@@ -1022,11 +1000,13 @@ mod tests {
 
         // Verify: "release" does NOT exist locally, only as remote tracking
         assert!(
-            repo.find_branch("release", git2::BranchType::Local).is_err(),
+            repo.find_branch("release", git2::BranchType::Local)
+                .is_err(),
             "release should not exist as a local branch"
         );
         assert!(
-            repo.find_branch("origin/release", git2::BranchType::Remote).is_ok(),
+            repo.find_branch("origin/release", git2::BranchType::Remote)
+                .is_ok(),
             "origin/release should exist as a remote tracking branch"
         );
 
@@ -1112,7 +1092,10 @@ mod tests {
 
         let result = create_worktree(repo_dir.path(), "occupied", &base, &target);
 
-        assert!(result.is_err(), "should fail when target path already exists");
+        assert!(
+            result.is_err(),
+            "should fail when target path already exists"
+        );
     }
 
     #[test]
@@ -1163,10 +1146,7 @@ mod tests {
             matches!(err, GitError::RemoteBranchAlreadyExists { ref branch, ref remote } if branch == "taken-branch" && remote == "origin"),
             "expected RemoteBranchAlreadyExists, got: {err:?}"
         );
-        assert!(
-            !target.exists(),
-            "worktree directory should NOT be created"
-        );
+        assert!(!target.exists(), "worktree directory should NOT be created");
     }
 
     #[test]
@@ -1180,29 +1160,20 @@ mod tests {
         {
             // Need an initial commit in the bare repo — build tree + commit directly
             let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-            let empty_tree = remote_repo
-                .treebuilder(None)
-                .unwrap()
-                .write()
-                .unwrap();
+            let empty_tree = remote_repo.treebuilder(None).unwrap().write().unwrap();
             let tree = remote_repo.find_tree(empty_tree).unwrap();
             let oid = remote_repo
                 .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
                 .unwrap();
             // Create a branch that we'll later delete
             let commit = remote_repo.find_commit(oid).unwrap();
-            remote_repo
-                .branch("stale-branch", &commit, false)
-                .unwrap();
+            remote_repo.branch("stale-branch", &commit, false).unwrap();
         }
 
         // Clone (local file path)
         let clone_dir = tempfile::tempdir().unwrap();
         let clone = git2::build::RepoBuilder::new()
-            .clone(
-                remote_dir.path().to_str().unwrap(),
-                clone_dir.path(),
-            )
+            .clone(remote_dir.path().to_str().unwrap(), clone_dir.path())
             .unwrap();
 
         // Verify the remote-tracking ref exists
@@ -1260,7 +1231,8 @@ mod tests {
 
         // The branch should still exist (we only remove the worktree, not the branch)
         assert!(
-            repo.find_branch("to-remove", git2::BranchType::Local).is_ok(),
+            repo.find_branch("to-remove", git2::BranchType::Local)
+                .is_ok(),
             "branch should still exist after worktree removal"
         );
     }
@@ -1272,7 +1244,10 @@ mod tests {
         let fake_path = repo_dir.path().join("nonexistent-worktree");
 
         let result = remove_worktree(repo_dir.path(), &fake_path);
-        assert!(result.is_err(), "should error for nonexistent worktree path");
+        assert!(
+            result.is_err(),
+            "should error for nonexistent worktree path"
+        );
     }
 
     #[test]
@@ -1291,7 +1266,9 @@ mod tests {
         repo.set_head("refs/heads/feature-ahead").unwrap();
         for i in 0..2 {
             let parent = repo.head().unwrap().peel_to_commit().unwrap();
-            let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+            let tree = repo
+                .find_tree(repo.index().unwrap().write_tree().unwrap())
+                .unwrap();
             repo.commit(
                 Some("HEAD"),
                 &sig,
@@ -1303,8 +1280,8 @@ mod tests {
             .unwrap();
         }
 
-        let result = ahead_behind(tmp.path(), "feature-ahead", Some(&base))
-            .expect("should succeed");
+        let result =
+            ahead_behind(tmp.path(), "feature-ahead", Some(&base)).expect("should succeed");
 
         assert_eq!(result, Some((2, 0)), "feature should be 2 ahead, 0 behind");
     }
@@ -1323,7 +1300,9 @@ mod tests {
         // Add 3 commits on the base branch (feature stays at original commit)
         for i in 0..3 {
             let parent = repo.head().unwrap().peel_to_commit().unwrap();
-            let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+            let tree = repo
+                .find_tree(repo.index().unwrap().write_tree().unwrap())
+                .unwrap();
             repo.commit(
                 Some("HEAD"),
                 &sig,
@@ -1335,8 +1314,8 @@ mod tests {
             .unwrap();
         }
 
-        let result = ahead_behind(tmp.path(), "feature-behind", Some(&base))
-            .expect("should succeed");
+        let result =
+            ahead_behind(tmp.path(), "feature-behind", Some(&base)).expect("should succeed");
 
         assert_eq!(result, Some((0, 3)), "feature should be 0 ahead, 3 behind");
     }
@@ -1350,8 +1329,7 @@ mod tests {
         let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
         repo.branch("orphan-branch", &head_commit, false).unwrap();
 
-        let result = ahead_behind(tmp.path(), "orphan-branch", None)
-            .expect("should succeed");
+        let result = ahead_behind(tmp.path(), "orphan-branch", None).expect("should succeed");
 
         assert_eq!(result, None, "no upstream and no base should return None");
     }
@@ -1375,8 +1353,7 @@ mod tests {
         let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
         repo.branch("feature", &head_commit, false).unwrap();
 
-        let result = ahead_behind(tmp.path(), "feature", Some(&base))
-            .expect("should succeed");
+        let result = ahead_behind(tmp.path(), "feature", Some(&base)).expect("should succeed");
 
         assert_eq!(result, Some((0, 0)), "same commit should be (0, 0)");
     }
@@ -1418,8 +1395,14 @@ mod tests {
 
         let worktrees = list_worktrees(tmp.path()).expect("should list worktrees");
 
-        assert!(!worktrees.is_empty(), "should include at least the main worktree");
-        let main_wt = worktrees.iter().find(|w| w.is_main).expect("should have main worktree");
+        assert!(
+            !worktrees.is_empty(),
+            "should include at least the main worktree"
+        );
+        let main_wt = worktrees
+            .iter()
+            .find(|w| w.is_main)
+            .expect("should have main worktree");
         assert_eq!(main_wt.path, tmp.path().canonicalize().unwrap());
         assert_eq!(main_wt.branch.as_deref(), Some(base.as_str()));
     }
@@ -1437,29 +1420,28 @@ mod tests {
 
         let worktrees = list_worktrees(repo_dir.path()).expect("should list worktrees");
 
-        assert_eq!(worktrees.len(), 2, "should include main + additional worktree");
+        assert_eq!(
+            worktrees.len(),
+            2,
+            "should include main + additional worktree"
+        );
 
-        let additional = worktrees.iter().find(|w| !w.is_main).expect("should have additional worktree");
+        let additional = worktrees
+            .iter()
+            .find(|w| !w.is_main)
+            .expect("should have additional worktree");
         assert_eq!(additional.path, target.canonicalize().unwrap());
         assert_eq!(additional.branch.as_deref(), Some("extra-wt"));
         assert!(!additional.is_main);
     }
 
     /// Helper: create a bare remote repo, clone it, return (clone_repo, clone_dir, remote_dir).
-    fn setup_clone_with_remote() -> (
-        git2::Repository,
-        tempfile::TempDir,
-        tempfile::TempDir,
-    ) {
+    fn setup_clone_with_remote() -> (git2::Repository, tempfile::TempDir, tempfile::TempDir) {
         let remote_dir = tempfile::tempdir().unwrap();
         let remote_repo = git2::Repository::init_bare(remote_dir.path()).unwrap();
         {
             let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-            let empty_tree = remote_repo
-                .treebuilder(None)
-                .unwrap()
-                .write()
-                .unwrap();
+            let empty_tree = remote_repo.treebuilder(None).unwrap().write().unwrap();
             let tree = remote_repo.find_tree(empty_tree).unwrap();
             remote_repo
                 .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
@@ -1467,10 +1449,7 @@ mod tests {
         }
         let clone_dir = tempfile::tempdir().unwrap();
         let clone = git2::build::RepoBuilder::new()
-            .clone(
-                remote_dir.path().to_str().unwrap(),
-                clone_dir.path(),
-            )
+            .clone(remote_dir.path().to_str().unwrap(), clone_dir.path())
             .unwrap();
         (clone, clone_dir, remote_dir)
     }
@@ -1481,11 +1460,16 @@ mod tests {
 
         // Create a branch and push it to the remote
         let head_commit = clone.head().unwrap().peel_to_commit().unwrap();
-        clone.branch("feature-to-delete", &head_commit, false).unwrap();
+        clone
+            .branch("feature-to-delete", &head_commit, false)
+            .unwrap();
         {
             let mut origin = clone.find_remote("origin").unwrap();
             origin
-                .push(&["refs/heads/feature-to-delete:refs/heads/feature-to-delete"], None)
+                .push(
+                    &["refs/heads/feature-to-delete:refs/heads/feature-to-delete"],
+                    None,
+                )
                 .unwrap();
         }
 
@@ -1553,10 +1537,7 @@ mod tests {
             matches!(err, GitError::BranchAlreadyExists { ref branch } if branch == "existing-branch"),
             "expected BranchAlreadyExists, got: {err:?}"
         );
-        assert!(
-            !target.exists(),
-            "worktree directory should NOT be created"
-        );
+        assert!(!target.exists(), "worktree directory should NOT be created");
     }
 
     #[test]
@@ -1657,7 +1638,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(tmp.path());
         let branches = list_local_branches(tmp.path()).unwrap();
-        assert!(!branches.is_empty(), "should have at least the default branch");
+        assert!(
+            !branches.is_empty(),
+            "should have at least the default branch"
+        );
     }
 
     #[test]

@@ -99,10 +99,7 @@ mod tests {
             format!("{}", ExitCode::MissingRequiredFlag),
             "8 (missing required flag)"
         );
-        assert_eq!(
-            format!("{}", ExitCode::FlagConflict),
-            "9 (flag conflict)"
-        );
+        assert_eq!(format!("{}", ExitCode::FlagConflict), "9 (flag conflict)");
     }
 
     #[test]

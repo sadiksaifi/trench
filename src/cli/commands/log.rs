@@ -181,11 +181,7 @@ fn to_json_entry(entry: &LogEntry) -> LogEntryJson {
 ///
 /// Shows output labeled by step (run/shell) with timestamps.
 /// Returns an error if no hook events exist for the worktree.
-pub fn execute_output(
-    db: &Database,
-    repo_id: i64,
-    worktree: &str,
-) -> Result<String> {
+pub fn execute_output(db: &Database, repo_id: i64, worktree: &str) -> Result<String> {
     let event = db
         .get_last_hook_event_for_worktree(repo_id, worktree)?
         .ok_or_else(|| anyhow::anyhow!("No hook output found for worktree '{}'", worktree))?;
@@ -194,13 +190,21 @@ pub fn execute_output(
 
     if lines.is_empty() {
         let mut out = String::new();
-        out.push_str(&format!("=== {} ({})\n", event.event_type, format_timestamp(event.created_at)));
+        out.push_str(&format!(
+            "=== {} ({})\n",
+            event.event_type,
+            format_timestamp(event.created_at)
+        ));
         out.push_str("(no output captured)\n");
         return Ok(out);
     }
 
     let mut out = String::new();
-    out.push_str(&format!("=== {} ({})\n", event.event_type, format_timestamp(event.created_at)));
+    out.push_str(&format!(
+        "=== {} ({})\n",
+        event.event_type,
+        format_timestamp(event.created_at)
+    ));
 
     for line in &lines {
         let step_label = line.step.as_deref().unwrap_or("unknown");
@@ -216,11 +220,7 @@ pub fn execute_output(
 }
 
 /// JSON output for hook stdout/stderr replay.
-pub fn execute_output_json(
-    db: &Database,
-    repo_id: i64,
-    worktree: &str,
-) -> Result<String> {
+pub fn execute_output_json(db: &Database, repo_id: i64, worktree: &str) -> Result<String> {
     let event = db
         .get_last_hook_event_for_worktree(repo_id, worktree)?
         .ok_or_else(|| anyhow::anyhow!("No hook output found for worktree '{}'", worktree))?;
@@ -331,12 +331,18 @@ pub fn execute_summary(
     let mut out = String::new();
     out.push_str(&format!("Total events:       {}\n", stats.total_events));
     out.push_str(&format!("Hook runs:          {}\n", stats.hook_runs));
-    out.push_str(&format!("Avg hook duration:  {:.1}s\n", stats.avg_hook_duration));
+    out.push_str(&format!(
+        "Avg hook duration:  {:.1}s\n",
+        stats.avg_hook_duration
+    ));
     out.push_str(&format!("Successes:          {}\n", stats.successes));
     out.push_str(&format!("Failures:           {}\n", stats.failures));
     match &stats.most_active {
         Some((name, count)) => {
-            out.push_str(&format!("Most active:        {} ({} events)\n", name, count));
+            out.push_str(&format!(
+                "Most active:        {} ({} events)\n",
+                name, count
+            ));
         }
         None => {
             out.push_str("Most active:        -\n");
@@ -408,7 +414,10 @@ mod tests {
         let repo = db.insert_repo("r", "/r", None).unwrap();
 
         let output = execute_summary(&db, repo.id, None, None).unwrap();
-        assert!(output.contains("No events"), "should indicate no events: {output}");
+        assert!(
+            output.contains("No events"),
+            "should indicate no events: {output}"
+        );
     }
 
     #[test]
@@ -423,32 +432,66 @@ mod tests {
             .unwrap();
 
         // 2 plain events for alpha
-        db.insert_event(repo.id, Some(wt_a.id), "created", None).unwrap();
-        db.insert_event(repo.id, Some(wt_a.id), "switched", None).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "created", None)
+            .unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "switched", None)
+            .unwrap();
 
         // 3 hook events: 2 success (alpha), 1 failure (beta)
         let ok_payload = serde_json::json!({"exit_code": 0, "duration_secs": 2.0});
         let fail_payload = serde_json::json!({"exit_code": 1, "duration_secs": 4.0});
-        db.insert_event(repo.id, Some(wt_a.id), "hook:post_create", Some(&ok_payload)).unwrap();
-        db.insert_event(repo.id, Some(wt_a.id), "hook:pre_sync", Some(&ok_payload)).unwrap();
-        db.insert_event(repo.id, Some(wt_b.id), "hook:post_create", Some(&fail_payload)).unwrap();
+        db.insert_event(
+            repo.id,
+            Some(wt_a.id),
+            "hook:post_create",
+            Some(&ok_payload),
+        )
+        .unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "hook:pre_sync", Some(&ok_payload))
+            .unwrap();
+        db.insert_event(
+            repo.id,
+            Some(wt_b.id),
+            "hook:post_create",
+            Some(&fail_payload),
+        )
+        .unwrap();
 
         // 1 plain event for beta
-        db.insert_event(repo.id, Some(wt_b.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "created", None)
+            .unwrap();
 
         let output = execute_summary(&db, repo.id, None, None).unwrap();
 
         // Total events: 6 (2 plain + 3 hooks + 1 plain)
-        assert!(output.contains("Total events:       6"), "total events: {output}");
+        assert!(
+            output.contains("Total events:       6"),
+            "total events: {output}"
+        );
         // Hook runs: 3
-        assert!(output.contains("Hook runs:          3"), "hook runs: {output}");
+        assert!(
+            output.contains("Hook runs:          3"),
+            "hook runs: {output}"
+        );
         // Avg duration: (2.0 + 2.0 + 4.0) / 3 = 2.666...
-        assert!(output.contains("Avg hook duration:  2.7s"), "avg duration: {output}");
+        assert!(
+            output.contains("Avg hook duration:  2.7s"),
+            "avg duration: {output}"
+        );
         // Successes: 2, Failures: 1
-        assert!(output.contains("Successes:          2"), "successes: {output}");
-        assert!(output.contains("Failures:           1"), "failures: {output}");
+        assert!(
+            output.contains("Successes:          2"),
+            "successes: {output}"
+        );
+        assert!(
+            output.contains("Failures:           1"),
+            "failures: {output}"
+        );
         // Most active: alpha (4 events: 2 plain + 2 hooks)
-        assert!(output.contains("Most active:        alpha (4 events)"), "most active: {output}");
+        assert!(
+            output.contains("Most active:        alpha (4 events)"),
+            "most active: {output}"
+        );
     }
 
     #[test]
@@ -479,18 +522,34 @@ mod tests {
             .unwrap();
 
         // 2 plain events for alpha
-        db.insert_event(repo.id, Some(wt_a.id), "created", None).unwrap();
-        db.insert_event(repo.id, Some(wt_a.id), "switched", None).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "created", None)
+            .unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "switched", None)
+            .unwrap();
 
         // 3 hook events: 2 success, 1 failure
         let ok_payload = serde_json::json!({"exit_code": 0, "duration_secs": 2.0});
         let fail_payload = serde_json::json!({"exit_code": 1, "duration_secs": 4.0});
-        db.insert_event(repo.id, Some(wt_a.id), "hook:post_create", Some(&ok_payload)).unwrap();
-        db.insert_event(repo.id, Some(wt_a.id), "hook:pre_sync", Some(&ok_payload)).unwrap();
-        db.insert_event(repo.id, Some(wt_b.id), "hook:post_create", Some(&fail_payload)).unwrap();
+        db.insert_event(
+            repo.id,
+            Some(wt_a.id),
+            "hook:post_create",
+            Some(&ok_payload),
+        )
+        .unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "hook:pre_sync", Some(&ok_payload))
+            .unwrap();
+        db.insert_event(
+            repo.id,
+            Some(wt_b.id),
+            "hook:post_create",
+            Some(&fail_payload),
+        )
+        .unwrap();
 
         // 1 plain for beta
-        db.insert_event(repo.id, Some(wt_b.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "created", None)
+            .unwrap();
 
         let output = execute_summary_json(&db, repo.id, None, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
@@ -518,17 +577,33 @@ mod tests {
             .unwrap();
 
         // 3 events for alpha, 2 for beta
-        db.insert_event(repo.id, Some(wt_a.id), "created", None).unwrap();
-        db.insert_event(repo.id, Some(wt_a.id), "switched", None).unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "created", None)
+            .unwrap();
+        db.insert_event(repo.id, Some(wt_a.id), "switched", None)
+            .unwrap();
         let ok_payload = serde_json::json!({"exit_code": 0, "duration_secs": 1.0});
-        db.insert_event(repo.id, Some(wt_a.id), "hook:post_create", Some(&ok_payload)).unwrap();
-        db.insert_event(repo.id, Some(wt_b.id), "created", None).unwrap();
-        db.insert_event(repo.id, Some(wt_b.id), "switched", None).unwrap();
+        db.insert_event(
+            repo.id,
+            Some(wt_a.id),
+            "hook:post_create",
+            Some(&ok_payload),
+        )
+        .unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "created", None)
+            .unwrap();
+        db.insert_event(repo.id, Some(wt_b.id), "switched", None)
+            .unwrap();
 
         // Filter to alpha only
         let output = execute_summary(&db, repo.id, Some("alpha"), None).unwrap();
-        assert!(output.contains("Total events:       3"), "should show 3 alpha events: {output}");
-        assert!(output.contains("Most active:        alpha"), "most active should be alpha: {output}");
+        assert!(
+            output.contains("Total events:       3"),
+            "should show 3 alpha events: {output}"
+        );
+        assert!(
+            output.contains("Most active:        alpha"),
+            "most active should be alpha: {output}"
+        );
     }
 
     #[test]
@@ -540,7 +615,8 @@ mod tests {
             .unwrap();
 
         for _ in 0..5 {
-            db.insert_event(repo.id, Some(wt.id), "created", None).unwrap();
+            db.insert_event(repo.id, Some(wt.id), "created", None)
+                .unwrap();
         }
 
         let output = execute_summary_json(&db, repo.id, None, Some(2)).unwrap();
@@ -572,7 +648,10 @@ mod tests {
         let stats = compute_summary(&entries);
         let (name, count) = stats.most_active.expect("should have most_active");
         assert_eq!(count, 1);
-        assert_eq!(name, "alpha", "lexicographically smaller name should win on tie");
+        assert_eq!(
+            name, "alpha",
+            "lexicographically smaller name should win on tie"
+        );
     }
 
     #[test]
@@ -584,15 +663,19 @@ mod tests {
             .unwrap();
 
         // Insert a hook event
-        let payload = serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.5});
+        let payload =
+            serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.5});
         let event_id = db
             .insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload))
             .unwrap();
 
         // Insert log lines with step labels
-        db.insert_log(event_id, "stdout", "Installing deps...", 1, Some("run")).unwrap();
-        db.insert_log(event_id, "stderr", "warning: peer dep", 2, Some("run")).unwrap();
-        db.insert_log(event_id, "stdout", "Migration done", 3, Some("shell")).unwrap();
+        db.insert_log(event_id, "stdout", "Installing deps...", 1, Some("run"))
+            .unwrap();
+        db.insert_log(event_id, "stderr", "warning: peer dep", 2, Some("run"))
+            .unwrap();
+        db.insert_log(event_id, "stdout", "Migration done", 3, Some("shell"))
+            .unwrap();
 
         let output = execute_output(&db, repo.id, "feat").unwrap();
 
@@ -601,12 +684,24 @@ mod tests {
         assert!(output.contains("[shell]"), "should show [shell] step label");
 
         // Should contain actual output lines
-        assert!(output.contains("Installing deps..."), "should show stdout line");
-        assert!(output.contains("warning: peer dep"), "should show stderr line");
-        assert!(output.contains("Migration done"), "should show shell output");
+        assert!(
+            output.contains("Installing deps..."),
+            "should show stdout line"
+        );
+        assert!(
+            output.contains("warning: peer dep"),
+            "should show stderr line"
+        );
+        assert!(
+            output.contains("Migration done"),
+            "should show shell output"
+        );
 
         // Should contain event type header
-        assert!(output.contains("hook:post_create"), "should show event type");
+        assert!(
+            output.contains("hook:post_create"),
+            "should show event type"
+        );
     }
 
     #[test]
@@ -617,13 +712,16 @@ mod tests {
             .insert_worktree(repo.id, "feat", "feature/feat", "/wt/feat", None)
             .unwrap();
 
-        let payload = serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.5});
+        let payload =
+            serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.5});
         let event_id = db
             .insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload))
             .unwrap();
 
-        db.insert_log(event_id, "stdout", "hello", 1, Some("run")).unwrap();
-        db.insert_log(event_id, "stderr", "warn", 2, Some("shell")).unwrap();
+        db.insert_log(event_id, "stdout", "hello", 1, Some("run"))
+            .unwrap();
+        db.insert_log(event_id, "stderr", "warn", 2, Some("shell"))
+            .unwrap();
 
         let output = execute_output_json(&db, repo.id, "feat").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
@@ -657,7 +755,8 @@ mod tests {
             .unwrap();
 
         // Only a non-hook event
-        db.insert_event(repo.id, Some(_wt.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(_wt.id), "created", None)
+            .unwrap();
 
         let result = execute_output(&db, repo.id, "feat");
         assert!(result.is_err(), "should error when no hook output exists");
@@ -705,10 +804,7 @@ mod tests {
             "should show hook event type"
         );
         assert!(output.contains("created"), "should show created event type");
-        assert!(
-            output.contains("feature-auth"),
-            "should show worktree name"
-        );
+        assert!(output.contains("feature-auth"), "should show worktree name");
         assert!(output.contains("2.3s"), "should show duration");
         assert!(output.contains("0"), "should show exit code");
     }

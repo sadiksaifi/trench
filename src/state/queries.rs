@@ -9,12 +9,7 @@ fn now() -> i64 {
 
 impl Database {
     /// Insert a new repo and return the populated struct.
-    pub fn insert_repo(
-        &self,
-        name: &str,
-        path: &str,
-        default_base: Option<&str>,
-    ) -> Result<Repo> {
+    pub fn insert_repo(&self, name: &str, path: &str, default_base: Option<&str>) -> Result<Repo> {
         let created_at = now();
         self.conn
             .execute(
@@ -243,11 +238,9 @@ impl Database {
         }
 
         params.push(Box::new(id));
-        let sql = format!(
-            "UPDATE worktrees SET {} WHERE id = ?",
-            sets.join(", ")
-        );
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let sql = format!("UPDATE worktrees SET {} WHERE id = ?", sets.join(", "));
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
         let affected = self
             .conn
             .execute(&sql, param_refs.as_slice())
@@ -350,18 +343,28 @@ impl Database {
     /// Save TUI list session state for a repo (selected worktree name + scroll position).
     ///
     /// Both fields are written in a single transaction so they stay consistent.
-    pub fn save_list_session(&self, repo_path: &str, worktree_name: &str, scroll_position: usize) -> Result<()> {
+    pub fn save_list_session(
+        &self,
+        repo_path: &str,
+        worktree_name: &str,
+        scroll_position: usize,
+    ) -> Result<()> {
         let key_name = format!("{repo_path}:selected_worktree");
         let key_scroll = format!("{repo_path}:scroll_position");
         let updated_at = now();
         let sql = "INSERT INTO session (key, value, updated_at) VALUES (?1, ?2, ?3)
                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at";
-        let tx = self.conn.unchecked_transaction()
+        let tx = self
+            .conn
+            .unchecked_transaction()
             .context("failed to begin session transaction")?;
         tx.execute(sql, rusqlite::params![key_name, worktree_name, updated_at])
             .context("failed to set selected_worktree")?;
-        tx.execute(sql, rusqlite::params![key_scroll, scroll_position.to_string(), updated_at])
-            .context("failed to set scroll_position")?;
+        tx.execute(
+            sql,
+            rusqlite::params![key_scroll, scroll_position.to_string(), updated_at],
+        )
+        .context("failed to set scroll_position")?;
         tx.commit().context("failed to commit session")?;
         Ok(())
     }
@@ -530,11 +533,7 @@ impl Database {
     }
 
     /// Count events for a worktree, optionally filtered by event type.
-    pub fn count_events(
-        &self,
-        worktree_id: i64,
-        event_type: Option<&str>,
-    ) -> Result<i64> {
+    pub fn count_events(&self, worktree_id: i64, event_type: Option<&str>) -> Result<i64> {
         let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match event_type {
             Some(et) => (
                 "SELECT COUNT(*) FROM events WHERE worktree_id = ?1 AND event_type = ?2",
@@ -653,8 +652,10 @@ impl Database {
         repo_id: i64,
         identifier: &str,
     ) -> Result<Option<Event>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT e.id, e.event_type, e.payload, e.created_at
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT e.id, e.event_type, e.payload, e.created_at
              FROM events e
              JOIN worktrees w ON e.worktree_id = w.id AND e.repo_id = w.repo_id
              WHERE e.repo_id = ?1
@@ -662,7 +663,8 @@ impl Database {
                AND e.event_type LIKE 'hook:%'
              ORDER BY e.created_at DESC, e.id DESC
              LIMIT 1",
-        ).context("failed to prepare get_last_hook_event_for_worktree query")?;
+            )
+            .context("failed to prepare get_last_hook_event_for_worktree query")?;
 
         let event = stmt
             .query_row(rusqlite::params![repo_id, identifier], |row| {
@@ -681,13 +683,16 @@ impl Database {
 
     /// List events for a worktree, most recent first, up to `limit`.
     pub fn list_events(&self, worktree_id: i64, limit: usize) -> Result<Vec<Event>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, event_type, payload, created_at
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, event_type, payload, created_at
              FROM events
              WHERE worktree_id = ?1
              ORDER BY created_at DESC
              LIMIT ?2",
-        ).context("failed to prepare list_events query")?;
+            )
+            .context("failed to prepare list_events query")?;
 
         let rows = stmt
             .query_map(rusqlite::params![worktree_id, limit as i64], |row| {
@@ -722,13 +727,21 @@ mod tests {
             .unwrap();
 
         // Insert a non-hook event, then two hook events
-        db.insert_event(repo.id, Some(wt.id), "created", None).unwrap();
-        let payload1 = serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.0});
-        db.insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload1)).unwrap();
-        let payload2 = serde_json::json!({"hook": "pre_sync", "exit_code": 0, "duration_secs": 0.5});
-        let last_id = db.insert_event(repo.id, Some(wt.id), "hook:pre_sync", Some(&payload2)).unwrap();
+        db.insert_event(repo.id, Some(wt.id), "created", None)
+            .unwrap();
+        let payload1 =
+            serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.0});
+        db.insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload1))
+            .unwrap();
+        let payload2 =
+            serde_json::json!({"hook": "pre_sync", "exit_code": 0, "duration_secs": 0.5});
+        let last_id = db
+            .insert_event(repo.id, Some(wt.id), "hook:pre_sync", Some(&payload2))
+            .unwrap();
 
-        let event = db.get_last_hook_event_for_worktree(repo.id, "feat").unwrap();
+        let event = db
+            .get_last_hook_event_for_worktree(repo.id, "feat")
+            .unwrap();
         assert!(event.is_some(), "should find a hook event");
         let event = event.unwrap();
         assert_eq!(event.id, last_id);
@@ -744,9 +757,12 @@ mod tests {
             .unwrap();
 
         // Only non-hook events
-        db.insert_event(repo.id, Some(wt.id), "created", None).unwrap();
+        db.insert_event(repo.id, Some(wt.id), "created", None)
+            .unwrap();
 
-        let event = db.get_last_hook_event_for_worktree(repo.id, "feat").unwrap();
+        let event = db
+            .get_last_hook_event_for_worktree(repo.id, "feat")
+            .unwrap();
         assert!(event.is_none(), "should return None when no hook events");
     }
 
@@ -758,11 +774,15 @@ mod tests {
             .insert_worktree(repo.id, "feat", "feature/feat", "/wt/feat", None)
             .unwrap();
 
-        let payload = serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.0});
-        db.insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload)).unwrap();
+        let payload =
+            serde_json::json!({"hook": "post_create", "exit_code": 0, "duration_secs": 1.0});
+        db.insert_event(repo.id, Some(wt.id), "hook:post_create", Some(&payload))
+            .unwrap();
 
         // Match by branch name (not sanitized name)
-        let event = db.get_last_hook_event_for_worktree(repo.id, "feature/feat").unwrap();
+        let event = db
+            .get_last_hook_event_for_worktree(repo.id, "feature/feat")
+            .unwrap();
         assert!(event.is_some(), "should match by branch name");
     }
 
@@ -781,15 +801,11 @@ mod tests {
         }
 
         // Limit to 3
-        let entries = db
-            .list_events_filtered(repo.id, None, Some(3))
-            .unwrap();
+        let entries = db.list_events_filtered(repo.id, None, Some(3)).unwrap();
         assert_eq!(entries.len(), 3, "should return exactly 3 events");
 
         // No limit returns all
-        let all = db
-            .list_events_filtered(repo.id, None, None)
-            .unwrap();
+        let all = db.list_events_filtered(repo.id, None, None).unwrap();
         assert_eq!(all.len(), 5, "no limit should return all 5 events");
     }
 
@@ -838,7 +854,8 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         // Save session for a repo
-        db.save_list_session("/repos/my-project", "feat-auth", 3).unwrap();
+        db.save_list_session("/repos/my-project", "feat-auth", 3)
+            .unwrap();
 
         // Load it back
         let session = db.load_list_session("/repos/my-project").unwrap();
@@ -893,7 +910,11 @@ mod tests {
         let name = db.get_session("/repos/atomic:selected_worktree").unwrap();
         let scroll = db.get_session("/repos/atomic:scroll_position").unwrap();
         assert_eq!(name.as_deref(), Some("wt-x"), "worktree name should be set");
-        assert_eq!(scroll.as_deref(), Some("42"), "scroll position should be set");
+        assert_eq!(
+            scroll.as_deref(),
+            Some("42"),
+            "scroll position should be set"
+        );
 
         // Connection should be in autocommit mode (no dangling transaction)
         assert!(

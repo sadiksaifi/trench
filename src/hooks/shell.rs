@@ -67,11 +67,7 @@ pub async fn execute_shell_step(
     };
 
     if !status.success() {
-        return Err(ShellStepError {
-            exit_code,
-            output,
-        }
-        .into());
+        return Err(ShellStepError { exit_code, output }.into());
     }
 
     Ok(output)
@@ -103,13 +99,10 @@ mod tests {
         env.insert("TRENCH_BRANCH".to_string(), "feature/auth".to_string());
         env.insert("TRENCH_EVENT".to_string(), "post_create".to_string());
 
-        let result = execute_shell_step(
-            "echo $TRENCH_BRANCH; echo $TRENCH_EVENT",
-            dir.path(),
-            &env,
-        )
-        .await
-        .unwrap();
+        let result =
+            execute_shell_step("echo $TRENCH_BRANCH; echo $TRENCH_EVENT", dir.path(), &env)
+                .await
+                .unwrap();
 
         let lines: Vec<&str> = result.stdout.lines().collect();
         assert_eq!(lines[0], "feature/auth");
@@ -122,9 +115,7 @@ mod tests {
         let env = HashMap::new();
 
         let script = "VAR=hello\necho $VAR\necho world";
-        let result = execute_shell_step(script, dir.path(), &env)
-            .await
-            .unwrap();
+        let result = execute_shell_step(script, dir.path(), &env).await.unwrap();
 
         let lines: Vec<&str> = result.stdout.lines().collect();
         assert_eq!(lines.len(), 2);
@@ -137,9 +128,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let env = HashMap::new();
 
-        let result = execute_shell_step("pwd", dir.path(), &env)
-            .await
-            .unwrap();
+        let result = execute_shell_step("pwd", dir.path(), &env).await.unwrap();
 
         let expected = dir.path().canonicalize().unwrap();
         let actual = std::path::PathBuf::from(result.stdout.trim())
@@ -170,13 +159,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let env = HashMap::new();
 
-        let result = execute_shell_step(
-            "echo out_msg; echo err_msg >&2",
-            dir.path(),
-            &env,
-        )
-        .await
-        .unwrap();
+        let result = execute_shell_step("echo out_msg; echo err_msg >&2", dir.path(), &env)
+            .await
+            .unwrap();
 
         assert_eq!(result.stdout.trim(), "out_msg");
         assert_eq!(result.stderr.trim(), "err_msg");
@@ -207,9 +192,7 @@ echo $TRENCH_BASE_BRANCH
 echo $TRENCH_EVENT
 "#;
 
-        let result = execute_shell_step(script, dir.path(), &env)
-            .await
-            .unwrap();
+        let result = execute_shell_step(script, dir.path(), &env).await.unwrap();
 
         let lines: Vec<&str> = result.stdout.lines().collect();
         assert_eq!(lines.len(), 7);

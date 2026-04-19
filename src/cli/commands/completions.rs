@@ -40,10 +40,7 @@ mod tests {
         let mut buf = Vec::new();
         generate::<TestCli>(ShellType::Bash, &mut buf);
         let output = String::from_utf8(buf).expect("completions should be valid utf-8");
-        assert!(
-            !output.is_empty(),
-            "bash completions should produce output"
-        );
+        assert!(!output.is_empty(), "bash completions should produce output");
         assert!(
             output.contains("trench"),
             "bash completions should reference the command name"
@@ -67,10 +64,7 @@ mod tests {
         let mut buf = Vec::new();
         generate::<TestCli>(ShellType::Fish, &mut buf);
         let output = String::from_utf8(buf).expect("completions should be valid utf-8");
-        assert!(
-            !output.is_empty(),
-            "fish completions should produce output"
-        );
+        assert!(!output.is_empty(), "fish completions should produce output");
         assert!(
             output.contains("trench"),
             "fish completions should reference the command name"

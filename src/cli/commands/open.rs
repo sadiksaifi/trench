@@ -156,9 +156,17 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
-        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
             .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "my-feature",
+            "my-feature",
+            "/wt/my-feature",
+            Some("main"),
+        )
+        .unwrap();
 
         let result = resolve("my-feature", repo_dir.path(), &db, Some("code")).unwrap();
 
@@ -176,9 +184,17 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
-        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
             .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "my-feature",
+            "my-feature",
+            "/wt/my-feature",
+            Some("main"),
+        )
+        .unwrap();
 
         let _editor = EnvGuard::set("EDITOR", Some("vim"));
         let _visual = EnvGuard::set("VISUAL", None);
@@ -196,9 +212,17 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
-        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
             .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "my-feature",
+            "my-feature",
+            "/wt/my-feature",
+            Some("main"),
+        )
+        .unwrap();
 
         let _editor = EnvGuard::set("EDITOR", None);
         let _visual = EnvGuard::set("VISUAL", Some("nano"));
@@ -216,9 +240,17 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
-        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
             .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "my-feature",
+            "my-feature",
+            "/wt/my-feature",
+            Some("main"),
+        )
+        .unwrap();
 
         let _editor = EnvGuard::set("EDITOR", None);
         let _visual = EnvGuard::set("VISUAL", None);
@@ -240,9 +272,17 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
-        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
             .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "my-feature",
+            "my-feature",
+            "/wt/my-feature",
+            Some("main"),
+        )
+        .unwrap();
 
         let _editor = EnvGuard::set("EDITOR", Some("vim"));
         let _visual = EnvGuard::set("VISUAL", Some("nano"));
@@ -259,7 +299,8 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        db.insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
 
         let err = resolve("nonexistent", repo_dir.path(), &db, Some("vim")).unwrap_err();
         let msg = err.to_string();
@@ -277,16 +318,27 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
         let wt = db
-            .insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .insert_worktree(
+                db_repo.id,
+                "my-feature",
+                "my-feature",
+                "/wt/my-feature",
+                Some("main"),
+            )
             .unwrap();
 
         resolve("my-feature", repo_dir.path(), &db, Some("vim")).unwrap();
 
         // resolve() must NOT touch the DB — no last_accessed update, no event
         let unchanged = db.get_worktree(wt.id).unwrap().unwrap();
-        assert!(unchanged.last_accessed.is_none(), "resolve should not update last_accessed");
+        assert!(
+            unchanged.last_accessed.is_none(),
+            "resolve should not update last_accessed"
+        );
         let event_count = db.count_events(wt.id, Some("opened")).unwrap();
         assert_eq!(event_count, 0, "resolve should not insert events");
     }
@@ -294,9 +346,17 @@ mod tests {
     #[test]
     fn record_open_updates_last_accessed_and_event() {
         let db = Database::open_in_memory().unwrap();
-        let db_repo = db.insert_repo("my-project", "/tmp/fake", Some("main")).unwrap();
+        let db_repo = db
+            .insert_repo("my-project", "/tmp/fake", Some("main"))
+            .unwrap();
         let wt = db
-            .insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+            .insert_worktree(
+                db_repo.id,
+                "my-feature",
+                "my-feature",
+                "/wt/my-feature",
+                Some("main"),
+            )
             .unwrap();
 
         assert!(wt.last_accessed.is_none());
@@ -320,9 +380,17 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
-        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
             .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "my-feature",
+            "my-feature",
+            "/wt/my-feature",
+            Some("main"),
+        )
+        .unwrap();
 
         let _editor = EnvGuard::set("EDITOR", None);
         let _visual = EnvGuard::set("VISUAL", None);
@@ -345,9 +413,17 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
-        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
             .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "my-feature",
+            "my-feature",
+            "/wt/my-feature",
+            Some("main"),
+        )
+        .unwrap();
 
         let _editor = EnvGuard::set("EDITOR", None);
         let _visual = EnvGuard::set("VISUAL", None);
@@ -370,9 +446,17 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
-        db.insert_worktree(db_repo.id, "my-feature", "my-feature", "/wt/my-feature", Some("main"))
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
             .unwrap();
+        db.insert_worktree(
+            db_repo.id,
+            "my-feature",
+            "my-feature",
+            "/wt/my-feature",
+            Some("main"),
+        )
+        .unwrap();
 
         // Whitespace-only EDITOR should fall through to VISUAL
         let _editor = EnvGuard::set("EDITOR", Some("  \t "));
@@ -390,7 +474,9 @@ mod tests {
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.insert_repo("my-project", repo_path_str, Some("main")).unwrap();
+        let db_repo = db
+            .insert_repo("my-project", repo_path_str, Some("main"))
+            .unwrap();
         db.insert_worktree(
             db_repo.id,
             "feature-auth",

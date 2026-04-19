@@ -144,13 +144,21 @@ mod tests {
         }
         // Content should still be present, just truncated
         assert!(output.contains("Name"), "header should still appear");
-        assert!(output.contains("short"), "short values should not be truncated");
+        assert!(
+            output.contains("short"),
+            "short values should not be truncated"
+        );
     }
 
     #[test]
     fn enforces_max_width_on_extremely_narrow_terminals() {
         let output = Table::new(vec!["Name", "Branch", "Path", "Status"])
-            .row(vec!["feature-auth", "feature/auth", "/home/user/proj", "clean"])
+            .row(vec![
+                "feature-auth",
+                "feature/auth",
+                "/home/user/proj",
+                "clean",
+            ])
             .max_width(5)
             .render();
 
@@ -210,7 +218,9 @@ mod tests {
         // Check that columns are aligned by verifying "Name" and "Branch" appear at same column offsets
         let header = lines[0];
         let row1 = lines[1];
-        let branch_offset_header = header.find("Branch").expect("header should contain 'Branch'");
+        let branch_offset_header = header
+            .find("Branch")
+            .expect("header should contain 'Branch'");
         let branch_offset_row1 = row1.find("main").expect("row should contain 'main'");
         assert_eq!(
             branch_offset_header, branch_offset_row1,

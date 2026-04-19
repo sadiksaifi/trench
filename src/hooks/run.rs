@@ -140,7 +140,9 @@ mod tests {
         let output_path = result.executed[0].stdout.trim();
         // Canonicalize both to handle symlinks like /tmp -> /private/tmp on macOS
         let expected = dir.path().canonicalize().unwrap();
-        let actual = std::path::PathBuf::from(output_path).canonicalize().unwrap();
+        let actual = std::path::PathBuf::from(output_path)
+            .canonicalize()
+            .unwrap();
         assert_eq!(actual, expected);
     }
 
@@ -177,7 +179,10 @@ mod tests {
 
         // Error message contains command and exit code
         let msg = err.to_string();
-        assert!(msg.contains("exit 42"), "error should contain command: {msg}");
+        assert!(
+            msg.contains("exit 42"),
+            "error should contain command: {msg}"
+        );
         assert!(msg.contains("42"), "error should contain exit code: {msg}");
 
         // Downcast to get partial results

@@ -55,9 +55,7 @@ pub fn parse_lsof_output(output: &str, worktree_path: &str) -> Vec<ProcessInfo> 
             current_name = Some(cmd.to_string());
         } else if let Some(path) = line.strip_prefix('n') {
             if let (Some(pid), Some(ref name)) = (current_pid, &current_name) {
-                if within_worktree(path, worktree_path)
-                    && seen_pids.insert(pid)
-                {
+                if within_worktree(path, worktree_path) && seen_pids.insert(pid) {
                     results.push(ProcessInfo {
                         pid,
                         name: name.clone(),
@@ -193,7 +191,10 @@ mod tests {
 
     #[test]
     fn format_warning_with_single_process() {
-        let procs = vec![ProcessInfo { pid: 1234, name: "node".into() }];
+        let procs = vec![ProcessInfo {
+            pid: 1234,
+            name: "node".into(),
+        }];
         let warning = format_process_warning_from(&procs);
         assert_eq!(
             warning.as_deref(),
@@ -204,8 +205,14 @@ mod tests {
     #[test]
     fn format_warning_with_multiple_processes() {
         let procs = vec![
-            ProcessInfo { pid: 1234, name: "node".into() },
-            ProcessInfo { pid: 5678, name: "vite".into() },
+            ProcessInfo {
+                pid: 1234,
+                name: "node".into(),
+            },
+            ProcessInfo {
+                pid: 5678,
+                name: "vite".into(),
+            },
         ];
         let warning = format_process_warning_from(&procs);
         assert_eq!(
@@ -223,8 +230,14 @@ mod tests {
     #[test]
     fn build_process_warning_shared_by_both_functions() {
         let procs = vec![
-            ProcessInfo { pid: 1, name: "node".into() },
-            ProcessInfo { pid: 2, name: "vite".into() },
+            ProcessInfo {
+                pid: 1,
+                name: "node".into(),
+            },
+            ProcessInfo {
+                pid: 2,
+                name: "vite".into(),
+            },
         ];
         let from_helper = build_process_warning(&procs);
         let from_public = format_process_warning_from(&procs);
@@ -257,14 +270,23 @@ p9999\n\
 cvite\n\
 n/Users/sdk/.worktrees/myrepo/feature-branch/packages/app\n";
 
-        let result = parse_lsof_output(
-            output,
-            "/Users/sdk/.worktrees/myrepo/feature-branch",
-        );
+        let result = parse_lsof_output(output, "/Users/sdk/.worktrees/myrepo/feature-branch");
 
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0], ProcessInfo { pid: 1234, name: "node".into() });
-        assert_eq!(result[1], ProcessInfo { pid: 9999, name: "vite".into() });
+        assert_eq!(
+            result[0],
+            ProcessInfo {
+                pid: 1234,
+                name: "node".into()
+            }
+        );
+        assert_eq!(
+            result[1],
+            ProcessInfo {
+                pid: 9999,
+                name: "vite".into()
+            }
+        );
     }
 
     #[test]
@@ -317,11 +339,7 @@ n/Users/sdk/.worktrees/myrepo/feature-branch/packages/app\n";
         std::fs::create_dir(&pid300).unwrap();
         std::fs::write(pid300.join("comm"), "bash\n").unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            other_dir.path().to_str().unwrap(),
-            pid300.join("cwd"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(other_dir.path().to_str().unwrap(), pid300.join("cwd")).unwrap();
 
         // Non-numeric directory (should be skipped)
         std::fs::create_dir(proc_dir.path().join("self")).unwrap();
@@ -361,7 +379,10 @@ n/Users/sdk/.worktrees/myrepo/feature-branch/packages/app\n";
     #[test]
     fn detect_processes_returns_empty_for_nonexistent_path() {
         let result = detect_processes("/nonexistent/worktree/path/xyz");
-        assert!(result.is_empty(), "should return empty for non-existent path");
+        assert!(
+            result.is_empty(),
+            "should return empty for non-existent path"
+        );
     }
 
     #[test]

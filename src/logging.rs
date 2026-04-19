@@ -27,9 +27,11 @@ fn build_subscriber_with_filter<W: Write + Send + 'static>(
 /// Build a tracing subscriber that writes to the given writer.
 ///
 /// Uses `TRENCH_LOG` env var for the filter if set, otherwise defaults to `warn`.
-fn build_subscriber<W: Write + Send + 'static>(writer: W) -> impl tracing::Subscriber + Send + Sync {
-    let filter = EnvFilter::try_from_env(ENV_FILTER_VAR)
-        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+fn build_subscriber<W: Write + Send + 'static>(
+    writer: W,
+) -> impl tracing::Subscriber + Send + Sync {
+    let filter =
+        EnvFilter::try_from_env(ENV_FILTER_VAR).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
     build_subscriber_with_filter(writer, filter)
 }
 

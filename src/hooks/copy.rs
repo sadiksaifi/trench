@@ -41,18 +41,28 @@ pub fn execute_copy_step(
                 .with_context(|| format!("invalid exclusion glob: {stripped}"))?;
             exclude_builder.add(glob);
         } else {
-            let glob =
-                Glob::new(pattern).with_context(|| format!("invalid glob: {pattern}"))?;
+            let glob = Glob::new(pattern).with_context(|| format!("invalid glob: {pattern}"))?;
             include_builder.add(glob);
         }
     }
 
-    let includes = include_builder.build().context("failed to build include glob set")?;
-    let excludes = exclude_builder.build().context("failed to build exclude glob set")?;
+    let includes = include_builder
+        .build()
+        .context("failed to build include glob set")?;
+    let excludes = exclude_builder
+        .build()
+        .context("failed to build exclude glob set")?;
 
     let mut copied = Vec::new();
 
-    collect_matching_files(source_dir, source_dir, dest_dir, &includes, &excludes, &mut copied)?;
+    collect_matching_files(
+        source_dir,
+        source_dir,
+        dest_dir,
+        &includes,
+        &excludes,
+        &mut copied,
+    )?;
 
     Ok(CopyResult { copied })
 }
@@ -98,8 +108,13 @@ fn collect_matching_files(
             if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::copy(&path, &dest_path)
-                .with_context(|| format!("failed to copy {} → {}", path.display(), dest_path.display()))?;
+            std::fs::copy(&path, &dest_path).with_context(|| {
+                format!(
+                    "failed to copy {} → {}",
+                    path.display(),
+                    dest_path.display()
+                )
+            })?;
 
             copied.push(CopiedFile {
                 name: relative.to_string_lossy().into_owned(),
@@ -168,7 +183,11 @@ mod tests {
             .mode();
 
         // Verify the executable bit is preserved (at least owner execute)
-        assert_ne!(dest_perms & 0o100, 0, "executable permission should be preserved");
+        assert_ne!(
+            dest_perms & 0o100,
+            0,
+            "executable permission should be preserved"
+        );
     }
 
     #[test]

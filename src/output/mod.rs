@@ -63,9 +63,7 @@ mod tests {
     #[test]
     fn no_color_flag_disables_color() {
         let config = OutputConfig::from_env(
-            /* no_color */ true,
-            /* quiet */ false,
-            /* verbose */ false,
+            /* no_color */ true, /* quiet */ false, /* verbose */ false,
             /* is_tty */ true,
         );
         assert!(!config.should_color());
@@ -77,9 +75,7 @@ mod tests {
         // NO_COLOR convention: any value (even empty) disables color
         std::env::set_var("NO_COLOR", "1");
         let config = OutputConfig::from_env(
-            /* no_color */ false,
-            /* quiet */ false,
-            /* verbose */ false,
+            /* no_color */ false, /* quiet */ false, /* verbose */ false,
             /* is_tty */ true,
         );
         std::env::remove_var("NO_COLOR");
@@ -121,7 +117,8 @@ mod tests {
     #[test]
     fn quiet_wins_over_verbose() {
         // When both --quiet and --verbose are passed, quiet takes precedence
-        let config = OutputConfig::from_env(false, /* quiet */ true, /* verbose */ true, true);
+        let config =
+            OutputConfig::from_env(false, /* quiet */ true, /* verbose */ true, true);
         assert!(config.is_quiet());
         assert!(!config.is_verbose());
         assert_eq!(config.verbosity(), Verbosity::Quiet);

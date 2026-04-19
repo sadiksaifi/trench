@@ -84,11 +84,7 @@ fn fetch_all_worktrees(
     // Build a set of known (managed) worktree paths for cross-referencing
     let managed_paths: HashSet<PathBuf> = db_worktrees
         .iter()
-        .filter_map(|wt| {
-            Path::new(&wt.path)
-                .canonicalize()
-                .ok()
-        })
+        .filter_map(|wt| Path::new(&wt.path).canonicalize().ok())
         .collect();
 
     let mut entries: Vec<ListEntry> = Vec::new();
@@ -112,7 +108,10 @@ fn fetch_all_worktrees(
         if !managed_paths.contains(&gw.path) {
             entries.push(ListEntry {
                 name: gw.name.clone(),
-                branch: gw.branch.clone().unwrap_or_else(|| "(detached)".to_string()),
+                branch: gw
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| "(detached)".to_string()),
                 path: gw.path.to_string_lossy().into_owned(),
                 base_branch: None,
                 managed: false,
@@ -435,13 +434,20 @@ mod tests {
         )
         .unwrap();
 
-        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
+        let output =
+            render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         // Should contain column headers
         assert!(output.contains("Name"), "output should have Name header");
-        assert!(output.contains("Branch"), "output should have Branch header");
+        assert!(
+            output.contains("Branch"),
+            "output should have Branch header"
+        );
         assert!(output.contains("Path"), "output should have Path header");
-        assert!(output.contains("Status"), "output should have Status header");
+        assert!(
+            output.contains("Status"),
+            "output should have Status header"
+        );
 
         // Should contain both worktree names
         assert!(
@@ -455,7 +461,11 @@ mod tests {
 
         // Should have header + 2 managed rows + 1 main worktree row
         let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines.len(), 4, "expected header + 2 managed + 1 main worktree");
+        assert_eq!(
+            lines.len(),
+            4,
+            "expected header + 2 managed + 1 main worktree"
+        );
     }
 
     #[test]
@@ -488,7 +498,8 @@ mod tests {
         )
         .expect("second create should succeed");
 
-        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
+        let output =
+            render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         assert!(
             output.contains("feature-one"),
@@ -501,7 +512,11 @@ mod tests {
 
         // header + 2 managed + 1 main worktree
         let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines.len(), 4, "expected header + 2 managed + 1 main worktree");
+        assert_eq!(
+            lines.len(),
+            4,
+            "expected header + 2 managed + 1 main worktree"
+        );
     }
 
     #[test]
@@ -511,7 +526,8 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         // With no managed worktrees, the main worktree still appears
-        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
+        let output =
+            render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         assert!(
             output.contains("[unmanaged]"),
@@ -566,7 +582,8 @@ mod tests {
         )
         .unwrap();
 
-        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
+        let output =
+            render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         assert!(
             output.contains("active-feature"),
@@ -579,7 +596,11 @@ mod tests {
 
         // header + 1 managed row + 1 main worktree row
         let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines.len(), 3, "expected header + 1 managed + 1 main worktree, got: {output}");
+        assert_eq!(
+            lines.len(),
+            3,
+            "expected header + 1 managed + 1 main worktree, got: {output}"
+        );
     }
 
     #[test]
@@ -602,10 +623,10 @@ mod tests {
         )
         .expect("create should succeed");
 
-        remove::execute("ephemeral", repo_dir.path(), &db, false)
-            .expect("remove should succeed");
+        remove::execute("ephemeral", repo_dir.path(), &db, false).expect("remove should succeed");
 
-        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
+        let output =
+            render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         // After removing all managed worktrees, the main worktree still appears
         assert!(
@@ -689,13 +710,7 @@ mod tests {
             .unwrap();
 
         let wt = db
-            .insert_worktree(
-                db_repo.id,
-                "my-wt",
-                "my-branch",
-                "/wt/my-wt",
-                Some("main"),
-            )
+            .insert_worktree(db_repo.id, "my-wt", "my-branch", "/wt/my-wt", Some("main"))
             .unwrap();
 
         db.add_tag(wt.id, "wip").unwrap();
@@ -723,13 +738,7 @@ mod tests {
             .unwrap();
 
         let wt = db
-            .insert_worktree(
-                db_repo.id,
-                "my-wt",
-                "my-branch",
-                "/wt/my-wt",
-                Some("main"),
-            )
+            .insert_worktree(db_repo.id, "my-wt", "my-branch", "/wt/my-wt", Some("main"))
             .unwrap();
 
         db.add_tag(wt.id, "wip").unwrap();
@@ -739,8 +748,13 @@ mod tests {
 
         let worktrees = parsed.as_array().expect("should be an array");
         // 1 managed + 1 main worktree
-        assert!(worktrees.len() >= 2, "should have at least 2 entries (managed + main)");
-        let tagged_wt = worktrees.iter().find(|w| w["name"] == "my-wt")
+        assert!(
+            worktrees.len() >= 2,
+            "should have at least 2 entries (managed + main)"
+        );
+        let tagged_wt = worktrees
+            .iter()
+            .find(|w| w["name"] == "my-wt")
             .expect("should find managed worktree");
         let tags = tagged_wt["tags"].as_array().expect("tags should be array");
         assert_eq!(tags, &[serde_json::json!("wip")]);
@@ -784,13 +798,7 @@ mod tests {
             &db,
         )
         .unwrap();
-        tag::execute(
-            "feature-beta",
-            &["+wip".to_string()],
-            repo_dir.path(),
-            &db,
-        )
-        .unwrap();
+        tag::execute("feature-beta", &["+wip".to_string()], repo_dir.path(), &db).unwrap();
 
         // List all — both should appear with tags
         let all_output = render_table(repo_dir.path(), &db, None, None, &[]).unwrap();
@@ -809,13 +817,7 @@ mod tests {
         assert!(!review_output.contains("feature-beta"));
 
         // Remove wip from alpha
-        tag::execute(
-            "feature-alpha",
-            &["-wip".to_string()],
-            repo_dir.path(),
-            &db,
-        )
-        .unwrap();
+        tag::execute("feature-alpha", &["-wip".to_string()], repo_dir.path(), &db).unwrap();
 
         // Filter by wip — only beta now
         let wip_after = render_table(repo_dir.path(), &db, Some("wip"), None, &[]).unwrap();
@@ -827,7 +829,11 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
         let items = parsed.as_array().unwrap();
         // 2 managed + 1 main worktree + 2 git worktrees for the created branches
-        assert!(items.len() >= 3, "should have at least 3 entries, got: {}", items.len());
+        assert!(
+            items.len() >= 3,
+            "should have at least 3 entries, got: {}",
+            items.len()
+        );
 
         // Find alpha in JSON and check tags
         let alpha = items
@@ -870,7 +876,9 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
         let items = parsed.as_array().expect("should be an array");
-        let wt = items.iter().find(|i| i["name"] == "feature-json-fields")
+        let wt = items
+            .iter()
+            .find(|i| i["name"] == "feature-json-fields")
             .expect("should find managed worktree in JSON");
 
         // Should have ahead, behind, and dirty fields
@@ -938,14 +946,29 @@ mod tests {
 
         let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
-        let wt_json = parsed.as_array().unwrap().iter()
+        let wt_json = parsed
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|i| i["name"] == "feature-e2e")
             .expect("should find feature-e2e in JSON");
 
         assert_eq!(wt_json["ahead"], serde_json::json!(1), "should be 1 ahead");
-        assert_eq!(wt_json["behind"], serde_json::json!(0), "should be 0 behind");
-        assert_eq!(wt_json["dirty"], serde_json::json!(1), "should have 1 dirty file");
-        assert_eq!(wt_json["status"], serde_json::json!("~1"), "status should show ~1");
+        assert_eq!(
+            wt_json["behind"],
+            serde_json::json!(0),
+            "should be 0 behind"
+        );
+        assert_eq!(
+            wt_json["dirty"],
+            serde_json::json!(1),
+            "should have 1 dirty file"
+        );
+        assert_eq!(
+            wt_json["status"],
+            serde_json::json!("~1"),
+            "status should show ~1"
+        );
     }
 
     #[test]
@@ -977,7 +1000,10 @@ mod tests {
         let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
-        let wt = parsed.as_array().unwrap().iter()
+        let wt = parsed
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|i| i["name"] == "orphan-wt")
             .expect("should find orphan-wt in JSON");
         assert!(
@@ -1000,7 +1026,8 @@ mod tests {
 
         // Create a real local branch with no upstream tracking
         let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.branch("no-upstream-branch", &head_commit, false).unwrap();
+        repo.branch("no-upstream-branch", &head_commit, false)
+            .unwrap();
 
         let repo_path = repo_dir.path().canonicalize().unwrap();
         let repo_name = repo_path.file_name().unwrap().to_str().unwrap();
@@ -1142,20 +1169,16 @@ mod tests {
             .insert_repo(repo_name, repo_path.to_str().unwrap(), Some("main"))
             .unwrap();
 
-        db.insert_worktree(
-            db_repo.id,
-            "my-wt",
-            "my-branch",
-            "/wt/my-wt",
-            Some("main"),
-        )
-        .unwrap();
+        db.insert_worktree(db_repo.id, "my-wt", "my-branch", "/wt/my-wt", Some("main"))
+            .unwrap();
 
         let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
         let worktrees = parsed.as_array().expect("should be an array");
-        let managed_wt = worktrees.iter().find(|w| w["name"] == "my-wt")
+        let managed_wt = worktrees
+            .iter()
+            .find(|w| w["name"] == "my-wt")
             .expect("should find managed worktree");
         assert_eq!(
             managed_wt["managed"],
@@ -1163,7 +1186,9 @@ mod tests {
             "managed worktree should have managed=true"
         );
         // Main worktree should also be present with managed=false
-        let main_wt = worktrees.iter().find(|w| w["managed"] == false)
+        let main_wt = worktrees
+            .iter()
+            .find(|w| w["managed"] == false)
             .expect("should find unmanaged worktree");
         assert_eq!(main_wt["managed"], serde_json::json!(false));
     }
@@ -1182,8 +1207,8 @@ mod tests {
             .expect("should create worktree via git");
 
         // Table output should include the manual worktree with badge
-        let table_output = render_table(repo_dir.path(), &db, None, None, &[])
-            .expect("table list should succeed");
+        let table_output =
+            render_table(repo_dir.path(), &db, None, None, &[]).expect("table list should succeed");
         assert!(
             table_output.contains("manually-added"),
             "table should show manually-added worktree, got: {table_output}"
@@ -1194,11 +1219,12 @@ mod tests {
         );
 
         // JSON output should include with managed=false
-        let json_output = execute_json(repo_dir.path(), &db, None, &[])
-            .expect("json list should succeed");
+        let json_output =
+            execute_json(repo_dir.path(), &db, None, &[]).expect("json list should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
         let items = parsed.as_array().unwrap();
-        let manual_wt = items.iter()
+        let manual_wt = items
+            .iter()
             .find(|i| i["name"] == "manually-added")
             .expect("JSON should include manually-added worktree");
         assert_eq!(manual_wt["managed"], serde_json::json!(false));
@@ -1210,7 +1236,8 @@ mod tests {
         // Porcelain output should include with managed=false
         let porcelain_output = execute_porcelain(repo_dir.path(), &db, None, &[])
             .expect("porcelain list should succeed");
-        let manual_line = porcelain_output.lines()
+        let manual_line = porcelain_output
+            .lines()
             .find(|l| l.starts_with("manually-added:"))
             .expect("porcelain should include manually-added worktree");
         let fields: Vec<&str> = manual_line.split(':').collect();
@@ -1219,13 +1246,21 @@ mod tests {
         assert_eq!(fields[7], "false", "managed should be false");
 
         // Main worktree should also appear in all formats
-        let repo_name = repo_dir.path().canonicalize().unwrap()
-            .file_name().unwrap().to_str().unwrap().to_string();
+        let repo_name = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
         assert!(
             table_output.contains(&repo_name),
             "table should include main worktree '{repo_name}'"
         );
-        let main_json = items.iter()
+        let main_json = items
+            .iter()
             .find(|i| i["name"] == repo_name.as_str())
             .expect("JSON should include main worktree");
         assert_eq!(main_json["managed"], serde_json::json!(false));
@@ -1259,36 +1294,43 @@ mod tests {
         )
         .unwrap();
 
-        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
+        let output =
+            render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         // Unmanaged rows (main worktree) should have ANSI dim codes
         let lines: Vec<&str> = output.lines().collect();
         let dim_start = "\x1b[2m";
         let dim_end = "\x1b[0m";
 
-        let unmanaged_lines: Vec<&&str> = lines.iter()
-            .filter(|l| l.contains("[unmanaged]"))
-            .collect();
-        assert!(!unmanaged_lines.is_empty(), "should have at least one unmanaged row");
+        let unmanaged_lines: Vec<&&str> =
+            lines.iter().filter(|l| l.contains("[unmanaged]")).collect();
+        assert!(
+            !unmanaged_lines.is_empty(),
+            "should have at least one unmanaged row"
+        );
 
         for line in &unmanaged_lines {
             assert!(
                 line.starts_with(dim_start),
-                "unmanaged row should start with dim ANSI code, got: {:?}", line
+                "unmanaged row should start with dim ANSI code, got: {:?}",
+                line
             );
             assert!(
                 line.ends_with(dim_end),
-                "unmanaged row should end with reset ANSI code, got: {:?}", line
+                "unmanaged row should end with reset ANSI code, got: {:?}",
+                line
             );
         }
 
         // Managed row should NOT have dim codes
-        let managed_line = lines.iter()
+        let managed_line = lines
+            .iter()
             .find(|l| l.contains("managed-wt") && !l.contains("[unmanaged]"))
             .expect("should find managed worktree row");
         assert!(
             !managed_line.starts_with(dim_start),
-            "managed row should NOT have dim ANSI code, got: {:?}", managed_line
+            "managed row should NOT have dim ANSI code, got: {:?}",
+            managed_line
         );
     }
 
@@ -1309,10 +1351,15 @@ mod tests {
         let lines: Vec<&str> = output.lines().collect();
 
         // Should have at least 2 entries (main + the external worktree)
-        assert!(lines.len() >= 2, "should have at least 2 porcelain lines, got: {}", lines.len());
+        assert!(
+            lines.len() >= 2,
+            "should have at least 2 porcelain lines, got: {}",
+            lines.len()
+        );
 
         // Find the line for the unmanaged worktree
-        let external_line = lines.iter()
+        let external_line = lines
+            .iter()
             .find(|l| l.starts_with("porcelain-external:"))
             .expect("should find porcelain-external in porcelain output");
 
@@ -1324,7 +1371,10 @@ mod tests {
         for line in &lines {
             let f: Vec<&str> = line.split(':').collect();
             assert_eq!(f.len(), 8, "each porcelain line should have 8 fields");
-            assert!(!line.contains('\x1b'), "porcelain should not contain ANSI codes");
+            assert!(
+                !line.contains('\x1b'),
+                "porcelain should not contain ANSI codes"
+            );
         }
     }
 
@@ -1346,7 +1396,9 @@ mod tests {
         let items = parsed.as_array().expect("should be an array");
 
         // Find the unmanaged worktree
-        let unmanaged = items.iter().find(|i| i["name"] == "git-only-wt")
+        let unmanaged = items
+            .iter()
+            .find(|i| i["name"] == "git-only-wt")
             .expect("should find unmanaged worktree in JSON");
         assert_eq!(
             unmanaged["managed"],
@@ -1361,9 +1413,10 @@ mod tests {
         assert!(unmanaged["tags"].is_array());
 
         // Main worktree should also be unmanaged
-        let main_wt = items.iter().find(|i| {
-            i["managed"] == false && i["name"] != "git-only-wt"
-        }).expect("should find main worktree as unmanaged");
+        let main_wt = items
+            .iter()
+            .find(|i| i["managed"] == false && i["name"] != "git-only-wt")
+            .expect("should find main worktree as unmanaged");
         assert_eq!(main_wt["managed"], serde_json::json!(false));
     }
 
@@ -1381,7 +1434,8 @@ mod tests {
             .expect("should create worktree via git");
 
         // Use render_table with no max_width to avoid terminal truncation
-        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
+        let output =
+            render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         assert!(
             output.contains("external-wt"),
@@ -1400,11 +1454,19 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         // Use render_table with no max_width to avoid terminal truncation
-        let output = render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
+        let output =
+            render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         // Main worktree should appear (it's unmanaged by trench)
-        let repo_name = repo_dir.path().canonicalize().unwrap()
-            .file_name().unwrap().to_str().unwrap().to_string();
+        let repo_name = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
         assert!(
             output.contains(&repo_name),
             "output should contain the main worktree name '{repo_name}', got: {output}"
@@ -1461,8 +1523,8 @@ mod tests {
 
         // Verify JSON output
         let json_output = execute_json(repo_dir.path(), &db, None, &[]).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_output)
-            .expect("JSON output must be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_output).expect("JSON output must be valid JSON");
 
         let items = parsed.as_array().expect("JSON should be an array");
         // 2 managed + main worktree (+ possibly git worktrees for created branches)
@@ -1492,9 +1554,11 @@ mod tests {
         for line in &lines {
             let fields: Vec<&str> = line.split(':').collect();
             assert_eq!(
-                fields.len(), 8,
+                fields.len(),
+                8,
                 "porcelain line should have 8 fields, got {}: {:?}",
-                fields.len(), line
+                fields.len(),
+                line
             );
         }
 
@@ -1534,7 +1598,9 @@ mod tests {
             .expect("json list should succeed for unborn repo");
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
         let items = parsed.as_array().expect("should be an array");
-        let main_wt = items.first().expect("should have at least the main worktree");
+        let main_wt = items
+            .first()
+            .expect("should have at least the main worktree");
         assert_eq!(
             main_wt["branch"],
             serde_json::json!("(detached)"),
@@ -1566,14 +1632,8 @@ mod tests {
 
         let scan_paths = vec![scan_dir.path().to_string_lossy().into_owned()];
 
-        let output = render_table(
-            repo_dir.path(),
-            &db,
-            None,
-            None,
-            &scan_paths,
-        )
-        .expect("list with scan paths should succeed");
+        let output = render_table(repo_dir.path(), &db, None, None, &scan_paths)
+            .expect("list with scan paths should succeed");
 
         assert!(
             output.contains("scan-feature"),
@@ -1596,10 +1656,8 @@ mod tests {
         let scan_dir = tempfile::tempdir().unwrap();
         let wt_a = scan_dir.path().join("feature-alpha");
         let wt_b = scan_dir.path().join("feature-beta");
-        git::create_worktree(repo_dir.path(), "feature-alpha", &base, &wt_a)
-            .expect("create alpha");
-        git::create_worktree(repo_dir.path(), "feature-beta", &base, &wt_b)
-            .expect("create beta");
+        git::create_worktree(repo_dir.path(), "feature-alpha", &base, &wt_a).expect("create alpha");
+        git::create_worktree(repo_dir.path(), "feature-beta", &base, &wt_b).expect("create beta");
 
         let scan_paths = vec![scan_dir.path().to_string_lossy().into_owned()];
 
@@ -1621,12 +1679,16 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
         let items = parsed.as_array().unwrap();
 
-        let alpha = items.iter().find(|i| i["name"] == "feature-alpha")
+        let alpha = items
+            .iter()
+            .find(|i| i["name"] == "feature-alpha")
             .expect("JSON should contain feature-alpha");
         assert_eq!(alpha["managed"], serde_json::json!(false));
         assert!(alpha["branch"].is_string());
 
-        let beta = items.iter().find(|i| i["name"] == "feature-beta")
+        let beta = items
+            .iter()
+            .find(|i| i["name"] == "feature-beta")
             .expect("JSON should contain feature-beta");
         assert_eq!(beta["managed"], serde_json::json!(false));
 
@@ -1642,7 +1704,8 @@ mod tests {
             "porcelain should contain feature-beta"
         );
         // Verify managed=false in porcelain
-        let alpha_line = porcelain_output.lines()
+        let alpha_line = porcelain_output
+            .lines()
             .find(|l| l.starts_with("feature-alpha:"))
             .expect("should find feature-alpha in porcelain");
         assert!(
@@ -1666,8 +1729,8 @@ mod tests {
 
         let scan_paths = vec![scan_dir.path().to_string_lossy().into_owned()];
 
-        let json_output = execute_json(repo_dir.path(), &db, None, &scan_paths)
-            .expect("json should succeed");
+        let json_output =
+            execute_json(repo_dir.path(), &db, None, &scan_paths).expect("json should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
         let items = parsed.as_array().unwrap();
 
@@ -1700,8 +1763,8 @@ mod tests {
         )
         .unwrap();
 
-        let output = render_table(repo_dir.path(), &db, None, None, &[])
-            .expect("list should succeed");
+        let output =
+            render_table(repo_dir.path(), &db, None, None, &[]).expect("list should succeed");
 
         assert!(
             output.contains("Procs"),
@@ -1734,7 +1797,9 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
 
         let worktrees = parsed.as_array().expect("should be an array");
-        let wt = worktrees.iter().find(|w| w["name"] == "my-wt")
+        let wt = worktrees
+            .iter()
+            .find(|w| w["name"] == "my-wt")
             .expect("should find worktree");
 
         // Should have process_count and processes fields
@@ -1750,10 +1815,7 @@ mod tests {
             wt["process_count"].is_number(),
             "process_count should be a number"
         );
-        assert!(
-            wt["processes"].is_array(),
-            "processes should be an array"
-        );
+        assert!(wt["processes"].is_array(), "processes should be an array");
     }
 
     #[test]
@@ -1766,6 +1828,9 @@ mod tests {
 
         // Should not error — non-existent paths are warnings
         let result = render_table(repo_dir.path(), &db, None, None, &scan_paths);
-        assert!(result.is_ok(), "non-existent scan path should not cause error");
+        assert!(
+            result.is_ok(),
+            "non-existent scan path should not cause error"
+        );
     }
 }

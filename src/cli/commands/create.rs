@@ -212,7 +212,11 @@ pub async fn execute_with_hooks(
     let repo_path_str = path_to_utf8(&repo_info.path)?;
     let repo = match db.get_repo_by_path(repo_path_str)? {
         Some(r) => r,
-        None => db.insert_repo(&repo_info.name, repo_path_str, Some(&repo_info.default_branch))?,
+        None => db.insert_repo(
+            &repo_info.name,
+            repo_path_str,
+            Some(&repo_info.default_branch),
+        )?,
     };
 
     let env_ctx = HookEnvContext {
@@ -295,8 +299,12 @@ pub fn execute(
     let base = from.unwrap_or(&repo_info.default_branch);
 
     if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create worktree parent directory: {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create worktree parent directory: {}",
+                parent.display()
+            )
+        })?;
     }
 
     git::create_worktree(&repo_info.path, branch, base, &worktree_path)?;
@@ -304,12 +312,22 @@ pub fn execute(
     let repo_path_str = path_to_utf8(&repo_info.path)?;
     let repo = match db.get_repo_by_path(repo_path_str)? {
         Some(r) => r,
-        None => db.insert_repo(&repo_info.name, repo_path_str, Some(&repo_info.default_branch))?,
+        None => db.insert_repo(
+            &repo_info.name,
+            repo_path_str,
+            Some(&repo_info.default_branch),
+        )?,
     };
 
     let sanitized_name = paths::sanitize_branch(branch);
     let worktree_path_str = path_to_utf8(&worktree_path)?;
-    let wt = db.insert_worktree(repo.id, &sanitized_name, branch, worktree_path_str, Some(base))?;
+    let wt = db.insert_worktree(
+        repo.id,
+        &sanitized_name,
+        branch,
+        worktree_path_str,
+        Some(base),
+    )?;
 
     db.insert_event(repo.id, Some(wt.id), "created", None)?;
 
@@ -384,7 +402,10 @@ mod tests {
 
         // Worktree exists on disk
         assert!(path.exists(), "worktree directory should exist on disk");
-        assert!(path.join(".git").exists(), "worktree should have .git entry");
+        assert!(
+            path.join(".git").exists(),
+            "worktree should have .git entry"
+        );
 
         // Path is under worktree root at expected location
         let repo_name = repo_dir
@@ -423,9 +444,7 @@ mod tests {
         assert!(worktrees[0].created_at > 0);
 
         // DB: "created" event written
-        let event_count = db
-            .count_events(worktrees[0].id, Some("created"))
-            .unwrap();
+        let event_count = db.count_events(worktrees[0].id, Some("created")).unwrap();
         assert_eq!(event_count, 1, "exactly one 'created' event should exist");
     }
 
@@ -565,7 +584,9 @@ mod tests {
         let develop_branch = repo.branch("develop", &head_commit, false).unwrap();
         let develop_oid = {
             let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-            let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+            let tree = repo
+                .find_tree(repo.index().unwrap().write_tree().unwrap())
+                .unwrap();
             // Commit on develop — now develop is 1 commit ahead of HEAD
             let develop_tip = develop_branch.get().peel_to_commit().unwrap();
             repo.commit(
@@ -620,11 +641,8 @@ mod tests {
 
         // Clone origin into a local working repo
         let local_dir = tempfile::tempdir().unwrap();
-        let local = git2::Repository::clone(
-            origin_dir.path().to_str().unwrap(),
-            local_dir.path(),
-        )
-        .unwrap();
+        let local =
+            git2::Repository::clone(origin_dir.path().to_str().unwrap(), local_dir.path()).unwrap();
 
         // Verify the remote tracking branch exists locally
         assert!(
@@ -815,22 +833,11 @@ mod tests {
         let post_create = plan_hooks
             .post_create
             .expect("post_create should be present");
-        assert_eq!(
-            post_create.run,
-            Some(vec!["bun install".to_string()])
-        );
-        assert_eq!(
-            post_create.copy,
-            Some(vec![".env*".to_string()])
-        );
+        assert_eq!(post_create.run, Some(vec!["bun install".to_string()]));
+        assert_eq!(post_create.copy, Some(vec![".env*".to_string()]));
 
-        let pre_create = plan_hooks
-            .pre_create
-            .expect("pre_create should be present");
-        assert_eq!(
-            pre_create.run,
-            Some(vec!["echo pre".to_string()])
-        );
+        let pre_create = plan_hooks.pre_create.expect("pre_create should be present");
+        assert_eq!(pre_create.run, Some(vec!["echo pre".to_string()]));
     }
 
     #[test]
@@ -854,7 +861,10 @@ mod tests {
         };
 
         let text = plan.to_string();
-        assert!(text.contains("post_create"), "should mention post_create hook");
+        assert!(
+            text.contains("post_create"),
+            "should mention post_create hook"
+        );
         assert!(text.contains("bun install"), "should list run commands");
         assert!(text.contains(".env*"), "should list copy patterns");
     }
@@ -966,7 +976,8 @@ mod tests {
         let hooks = HooksStatus::None;
         let json_output = result.to_json_output(hooks);
         let json_str = format_json_value(&json_output).expect("should serialize to JSON");
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("should be valid JSON");
 
         assert_eq!(parsed["worktree"], "my-feature");
         assert_eq!(parsed["branch"], "my-feature");
@@ -1005,7 +1016,10 @@ mod tests {
         assert_eq!(parsed["branch"], "json-test");
         // path is a real path on disk that exists
         let path_str = parsed["path"].as_str().unwrap();
-        assert!(std::path::Path::new(path_str).exists(), "path should exist on disk");
+        assert!(
+            std::path::Path::new(path_str).exists(),
+            "path should exist on disk"
+        );
         // base_branch is set to the repo's default
         assert!(!parsed["base_branch"].as_str().unwrap().is_empty());
         // hooks status reflects no hooks configured
@@ -1032,7 +1046,10 @@ mod tests {
         )
         .expect("dry-run with --from should succeed");
 
-        assert_eq!(plan.base_branch, "develop", "base should reflect --from override");
+        assert_eq!(
+            plan.base_branch, "develop",
+            "base should reflect --from override"
+        );
     }
 
     #[test]
@@ -1094,7 +1111,7 @@ mod tests {
             wt_root.path(),
             paths::DEFAULT_WORKTREE_TEMPLATE,
             &db,
-            None, // no hooks configured
+            None,  // no hooks configured
             false, // no_hooks flag = false
             None,
         )
@@ -1137,14 +1154,31 @@ mod tests {
         .expect("should succeed");
 
         assert!(matches!(result.hooks_status, HooksStatus::Skipped));
-        assert!(result.result.path.exists(), "worktree should still be created");
+        assert!(
+            result.result.path.exists(),
+            "worktree should still be created"
+        );
 
         // Verify no hook events were logged
-        let repo_path_str = repo_dir.path().canonicalize().unwrap().to_str().unwrap().to_string();
-        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().expect("repo in DB");
+        let repo_path_str = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let db_repo = db
+            .get_repo_by_path(&repo_path_str)
+            .unwrap()
+            .expect("repo in DB");
         let wts = db.list_worktrees(db_repo.id).unwrap();
-        let hook_events = db.count_events(wts[0].id, Some("hook:post_create")).unwrap();
-        assert_eq!(hook_events, 0, "no hook events should be logged when --no-hooks");
+        let hook_events = db
+            .count_events(wts[0].id, Some("hook:post_create"))
+            .unwrap();
+        assert_eq!(
+            hook_events, 0,
+            "no hook events should be logged when --no-hooks"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1276,16 +1310,30 @@ mod tests {
 
         // Marker file in worktree dir proves post_create ran with cwd = worktree
         let marker = result.result.path.join("post_create_ran.marker");
-        assert!(marker.exists(), "post_create hook should have run in worktree dir");
+        assert!(
+            marker.exists(),
+            "post_create hook should have run in worktree dir"
+        );
 
         assert!(matches!(result.hooks_status, HooksStatus::Ran));
         assert!(result.post_create_error.is_none());
 
         // Hook event logged to DB
-        let repo_path_str = repo_dir.path().canonicalize().unwrap().to_str().unwrap().to_string();
-        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().expect("repo in DB");
+        let repo_path_str = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let db_repo = db
+            .get_repo_by_path(&repo_path_str)
+            .unwrap()
+            .expect("repo in DB");
         let wts = db.list_worktrees(db_repo.id).unwrap();
-        let hook_events = db.count_events(wts[0].id, Some("hook:post_create")).unwrap();
+        let hook_events = db
+            .count_events(wts[0].id, Some("hook:post_create"))
+            .unwrap();
         assert_eq!(hook_events, 1, "post_create hook event should be logged");
     }
 
@@ -1343,7 +1391,11 @@ mod tests {
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
 
         // Create files in repo that should be copied by post_create
-        std::fs::write(repo_dir.path().join(".env"), "DATABASE_URL=postgres://localhost/mydb").unwrap();
+        std::fs::write(
+            repo_dir.path().join(".env"),
+            "DATABASE_URL=postgres://localhost/mydb",
+        )
+        .unwrap();
         std::fs::write(repo_dir.path().join(".env.local"), "SECRET=abc123").unwrap();
         std::fs::write(repo_dir.path().join(".env.example"), "DATABASE_URL=").unwrap();
         std::fs::write(repo_dir.path().join("README.md"), "# readme").unwrap();
@@ -1406,11 +1458,25 @@ mod tests {
         assert!(result.post_create_error.is_none());
 
         // DB: hook events logged
-        let repo_path_str = repo_dir.path().canonicalize().unwrap().to_str().unwrap().to_string();
-        let db_repo = db.get_repo_by_path(&repo_path_str).unwrap().expect("repo in DB");
+        let repo_path_str = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let db_repo = db
+            .get_repo_by_path(&repo_path_str)
+            .unwrap()
+            .expect("repo in DB");
         let wts = db.list_worktrees(db_repo.id).unwrap();
-        let post_hook_count = db.count_events(wts[0].id, Some("hook:post_create")).unwrap();
-        assert_eq!(post_hook_count, 1, "post_create hook event should be logged");
+        let post_hook_count = db
+            .count_events(wts[0].id, Some("hook:post_create"))
+            .unwrap();
+        assert_eq!(
+            post_hook_count, 1,
+            "post_create hook event should be logged"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

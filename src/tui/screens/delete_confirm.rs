@@ -1,15 +1,17 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Flex, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 
-const CONFIRM_FOOTER: &str = " Enter/y confirm  Esc/n cancel ";
-const RESULT_FOOTER: &str = " Enter/Space dismiss ";
-
-pub fn render(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
+pub fn render(
+    state: &DeleteConfirmState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
     if let Some(ref result) = state.result {
         render_result(state, result, frame, area, theme);
     } else {
@@ -17,30 +19,15 @@ pub fn render(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, theme: 
     }
 }
 
-/// Compute a centered rectangle within `area`.
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let [area] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .areas(area);
-    area
-}
-
-fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
+fn render_confirm(
+    state: &DeleteConfirmState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
     let bold = Style::default().add_modifier(Modifier::BOLD);
 
-    let dialog_area = centered_rect(60, 10, area);
-    frame.render_widget(Clear, dialog_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border))
-        .title(" Delete Worktree ")
-        .title_alignment(Alignment::Center);
-    let inner = block.inner(dialog_area);
-    frame.render_widget(block, dialog_area);
+    let inner = crate::tui::chrome::render_modal(frame, area, theme, 60, 10, " Delete Worktree ");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // blank
@@ -48,7 +35,7 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, the
         Constraint::Length(1), // path
         Constraint::Length(1), // blank
         Constraint::Length(1), // warning
-        Constraint::Min(0),   // spacer
+        Constraint::Min(0),    // spacer
         Constraint::Length(1), // footer
     ])
     .split(inner);
@@ -118,9 +105,12 @@ fn render_confirm(state: &DeleteConfirmState, frame: &mut Frame, area: Rect, the
     );
 
     // Footer
-    let footer = Paragraph::new(Line::from(CONFIRM_FOOTER))
-        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
-    frame.render_widget(footer, chunks[6]);
+    crate::tui::chrome::render_keybar(
+        frame,
+        chunks[6],
+        theme,
+        &[("Enter/y", "confirm"), ("Esc/n", "cancel")],
+    );
 }
 
 fn render_result(
@@ -131,23 +121,25 @@ fn render_result(
     theme: &crate::tui::theme::Theme,
 ) {
     let status_style = Style::default()
-        .fg(if result.success { theme.success } else { theme.error })
+        .fg(if result.success {
+            theme.success
+        } else {
+            theme.error
+        })
         .add_modifier(Modifier::BOLD);
 
-    let dialog_area = centered_rect(60, 8, area);
-    frame.render_widget(Clear, dialog_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border))
-        .title(if result.success {
+    let inner = crate::tui::chrome::render_modal(
+        frame,
+        area,
+        theme,
+        60,
+        8,
+        if result.success {
             " Removed "
         } else {
             " Delete Failed "
-        })
-        .title_alignment(Alignment::Center);
-    let inner = block.inner(dialog_area);
-    frame.render_widget(block, dialog_area);
+        },
+    );
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // blank
@@ -178,9 +170,7 @@ fn render_result(
         chunks[2],
     );
 
-    let footer = Paragraph::new(Line::from(RESULT_FOOTER))
-        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
-    frame.render_widget(footer, chunks[3]);
+    crate::tui::chrome::render_keybar(frame, chunks[3], theme, &[("Enter/Space", "dismiss")]);
 }
 
 /// View model for the delete confirmation dialog.
@@ -227,7 +217,11 @@ impl DeleteConfirmState {
 mod tests {
     use super::*;
 
-    fn render_to_buffer(state: &DeleteConfirmState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    fn render_to_buffer(
+        state: &DeleteConfirmState,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let theme = crate::tui::theme::from_name("catppuccin");
@@ -243,7 +237,11 @@ mod tests {
 
     #[test]
     fn delete_confirm_state_holds_worktree_info() {
-        let state = DeleteConfirmState::new("feat-auth", "/home/user/.worktrees/repo/feat-auth", "feature/auth");
+        let state = DeleteConfirmState::new(
+            "feat-auth",
+            "/home/user/.worktrees/repo/feat-auth",
+            "feature/auth",
+        );
         assert_eq!(state.worktree_name, "feat-auth");
         assert_eq!(state.worktree_path, "/home/user/.worktrees/repo/feat-auth");
         assert_eq!(state.branch, "feature/auth");
@@ -271,7 +269,10 @@ mod tests {
         let state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("feat-auth"), "should show worktree name, got: {text}");
+        assert!(
+            text.contains("feat-auth"),
+            "should show worktree name, got: {text}"
+        );
     }
 
     #[test]
@@ -279,7 +280,10 @@ mod tests {
         let state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("/tmp/wt/feat-auth"), "should show worktree path");
+        assert!(
+            text.contains("/tmp/wt/feat-auth"),
+            "should show worktree path"
+        );
     }
 
     #[test]
@@ -351,7 +355,10 @@ mod tests {
         });
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("Enter/Space dismiss"), "result footer should show Enter/Space dismiss");
+        assert!(
+            text.contains("Enter/Space dismiss"),
+            "result footer should show Enter/Space dismiss"
+        );
     }
 
     #[test]
@@ -360,8 +367,14 @@ mod tests {
         let state = DeleteConfirmState::new("feat-auth", long_path, "feature/auth");
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("\u{2026}"), "long path should be truncated with ellipsis");
-        assert!(!text.contains(long_path), "full long path should NOT appear in dialog");
+        assert!(
+            text.contains("\u{2026}"),
+            "long path should be truncated with ellipsis"
+        );
+        assert!(
+            !text.contains(long_path),
+            "full long path should NOT appear in dialog"
+        );
     }
 
     #[test]
@@ -400,8 +413,7 @@ mod tests {
 
     #[test]
     fn long_branch_name_is_truncated_in_confirm_dialog() {
-        let long_branch =
-            "feature/very-long-descriptive-branch-name-that-exceeds-dialog-width";
+        let long_branch = "feature/very-long-descriptive-branch-name-that-exceeds-dialog-width";
         let state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", long_branch);
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
@@ -424,7 +436,10 @@ mod tests {
         });
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("Space"), "result footer should mention Space key");
+        assert!(
+            text.contains("Space"),
+            "result footer should mention Space key"
+        );
     }
 
     #[test]
@@ -492,8 +507,14 @@ mod tests {
         let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
 
         // Dialog content should be visible
-        assert!(content.contains("Delete Worktree"), "dialog should be visible");
-        assert!(content.contains("feat-a"), "dialog should show worktree name");
+        assert!(
+            content.contains("Delete Worktree"),
+            "dialog should be visible"
+        );
+        assert!(
+            content.contains("feat-a"),
+            "dialog should show worktree name"
+        );
     }
 
     #[test]
@@ -520,7 +541,8 @@ mod tests {
     fn process_warning_shown_in_confirm_dialog() {
         let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
         // Manually set process warning (since temp dir has no processes)
-        state.process_warning = Some("warning: 2 processes running in this worktree: node, vite".into());
+        state.process_warning =
+            Some("warning: 2 processes running in this worktree: node, vite".into());
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
         assert!(

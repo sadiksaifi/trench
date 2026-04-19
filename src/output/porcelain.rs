@@ -51,8 +51,16 @@ mod tests {
     #[test]
     fn format_porcelain_produces_colon_separated_lines() {
         let items = vec![
-            TestRecord { name: "alpha".into(), branch: "feature/alpha".into(), managed: true },
-            TestRecord { name: "beta".into(), branch: "fix/beta".into(), managed: false },
+            TestRecord {
+                name: "alpha".into(),
+                branch: "feature/alpha".into(),
+                managed: true,
+            },
+            TestRecord {
+                name: "beta".into(),
+                branch: "fix/beta".into(),
+                managed: false,
+            },
         ];
 
         let output = format_porcelain(&items);
@@ -72,9 +80,11 @@ mod tests {
 
     #[test]
     fn format_porcelain_single_record() {
-        let items = vec![
-            TestRecord { name: "solo".into(), branch: "main".into(), managed: true },
-        ];
+        let items = vec![TestRecord {
+            name: "solo".into(),
+            branch: "main".into(),
+            managed: true,
+        }];
 
         let output = format_porcelain(&items);
         assert_eq!(output, "solo:main:true\n");
@@ -82,21 +92,31 @@ mod tests {
 
     #[test]
     fn format_porcelain_ends_each_line_with_newline() {
-        let items = vec![
-            TestRecord { name: "a".into(), branch: "b".into(), managed: true },
-        ];
+        let items = vec![TestRecord {
+            name: "a".into(),
+            branch: "b".into(),
+            managed: true,
+        }];
 
         let output = format_porcelain(&items);
-        assert!(output.ends_with('\n'), "each record line must end with newline");
+        assert!(
+            output.ends_with('\n'),
+            "each record line must end with newline"
+        );
     }
 
     #[test]
     fn format_porcelain_contains_no_ansi_codes() {
-        let items = vec![
-            TestRecord { name: "test".into(), branch: "dev".into(), managed: false },
-        ];
+        let items = vec![TestRecord {
+            name: "test".into(),
+            branch: "dev".into(),
+            managed: false,
+        }];
 
         let output = format_porcelain(&items);
-        assert!(!output.contains('\x1b'), "porcelain output must not contain ANSI escape codes");
+        assert!(
+            !output.contains('\x1b'),
+            "porcelain output must not contain ANSI escape codes"
+        );
     }
 }

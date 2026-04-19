@@ -94,7 +94,10 @@ mod tests {
         let ops = parse_tag_args(&["+wip".to_string(), "+review".to_string()]).unwrap();
         assert_eq!(
             ops,
-            vec![TagOp::Add("wip".to_string()), TagOp::Add("review".to_string())]
+            vec![
+                TagOp::Add("wip".to_string()),
+                TagOp::Add("review".to_string())
+            ]
         );
     }
 
@@ -109,7 +112,10 @@ mod tests {
         let ops = parse_tag_args(&["+wip".to_string(), "-old".to_string()]).unwrap();
         assert_eq!(
             ops,
-            vec![TagOp::Add("wip".to_string()), TagOp::Remove("old".to_string())]
+            vec![
+                TagOp::Add("wip".to_string()),
+                TagOp::Remove("old".to_string())
+            ]
         );
     }
 
@@ -149,7 +155,10 @@ mod tests {
         .unwrap();
 
         assert!(output.contains("wip"), "output should mention wip tag");
-        assert!(output.contains("review"), "output should mention review tag");
+        assert!(
+            output.contains("review"),
+            "output should mention review tag"
+        );
 
         // Verify in DB
         let tags = db.list_tags(wt.id).unwrap();
@@ -213,13 +222,7 @@ mod tests {
         db.add_tag(wt.id, "wip").unwrap();
         db.add_tag(wt.id, "review").unwrap();
 
-        let output = execute(
-            "my-wt",
-            &["-wip".to_string()],
-            repo_dir.path(),
-            &db,
-        )
-        .unwrap();
+        let output = execute("my-wt", &["-wip".to_string()], repo_dir.path(), &db).unwrap();
 
         assert!(!output.contains("wip"), "wip should be removed");
         assert!(output.contains("review"), "review should remain");
@@ -245,15 +248,12 @@ mod tests {
 
         db.add_tag(wt.id, "wip").unwrap();
 
-        let output = execute(
-            "my-wt",
-            &["-wip".to_string()],
-            repo_dir.path(),
-            &db,
-        )
-        .unwrap();
+        let output = execute("my-wt", &["-wip".to_string()], repo_dir.path(), &db).unwrap();
 
-        assert!(output.contains("All tags removed"), "should show removal message");
+        assert!(
+            output.contains("All tags removed"),
+            "should show removal message"
+        );
         let tags = db.list_tags(wt.id).unwrap();
         assert!(tags.is_empty());
     }

@@ -77,7 +77,6 @@ impl FileWatcher {
         }
         got_any
     }
-
 }
 
 /// Wraps a `FileWatcher` with trailing-edge debounce logic.
@@ -200,7 +199,10 @@ mod tests {
         let watcher = FileWatcher::new(&[dir.path()]).unwrap();
 
         // No events initially
-        assert!(!watcher.drain_events(), "should have no events before any changes");
+        assert!(
+            !watcher.drain_events(),
+            "should have no events before any changes"
+        );
 
         // Create a file — should trigger an event
         fs::write(dir.path().join("test.txt"), "hello").unwrap();
@@ -240,7 +242,10 @@ mod tests {
         let nonexistent = dir.path().join("does-not-exist");
         // Should not error — nonexistent paths are silently skipped
         let watcher = FileWatcher::new(&[&nonexistent]);
-        assert!(watcher.is_ok(), "should handle nonexistent paths gracefully");
+        assert!(
+            watcher.is_ok(),
+            "should handle nonexistent paths gracefully"
+        );
     }
 
     #[test]
@@ -253,17 +258,17 @@ mod tests {
         watcher.drain_events();
 
         // No changes made — should return false
-        assert!(!watcher.drain_events(), "should return false with no pending events");
+        assert!(
+            !watcher.drain_events(),
+            "should return false with no pending events"
+        );
     }
 
     #[test]
     fn debounced_watcher_no_refresh_without_events() {
         let dir = TempDir::new().unwrap();
-        let mut dw = DebouncedWatcher::with_debounce(
-            &[dir.path()],
-            Duration::from_millis(50),
-        )
-        .unwrap();
+        let mut dw =
+            DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(50)).unwrap();
 
         // Drain any startup noise
         std::thread::sleep(Duration::from_millis(100));
@@ -276,11 +281,8 @@ mod tests {
     #[test]
     fn debounced_watcher_no_refresh_during_debounce_window() {
         let dir = TempDir::new().unwrap();
-        let mut dw = DebouncedWatcher::with_debounce(
-            &[dir.path()],
-            Duration::from_millis(300),
-        )
-        .unwrap();
+        let mut dw =
+            DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(300)).unwrap();
 
         // Drain startup noise
         std::thread::sleep(Duration::from_millis(100));
@@ -291,17 +293,17 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
 
         // Event received but debounce window (300ms) not yet elapsed
-        assert!(!dw.should_refresh(), "should not refresh during debounce window");
+        assert!(
+            !dw.should_refresh(),
+            "should not refresh during debounce window"
+        );
     }
 
     #[test]
     fn debounced_watcher_refreshes_after_debounce_window() {
         let dir = TempDir::new().unwrap();
-        let mut dw = DebouncedWatcher::with_debounce(
-            &[dir.path()],
-            Duration::from_millis(100),
-        )
-        .unwrap();
+        let mut dw =
+            DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(100)).unwrap();
 
         // Drain startup noise
         std::thread::sleep(Duration::from_millis(100));
@@ -315,17 +317,17 @@ mod tests {
         // Wait for debounce to expire
         std::thread::sleep(Duration::from_millis(150));
 
-        assert!(dw.should_refresh(), "should refresh after debounce window expires");
+        assert!(
+            dw.should_refresh(),
+            "should refresh after debounce window expires"
+        );
     }
 
     #[test]
     fn debounced_watcher_resets_on_new_events() {
         let dir = TempDir::new().unwrap();
-        let mut dw = DebouncedWatcher::with_debounce(
-            &[dir.path()],
-            Duration::from_millis(200),
-        )
-        .unwrap();
+        let mut dw =
+            DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(200)).unwrap();
 
         // Drain startup noise
         std::thread::sleep(Duration::from_millis(100));
@@ -349,11 +351,8 @@ mod tests {
     #[test]
     fn debounced_watcher_clears_after_refresh() {
         let dir = TempDir::new().unwrap();
-        let mut dw = DebouncedWatcher::with_debounce(
-            &[dir.path()],
-            Duration::from_millis(50),
-        )
-        .unwrap();
+        let mut dw =
+            DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(50)).unwrap();
 
         // Drain startup noise
         std::thread::sleep(Duration::from_millis(100));
@@ -366,7 +365,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
 
         assert!(dw.should_refresh(), "first call should return true");
-        assert!(!dw.should_refresh(), "second call should return false (cleared)");
+        assert!(
+            !dw.should_refresh(),
+            "second call should return false (cleared)"
+        );
     }
 
     #[test]
@@ -430,11 +432,9 @@ mod tests {
         }
 
         // Use the constructor that takes worktree paths and auto-discovers .git dirs
-        let mut dw = DebouncedWatcher::from_worktree_paths(
-            &[dir.path()],
-            Duration::from_millis(50),
-        )
-        .unwrap();
+        let mut dw =
+            DebouncedWatcher::from_worktree_paths(&[dir.path()], Duration::from_millis(50))
+                .unwrap();
 
         // Drain startup noise
         std::thread::sleep(Duration::from_millis(200));
@@ -450,7 +450,10 @@ mod tests {
         dw.should_refresh(); // picks up event
 
         std::thread::sleep(Duration::from_millis(100));
-        assert!(dw.should_refresh(), "should auto-discover and watch .git directory");
+        assert!(
+            dw.should_refresh(),
+            "should auto-discover and watch .git directory"
+        );
     }
 
     #[test]
@@ -476,7 +479,10 @@ mod tests {
         // Watcher should still be functional after potential errors
         fs::write(dir.path().join("after.txt"), "still works").unwrap();
         std::thread::sleep(Duration::from_millis(200));
-        assert!(watcher.drain_events(), "watcher should continue after error events");
+        assert!(
+            watcher.drain_events(),
+            "watcher should continue after error events"
+        );
     }
 
     #[test]
@@ -485,11 +491,8 @@ mod tests {
         let subdir = dir.path().join("watched");
         fs::create_dir(&subdir).unwrap();
 
-        let mut dw = DebouncedWatcher::with_debounce(
-            &[dir.path()],
-            Duration::from_millis(50),
-        )
-        .unwrap();
+        let mut dw =
+            DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(50)).unwrap();
 
         // Drain startup
         std::thread::sleep(Duration::from_millis(100));
@@ -507,7 +510,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         dw.should_refresh();
         std::thread::sleep(Duration::from_millis(100));
-        assert!(dw.should_refresh(), "debounced watcher should continue after watched dir removed");
+        assert!(
+            dw.should_refresh(),
+            "debounced watcher should continue after watched dir removed"
+        );
     }
 
     #[test]
@@ -524,7 +530,10 @@ mod tests {
         fs::write(dir2.path().join("file.txt"), "data").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
 
-        assert!(watcher.drain_events(), "should detect changes in second directory");
+        assert!(
+            watcher.drain_events(),
+            "should detect changes in second directory"
+        );
     }
 
     #[test]

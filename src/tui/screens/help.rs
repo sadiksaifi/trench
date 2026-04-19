@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Flex, Layout, Rect},
+    layout::{Alignment, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 
@@ -26,29 +26,68 @@ pub fn keybinding_groups() -> &'static [KeybindingGroup] {
         KeybindingGroup {
             context: "Global",
             bindings: &[
-                KeybindingEntry { key: "?", description: "Toggle help overlay" },
-                KeybindingEntry { key: "q / Esc", description: "Back / quit" },
-                KeybindingEntry { key: "Ctrl+c", description: "Force quit" },
+                KeybindingEntry {
+                    key: "?",
+                    description: "Toggle help overlay",
+                },
+                KeybindingEntry {
+                    key: "q / Esc",
+                    description: "Back / quit",
+                },
+                KeybindingEntry {
+                    key: "Ctrl+c",
+                    description: "Force quit",
+                },
             ],
         },
         KeybindingGroup {
             context: "List",
             bindings: &[
-                KeybindingEntry { key: "j / ↓", description: "Move down" },
-                KeybindingEntry { key: "k / ↑", description: "Move up" },
-                KeybindingEntry { key: "Enter", description: "Switch to worktree" },
-                KeybindingEntry { key: "d", description: "Open detail view" },
-                KeybindingEntry { key: "n", description: "Create worktree" },
-                KeybindingEntry { key: "s", description: "Sync worktree" },
-                KeybindingEntry { key: "D", description: "Delete worktree" },
-                KeybindingEntry { key: "l", description: "View hook log" },
+                KeybindingEntry {
+                    key: "j / ↓",
+                    description: "Move down",
+                },
+                KeybindingEntry {
+                    key: "k / ↑",
+                    description: "Move up",
+                },
+                KeybindingEntry {
+                    key: "Enter",
+                    description: "Switch to worktree",
+                },
+                KeybindingEntry {
+                    key: "d",
+                    description: "Open detail view",
+                },
+                KeybindingEntry {
+                    key: "n",
+                    description: "Create worktree",
+                },
+                KeybindingEntry {
+                    key: "s",
+                    description: "Sync worktree",
+                },
+                KeybindingEntry {
+                    key: "D",
+                    description: "Delete worktree",
+                },
+                KeybindingEntry {
+                    key: "l",
+                    description: "View hook log",
+                },
             ],
         },
         KeybindingGroup {
             context: "Detail",
             bindings: &[
-                KeybindingEntry { key: "s", description: "Sync worktree" },
-                KeybindingEntry { key: "o", description: "Open in $EDITOR" },
+                KeybindingEntry {
+                    key: "s",
+                    description: "Sync worktree",
+                },
+                KeybindingEntry {
+                    key: "o",
+                    description: "Open in $EDITOR",
+                },
             ],
         },
     ];
@@ -60,8 +99,10 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
     let groups = keybinding_groups();
 
     // Build lines from keybinding data
-    let bold = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(theme.dimmed);
+    let bold = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(theme.fg_muted);
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     for (i, group) in groups.iter().enumerate() {
@@ -78,38 +119,19 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Press ? or Esc to close",
-        dim,
-    )));
+    lines.push(Line::from(Span::styled("Press ? or Esc to close", dim)));
 
     // Size the dialog to fit content + border
     let content_height = lines.len() as u16;
     let dialog_width = 44;
     let dialog_height = content_height + 2; // +2 for top/bottom border
 
-    let dialog_area = centered_rect(dialog_width, dialog_height, area);
-    frame.render_widget(Clear, dialog_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border))
-        .title(" Help ")
-        .title_alignment(Alignment::Center);
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, dialog_area);
-}
-
-/// Compute a centered rectangle within `area`.
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let [area] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .areas(area);
-    area
+    let inner =
+        crate::tui::chrome::render_modal(frame, area, theme, dialog_width, dialog_height, " Help ");
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().fg(theme.fg).bg(theme.bg_panel))
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner);
 }
 
 #[cfg(test)]
@@ -135,7 +157,10 @@ mod tests {
     fn render_shows_help_title_in_border() {
         let buf = render_to_buffer(60, 30);
         let text = buffer_text(&buf);
-        assert!(text.contains("Help"), "should contain 'Help' title in border");
+        assert!(
+            text.contains("Help"),
+            "should contain 'Help' title in border"
+        );
     }
 
     #[test]
@@ -156,9 +181,15 @@ mod tests {
         let buf = render_to_buffer(60, 30);
         let text = buffer_text(&buf);
         // Check a sample of keybindings appear
-        assert!(text.contains("Toggle help overlay"), "should show '?' description");
+        assert!(
+            text.contains("Toggle help overlay"),
+            "should show '?' description"
+        );
         assert!(text.contains("Move down"), "should show j/↓ description");
-        assert!(text.contains("Sync worktree"), "should show sync description");
+        assert!(
+            text.contains("Sync worktree"),
+            "should show sync description"
+        );
     }
 
     #[test]
@@ -176,7 +207,11 @@ mod tests {
         let groups = keybinding_groups();
 
         // Must have at least 3 groups: Global, List, Detail
-        assert!(groups.len() >= 3, "expected at least 3 groups, got {}", groups.len());
+        assert!(
+            groups.len() >= 3,
+            "expected at least 3 groups, got {}",
+            groups.len()
+        );
 
         let contexts: Vec<&str> = groups.iter().map(|g| g.context).collect();
         assert!(contexts.contains(&"Global"), "missing Global group");
@@ -202,7 +237,10 @@ mod tests {
         let global = groups.iter().find(|g| g.context == "Global").unwrap();
         let keys: Vec<&str> = global.bindings.iter().map(|b| b.key).collect();
         assert!(keys.contains(&"?"), "Global group missing '?' keybinding");
-        assert!(keys.contains(&"q / Esc"), "Global group missing quit keybinding");
+        assert!(
+            keys.contains(&"q / Esc"),
+            "Global group missing quit keybinding"
+        );
     }
 
     #[test]
@@ -210,8 +248,17 @@ mod tests {
         let groups = keybinding_groups();
         let list = groups.iter().find(|g| g.context == "List").unwrap();
         let descs: Vec<&str> = list.bindings.iter().map(|b| b.description).collect();
-        assert!(descs.contains(&"Switch to worktree"), "List group missing switch binding");
-        assert!(descs.contains(&"Open detail view"), "List group missing detail binding");
-        assert!(descs.contains(&"View hook log"), "List group missing log binding");
+        assert!(
+            descs.contains(&"Switch to worktree"),
+            "List group missing switch binding"
+        );
+        assert!(
+            descs.contains(&"Open detail view"),
+            "List group missing detail binding"
+        );
+        assert!(
+            descs.contains(&"View hook log"),
+            "List group missing log binding"
+        );
     }
 }

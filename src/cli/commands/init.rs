@@ -23,10 +23,11 @@ const SCAFFOLD: &str = r#"# trench — project configuration
 # ─── UI ──────────────────────────────────────────────────────────────
 
 # [ui]
-# theme = "default"
+# theme = "ops"
 # date_format = "%Y-%m-%d %H:%M"
 # show_ahead_behind = true
 # show_dirty_count = true
+# auto_refresh = true
 
 # ─── Git ─────────────────────────────────────────────────────────────
 
@@ -132,31 +133,76 @@ mod tests {
         let contents = std::fs::read_to_string(path).unwrap();
 
         // All config sections should be present as comments
-        assert!(contents.contains("# [ui]"), "should contain commented [ui] section");
-        assert!(contents.contains("# [git]"), "should contain commented [git] section");
-        assert!(contents.contains("# [worktrees]"), "should contain commented [worktrees] section");
+        assert!(
+            contents.contains("# [ui]"),
+            "should contain commented [ui] section"
+        );
+        assert!(
+            contents.contains("# [git]"),
+            "should contain commented [git] section"
+        );
+        assert!(
+            contents.contains("# [worktrees]"),
+            "should contain commented [worktrees] section"
+        );
 
         // All six hook sections
-        assert!(contents.contains("# [hooks.pre_create]"), "should contain pre_create hook");
-        assert!(contents.contains("# [hooks.post_create]"), "should contain post_create hook");
-        assert!(contents.contains("# [hooks.pre_sync]"), "should contain pre_sync hook");
-        assert!(contents.contains("# [hooks.post_sync]"), "should contain post_sync hook");
-        assert!(contents.contains("# [hooks.pre_remove]"), "should contain pre_remove hook");
-        assert!(contents.contains("# [hooks.post_remove]"), "should contain post_remove hook");
+        assert!(
+            contents.contains("# [hooks.pre_create]"),
+            "should contain pre_create hook"
+        );
+        assert!(
+            contents.contains("# [hooks.post_create]"),
+            "should contain post_create hook"
+        );
+        assert!(
+            contents.contains("# [hooks.pre_sync]"),
+            "should contain pre_sync hook"
+        );
+        assert!(
+            contents.contains("# [hooks.post_sync]"),
+            "should contain post_sync hook"
+        );
+        assert!(
+            contents.contains("# [hooks.pre_remove]"),
+            "should contain pre_remove hook"
+        );
+        assert!(
+            contents.contains("# [hooks.post_remove]"),
+            "should contain post_remove hook"
+        );
 
         // Key config fields should be documented
         assert!(contents.contains("# theme"), "should document theme");
-        assert!(contents.contains("# default_base"), "should document default_base");
-        assert!(contents.contains("# root"), "should document worktrees.root");
+        assert!(
+            contents.contains("# default_base"),
+            "should document default_base"
+        );
+        assert!(
+            contents.contains("# root"),
+            "should document worktrees.root"
+        );
 
         // Hook fields should be documented
-        assert!(contents.contains("# copy"), "should document hook copy field");
+        assert!(
+            contents.contains("# copy"),
+            "should document hook copy field"
+        );
         assert!(contents.contains("# run"), "should document hook run field");
-        assert!(contents.contains("# shell"), "should document hook shell field");
-        assert!(contents.contains("# timeout_secs"), "should document hook timeout_secs");
+        assert!(
+            contents.contains("# shell"),
+            "should document hook shell field"
+        );
+        assert!(
+            contents.contains("# timeout_secs"),
+            "should document hook timeout_secs"
+        );
 
         // Should have inline documentation
-        assert!(contents.contains("Uncomment"), "should have usage instructions");
+        assert!(
+            contents.contains("Uncomment"),
+            "should have usage instructions"
+        );
     }
 
     #[test]
@@ -195,9 +241,7 @@ mod tests {
                 if let Some(rest) = trimmed.strip_prefix("# ") {
                     // Only uncomment lines that look like TOML content
                     let rest_trimmed = rest.trim_start();
-                    if rest_trimmed.starts_with('[')
-                        || rest_trimmed.contains(" = ")
-                    {
+                    if rest_trimmed.starts_with('[') || rest_trimmed.contains(" = ") {
                         return rest;
                     }
                 }
@@ -232,8 +276,8 @@ mod tests {
         assert!(path.exists());
 
         // Verify the file can be loaded by the config system
-        let config = crate::config::load_project_config(dir.path())
-            .expect("should load without error");
+        let config =
+            crate::config::load_project_config(dir.path()).expect("should load without error");
         // All sections are commented out, so parsed config should have no active sections
         let config = config.expect("file exists, so should return Some");
         assert!(config.ui.is_none(), "all sections should be commented out");
@@ -250,7 +294,11 @@ mod tests {
 
         let result = execute(dir.path(), true);
 
-        assert!(result.is_ok(), "init --force should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "init --force should succeed: {:?}",
+            result.err()
+        );
         let contents = std::fs::read_to_string(&existing).unwrap();
         assert!(
             contents.contains("# trench — project configuration"),

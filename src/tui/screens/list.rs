@@ -9,8 +9,8 @@ use crate::state::Database;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    text::{Line, Span},
+    widgets::{Cell, Paragraph, Row, Table, TableState},
     Frame,
 };
 
@@ -85,7 +85,11 @@ impl ListState {
 ///
 /// Additional directories in `scan_paths` are scanned for worktrees that
 /// may live outside the default location (FR-30).
-pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Result<Vec<WorktreeRow>> {
+pub fn load_worktrees(
+    cwd: &Path,
+    db: &Database,
+    scan_paths: &[String],
+) -> Result<Vec<WorktreeRow>> {
     let repo_info = git::discover_repo(cwd)?;
     let repo_path = &repo_info.path;
     let repo_path_str = repo_path
@@ -108,7 +112,11 @@ pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Resul
     for wt in &db_worktrees {
         let status = compute_status(repo_path, &wt.branch, wt.base_branch.as_deref(), &wt.path);
         let procs = crate::process::detect_processes(&wt.path);
-        let processes = procs.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ");
+        let processes = procs
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
         rows.push(WorktreeRow {
             name: wt.name.clone(),
             branch: wt.branch.clone(),
@@ -123,16 +131,18 @@ pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Resul
     let git_worktrees = git::list_worktrees(repo_path)?;
     for gw in &git_worktrees {
         if !managed_paths.contains(&gw.path) {
-            let branch = gw.branch.clone().unwrap_or_else(|| "(detached)".to_string());
-            let status = compute_status(
-                repo_path,
-                &branch,
-                None,
-                &gw.path.to_string_lossy(),
-            );
+            let branch = gw
+                .branch
+                .clone()
+                .unwrap_or_else(|| "(detached)".to_string());
+            let status = compute_status(repo_path, &branch, None, &gw.path.to_string_lossy());
             let wt_path_str = gw.path.to_string_lossy().to_string();
             let procs = crate::process::detect_processes(&wt_path_str);
-            let processes = procs.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ");
+            let processes = procs
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
             rows.push(WorktreeRow {
                 name: gw.name.clone(),
                 branch,
@@ -156,16 +166,18 @@ pub fn load_worktrees(cwd: &Path, db: &Database, scan_paths: &[String]) -> Resul
         for sw in scanned {
             if !seen_paths.contains(&sw.path) {
                 seen_paths.insert(sw.path.clone());
-                let branch = sw.branch.clone().unwrap_or_else(|| "(detached)".to_string());
+                let branch = sw
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| "(detached)".to_string());
                 let wt_path_str = sw.path.to_string_lossy().to_string();
-                let status = compute_status(
-                    repo_path,
-                    &branch,
-                    None,
-                    &wt_path_str,
-                );
+                let status = compute_status(repo_path, &branch, None, &wt_path_str);
                 let procs = crate::process::detect_processes(&wt_path_str);
-                let processes = procs.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ");
+                let processes = procs
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 rows.push(WorktreeRow {
                     name: sw.name.clone(),
                     branch,
@@ -203,12 +215,20 @@ fn compute_status(
     (status, ab)
 }
 
-const FOOTER_KEYS: &str = " Enter switch  d detail  n create  s sync  D delete  l log  q quit ";
+const KEYBAR_ITEMS: [(&str, &str); 7] = [
+    ("Enter", "switch"),
+    ("d", "detail"),
+    ("n", "create"),
+    ("s", "sync"),
+    ("D", "delete"),
+    ("l", "log"),
+    ("q", "quit"),
+];
 
 pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
-    let base_style = Style::default().fg(theme.foreground).bg(theme.background);
+    let base_style = Style::default().fg(theme.fg).bg(theme.bg);
     let footer_style = Style::default()
-        .fg(theme.background)
+        .fg(theme.selection_fg)
         .bg(theme.accent)
         .add_modifier(Modifier::BOLD);
 
@@ -218,15 +238,20 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
             .alignment(ratatui::layout::Alignment::Center);
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
         frame.render_widget(msg, chunks[0]);
-        render_footer(state, frame, chunks[1], theme, &footer_style);
+        render_legacy_footer(state, frame, chunks[1], theme, &footer_style);
         return;
     }
 
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
-
     let header_cells = ["Name", "Branch", "Status", "Ahead/Behind", "Procs", ""]
         .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)));
+        .map(|h| {
+            Cell::from(*h).style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
     let header = Row::new(header_cells).height(1);
 
     let rows: Vec<Row> = state
@@ -237,7 +262,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
             let style = if r.managed {
                 base_style
             } else {
-                Style::default().fg(theme.dimmed).bg(theme.background)
+                Style::default().fg(theme.fg_muted).bg(theme.bg)
             };
             Row::new(vec![
                 Cell::from(r.name.clone()),
@@ -251,31 +276,322 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
         })
         .collect();
 
-    let widths = [
-        Constraint::Percentage(20),
-        Constraint::Percentage(20),
-        Constraint::Percentage(10),
-        Constraint::Percentage(15),
-        Constraint::Percentage(15),
-        Constraint::Percentage(20),
-    ];
-
-    let table = Table::new(rows, widths)
-        .header(header)
-        .style(base_style)
-        .block(Block::default().borders(Borders::NONE))
-        .row_highlight_style(Style::default().bg(theme.accent).fg(theme.background));
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(10),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Percentage(20),
+        ],
+    )
+    .header(header)
+    .style(base_style)
+    .row_highlight_style(Style::default().bg(theme.accent).fg(theme.selection_fg));
 
     let mut table_state = TableState::default();
     table_state.select(Some(state.selected));
-
     frame.render_stateful_widget(table, chunks[0], &mut table_state);
-
-    render_footer(state, frame, chunks[1], theme, &footer_style);
+    render_legacy_footer(state, frame, chunks[1], theme, &footer_style);
 }
 
-/// Render the footer area: status message if active, otherwise keybinding hints.
+pub fn render_with_options(
+    state: &ListState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+    options: &crate::tui::chrome::UiOptions,
+) {
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    render_summary_bar(state, frame, chunks[0], theme);
+
+    if state.rows.is_empty() {
+        crate::tui::chrome::render_empty_state(
+            frame,
+            chunks[1],
+            theme,
+            "Worktrees",
+            "No worktrees. Press n to create one.",
+        );
+        render_footer(state, frame, chunks[2], theme);
+        return;
+    }
+
+    let body_chunks = if chunks[1].width >= 120 {
+        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .split(chunks[1])
+    } else {
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(chunks[1])
+    };
+
+    render_table(state, frame, body_chunks[0], theme, options);
+    render_inspector(state, frame, body_chunks[1], theme, options);
+    render_footer(state, frame, chunks[2], theme);
+}
+
+fn render_summary_bar(
+    state: &ListState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
+    let managed = state.rows.iter().filter(|row| row.managed).count();
+    let unmanaged = state.rows.len().saturating_sub(managed);
+    let line = Line::from(vec![
+        Span::styled(
+            "Worktree Cockpit",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        crate::tui::chrome::pill(
+            theme,
+            &format!("{} total", state.rows.len()),
+            crate::tui::chrome::Tone::Muted,
+        ),
+        Span::raw("  "),
+        crate::tui::chrome::pill(
+            theme,
+            &format!("{managed} managed"),
+            crate::tui::chrome::Tone::Success,
+        ),
+        Span::raw("  "),
+        crate::tui::chrome::pill(
+            theme,
+            &format!("{unmanaged} unmanaged"),
+            crate::tui::chrome::Tone::Warning,
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().fg(theme.fg).bg(theme.bg)),
+        area,
+    );
+}
+
+fn render_table(
+    state: &ListState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+    options: &crate::tui::chrome::UiOptions,
+) {
+    let mut titles = vec![
+        Cell::from("Name"),
+        Cell::from("Branch"),
+        Cell::from("Status"),
+    ];
+    if options.show_ahead_behind {
+        titles.push(Cell::from("Ahead/Behind"));
+    }
+    titles.push(Cell::from("Procs"));
+    titles.push(Cell::from(""));
+
+    let header = Row::new(titles.into_iter().map(|cell| {
+        cell.style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    }));
+
+    let rows: Vec<Row> = state
+        .rows
+        .iter()
+        .map(|row| {
+            let mut cells = vec![
+                Cell::from(row.name.clone()),
+                Cell::from(row.branch.clone()),
+                Cell::from(display_status(&row.status, options.show_dirty_count)),
+            ];
+            if options.show_ahead_behind {
+                cells.push(Cell::from(row.ahead_behind.clone()));
+            }
+            cells.push(Cell::from(if row.processes.is_empty() {
+                "idle".to_string()
+            } else {
+                row.processes.clone()
+            }));
+            cells.push(Cell::from(if row.managed {
+                String::new()
+            } else {
+                "[unmanaged]".to_string()
+            }));
+
+            Row::new(cells).style(if row.managed {
+                Style::default().fg(theme.fg).bg(theme.bg_panel)
+            } else {
+                Style::default().fg(theme.fg_muted).bg(theme.bg_panel)
+            })
+        })
+        .collect();
+
+    let widths = if options.show_ahead_behind {
+        vec![
+            Constraint::Percentage(18),
+            Constraint::Percentage(24),
+            Constraint::Percentage(13),
+            Constraint::Percentage(16),
+            Constraint::Percentage(17),
+            Constraint::Percentage(12),
+        ]
+    } else {
+        vec![
+            Constraint::Percentage(20),
+            Constraint::Percentage(28),
+            Constraint::Percentage(15),
+            Constraint::Percentage(25),
+            Constraint::Percentage(12),
+        ]
+    };
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(crate::tui::chrome::panel(" Worktrees ", theme))
+        .row_highlight_style(
+            Style::default()
+                .fg(theme.selection_fg)
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().fg(theme.fg).bg(theme.bg_panel));
+
+    let mut table_state = TableState::default();
+    table_state.select(Some(state.selected));
+    frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+fn render_inspector(
+    state: &ListState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+    options: &crate::tui::chrome::UiOptions,
+) {
+    let Some(selected) = state.rows.get(state.selected) else {
+        return;
+    };
+    let block = crate::tui::chrome::panel(" Focus ", theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let process_text = if selected.processes.is_empty() {
+        "idle".to_string()
+    } else {
+        selected.processes.clone()
+    };
+    let management = if selected.managed {
+        "managed"
+    } else {
+        "unmanaged"
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            selected.name.clone(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        metric_line("Branch", &selected.branch, theme),
+        metric_line("Path", &selected.path, theme),
+        metric_line(
+            "Status",
+            &display_status(&selected.status, options.show_dirty_count),
+            theme,
+        ),
+        metric_line("Mode", management, theme),
+    ];
+    if options.show_ahead_behind {
+        lines.push(metric_line("Ahead/Behind", &selected.ahead_behind, theme));
+    }
+    lines.push(metric_line("Processes", &process_text, theme));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        crate::tui::chrome::pill(
+            theme,
+            management,
+            if selected.managed {
+                crate::tui::chrome::Tone::Success
+            } else {
+                crate::tui::chrome::Tone::Warning
+            },
+        ),
+        Span::raw(" "),
+        crate::tui::chrome::pill(
+            theme,
+            &display_status(&selected.status, options.show_dirty_count),
+            status_tone(&selected.status),
+        ),
+    ]));
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+        inner,
+    );
+}
+
+fn metric_line(label: &str, value: &str, theme: &crate::tui::theme::Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<12}"),
+            Style::default()
+                .fg(theme.fg_muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(value.to_string()),
+    ])
+}
+
+fn display_status(raw: &str, show_dirty_count: bool) -> String {
+    if show_dirty_count || raw == "clean" {
+        raw.to_string()
+    } else {
+        "dirty".to_string()
+    }
+}
+
+fn status_tone(status: &str) -> crate::tui::chrome::Tone {
+    if status == "clean" {
+        crate::tui::chrome::Tone::Success
+    } else {
+        crate::tui::chrome::Tone::Warning
+    }
+}
+
 fn render_footer(
+    state: &ListState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
+    if let Some(ref status) = state.status_message {
+        let tone = if status.success {
+            crate::tui::chrome::Tone::Success
+        } else {
+            crate::tui::chrome::Tone::Error
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                crate::tui::chrome::pill(theme, "status", tone),
+                Span::raw(format!(" {}", status.text)),
+            ]))
+            .style(Style::default().fg(theme.fg).bg(theme.bg_elevated)),
+            area,
+        );
+    } else {
+        crate::tui::chrome::render_keybar(frame, area, theme, &KEYBAR_ITEMS);
+    }
+}
+
+fn render_legacy_footer(
     state: &ListState,
     frame: &mut Frame,
     area: Rect,
@@ -288,15 +604,23 @@ fn render_footer(
         } else {
             theme.error
         };
-        let style = Style::default()
-            .fg(color)
-            .bg(theme.background)
-            .add_modifier(Modifier::BOLD);
-        let footer = Paragraph::new(Line::from(format!(" {}", status.text))).style(style);
-        frame.render_widget(footer, area);
+        frame.render_widget(
+            Paragraph::new(Line::from(format!(" {}", status.text))).style(
+                Style::default()
+                    .fg(color)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            area,
+        );
     } else {
-        let footer = Paragraph::new(Line::from(FOOTER_KEYS)).style(*footer_style);
-        frame.render_widget(footer, area);
+        frame.render_widget(
+            Paragraph::new(Line::from(
+                " Enter switch  d detail  n create  s sync  D delete  l log  q quit ",
+            ))
+            .style(*footer_style),
+            area,
+        );
     }
 }
 
@@ -505,8 +829,8 @@ mod tests {
         // The unmanaged row is index 2 (third row), rendered at buffer row 3 (header=0, row0=1, row1=2, row2=3)
         let cell = buf.cell((0, 3)).unwrap();
         assert_eq!(
-            cell.fg, theme.dimmed,
-            "unmanaged row should use theme.dimmed color, got: {:?}",
+            cell.fg, theme.fg_muted,
+            "unmanaged row should use theme.fg_muted color, got: {:?}",
             cell.fg
         );
     }
@@ -516,7 +840,10 @@ mod tests {
         let state = ListState::new(sample_rows());
         let buf = render_to_buffer(&state, 100, 10);
         let text = buffer_text(&buf);
-        assert!(text.contains("Enter switch"), "footer should show Enter switch");
+        assert!(
+            text.contains("Enter switch"),
+            "footer should show Enter switch"
+        );
         assert!(text.contains("d detail"), "footer should show d detail");
         assert!(text.contains("n create"), "footer should show n create");
         assert!(text.contains("s sync"), "footer should show s sync");
@@ -560,8 +887,8 @@ mod tests {
         let y = (offset / width) as u16;
         let cell = buf.cell((x, y)).unwrap();
         assert_eq!(
-            cell.fg, theme.foreground,
-            "empty state text should use theme.foreground, got: {:?}",
+            cell.fg, theme.fg,
+            "empty state text should use theme.fg, got: {:?}",
             cell.fg
         );
     }
@@ -608,8 +935,8 @@ mod tests {
         // Row 0 is at buffer row 1 (header at row 0)
         let cell = buf.cell((0, 1)).unwrap();
         assert_eq!(
-            cell.fg, theme.foreground,
-            "managed row should use theme.foreground, got: {:?}",
+            cell.fg, theme.fg,
+            "managed row should use theme.fg, got: {:?}",
             cell.fg
         );
     }

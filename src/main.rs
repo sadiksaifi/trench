@@ -307,9 +307,19 @@ fn main() -> anyhow::Result<()> {
                 run_sync(&branch, strategy, json, dry_run, no_hooks)
             }
         }
-        Some(Commands::Log { branch, tail, output, summary }) => {
-            run_log(branch.as_deref(), tail, output, summary, json, output_config.should_color())
-        }
+        Some(Commands::Log {
+            branch,
+            tail,
+            output,
+            summary,
+        }) => run_log(
+            branch.as_deref(),
+            tail,
+            output,
+            summary,
+            json,
+            output_config.should_color(),
+        ),
         None => {
             anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
         }
@@ -396,10 +406,10 @@ fn run_create(
 
             // Exit 4 if post_create hook failed (FR-24: hard stop)
             if let Some(ref hook_err) = outcome.post_create_error {
-                if hook_err
-                    .chain()
-                    .any(|c| c.downcast_ref::<hooks::runner::HookTimeoutError>().is_some())
-                {
+                if hook_err.chain().any(|c| {
+                    c.downcast_ref::<hooks::runner::HookTimeoutError>()
+                        .is_some()
+                }) {
                     ExitCode::HookTimeout.exit();
                 }
                 ExitCode::HookFailed.exit();
@@ -408,9 +418,10 @@ fn run_create(
         }
         Err(e) => {
             // Check for hook timeout first (more specific than hook failure)
-            if e.chain()
-                .any(|c| c.downcast_ref::<hooks::runner::HookTimeoutError>().is_some())
-            {
+            if e.chain().any(|c| {
+                c.downcast_ref::<hooks::runner::HookTimeoutError>()
+                    .is_some()
+            }) {
                 eprintln!("error: {e:#}");
                 ExitCode::HookTimeout.exit();
             }
@@ -557,9 +568,10 @@ fn run_remove(
         }
         Err(e) => {
             // Check for hook timeout first (more specific than hook failure)
-            if e.chain()
-                .any(|c| c.downcast_ref::<hooks::runner::HookTimeoutError>().is_some())
-            {
+            if e.chain().any(|c| {
+                c.downcast_ref::<hooks::runner::HookTimeoutError>()
+                    .is_some()
+            }) {
                 eprintln!("error: {e:#}");
                 ExitCode::HookTimeout.exit();
             }
@@ -591,10 +603,7 @@ fn run_remove(
 /// Returns `Ok(true)` on success, `Ok(false)` if `tmux` was not found on PATH
 /// (caller should fall back), or `Err` for other failures.
 fn execute_tmux_command(cmd: &[String]) -> anyhow::Result<bool> {
-    match std::process::Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .status()
-    {
+    match std::process::Command::new(&cmd[0]).args(&cmd[1..]).status() {
         Ok(status) if !status.success() => {
             anyhow::bail!("tmux exited with status {}", status);
         }
@@ -643,10 +652,7 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
                 tmux::TmuxAction::TmuxNewWindow(cmd) => {
                     if !execute_tmux_command(&cmd)? {
                         eprintln!("warning: tmux not found, falling back to default behavior");
-                        println!(
-                            "Switched to worktree '{}' at {}",
-                            result.name, result.path
-                        );
+                        println!("Switched to worktree '{}' at {}", result.name, result.path);
                     }
                 }
                 tmux::TmuxAction::Fallback { warn_not_in_tmux } => {
@@ -708,12 +714,7 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
                     cli::commands::open::record_open(&db, repo.id, wt.id)?;
                 } else {
                     eprintln!("warning: tmux not found, falling back to $EDITOR");
-                    return run_open_editor(
-                        identifier,
-                        &cwd,
-                        &db,
-                        editor_command.as_deref(),
-                    );
+                    return run_open_editor(identifier, &cwd, &db, editor_command.as_deref());
                 }
             }
             tmux::TmuxAction::Fallback { warn_not_in_tmux } => {
@@ -1088,10 +1089,10 @@ fn run_sync(
 
             // Exit 4 if post_sync hook failed (FR-24: Report — non-zero exit but sync completed)
             if let Some(ref hook_err) = outcome.post_sync_error {
-                if hook_err
-                    .chain()
-                    .any(|c| c.downcast_ref::<hooks::runner::HookTimeoutError>().is_some())
-                {
+                if hook_err.chain().any(|c| {
+                    c.downcast_ref::<hooks::runner::HookTimeoutError>()
+                        .is_some()
+                }) {
                     ExitCode::HookTimeout.exit();
                 }
                 ExitCode::HookFailed.exit();
@@ -1100,9 +1101,10 @@ fn run_sync(
         }
         Err(e) => {
             // Check for hook timeout first (more specific than hook failure)
-            if e.chain()
-                .any(|c| c.downcast_ref::<hooks::runner::HookTimeoutError>().is_some())
-            {
+            if e.chain().any(|c| {
+                c.downcast_ref::<hooks::runner::HookTimeoutError>()
+                    .is_some()
+            }) {
                 eprintln!("error: {e:#}");
                 ExitCode::HookTimeout.exit();
             }
@@ -1715,9 +1717,8 @@ mod tests {
 
     #[test]
     fn switch_subcommand_print_path_and_tmux_both_parse() {
-        let cli =
-            Cli::try_parse_from(["trench", "switch", "my-feature", "--print-path", "--tmux"])
-                .expect("switch with --print-path and --tmux should succeed");
+        let cli = Cli::try_parse_from(["trench", "switch", "my-feature", "--print-path", "--tmux"])
+            .expect("switch with --print-path and --tmux should succeed");
         match cli.command {
             Some(Commands::Switch {
                 branch,

@@ -234,10 +234,6 @@ impl HookLogState {
     }
 }
 
-const FOOTER_RUNNING: &str = " Esc back (hooks continue) ";
-const FOOTER_DONE: &str = " Esc back  Enter dismiss ";
-const FOOTER_REPLAY: &str = " ↑/↓ scroll  PgUp/PgDn page  Esc back ";
-
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs_f64();
     if secs < 1.0 {
@@ -248,7 +244,12 @@ fn format_duration(d: Duration) -> String {
 }
 
 /// Render the hook log screen.
-pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
+pub fn render(
+    state: &HookLogState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // title
         Constraint::Min(1),    // output area
@@ -278,15 +279,12 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, theme: &crate
     let title = Line::from(vec![
         Span::styled(
             format!("Hook: {}", state.title),
-            Style::default()
-                .fg(theme.foreground)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
         ),
         Span::styled(status_text, status_style),
     ]);
     frame.render_widget(
-        Paragraph::new(title)
-            .style(Style::default().fg(theme.foreground).bg(theme.background)),
+        Paragraph::new(title).style(Style::default().fg(theme.fg).bg(theme.bg)),
         chunks[0],
     );
 
@@ -301,7 +299,9 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, theme: &crate
                     .fg(theme.success)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.error).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.error)
+                    .add_modifier(Modifier::BOLD)
             }
         } else {
             Style::default()
@@ -334,7 +334,7 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, theme: &crate
             let style = if log_line.stream == "stderr" {
                 Style::default().fg(theme.error)
             } else {
-                Style::default().fg(theme.foreground)
+                Style::default().fg(theme.fg)
             };
             lines.push(Line::from(Span::styled(
                 format!("  {}", log_line.text),
@@ -348,7 +348,9 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, theme: &crate
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("Error: {err}"),
-            Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
         )));
     }
 
@@ -360,21 +362,20 @@ pub fn render(state: &HookLogState, frame: &mut Frame, area: Rect, theme: &crate
 
     frame.render_widget(
         Paragraph::new(visible_lines)
-            .style(Style::default().fg(theme.foreground).bg(theme.background)),
+            .style(Style::default().fg(theme.fg).bg(theme.bg_panel))
+            .block(crate::tui::chrome::panel(" Output ", theme)),
         chunks[1],
     );
 
     // Footer
-    let footer_text = if state.replay {
-        FOOTER_REPLAY
+    let footer_items: &[(&str, &str)] = if state.replay {
+        &[("↑/↓", "scroll"), ("PgUp/PgDn", "page"), ("Esc", "back")]
     } else if state.completed {
-        FOOTER_DONE
+        &[("Esc", "back"), ("Enter", "dismiss")]
     } else {
-        FOOTER_RUNNING
+        &[("Esc", "back"), ("hooks", "continue")]
     };
-    let footer = Paragraph::new(Line::from(footer_text))
-        .style(Style::default().fg(theme.background).bg(theme.accent).add_modifier(Modifier::BOLD));
-    frame.render_widget(footer, chunks[2]);
+    crate::tui::chrome::render_keybar(frame, chunks[2], theme, footer_items);
 }
 
 #[cfg(test)]
@@ -737,8 +738,7 @@ mod tests {
             },
         ];
 
-        let state =
-            HookLogState::from_hook_output(&lines, "hook:post_create", &None);
+        let state = HookLogState::from_hook_output(&lines, "hook:post_create", &None);
 
         assert_eq!(state.sections.len(), 3);
         assert_eq!(state.sections[0].step, "copy");
@@ -934,15 +934,13 @@ mod tests {
     fn from_hook_output_missing_step_grouped_as_unknown() {
         use crate::state::HookOutputLine;
 
-        let lines = vec![
-            HookOutputLine {
-                stream: "stdout".into(),
-                line: "some output".into(),
-                step: None,
-                line_number: 1,
-                created_at: 1700000000,
-            },
-        ];
+        let lines = vec![HookOutputLine {
+            stream: "stdout".into(),
+            line: "some output".into(),
+            step: None,
+            line_number: 1,
+            created_at: 1700000000,
+        }];
 
         let state = HookLogState::from_hook_output(&lines, "hook:post_create", &None);
 
@@ -1073,11 +1071,11 @@ mod tests {
             duration: Duration::from_millis(100),
         });
         let buf = render_to_buffer(&state, 80, 20);
-        let has_success = buf
-            .content()
-            .iter()
-            .any(|cell| cell.fg == theme.success);
-        assert!(has_success, "successful step should use theme.success color");
+        let has_success = buf.content().iter().any(|cell| cell.fg == theme.success);
+        assert!(
+            has_success,
+            "successful step should use theme.success color"
+        );
     }
 
     #[test]
@@ -1091,10 +1089,7 @@ mod tests {
             duration: Duration::from_millis(100),
         });
         let buf = render_to_buffer(&state, 80, 20);
-        let has_error = buf
-            .content()
-            .iter()
-            .any(|cell| cell.fg == theme.error);
+        let has_error = buf.content().iter().any(|cell| cell.fg == theme.error);
         assert!(has_error, "failed step should use theme.error color");
     }
 
@@ -1118,7 +1113,10 @@ mod tests {
             .content()
             .iter()
             .any(|cell| cell.fg == ratatui::style::Color::Green);
-        assert!(has_green, "minimal theme should use basic ANSI Green for success");
+        assert!(
+            has_green,
+            "minimal theme should use basic ANSI Green for success"
+        );
     }
 
     #[test]
@@ -1221,8 +1219,8 @@ mod tests {
         // Title is at row 0. "Hook:" starts at column 0.
         let cell = buf.cell((0, 0)).unwrap();
         assert_eq!(
-            cell.fg, theme.foreground,
-            "title 'Hook:' should use theme.foreground, got: {:?}",
+            cell.fg, theme.fg,
+            "title 'Hook:' should use theme.fg, got: {:?}",
             cell.fg
         );
     }
@@ -1248,8 +1246,8 @@ mod tests {
         let y = (offset / width) as u16;
         let cell = buf.cell((x, y)).unwrap();
         assert_eq!(
-            cell.fg, theme.foreground,
-            "stdout line should use theme.foreground, got: {:?}",
+            cell.fg, theme.fg,
+            "stdout line should use theme.fg, got: {:?}",
             cell.fg
         );
     }

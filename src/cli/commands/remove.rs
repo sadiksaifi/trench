@@ -65,11 +65,7 @@ impl fmt::Display for RemoveDryRunPlan {
         writeln!(f, "  Worktree:  {}", self.name)?;
         writeln!(f, "  Branch:    {}", self.branch)?;
         writeln!(f, "  Path:      {}", self.path)?;
-        writeln!(
-            f,
-            "  Prune:     {}",
-            if self.prune { "yes" } else { "no" }
-        )?;
+        writeln!(f, "  Prune:     {}", if self.prune { "yes" } else { "no" })?;
 
         match &self.hooks {
             Some(hooks) if hooks.pre_remove.is_some() || hooks.post_remove.is_some() => {
@@ -730,8 +726,7 @@ mod tests {
         let (repo, wt) = crate::adopt::resolve_or_adopt("pre-resolved", &repo_info, &db).unwrap();
 
         // Call execute_resolved with the pre-resolved data
-        let result =
-            execute_resolved(&repo, &wt, &repo_info, &db, false).expect("should succeed");
+        let result = execute_resolved(&repo, &wt, &repo_info, &db, false).expect("should succeed");
         assert_eq!(result.name, "pre-resolved");
         assert!(!create_result.path.exists(), "worktree dir should be gone");
     }
@@ -805,17 +800,11 @@ mod tests {
 
         // Resolve worktree for the hooks variant
         let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
-        let (repo, wt) =
-            crate::adopt::resolve_or_adopt("hooks-none", &repo_info, &db).unwrap();
+        let (repo, wt) = crate::adopt::resolve_or_adopt("hooks-none", &repo_info, &db).unwrap();
 
         // Remove with no hooks configured
         let outcome = execute_resolved_with_hooks(
-            &repo,
-            &wt,
-            &repo_info,
-            &db,
-            false,
-            None,  // no hooks
+            &repo, &wt, &repo_info, &db, false, None,  // no hooks
             false, // no_hooks flag irrelevant
             None,
         )
@@ -825,7 +814,10 @@ mod tests {
         assert_eq!(outcome.result.name, "hooks-none");
         assert_eq!(outcome.hooks_status, RemoveHooksStatus::None);
         assert!(outcome.post_remove_warning.is_none());
-        assert!(!create_result.path.exists(), "worktree dir should be deleted");
+        assert!(
+            !create_result.path.exists(),
+            "worktree dir should be deleted"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -847,8 +839,7 @@ mod tests {
         .expect("create should succeed");
 
         let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
-        let (repo, wt) =
-            crate::adopt::resolve_or_adopt("skip-hooks", &repo_info, &db).unwrap();
+        let (repo, wt) = crate::adopt::resolve_or_adopt("skip-hooks", &repo_info, &db).unwrap();
 
         let hooks = sample_hooks_config();
 
@@ -869,12 +860,20 @@ mod tests {
         assert_eq!(outcome.result.name, "skip-hooks");
         assert_eq!(outcome.hooks_status, RemoveHooksStatus::Skipped);
         assert!(outcome.post_remove_warning.is_none());
-        assert!(!create_result.path.exists(), "worktree dir should be deleted");
+        assert!(
+            !create_result.path.exists(),
+            "worktree dir should be deleted"
+        );
 
         // Verify no hook events were recorded
         let wt_record = db.get_worktree(wt.id).unwrap().unwrap();
-        let hook_events = db.count_events(wt_record.id, Some("hook:pre_remove")).unwrap();
-        assert_eq!(hook_events, 0, "no hook events should be recorded when --no-hooks");
+        let hook_events = db
+            .count_events(wt_record.id, Some("hook:pre_remove"))
+            .unwrap();
+        assert_eq!(
+            hook_events, 0,
+            "no hook events should be recorded when --no-hooks"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -896,8 +895,7 @@ mod tests {
         .expect("create should succeed");
 
         let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
-        let (repo, wt) =
-            crate::adopt::resolve_or_adopt("pre-rm-test", &repo_info, &db).unwrap();
+        let (repo, wt) = crate::adopt::resolve_or_adopt("pre-rm-test", &repo_info, &db).unwrap();
 
         // pre_remove hook writes a marker file to prove it ran with cwd = worktree path
         let hooks = crate::config::HooksConfig {
@@ -924,7 +922,10 @@ mod tests {
         .expect("remove should succeed");
 
         assert_eq!(outcome.hooks_status, RemoveHooksStatus::Ran);
-        assert!(!create_result.path.exists(), "worktree dir should be deleted after hooks");
+        assert!(
+            !create_result.path.exists(),
+            "worktree dir should be deleted after hooks"
+        );
 
         // Verify hook event was logged
         let hook_events = db.count_events(wt.id, Some("hook:pre_remove")).unwrap();
@@ -932,7 +933,10 @@ mod tests {
 
         // Verify hook output was captured in logs
         let events = db.list_events(wt.id, 10).unwrap();
-        let hook_event = events.iter().find(|e| e.event_type == "hook:pre_remove").unwrap();
+        let hook_event = events
+            .iter()
+            .find(|e| e.event_type == "hook:pre_remove")
+            .unwrap();
         let logs = db.get_logs(hook_event.id).unwrap();
         let stdout_lines: Vec<&str> = logs
             .iter()
@@ -964,8 +968,7 @@ mod tests {
         .expect("create should succeed");
 
         let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
-        let (repo, wt) =
-            crate::adopt::resolve_or_adopt("fail-pre-rm", &repo_info, &db).unwrap();
+        let (repo, wt) = crate::adopt::resolve_or_adopt("fail-pre-rm", &repo_info, &db).unwrap();
 
         // pre_remove hook that fails
         let hooks = crate::config::HooksConfig {
@@ -1030,8 +1033,7 @@ mod tests {
         .expect("create should succeed");
 
         let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
-        let (repo, wt) =
-            crate::adopt::resolve_or_adopt("post-rm-test", &repo_info, &db).unwrap();
+        let (repo, wt) = crate::adopt::resolve_or_adopt("post-rm-test", &repo_info, &db).unwrap();
 
         // post_remove hook creates a marker file in repo dir to prove cwd = repo path
         let marker = repo_dir.path().join("post_remove_marker.txt");
@@ -1059,7 +1061,10 @@ mod tests {
         .expect("remove should succeed");
 
         assert_eq!(outcome.hooks_status, RemoveHooksStatus::Ran);
-        assert!(!create_result.path.exists(), "worktree dir should be deleted");
+        assert!(
+            !create_result.path.exists(),
+            "worktree dir should be deleted"
+        );
         assert!(outcome.post_remove_warning.is_none());
 
         // Verify post_remove hook ran with cwd = repo path
@@ -1092,8 +1097,7 @@ mod tests {
         .expect("create should succeed");
 
         let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
-        let (repo, wt) =
-            crate::adopt::resolve_or_adopt("gone-dir", &repo_info, &db).unwrap();
+        let (repo, wt) = crate::adopt::resolve_or_adopt("gone-dir", &repo_info, &db).unwrap();
 
         // Manually delete the worktree directory to simulate user deletion
         std::fs::remove_dir_all(&create_result.path).unwrap();
@@ -1154,8 +1158,7 @@ mod tests {
         .expect("create should succeed");
 
         let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
-        let (repo, wt) =
-            crate::adopt::resolve_or_adopt("post-fail", &repo_info, &db).unwrap();
+        let (repo, wt) = crate::adopt::resolve_or_adopt("post-fail", &repo_info, &db).unwrap();
 
         // post_remove hook that fails
         let hooks = crate::config::HooksConfig {
@@ -1291,10 +1294,19 @@ mod tests {
         .expect("dry-run should succeed");
 
         let output = format!("{plan}");
-        assert!(output.contains("Dry run"), "should contain 'Dry run' header");
-        assert!(output.contains("display-test"), "should contain worktree name");
+        assert!(
+            output.contains("Dry run"),
+            "should contain 'Dry run' header"
+        );
+        assert!(
+            output.contains("display-test"),
+            "should contain worktree name"
+        );
         assert!(output.contains("pre_remove"), "should show pre_remove hook");
-        assert!(output.contains("post_remove"), "should show post_remove hook");
+        assert!(
+            output.contains("post_remove"),
+            "should show post_remove hook"
+        );
         assert!(output.contains("Prune:"), "should mention prune status");
     }
 

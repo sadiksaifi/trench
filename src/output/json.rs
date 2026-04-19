@@ -31,8 +31,14 @@ mod tests {
     #[test]
     fn format_json_serializes_array() {
         let items = vec![
-            Dummy { name: "alpha".into(), count: 1 },
-            Dummy { name: "beta".into(), count: 2 },
+            Dummy {
+                name: "alpha".into(),
+                count: 1,
+            },
+            Dummy {
+                name: "beta".into(),
+                count: 2,
+            },
         ];
 
         let output = format_json(&items).unwrap();
@@ -52,7 +58,10 @@ mod tests {
 
     #[test]
     fn format_json_value_serializes_single_object() {
-        let item = Dummy { name: "solo".into(), count: 42 };
+        let item = Dummy {
+            name: "solo".into(),
+            count: 42,
+        };
         let output = format_json_value(&item).unwrap();
         let parsed: Dummy = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed, item);
@@ -60,7 +69,10 @@ mod tests {
 
     #[test]
     fn format_json_output_is_pretty_printed() {
-        let items = vec![Dummy { name: "x".into(), count: 0 }];
+        let items = vec![Dummy {
+            name: "x".into(),
+            count: 0,
+        }];
         let output = format_json(&items).unwrap();
         // Pretty-printed JSON has newlines and indentation
         assert!(output.contains('\n'), "output should be pretty-printed");
@@ -69,8 +81,14 @@ mod tests {
 
     #[test]
     fn format_json_contains_no_ansi_codes() {
-        let items = vec![Dummy { name: "test".into(), count: 1 }];
+        let items = vec![Dummy {
+            name: "test".into(),
+            count: 1,
+        }];
         let output = format_json(&items).unwrap();
-        assert!(!output.contains('\x1b'), "JSON output must not contain ANSI escape codes");
+        assert!(
+            !output.contains('\x1b'),
+            "JSON output must not contain ANSI escape codes"
+        );
     }
 }

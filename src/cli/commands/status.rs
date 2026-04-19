@@ -132,9 +132,7 @@ fn render_summary_table(
         return Ok("No worktrees.\n".to_string());
     }
 
-    let mut table = Table::new(vec![
-        "Name", "Branch", "Status", "Ahead/Behind",
-    ]);
+    let mut table = Table::new(vec!["Name", "Branch", "Status", "Ahead/Behind"]);
     let mut unmanaged_rows: Vec<bool> = Vec::new();
 
     for entry in &entries {
@@ -178,11 +176,7 @@ fn render_summary_table(
 
 /// Resolve a worktree by identifier (sanitized name or branch) from the DB.
 /// Falls back to git-discovered worktrees for unmanaged entries.
-fn resolve_worktree(
-    cwd: &Path,
-    db: &Database,
-    identifier: &str,
-) -> Result<(PathBuf, StatusEntry)> {
+fn resolve_worktree(cwd: &Path, db: &Database, identifier: &str) -> Result<(PathBuf, StatusEntry)> {
     let repo_info = git::discover_repo(cwd)?;
 
     // Use resolve_or_adopt for lazy adoption on detail view
@@ -475,12 +469,15 @@ mod tests {
         )
         .unwrap();
 
-        let output =
-            render_summary_table(repo_dir.path(), &db, None, false).expect("summary should succeed");
+        let output = render_summary_table(repo_dir.path(), &db, None, false)
+            .expect("summary should succeed");
 
         assert!(output.contains("Name"), "should have Name header");
         assert!(output.contains("Branch"), "should have Branch header");
-        assert!(output.contains("feature-auth"), "should show first worktree");
+        assert!(
+            output.contains("feature-auth"),
+            "should show first worktree"
+        );
         assert!(output.contains("fix-bug"), "should show second worktree");
     }
 
@@ -521,13 +518,16 @@ mod tests {
         )
         .unwrap();
 
-        let output =
-            execute_json(repo_dir.path(), &db, None).expect("summary json should succeed");
+        let output = execute_json(repo_dir.path(), &db, None).expect("summary json should succeed");
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let arr = parsed.as_array().expect("should be array");
 
         // At least the managed worktree + main worktree
-        assert!(arr.len() >= 2, "should have at least 2 entries, got {}", arr.len());
+        assert!(
+            arr.len() >= 2,
+            "should have at least 2 entries, got {}",
+            arr.len()
+        );
 
         // Find the managed worktree
         let wt = arr
@@ -623,9 +623,7 @@ mod tests {
         let wt_repo = git2::Repository::open(&wt_path).unwrap();
         std::fs::write(wt_path.join("file.txt"), "content").unwrap();
         let mut index = wt_repo.index().unwrap();
-        index
-            .add_path(std::path::Path::new("file.txt"))
-            .unwrap();
+        index.add_path(std::path::Path::new("file.txt")).unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = wt_repo.find_tree(tree_id).unwrap();
