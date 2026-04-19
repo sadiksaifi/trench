@@ -547,11 +547,12 @@ fn run_remove(
     let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
-    // If not forced, resolve the worktree (adopting if unmanaged) for the prompt
+    // If not forced, resolve the worktree from live git for the prompt
     let resolved = if !force {
-        if let Ok((repo, wt)) = adopt::resolve_or_adopt(identifier, &repo_info, &db) {
+        if let Ok(live) = live_worktree::resolve(identifier, &repo_info, &db) {
             // Warn about running processes before confirmation
-            if let Some(warning) = process::format_process_warning(&wt.path) {
+            let path = live.entry.path.to_string_lossy().to_string();
+            if let Some(warning) = process::format_process_warning(&path) {
                 eprintln!("{warning}");
             }
             let prune_hint = if prune {
@@ -561,7 +562,9 @@ fn run_remove(
             };
             eprint!(
                 "Remove worktree '{}' at {}{}? [y/N] ",
-                wt.name, wt.path, prune_hint
+                live.entry.name,
+                live.entry.path.display(),
+                prune_hint
             );
             let mut input = String::new();
             std::io::stdin()
@@ -571,7 +574,7 @@ fn run_remove(
                 eprintln!("Cancelled.");
                 return Ok(());
             }
-            Some((repo, wt))
+            Some(live)
         } else {
             None
         }
@@ -580,16 +583,15 @@ fn run_remove(
     };
 
     // Resolve worktree if not already done by the prompt flow
-    let (repo, wt) = match resolved {
-        Some((repo, wt)) => (repo, wt),
-        None => adopt::resolve_or_adopt(identifier, &repo_info, &db)?,
+    let live = match resolved {
+        Some(live) => live,
+        None => live_worktree::resolve(identifier, &repo_info, &db)?,
     };
 
     let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
 
-    match rt.block_on(cli::commands::remove::execute_resolved_with_hooks(
-        &repo,
-        &wt,
+    match rt.block_on(cli::commands::remove::execute_live_resolved_with_hooks(
+        &live,
         &repo_info,
         &db,
         prune,
@@ -859,11 +861,15 @@ fn run_log(
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
 
+    let live_branch_exists =
+        branch.is_some_and(|b| live_worktree::resolve_read_only(b, &repo_info, Some(&db)).is_ok());
+
     let repo = db.get_repo_by_path(repo_path_str)?;
     let repo_id = match repo {
         Some(r) => r.id,
         None => {
-            if let Some(b) = branch {
+            if branch.is_some() && !live_branch_exists {
+                let b = branch.expect("branch checked above");
                 eprintln!("error: worktree '{b}' not found");
                 ExitCode::NotFound.exit();
             }
@@ -885,9 +891,8 @@ fn run_log(
         }
     };
 
-    // If a branch filter is specified, verify the worktree exists
     if let Some(b) = branch {
-        if !db.worktree_exists_any(repo_id, b)? {
+        if !live_branch_exists && !db.worktree_exists_any(repo_id, b)? {
             eprintln!("error: worktree '{b}' not found");
             ExitCode::NotFound.exit();
         }
@@ -1180,30 +1185,20 @@ fn run_sync_all(
     no_hooks: bool,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = if dry_run {
-        existing_db_path()?
-    } else {
-        Some(runtime_db_path()?)
-    };
-
-    // If dry-run and DB doesn't exist yet, there are no tracked worktrees
-    if dry_run && db_path.is_none() {
-        if json {
-            println!("[]");
-        } else {
-            eprintln!("No active worktrees to sync.");
-        }
-        return Ok(());
-    }
-
-    let db = state::Database::open(db_path.as_ref().expect("db path should exist"))?;
     let repo_info = git::discover_repo(&cwd)?;
-
-    let db_repo = db
-        .get_repo_by_path(repo_info.path.to_str().unwrap_or_default())?
-        .ok_or_else(|| anyhow::anyhow!("repo not tracked by trench"))?;
-
-    let worktrees = db.list_worktrees(db_repo.id)?;
+    let db = if dry_run {
+        existing_db_path()?
+            .map(|db_path| state::Database::open(&db_path))
+            .transpose()?
+    } else {
+        Some(state::Database::open(&runtime_db_path()?)?)
+    };
+    let worktrees = match (dry_run, db.as_ref()) {
+        (true, Some(db)) => live_worktree::list_read_only(&repo_info, Some(db), &[])?,
+        (true, None) => live_worktree::list_read_only(&repo_info, None, &[])?,
+        (false, Some(db)) => live_worktree::list(&repo_info, db, &[])?,
+        (false, None) => unreachable!("runtime DB should exist for mutating sync"),
+    };
 
     if worktrees.is_empty() {
         if json {
@@ -1230,9 +1225,8 @@ fn run_sync_all(
 
     // Dry-run: show per-worktree plans and exit
     if dry_run {
-        let plans = cli::commands::sync::execute_all_dry_run(
+        let plans = cli::commands::sync::execute_all_dry_run_live(
             &worktrees,
-            &db_repo,
             &repo_info,
             sync_strategy,
             hooks_config.as_ref(),
@@ -1253,14 +1247,20 @@ fn run_sync_all(
             .as_ref()
             .map(|h| h.pre_sync.is_some() || h.post_sync.is_some())
             .unwrap_or(false);
+    let db = db.expect("runtime DB should exist for mutating sync");
 
     let results = if has_hooks {
         // Run with hooks per worktree
         let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
         let mut entries = Vec::new();
-        for wt in &worktrees {
+        for live in &worktrees {
+            let identifier = live
+                .entry
+                .branch
+                .as_deref()
+                .unwrap_or(live.entry.name.as_str());
             match rt.block_on(cli::commands::sync::execute_with_hooks(
-                &wt.branch,
+                identifier,
                 &cwd,
                 &db,
                 sync_strategy,
@@ -1272,12 +1272,12 @@ fn run_sync_all(
                     if let Some(ref hook_err) = outcome.post_sync_error {
                         eprintln!(
                             "error: post_sync hook failed for '{}': {hook_err:#}",
-                            wt.name
+                            live.entry.name
                         );
                     }
                     let has_hook_error = outcome.post_sync_error.is_some();
                     entries.push(cli::commands::sync::BatchSyncEntry {
-                        name: wt.name.clone(),
+                        name: live.entry.name.clone(),
                         status: if has_hook_error {
                             cli::commands::sync::BatchSyncStatus::Failure
                         } else {
@@ -1290,9 +1290,9 @@ fn run_sync_all(
                     });
                 }
                 Err(e) => {
-                    eprintln!("error: sync failed for '{}': {e:#}", wt.name);
+                    eprintln!("error: sync failed for '{}': {e:#}", live.entry.name);
                     entries.push(cli::commands::sync::BatchSyncEntry {
-                        name: wt.name.clone(),
+                        name: live.entry.name.clone(),
                         status: cli::commands::sync::BatchSyncStatus::Failure,
                         result: None,
                         error: Some(format!("{e:#}")),
@@ -1303,7 +1303,7 @@ fn run_sync_all(
         entries
     } else {
         // No hooks — use the batch function directly
-        cli::commands::sync::execute_all(&worktrees, &db_repo, &repo_info, &db, sync_strategy)
+        cli::commands::sync::execute_all_live(&worktrees, &repo_info, &db, sync_strategy)
     };
 
     // Output results

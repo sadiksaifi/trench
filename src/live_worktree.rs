@@ -60,10 +60,11 @@ fn purge_stale_metadata(
     Ok(())
 }
 
-pub fn list(
+fn list_inner(
     repo_info: &RepoInfo,
-    db: &Database,
+    db: Option<&Database>,
     scan_paths: &[String],
+    purge_stale: bool,
 ) -> Result<Vec<LiveWorktree>> {
     let mut entries = git::list_worktrees(&repo_info.path)?;
     let mut seen_paths: HashSet<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
@@ -74,15 +75,19 @@ pub fn list(
         }
     }
 
-    let repo = db.get_repo_by_path(repo_path_str(repo_info)?)?;
-    if let Some(ref repo) = repo {
-        purge_stale_metadata(db, repo.id, &entries)?;
+    let repo = db
+        .map(|db| db.get_repo_by_path(repo_path_str(repo_info)?))
+        .transpose()?
+        .flatten();
+    if purge_stale {
+        if let (Some(db), Some(ref repo)) = (db, repo.as_ref()) {
+            purge_stale_metadata(db, repo.id, &entries)?;
+        }
     }
 
-    let repo = db.get_repo_by_path(repo_path_str(repo_info)?)?;
     let mut live = Vec::with_capacity(entries.len());
     for entry in entries {
-        let metadata = if let Some(ref repo) = repo {
+        let metadata = if let (Some(db), Some(ref repo)) = (db, repo.as_ref()) {
             db.find_worktree_by_path(repo.id, &canonical_string(&entry.path))?
         } else {
             None
@@ -93,9 +98,30 @@ pub fn list(
     Ok(live)
 }
 
-pub fn resolve(identifier: &str, repo_info: &RepoInfo, db: &Database) -> Result<LiveWorktree> {
+pub fn list(
+    repo_info: &RepoInfo,
+    db: &Database,
+    scan_paths: &[String],
+) -> Result<Vec<LiveWorktree>> {
+    list_inner(repo_info, Some(db), scan_paths, true)
+}
+
+pub fn list_read_only(
+    repo_info: &RepoInfo,
+    db: Option<&Database>,
+    scan_paths: &[String],
+) -> Result<Vec<LiveWorktree>> {
+    list_inner(repo_info, db, scan_paths, false)
+}
+
+fn resolve_inner(
+    identifier: &str,
+    repo_info: &RepoInfo,
+    db: Option<&Database>,
+    purge_stale: bool,
+) -> Result<LiveWorktree> {
     let sanitized = paths::sanitize_branch(identifier);
-    for worktree in list(repo_info, db, &[])? {
+    for worktree in list_inner(repo_info, db, &[], purge_stale)? {
         let branch_match = worktree.entry.branch.as_deref() == Some(identifier);
         let name_match = worktree.entry.name == identifier || worktree.entry.name == sanitized;
         let sanitized_branch_match = worktree
@@ -110,6 +136,18 @@ pub fn resolve(identifier: &str, repo_info: &RepoInfo, db: &Database) -> Result<
     }
 
     anyhow::bail!("worktree not found: {identifier}")
+}
+
+pub fn resolve(identifier: &str, repo_info: &RepoInfo, db: &Database) -> Result<LiveWorktree> {
+    resolve_inner(identifier, repo_info, Some(db), true)
+}
+
+pub fn resolve_read_only(
+    identifier: &str,
+    repo_info: &RepoInfo,
+    db: Option<&Database>,
+) -> Result<LiveWorktree> {
+    resolve_inner(identifier, repo_info, db, false)
 }
 
 pub fn ensure_metadata(

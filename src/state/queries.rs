@@ -596,6 +596,31 @@ impl Database {
         Ok(())
     }
 
+    /// Archive a removed worktree row so history stays readable without
+    /// blocking future reuse of the live path.
+    pub fn archive_removed_worktree(
+        &self,
+        worktree_id: i64,
+        archived_path: &str,
+        removed_at: i64,
+    ) -> Result<()> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE worktrees
+                 SET path = ?2, removed_at = ?3
+                 WHERE id = ?1",
+                rusqlite::params![worktree_id, archived_path, removed_at],
+            )
+            .context("failed to archive removed worktree")?;
+
+        if affected == 0 {
+            bail!("worktree with id {worktree_id} not found");
+        }
+
+        Ok(())
+    }
+
     /// Count events for a worktree, optionally filtered by event type.
     pub fn count_events(&self, worktree_id: i64, event_type: Option<&str>) -> Result<i64> {
         let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match event_type {

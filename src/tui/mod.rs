@@ -719,9 +719,9 @@ impl App {
                     return;
                 }
             };
-            let resolve = crate::adopt::resolve_or_adopt(&worktree_name, &repo_info, &db);
-            let (repo, wt) = match resolve {
-                Ok((r, w)) => (r, w),
+            let resolve = crate::live_worktree::resolve(&worktree_name, &repo_info, &db);
+            let live = match resolve {
+                Ok(live) => live,
                 Err(e) => {
                     if let Some(ref mut c) = self.delete_confirm_state {
                         c.result = Some(screens::delete_confirm::DeleteResultMessage {
@@ -747,17 +747,17 @@ impl App {
                         return;
                     }
                 };
-                let result =
-                    rt.block_on(crate::cli::commands::remove::execute_resolved_with_hooks(
-                        &repo,
-                        &wt,
+                let result = rt.block_on(
+                    crate::cli::commands::remove::execute_live_resolved_with_hooks(
+                        &live,
                         &repo_info,
                         &db,
                         false,
                         Some(&hooks),
                         false,
                         Some(&tx),
-                    ));
+                    ),
+                );
                 let (success, error) = match result {
                     Ok(_) => (true, None),
                     Err(ref e) => (false, Some(format!("{e:#}"))),
@@ -790,29 +790,6 @@ impl App {
                 }
             }
         }
-    }
-
-    /// If the selected worktree is unmanaged, silently adopt it into the DB.
-    fn adopt_selected_if_unmanaged(&mut self) {
-        let row = match self.list_state.rows.get(self.list_state.selected) {
-            Some(r) if !r.managed => r,
-            _ => return,
-        };
-        let identifier = if row.branch == "(detached)" {
-            row.name.clone()
-        } else {
-            row.branch.clone()
-        };
-
-        let Some((cwd, db)) = Self::open_db() else {
-            return;
-        };
-        let repo_info = match crate::git::discover_repo(&cwd) {
-            Ok(r) => r,
-            Err(_) => return,
-        };
-        let _ = crate::adopt::resolve_or_adopt(&identifier, &repo_info, &db);
-        self.refresh_list();
     }
 
     fn load_detail(&mut self, name: &str) -> bool {
@@ -1144,7 +1121,6 @@ impl App {
                     .rows
                     .get(self.list_state.selected)
                     .map(|r| r.name.clone());
-                self.adopt_selected_if_unmanaged();
                 if let Some(ref name) = identity {
                     if let Some(idx) = self.list_state.rows.iter().position(|r| r.name == *name) {
                         self.list_state.selected = idx;

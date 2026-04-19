@@ -5,8 +5,9 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::config::HooksConfig;
-use crate::git::RepoInfo;
+use crate::git::{GitWorktreeEntry, RepoInfo};
 use crate::hooks::{self, HookEnvContext, HookEvent};
+use crate::live_worktree::LiveWorktree;
 use crate::state::{Database, Repo, Worktree};
 
 /// Typed errors for the `sync` command.
@@ -159,19 +160,18 @@ impl BatchSyncEntry {
 /// Execute `trench sync --all`: sync every worktree in the list.
 ///
 /// Continues on failure — a failing worktree does not block others.
-pub fn execute_all(
-    worktrees: &[crate::state::Worktree],
-    repo: &Repo,
+pub fn execute_all_live(
+    worktrees: &[LiveWorktree],
     repo_info: &RepoInfo,
     db: &Database,
     strategy: Strategy,
 ) -> Vec<BatchSyncEntry> {
     let mut results = Vec::new();
-    for wt in worktrees {
-        match execute_resolved(repo, wt, repo_info, db, strategy) {
+    for live in worktrees {
+        match execute_live_resolved(live, repo_info, db, strategy) {
             Ok(sync_result) => {
                 results.push(BatchSyncEntry {
-                    name: wt.name.clone(),
+                    name: live.entry.name.clone(),
                     status: BatchSyncStatus::Success,
                     result: Some(sync_result),
                     error: None,
@@ -179,7 +179,7 @@ pub fn execute_all(
             }
             Err(e) => {
                 results.push(BatchSyncEntry {
-                    name: wt.name.clone(),
+                    name: live.entry.name.clone(),
                     status: BatchSyncStatus::Failure,
                     result: None,
                     error: Some(format!("{e:#}")),
@@ -192,8 +192,8 @@ pub fn execute_all(
 
 /// Execute the `trench sync <identifier>` command.
 ///
-/// Resolves the worktree (adopting it if unmanaged), fetches from remote,
-/// then rebases or merges with the base branch.
+/// Resolves the worktree from live git state, fetches from remote, then rebases
+/// or merges with the base branch.
 pub fn execute(
     identifier: &str,
     cwd: &Path,
@@ -201,35 +201,35 @@ pub fn execute(
     strategy: Strategy,
 ) -> Result<SyncResult> {
     let repo_info = crate::git::discover_repo(cwd)?;
-    let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
-    execute_resolved(&repo, &wt, &repo_info, db, strategy)
+    let live = crate::live_worktree::resolve(identifier, &repo_info, db)?;
+    execute_live_resolved(&live, &repo_info, db, strategy)
 }
 
 /// Execute sync with pre-resolved worktree data.
 ///
 /// Use this when the caller has already resolved the worktree (e.g. for
 /// hook context) to avoid a redundant DB/git round-trip.
-pub fn execute_resolved(
-    repo: &Repo,
-    wt: &Worktree,
+pub fn execute_live_resolved(
+    live: &LiveWorktree,
     repo_info: &RepoInfo,
     db: &Database,
     strategy: Strategy,
 ) -> Result<SyncResult> {
-    let dirty = crate::git::dirty_count(Path::new(&wt.path))?;
+    let branch = live
+        .entry
+        .branch
+        .as_deref()
+        .unwrap_or(live.entry.name.as_str());
+    let dirty = crate::git::dirty_count(live.entry.path.as_path())?;
     if dirty > 0 {
         anyhow::bail!(
             "worktree '{}' has {} uncommitted change(s); commit or stash before syncing",
-            wt.name,
+            live.entry.name,
             dirty
         );
     }
 
-    let base_branch = wt
-        .base_branch
-        .as_deref()
-        .or(repo.default_base.as_deref())
-        .unwrap_or(repo_info.default_branch.as_str());
+    let base_branch = crate::live_worktree::base_branch(repo_info, live);
 
     // Fetch from remote before capturing the baseline counts
     if let Err(e) = crate::git::fetch_remote(Path::new(&repo_info.path)) {
@@ -237,25 +237,26 @@ pub fn execute_resolved(
     }
 
     let (before_ahead, before_behind) =
-        crate::git::ahead_behind(Path::new(&repo_info.path), &wt.branch, Some(base_branch))?
+        crate::git::ahead_behind(Path::new(&repo_info.path), branch, Some(&base_branch))?
             .unwrap_or((0, 0));
 
     // Perform sync
     match strategy {
         Strategy::Rebase => {
-            crate::git::sync_rebase(Path::new(&wt.path), &wt.branch, base_branch)?;
+            crate::git::sync_rebase(live.entry.path.as_path(), branch, &base_branch)?;
         }
         Strategy::Merge => {
-            crate::git::sync_merge(Path::new(&wt.path), &wt.branch, base_branch)?;
+            crate::git::sync_merge(live.entry.path.as_path(), branch, &base_branch)?;
         }
     }
 
     // Get after counts
     let (after_ahead, after_behind) =
-        crate::git::ahead_behind(Path::new(&repo_info.path), &wt.branch, Some(base_branch))?
+        crate::git::ahead_behind(Path::new(&repo_info.path), branch, Some(&base_branch))?
             .unwrap_or((0, 0));
 
     // Insert synced event
+    let (repo, wt) = crate::live_worktree::ensure_metadata(db, repo_info, &live.entry)?;
     let payload = serde_json::json!({
         "strategy": strategy.to_string(),
         "base_branch": base_branch,
@@ -265,13 +266,57 @@ pub fn execute_resolved(
     db.insert_event(repo.id, Some(wt.id), "synced", Some(&payload))?;
 
     Ok(SyncResult {
-        name: wt.name.clone(),
+        name: live.entry.name.clone(),
         strategy,
         before_ahead,
         before_behind,
         after_ahead,
         after_behind,
     })
+}
+
+pub fn execute_resolved(
+    repo: &Repo,
+    wt: &Worktree,
+    repo_info: &RepoInfo,
+    db: &Database,
+    strategy: Strategy,
+) -> Result<SyncResult> {
+    let live = LiveWorktree {
+        entry: GitWorktreeEntry {
+            name: wt.name.clone(),
+            path: Path::new(&wt.path).to_path_buf(),
+            branch: Some(wt.branch.clone()),
+            is_main: false,
+        },
+        metadata: Some(wt.clone()),
+    };
+    let _ = repo;
+    execute_live_resolved(&live, repo_info, db, strategy)
+}
+
+pub fn execute_all(
+    worktrees: &[crate::state::Worktree],
+    repo: &Repo,
+    repo_info: &RepoInfo,
+    db: &Database,
+    strategy: Strategy,
+) -> Vec<BatchSyncEntry> {
+    let live: Vec<LiveWorktree> = worktrees
+        .iter()
+        .cloned()
+        .map(|wt| LiveWorktree {
+            entry: GitWorktreeEntry {
+                name: wt.name.clone(),
+                path: Path::new(&wt.path).to_path_buf(),
+                branch: Some(wt.branch.clone()),
+                is_main: false,
+            },
+            metadata: Some(wt),
+        })
+        .collect();
+    let _ = repo;
+    execute_all_live(&live, repo_info, db, strategy)
 }
 
 /// Plan produced by `--dry-run` showing what `trench sync` would do.
@@ -353,13 +398,13 @@ pub fn execute_dry_run(
     no_hooks: bool,
 ) -> Result<SyncDryRunPlan> {
     let repo_info = crate::git::discover_repo(cwd)?;
-    let (repo, wt) = crate::adopt::resolve_only(identifier, &repo_info, db)?;
-
-    let base_branch = wt
-        .base_branch
-        .as_deref()
-        .or(repo.default_base.as_deref())
-        .unwrap_or(repo_info.default_branch.as_str());
+    let live = crate::live_worktree::resolve_read_only(identifier, &repo_info, db)?;
+    let branch = live
+        .entry
+        .branch
+        .clone()
+        .unwrap_or_else(|| live.entry.name.clone());
+    let base_branch = crate::live_worktree::base_branch(&repo_info, &live);
 
     let hooks = if no_hooks {
         None
@@ -372,9 +417,9 @@ pub fn execute_dry_run(
 
     Ok(SyncDryRunPlan {
         dry_run: true,
-        name: wt.name.clone(),
-        branch: wt.branch.clone(),
-        base_branch: base_branch.to_string(),
+        name: live.entry.name.clone(),
+        branch,
+        base_branch,
         strategy: strategy.to_string(),
         hooks,
     })
@@ -383,9 +428,8 @@ pub fn execute_dry_run(
 /// Execute a dry-run of `trench sync --all`.
 ///
 /// Builds a plan for each worktree without performing any operations.
-pub fn execute_all_dry_run(
-    worktrees: &[Worktree],
-    repo: &crate::state::Repo,
+pub fn execute_all_dry_run_live(
+    worktrees: &[LiveWorktree],
     repo_info: &RepoInfo,
     strategy: Strategy,
     hooks_config: Option<&HooksConfig>,
@@ -402,23 +446,47 @@ pub fn execute_all_dry_run(
 
     worktrees
         .iter()
-        .map(|wt| {
-            let base_branch = wt
-                .base_branch
-                .as_deref()
-                .or(repo.default_base.as_deref())
-                .unwrap_or(repo_info.default_branch.as_str());
-
+        .map(|live| {
+            let branch = live
+                .entry
+                .branch
+                .clone()
+                .unwrap_or_else(|| live.entry.name.clone());
             SyncDryRunPlan {
                 dry_run: true,
-                name: wt.name.clone(),
-                branch: wt.branch.clone(),
-                base_branch: base_branch.to_string(),
+                name: live.entry.name.clone(),
+                branch,
+                base_branch: crate::live_worktree::base_branch(repo_info, live),
                 strategy: strategy.to_string(),
                 hooks: hooks.clone(),
             }
         })
         .collect()
+}
+
+pub fn execute_all_dry_run(
+    worktrees: &[Worktree],
+    repo: &crate::state::Repo,
+    repo_info: &RepoInfo,
+    strategy: Strategy,
+    hooks_config: Option<&HooksConfig>,
+    no_hooks: bool,
+) -> Vec<SyncDryRunPlan> {
+    let live: Vec<LiveWorktree> = worktrees
+        .iter()
+        .cloned()
+        .map(|wt| LiveWorktree {
+            entry: GitWorktreeEntry {
+                name: wt.name.clone(),
+                path: Path::new(&wt.path).to_path_buf(),
+                branch: Some(wt.branch.clone()),
+                is_main: false,
+            },
+            metadata: Some(wt),
+        })
+        .collect();
+    let _ = repo;
+    execute_all_dry_run_live(&live, repo_info, strategy, hooks_config, no_hooks)
 }
 
 /// Execute `trench sync <identifier>` with lifecycle hooks.
@@ -459,13 +527,9 @@ pub async fn execute_with_hooks(
 
     // Resolve worktree info for hooks (before sync modifies state)
     let repo_info = crate::git::discover_repo(cwd)?;
-    let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
-
-    let base_branch = wt
-        .base_branch
-        .as_deref()
-        .or(repo.default_base.as_deref())
-        .unwrap_or(repo_info.default_branch.as_str());
+    let live = crate::live_worktree::resolve(identifier, &repo_info, db)?;
+    let (repo, wt) = crate::live_worktree::ensure_metadata(db, &repo_info, &live.entry)?;
+    let base_branch = crate::live_worktree::base_branch(&repo_info, &live);
 
     let env_ctx = HookEnvContext {
         worktree_path: wt.path.clone(),
@@ -494,7 +558,7 @@ pub async fn execute_with_hooks(
     }
 
     // Step 2: perform sync (reuse already-resolved data)
-    let result = execute_resolved(&repo, &wt, &repo_info, db, strategy)?;
+    let result = execute_live_resolved(&live, &repo_info, db, strategy)?;
 
     // Step 3: post_sync hook (cwd = worktree path)
     let post_sync_error = if let Some(post_sync) = &hooks.post_sync {
@@ -2226,6 +2290,43 @@ mod tests {
         assert!(
             found_repo.is_none(),
             "dry-run must not create repo rows in DB"
+        );
+    }
+
+    #[test]
+    fn dry_run_does_not_resolve_stale_db_worktree() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "stale-sync",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        crate::git::remove_worktree(repo_dir.path(), &create_result.path)
+            .expect("external git delete should succeed");
+
+        let err = execute_dry_run(
+            "stale-sync",
+            repo_dir.path(),
+            Some(&db),
+            Strategy::Rebase,
+            None,
+            false,
+        )
+        .expect_err("dry-run should ignore stale db-only worktree");
+
+        assert!(
+            err.to_string().contains("not found"),
+            "unexpected error: {err:#}"
         );
     }
 

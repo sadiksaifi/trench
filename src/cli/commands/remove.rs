@@ -4,8 +4,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::config::HooksConfig;
-use crate::git::{self, RepoInfo};
+use crate::git::{self, GitWorktreeEntry, RepoInfo};
 use crate::hooks::{self, HookEnvContext, HookEvent};
+use crate::live_worktree::LiveWorktree;
 use crate::state::{Database, Repo, Worktree};
 
 /// Typed errors for the `remove` command.
@@ -104,6 +105,10 @@ fn format_hook_def(f: &mut fmt::Formatter<'_>, hook: &crate::config::HookDef) ->
     Ok(())
 }
 
+fn archived_path(live_path: &Path, removed_at: i64) -> String {
+    format!("{}#removed-{removed_at}", live_path.to_string_lossy())
+}
+
 /// Hook definitions included in a remove dry-run plan.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RemoveDryRunHooks {
@@ -126,7 +131,12 @@ pub fn execute_dry_run(
     no_hooks: bool,
 ) -> Result<RemoveDryRunPlan> {
     let repo_info = crate::git::discover_repo(cwd)?;
-    let (_repo, wt) = crate::adopt::resolve_only(identifier, &repo_info, db)?;
+    let live = crate::live_worktree::resolve_read_only(identifier, &repo_info, db)?;
+    let branch = live
+        .entry
+        .branch
+        .clone()
+        .unwrap_or_else(|| live.entry.name.clone());
 
     let hooks = if no_hooks {
         None
@@ -146,9 +156,9 @@ pub fn execute_dry_run(
 
     Ok(RemoveDryRunPlan {
         dry_run: true,
-        name: wt.name.clone(),
-        branch: wt.branch.clone(),
-        path: wt.path.clone(),
+        name: live.entry.name.clone(),
+        branch,
+        path: live.entry.path.to_string_lossy().to_string(),
         prune,
         hooks,
     })
@@ -156,31 +166,25 @@ pub fn execute_dry_run(
 
 /// Execute the `trench remove <identifier>` command.
 ///
-/// Resolves the worktree by sanitized name or branch name, removes it from
-/// disk via git2, updates the DB record with `removed_at`, and inserts a
-/// "removed" event.
-///
-/// When `prune` is true, also deletes the corresponding remote branch.
-/// Returns a warning via `RemoveResult.pruned_remote = false` if the remote
-/// branch was not found (non-fatal).
+/// Resolves the worktree from live git state, removes it from disk, and
+/// purges trench metadata for the path when present.
 pub fn execute(identifier: &str, cwd: &Path, db: &Database, prune: bool) -> Result<RemoveResult> {
     let repo_info = git::discover_repo(cwd)?;
-    let (repo, wt) = crate::adopt::resolve_or_adopt(identifier, &repo_info, db)?;
-    execute_resolved(&repo, &wt, &repo_info, db, prune)
+    let live = crate::live_worktree::resolve(identifier, &repo_info, db)?;
+    execute_live_resolved(&live, &repo_info, db, prune)
 }
 
 /// Execute removal with pre-resolved worktree data.
 ///
 /// Use this when the caller has already resolved the worktree (e.g. for
 /// the confirmation prompt) to avoid a redundant DB/git round-trip.
-pub fn execute_resolved(
-    repo: &Repo,
-    wt: &Worktree,
+pub fn execute_live_resolved(
+    live: &LiveWorktree,
     repo_info: &RepoInfo,
     db: &Database,
     prune: bool,
 ) -> Result<RemoveResult> {
-    let worktree_path = Path::new(&wt.path);
+    let worktree_path = live.entry.path.as_path();
 
     // Remove worktree from disk and prune git references
     if worktree_path.exists() {
@@ -189,26 +193,26 @@ pub fn execute_resolved(
         eprintln!("warning: worktree directory already removed from disk");
     }
 
-    // Update DB: set removed_at timestamp
-    let now = crate::state::unix_epoch_secs() as i64;
-
-    db.update_worktree(
-        wt.id,
-        &crate::state::WorktreeUpdate {
-            removed_at: Some(Some(now)),
-            ..Default::default()
-        },
-    )
-    .context("failed to update worktree record")?;
-
-    // Insert "removed" event
-    db.insert_event(repo.id, Some(wt.id), "removed", None)
-        .context("failed to insert removed event")?;
+    if let Some(metadata) = live.metadata.as_ref() {
+        let now = crate::state::unix_epoch_secs() as i64;
+        db.archive_removed_worktree(metadata.id, &archived_path(worktree_path, now), now)
+            .context("failed to archive removed worktree metadata")?;
+        let repo = db.get_repo(metadata.repo_id)?.ok_or_else(|| {
+            anyhow::anyhow!("repo metadata missing for worktree '{}'", metadata.name)
+        })?;
+        db.insert_event(repo.id, Some(metadata.id), "removed", None)
+            .context("failed to insert removed event")?;
+    }
 
     // Optionally delete the remote branch
     let mut pruned_remote = false;
     if prune {
-        match git::delete_remote_branch(&repo_info.path, "origin", &wt.branch) {
+        let branch = live
+            .entry
+            .branch
+            .as_deref()
+            .unwrap_or(live.entry.name.as_str());
+        match git::delete_remote_branch(&repo_info.path, "origin", branch) {
             Ok(()) => pruned_remote = true,
             Err(git::GitError::RemoteBranchNotFound { branch, remote }) => {
                 eprintln!("warning: remote branch '{branch}' not found on {remote}");
@@ -218,9 +222,28 @@ pub fn execute_resolved(
     }
 
     Ok(RemoveResult {
-        name: wt.name.clone(),
+        name: live.entry.name.clone(),
         pruned_remote,
     })
+}
+
+pub fn execute_resolved(
+    _repo: &Repo,
+    wt: &Worktree,
+    repo_info: &RepoInfo,
+    db: &Database,
+    prune: bool,
+) -> Result<RemoveResult> {
+    let live = LiveWorktree {
+        entry: GitWorktreeEntry {
+            name: wt.name.clone(),
+            path: Path::new(&wt.path).to_path_buf(),
+            branch: Some(wt.branch.clone()),
+            is_main: false,
+        },
+        metadata: Some(wt.clone()),
+    };
+    execute_live_resolved(&live, repo_info, db, prune)
 }
 
 /// Execute `trench remove` with lifecycle hooks.
@@ -229,9 +252,8 @@ pub fn execute_resolved(
 /// - If `no_hooks` is true or no hooks configured, hooks are skipped.
 /// - Pre_remove failure cancels the operation (worktree not removed).
 /// - Post_remove failure: worktree already gone, warning only (FR-24).
-pub async fn execute_resolved_with_hooks(
-    repo: &Repo,
-    wt: &Worktree,
+pub async fn execute_live_resolved_with_hooks(
+    live: &LiveWorktree,
     repo_info: &RepoInfo,
     db: &Database,
     prune: bool,
@@ -250,7 +272,7 @@ pub async fn execute_resolved_with_hooks(
         } else {
             RemoveHooksStatus::None
         };
-        let result = execute_resolved(repo, wt, repo_info, db, prune)?;
+        let result = execute_live_resolved(live, repo_info, db, prune)?;
         return Ok(RemoveWithHooksResult {
             result,
             hooks_status,
@@ -259,6 +281,8 @@ pub async fn execute_resolved_with_hooks(
     }
 
     let hooks = hooks_config.unwrap(); // safe: has_hooks is true
+    let (repo, wt) = crate::live_worktree::ensure_metadata(db, repo_info, &live.entry)?;
+    let base_branch = crate::live_worktree::base_branch(repo_info, live);
 
     let env_ctx = HookEnvContext {
         worktree_path: wt.path.clone(),
@@ -266,7 +290,7 @@ pub async fn execute_resolved_with_hooks(
         branch: wt.branch.clone(),
         repo_name: repo.name.clone(),
         repo_path: repo_info.path.to_string_lossy().to_string(),
-        base_branch: wt.base_branch.clone().unwrap_or_default(),
+        base_branch,
     };
 
     // Step 1: pre_remove hook (cwd = worktree path, FR-22)
@@ -325,17 +349,10 @@ pub async fn execute_resolved_with_hooks(
         None
     };
 
-    // Step 4: DB bookkeeping — cannot prevent post_remove from running
+    // Step 4: archive metadata after hook execution
     let now = crate::state::unix_epoch_secs() as i64;
-    db.update_worktree(
-        wt.id,
-        &crate::state::WorktreeUpdate {
-            removed_at: Some(Some(now)),
-            ..Default::default()
-        },
-    )
-    .context("failed to update worktree record")?;
-
+    db.archive_removed_worktree(wt.id, &archived_path(worktree_path, now), now)
+        .context("failed to archive removed worktree metadata")?;
     db.insert_event(repo.id, Some(wt.id), "removed", None)
         .context("failed to insert removed event")?;
 
@@ -359,6 +376,30 @@ pub async fn execute_resolved_with_hooks(
         hooks_status: RemoveHooksStatus::Ran,
         post_remove_warning,
     })
+}
+
+pub async fn execute_resolved_with_hooks(
+    repo: &Repo,
+    wt: &Worktree,
+    repo_info: &RepoInfo,
+    db: &Database,
+    prune: bool,
+    hooks_config: Option<&HooksConfig>,
+    no_hooks: bool,
+    hook_tx: Option<&std::sync::mpsc::Sender<crate::tui::screens::hook_log::HookOutputMessage>>,
+) -> Result<RemoveWithHooksResult> {
+    let live = LiveWorktree {
+        entry: GitWorktreeEntry {
+            name: wt.name.clone(),
+            path: Path::new(&wt.path).to_path_buf(),
+            branch: Some(wt.branch.clone()),
+            is_main: false,
+        },
+        metadata: Some(wt.clone()),
+    };
+    let _ = repo;
+    execute_live_resolved_with_hooks(&live, repo_info, db, prune, hooks_config, no_hooks, hook_tx)
+        .await
 }
 
 #[cfg(test)]
@@ -641,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_adopts_unmanaged_worktree_before_removing() {
+    fn remove_unmanaged_worktree_without_persisting_metadata() {
         let repo_dir = tempfile::tempdir().unwrap();
         let git_repo = init_repo_with_commit(repo_dir.path());
         let db_dir = tempfile::tempdir().unwrap();
@@ -673,14 +714,13 @@ mod tests {
             .unwrap();
         assert!(wt_path.exists(), "worktree should exist on disk");
 
-        // Remove the unmanaged worktree — should adopt then remove
+        // Remove the unmanaged worktree — should not persist metadata
         let result = execute("unmanaged-rm", repo_dir.path(), &db, false)
             .expect("remove of unmanaged worktree should succeed");
         assert_eq!(result.name, "unmanaged-rm");
 
-        // Verify worktree was adopted (has adopted_at) and removed (has removed_at)
+        // Verify DB stayed clean for the unmanaged worktree path
         let db_repo = db.get_repo_by_path(repo_path_str).unwrap().unwrap();
-        // Check via raw query since find_worktree_by_identifier excludes removed
         let wt_count: i64 = db
             .conn_for_test()
             .query_row(
@@ -689,16 +729,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(wt_count, 1, "worktree should exist in DB");
-
-        // Check adopted_at and removed_at via raw query
-        let (adopted_at, removed_at): (Option<i64>, Option<i64>) = db.conn_for_test().query_row(
-            "SELECT adopted_at, removed_at FROM worktrees WHERE repo_id = ?1 AND name = 'unmanaged-rm'",
-            rusqlite::params![db_repo.id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
-        assert!(adopted_at.is_some(), "adopted_at should be set");
-        assert!(removed_at.is_some(), "removed_at should be set");
+        assert_eq!(wt_count, 0, "worktree should not be inserted into DB");
     }
 
     #[test]
@@ -755,6 +786,41 @@ mod tests {
         assert!(
             msg.contains("not found"),
             "error should mention 'not found', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn external_git_delete_returns_not_found_not_unique_constraint() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "deleted-outside",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        crate::git::remove_worktree(repo_dir.path(), &create_result.path)
+            .expect("external git delete should succeed");
+        assert!(!create_result.path.exists(), "worktree should be gone");
+
+        let err = execute("deleted-outside", repo_dir.path(), &db, false)
+            .expect_err("remove should not resolve stale db ghost");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "expected not found error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("UNIQUE constraint"),
+            "should not fail via stale DB adoption: {msg}"
         );
     }
 
@@ -1384,6 +1450,29 @@ mod tests {
             plan.hooks.is_none(),
             "empty hooks config should normalize to None, got: {:?}",
             plan.hooks
+        );
+    }
+
+    #[test]
+    fn dry_run_does_not_resolve_stale_db_worktree() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("stale-dry-run");
+        let repo_info = crate::git::discover_repo(repo_dir.path()).unwrap();
+        let live = crate::live_worktree::resolve("stale-dry-run", &repo_info, &db).unwrap();
+        crate::git::remove_worktree(repo_dir.path(), &live.entry.path)
+            .expect("external git delete should succeed");
+
+        let err = execute_dry_run(
+            "stale-dry-run",
+            repo_dir.path(),
+            Some(&db),
+            false,
+            None,
+            false,
+        )
+        .expect_err("dry run should ignore stale DB-only worktree");
+        assert!(
+            err.to_string().contains("not found"),
+            "unexpected error: {err:#}"
         );
     }
 }
