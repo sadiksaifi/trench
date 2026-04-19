@@ -394,8 +394,26 @@ fn map_repo_open_error(e: git2::Error, path: &Path) -> GitError {
 /// the canonical repo path, optional origin remote URL, and the default branch.
 pub fn discover_repo(path: &Path) -> Result<RepoInfo, GitError> {
     let repo = git2::Repository::discover(path).map_err(|e| map_repo_open_error(e, path))?;
+    let repo_git_dir = repo.path();
+    let common_git_dir = if repo_git_dir
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "worktrees")
+    {
+        repo_git_dir
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .ok_or_else(|| GitError::NotAGitRepo {
+                path: path.to_path_buf(),
+            })?
+    } else {
+        repo_git_dir.to_path_buf()
+    };
+    let common_repo = git2::Repository::open(&common_git_dir)
+        .map_err(|e| map_repo_open_error(e, &common_git_dir))?;
 
-    let workdir = repo
+    let workdir = common_repo
         .workdir()
         .ok_or_else(|| GitError::NotAGitRepo {
             path: path.to_path_buf(),
@@ -411,13 +429,13 @@ pub fn discover_repo(path: &Path) -> Result<RepoInfo, GitError> {
         .unwrap_or_else(|| String::from("repo"));
 
     // Extract origin remote URL if present
-    let remote_url = repo
+    let remote_url = common_repo
         .find_remote("origin")
         .ok()
         .and_then(|r| r.url().map(String::from));
 
     // Extract default branch from HEAD
-    let default_branch = repo
+    let default_branch = common_repo
         .head()
         .ok()
         .and_then(|r| r.shorthand().map(String::from))
@@ -1433,6 +1451,32 @@ mod tests {
         assert_eq!(additional.path, target.canonicalize().unwrap());
         assert_eq!(additional.branch.as_deref(), Some("extra-wt"));
         assert!(!additional.is_main);
+    }
+
+    #[test]
+    fn discover_repo_from_linked_worktree_returns_primary_checkout() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = head_branch(&repo);
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("linked-wt");
+
+        create_worktree(repo_dir.path(), "linked-wt", &base, &target)
+            .expect("should create linked worktree");
+
+        let info = discover_repo(&target).expect("should discover from linked worktree");
+
+        assert_eq!(info.path, repo_dir.path().canonicalize().unwrap());
+        assert_eq!(
+            info.name,
+            repo_dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+        );
     }
 
     /// Helper: create a bare remote repo, clone it, return (clone_repo, clone_dir, remote_dir).

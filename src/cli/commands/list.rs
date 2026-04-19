@@ -1478,6 +1478,36 @@ mod tests {
     }
 
     #[test]
+    fn list_from_linked_worktree_still_shows_primary_checkout() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("linked-wt");
+        let db = Database::open_in_memory().unwrap();
+
+        crate::git::create_worktree(repo_dir.path(), "linked-wt", &base, &target)
+            .expect("should create linked worktree");
+
+        let output = render_table(&target, &db, None, None, &[]).expect("list should succeed");
+        let main_path = repo_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        assert!(
+            output.contains(&main_path),
+            "output should contain primary checkout path '{main_path}', got: {output}"
+        );
+        assert!(
+            output.contains("linked-wt"),
+            "output should contain linked worktree row, got: {output}"
+        );
+    }
+
+    #[test]
     fn empty_state_output_ends_with_newline() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
