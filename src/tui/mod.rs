@@ -349,11 +349,17 @@ impl App {
     pub fn pop_screen(&mut self) {
         if self.nav_stack.len() > 1 {
             self.nav_stack.pop();
-            if self.active_screen() == Screen::List {
-                self.refresh_list();
-            }
         } else {
             self.running = false;
+        }
+    }
+
+    fn pop_to_list(&mut self, refresh: bool) {
+        while self.active_screen() != Screen::List {
+            self.pop_screen();
+        }
+        if refresh {
+            self.refresh_list();
         }
     }
 
@@ -411,6 +417,11 @@ impl App {
 
     /// Reload worktree data from git + DB for the list screen.
     pub fn refresh_list(&mut self) {
+        #[cfg(test)]
+        if self.repo_path.is_none() {
+            return;
+        }
+
         let Some((cwd, db)) = Self::open_db() else {
             return;
         };
@@ -454,9 +465,17 @@ impl App {
             all_refs.push(rp.as_path());
         }
 
-        if let Ok(dw) =
-            watcher::DebouncedWatcher::from_worktree_paths(&all_refs, watcher::DEBOUNCE_DURATION)
-        {
+        #[cfg(test)]
+        let watcher_result = watcher::DebouncedWatcher::from_worktree_paths_with_polling(
+            &all_refs,
+            watcher::DEBOUNCE_DURATION,
+            std::time::Duration::from_millis(25),
+        );
+        #[cfg(not(test))]
+        let watcher_result =
+            watcher::DebouncedWatcher::from_worktree_paths(&all_refs, watcher::DEBOUNCE_DURATION);
+
+        if let Ok(dw) = watcher_result {
             self.watcher = Some(dw);
         }
     }
@@ -645,9 +664,7 @@ impl App {
             match key.code {
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     self.delete_confirm_state = None;
-                    while self.active_screen() != Screen::List {
-                        self.pop_screen();
-                    }
+                    self.pop_to_list(true);
                 }
                 _ => {}
             }
@@ -812,6 +829,10 @@ impl App {
         true
     }
 
+    fn load_detail_from_row(&mut self, row: &screens::list::WorktreeRow) {
+        self.detail_state = Some(screens::detail::fallback_from_row(row));
+    }
+
     fn handle_detail_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('s') => {
@@ -898,10 +919,8 @@ impl App {
         if in_result_mode {
             match key.code {
                 KeyCode::Enter | KeyCode::Char(' ') => {
-                    while self.active_screen() != Screen::List {
-                        self.pop_screen();
-                    }
                     self.sync_picker_state = None;
+                    self.pop_to_list(true);
                 }
                 _ => {}
             }
@@ -1119,6 +1138,7 @@ impl App {
                 }
             }
             KeyCode::Char('d') => {
+                let selected_row = self.list_state.rows.get(self.list_state.selected).cloned();
                 let identity = self
                     .list_state
                     .rows
@@ -1133,6 +1153,15 @@ impl App {
                 if let Some(name) = identity {
                     self.save_list_session();
                     if self.load_detail(&name) {
+                        self.push_screen(Screen::Detail);
+                    } else if let Some(row) = self
+                        .list_state
+                        .rows
+                        .get(self.list_state.selected)
+                        .cloned()
+                        .or(selected_row)
+                    {
+                        self.load_detail_from_row(&row);
                         self.push_screen(Screen::Detail);
                     }
                 }
@@ -1190,9 +1219,7 @@ impl App {
             match key.code {
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     self.create_state = None;
-                    while self.active_screen() != Screen::List {
-                        self.pop_screen();
-                    }
+                    self.pop_to_list(true);
                 }
                 _ => {}
             }
@@ -1918,6 +1945,30 @@ mod tests {
         // Pop List → quit
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.is_running());
+    }
+
+    #[test]
+    fn pop_screen_to_list_does_not_refresh_fake_rows() {
+        let mut app = app_with_rows();
+        let original_names: Vec<String> = app
+            .list_state
+            .rows
+            .iter()
+            .map(|row| row.name.clone())
+            .collect();
+        app.detail_state = Some(sample_detail_state());
+        app.push_screen(Screen::Detail);
+
+        app.pop_screen();
+
+        let current_names: Vec<String> = app
+            .list_state
+            .rows
+            .iter()
+            .map(|row| row.name.clone())
+            .collect();
+        assert_eq!(app.active_screen(), Screen::List);
+        assert_eq!(current_names, original_names);
     }
 
     #[test]

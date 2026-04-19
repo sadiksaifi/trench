@@ -40,7 +40,14 @@ fn build_subscriber<W: Write + Send + 'static>(
 /// Writes logs to `$XDG_STATE_HOME/trench/trench.log`. Defaults to `warn`
 /// level; override with the `TRENCH_LOG` environment variable.
 pub fn init() -> Result<()> {
-    init_with_log_dir(&paths::state_dir()?)
+    match paths::state_dir().and_then(|dir| init_with_log_dir(&dir)) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let subscriber = build_subscriber(std::io::sink());
+            let _ = tracing::subscriber::set_global_default(subscriber);
+            Ok(())
+        }
+    }
 }
 
 fn init_with_log_dir(log_dir: &std::path::Path) -> Result<()> {

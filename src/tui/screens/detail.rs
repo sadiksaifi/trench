@@ -10,6 +10,7 @@ use ratatui::{
 
 use crate::git;
 use crate::state::Database;
+use crate::tui::screens::list::WorktreeRow;
 
 /// View model for the detail screen showing a single worktree's information.
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +126,27 @@ pub fn load_detail(name: &str, cwd: &Path, db: &Database, date_format: &str) -> 
         hook_timestamp,
         changed_files,
         commits,
+    }
+}
+
+/// Build a best-effort detail view directly from a selected list row.
+pub fn fallback_from_row(row: &WorktreeRow) -> DetailState {
+    DetailState {
+        name: row.name.clone(),
+        branch: row.branch.clone(),
+        path: row.path.clone(),
+        base_branch: "-".to_string(),
+        ahead_behind: if row.ahead_behind.is_empty() {
+            "-".to_string()
+        } else {
+            row.ahead_behind.clone()
+        },
+        created: "-".to_string(),
+        last_accessed: "never".to_string(),
+        hook_status: "none".to_string(),
+        hook_timestamp: "-".to_string(),
+        changed_files: vec![],
+        commits: vec![],
     }
 }
 

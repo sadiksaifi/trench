@@ -3,10 +3,36 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use notify::{Event, RecommendedWatcher, Watcher};
+use notify::{Config, Event, PollWatcher, RecommendedWatcher, Watcher};
 
 /// Default debounce window: 500ms of quiet before triggering a refresh.
 pub const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+const FALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(250);
+#[cfg(test)]
+const TEST_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Clone, Copy, Debug)]
+enum WatchBackend {
+    Recommended,
+    Poll {
+        interval: Duration,
+        compare_contents: bool,
+    },
+}
+
+enum ActiveWatcher {
+    Recommended(RecommendedWatcher),
+    Poll(PollWatcher),
+}
+
+impl ActiveWatcher {
+    fn watch(&mut self, path: &Path, mode: notify::RecursiveMode) -> notify::Result<()> {
+        match self {
+            Self::Recommended(watcher) => watcher.watch(path, mode),
+            Self::Poll(watcher) => watcher.watch(path, mode),
+        }
+    }
+}
 
 /// Handle a notify watch event: forward successful events to the channel,
 /// log errors at warn level.
@@ -26,7 +52,7 @@ fn handle_watch_event(res: notify::Result<Event>, tx: &mpsc::Sender<()>) {
 /// Uses the `notify` crate to monitor worktree directories and `.git` directories
 /// for changes. Events are coalesced — callers should debounce before refreshing.
 pub struct FileWatcher {
-    _watcher: RecommendedWatcher,
+    _watcher: ActiveWatcher,
     event_rx: mpsc::Receiver<()>,
 }
 
@@ -37,11 +63,37 @@ impl FileWatcher {
     /// when changes are detected. Returns an error if the watcher cannot
     /// be initialized.
     pub fn new(paths: &[&Path]) -> Result<Self> {
+        match Self::new_with_backend(paths, WatchBackend::Recommended) {
+            Ok(watcher) => Ok(watcher),
+            Err(native_err) => {
+                tracing::warn!(
+                    "native watcher unavailable, falling back to polling: {native_err:#}"
+                );
+                Self::new_with_backend(
+                    paths,
+                    WatchBackend::Poll {
+                        interval: FALLBACK_POLL_INTERVAL,
+                        compare_contents: true,
+                    },
+                )
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_polling(paths: &[&Path], interval: Duration) -> Result<Self> {
+        Self::new_with_backend(
+            paths,
+            WatchBackend::Poll {
+                interval,
+                compare_contents: true,
+            },
+        )
+    }
+
+    fn new_with_backend(paths: &[&Path], backend: WatchBackend) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
-        let event_tx = tx;
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-            handle_watch_event(res, &event_tx);
-        })?;
+        let mut watcher = Self::build_watcher(backend, tx)?;
 
         let mut watched = 0;
         let mut watch_errors = 0;
@@ -69,6 +121,31 @@ impl FileWatcher {
         })
     }
 
+    fn build_watcher(backend: WatchBackend, tx: mpsc::Sender<()>) -> notify::Result<ActiveWatcher> {
+        match backend {
+            WatchBackend::Recommended => {
+                let watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+                    handle_watch_event(res, &tx);
+                })?;
+                Ok(ActiveWatcher::Recommended(watcher))
+            }
+            WatchBackend::Poll {
+                interval,
+                compare_contents,
+            } => {
+                let watcher = PollWatcher::new(
+                    move |res: notify::Result<Event>| {
+                        handle_watch_event(res, &tx);
+                    },
+                    Config::default()
+                        .with_poll_interval(interval)
+                        .with_compare_contents(compare_contents),
+                )?;
+                Ok(ActiveWatcher::Poll(watcher))
+            }
+        }
+    }
+
     /// Drain all pending events. Returns `true` if any events were received.
     pub fn drain_events(&self) -> bool {
         let mut got_any = false;
@@ -84,33 +161,63 @@ impl FileWatcher {
 /// After the first filesystem event, waits until `DEBOUNCE_DURATION` (500ms)
 /// passes with no new events before signaling that a refresh is needed.
 /// This prevents excessive refreshes during rapid file changes (e.g. `git fetch`).
-pub struct DebouncedWatcher {
-    inner: FileWatcher,
+#[derive(Debug)]
+struct DebounceState {
     last_event: Option<Instant>,
     pending_refresh: bool,
     debounce: Duration,
 }
 
+impl DebounceState {
+    fn new(debounce: Duration) -> Self {
+        Self {
+            last_event: None,
+            pending_refresh: false,
+            debounce,
+        }
+    }
+
+    fn record_event(&mut self, now: Instant) {
+        self.last_event = Some(now);
+    }
+
+    fn poll_at(&mut self, now: Instant) {
+        if let Some(last) = self.last_event {
+            if now.checked_duration_since(last).unwrap_or_default() >= self.debounce {
+                self.last_event = None;
+                self.pending_refresh = true;
+            }
+        }
+    }
+
+    fn take_refresh(&mut self) -> bool {
+        std::mem::take(&mut self.pending_refresh)
+    }
+
+    #[cfg(test)]
+    fn has_pending_refresh(&self) -> bool {
+        self.pending_refresh
+    }
+}
+
+pub struct DebouncedWatcher {
+    inner: FileWatcher,
+    state: DebounceState,
+}
+
 impl DebouncedWatcher {
     /// Create a debounced watcher monitoring the given paths.
     pub fn new(paths: &[&Path]) -> Result<Self> {
-        Ok(Self {
-            inner: FileWatcher::new(paths)?,
-            last_event: None,
-            pending_refresh: false,
-            debounce: DEBOUNCE_DURATION,
-        })
+        Self::from_file_watcher(FileWatcher::new(paths)?, DEBOUNCE_DURATION)
     }
 
     /// Create with a custom debounce duration (for testing).
     #[cfg(test)]
     pub fn with_debounce(paths: &[&Path], debounce: Duration) -> Result<Self> {
-        Ok(Self {
-            inner: FileWatcher::new(paths)?,
-            last_event: None,
-            pending_refresh: false,
+        Self::from_file_watcher(
+            FileWatcher::with_polling(paths, TEST_POLL_INTERVAL)?,
             debounce,
-        })
+        )
     }
 
     /// Create a debounced watcher from worktree paths, auto-discovering `.git` dirs.
@@ -118,40 +225,35 @@ impl DebouncedWatcher {
     /// For each worktree path, also watches the `.git` directory (if it exists)
     /// so that ref changes (commits, fetches, branch switches) trigger refresh.
     pub fn from_worktree_paths(worktree_paths: &[&Path], debounce: Duration) -> Result<Self> {
-        let mut all_paths: Vec<std::path::PathBuf> = Vec::new();
-
-        for path in worktree_paths {
-            all_paths.push(path.to_path_buf());
-
-            // Check for .git directory (normal repo)
-            let git_dir = path.join(".git");
-            if git_dir.is_dir() {
-                all_paths.push(git_dir);
-            } else if git_dir.is_file() {
-                // Worktree: .git is a file pointing to the real git dir
-                if let Ok(content) = std::fs::read_to_string(&git_dir) {
-                    if let Some(gitdir) = content.strip_prefix("gitdir: ") {
-                        let gitdir_path = Path::new(gitdir.trim());
-                        let real_git_dir = if gitdir_path.is_relative() {
-                            path.join(gitdir_path)
-                        } else {
-                            gitdir_path.to_path_buf()
-                        };
-                        if real_git_dir.is_dir() {
-                            all_paths.push(real_git_dir);
-                        }
-                    }
-                }
-            }
-        }
-
+        let all_paths = collect_watch_paths(worktree_paths);
         let path_refs: Vec<&Path> = all_paths.iter().map(|p| p.as_path()).collect();
-        Ok(Self {
-            inner: FileWatcher::new(&path_refs)?,
-            last_event: None,
-            pending_refresh: false,
+        Self::from_file_watcher(FileWatcher::new(&path_refs)?, debounce)
+    }
+
+    #[cfg(test)]
+    pub fn from_worktree_paths_with_polling(
+        worktree_paths: &[&Path],
+        debounce: Duration,
+        poll_interval: Duration,
+    ) -> Result<Self> {
+        let all_paths = collect_watch_paths(worktree_paths);
+        let path_refs: Vec<&Path> = all_paths.iter().map(|p| p.as_path()).collect();
+        Self::from_file_watcher(
+            FileWatcher::with_polling(&path_refs, poll_interval)?,
             debounce,
+        )
+    }
+
+    fn from_file_watcher(inner: FileWatcher, debounce: Duration) -> Result<Self> {
+        Ok(Self {
+            inner,
+            state: DebounceState::new(debounce),
         })
+    }
+
+    #[cfg(test)]
+    pub fn has_pending_refresh(&self) -> bool {
+        self.state.has_pending_refresh()
     }
 
     /// Drain pending filesystem events and update internal state.
@@ -160,15 +262,9 @@ impl DebouncedWatcher {
     /// consume the pending refresh — use `should_refresh()` for that.
     pub fn poll_events(&mut self) {
         if self.inner.drain_events() {
-            self.last_event = Some(Instant::now());
+            self.state.record_event(Instant::now());
         }
-
-        if let Some(last) = self.last_event {
-            if last.elapsed() >= self.debounce {
-                self.last_event = None;
-                self.pending_refresh = true;
-            }
-        }
+        self.state.poll_at(Instant::now());
     }
 
     /// Check if a refresh is pending and consume it.
@@ -178,25 +274,113 @@ impl DebouncedWatcher {
     /// return `false` until new events arrive.
     pub fn should_refresh(&mut self) -> bool {
         self.poll_events();
-        if self.pending_refresh {
-            self.pending_refresh = false;
-            return true;
-        }
-        false
+        self.state.take_refresh()
     }
+}
+
+fn collect_watch_paths(worktree_paths: &[&Path]) -> Vec<std::path::PathBuf> {
+    let mut all_paths: Vec<std::path::PathBuf> = Vec::new();
+
+    for path in worktree_paths {
+        all_paths.push(path.to_path_buf());
+
+        let git_dir = path.join(".git");
+        if git_dir.is_dir() {
+            all_paths.push(git_dir);
+        } else if git_dir.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&git_dir) {
+                if let Some(gitdir) = content.strip_prefix("gitdir: ") {
+                    let gitdir_path = Path::new(gitdir.trim());
+                    let real_git_dir = if gitdir_path.is_relative() {
+                        path.join(gitdir_path)
+                    } else {
+                        gitdir_path.to_path_buf()
+                    };
+                    if real_git_dir.is_dir() {
+                        all_paths.push(real_git_dir);
+                    }
+                }
+            }
+        }
+    }
+
+    all_paths
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
-    use std::io::Read as _;
+    use std::io;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct SharedLogWriter {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter {
+                inner: Arc::clone(&self.inner),
+            }
+        }
+    }
+
+    impl io::Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SharedLogBuffer {
+        fn contents(&self) -> String {
+            String::from_utf8(self.inner.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    fn wait_until(timeout: Duration, step: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+        let start = Instant::now();
+        loop {
+            if predicate() {
+                return true;
+            }
+            if start.elapsed() >= timeout {
+                return false;
+            }
+            std::thread::sleep(step);
+        }
+    }
+
+    fn wait_for_events(watcher: &FileWatcher) -> bool {
+        wait_until(Duration::from_secs(2), TEST_POLL_INTERVAL, || {
+            watcher.drain_events()
+        })
+    }
+
+    fn wait_for_refresh(watcher: &mut DebouncedWatcher) -> bool {
+        wait_until(Duration::from_secs(2), TEST_POLL_INTERVAL, || {
+            watcher.should_refresh()
+        })
+    }
 
     #[test]
     fn watcher_detects_file_creation() {
         let dir = TempDir::new().unwrap();
-        let watcher = FileWatcher::new(&[dir.path()]).unwrap();
+        let watcher = FileWatcher::with_polling(&[dir.path()], TEST_POLL_INTERVAL).unwrap();
 
         // No events initially
         assert!(
@@ -206,11 +390,7 @@ mod tests {
 
         // Create a file — should trigger an event
         fs::write(dir.path().join("test.txt"), "hello").unwrap();
-
-        // Give the watcher time to deliver the event
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        assert!(watcher.drain_events(), "should detect file creation");
+        assert!(wait_for_events(&watcher), "should detect file creation");
     }
 
     #[test]
@@ -219,21 +399,13 @@ mod tests {
         let file_path = dir.path().join("existing.txt");
         fs::write(&file_path, "original").unwrap();
 
-        // Small delay to ensure watcher doesn't pick up the initial write
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        let watcher = FileWatcher::new(&[dir.path()]).unwrap();
-
-        // Drain any spurious startup events
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let watcher = FileWatcher::with_polling(&[dir.path()], TEST_POLL_INTERVAL).unwrap();
         watcher.drain_events();
 
         // Modify the file
         fs::write(&file_path, "modified").unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        assert!(watcher.drain_events(), "should detect file modification");
+        assert!(wait_for_events(&watcher), "should detect file modification");
     }
 
     #[test]
@@ -251,10 +423,7 @@ mod tests {
     #[test]
     fn drain_returns_false_when_no_events() {
         let dir = TempDir::new().unwrap();
-        let watcher = FileWatcher::new(&[dir.path()]).unwrap();
-
-        // Drain any startup noise
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let watcher = FileWatcher::with_polling(&[dir.path()], TEST_POLL_INTERVAL).unwrap();
         watcher.drain_events();
 
         // No changes made — should return false
@@ -266,107 +435,58 @@ mod tests {
 
     #[test]
     fn debounced_watcher_no_refresh_without_events() {
-        let dir = TempDir::new().unwrap();
-        let mut dw =
-            DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(50)).unwrap();
-
-        // Drain any startup noise
-        std::thread::sleep(Duration::from_millis(100));
-        dw.should_refresh();
-        std::thread::sleep(Duration::from_millis(100));
-
-        assert!(!dw.should_refresh(), "should not refresh without events");
+        let mut state = DebounceState::new(Duration::from_millis(50));
+        let start = Instant::now();
+        state.poll_at(start + Duration::from_millis(250));
+        assert!(!state.take_refresh(), "should not refresh without events");
     }
 
     #[test]
     fn debounced_watcher_no_refresh_during_debounce_window() {
-        let dir = TempDir::new().unwrap();
-        let mut dw =
-            DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(300)).unwrap();
-
-        // Drain startup noise
-        std::thread::sleep(Duration::from_millis(100));
-        dw.should_refresh();
-
-        // Create a file
-        fs::write(dir.path().join("test.txt"), "hello").unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-
-        // Event received but debounce window (300ms) not yet elapsed
+        let mut state = DebounceState::new(Duration::from_millis(300));
+        let start = Instant::now();
+        state.record_event(start);
+        state.poll_at(start + Duration::from_millis(100));
         assert!(
-            !dw.should_refresh(),
+            !state.take_refresh(),
             "should not refresh during debounce window"
         );
     }
 
     #[test]
     fn debounced_watcher_refreshes_after_debounce_window() {
-        let dir = TempDir::new().unwrap();
-        let mut dw =
-            DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(100)).unwrap();
-
-        // Drain startup noise
-        std::thread::sleep(Duration::from_millis(100));
-        dw.should_refresh();
-
-        // Create a file
-        fs::write(dir.path().join("test.txt"), "hello").unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        dw.should_refresh(); // picks up event, starts debounce
-
-        // Wait for debounce to expire
-        std::thread::sleep(Duration::from_millis(150));
-
+        let mut state = DebounceState::new(Duration::from_millis(100));
+        let start = Instant::now();
+        state.record_event(start);
+        state.poll_at(start + Duration::from_millis(150));
         assert!(
-            dw.should_refresh(),
+            state.take_refresh(),
             "should refresh after debounce window expires"
         );
     }
 
     #[test]
     fn debounced_watcher_resets_on_new_events() {
-        let dir = TempDir::new().unwrap();
-        let mut dw =
-            DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(200)).unwrap();
-
-        // Drain startup noise
-        std::thread::sleep(Duration::from_millis(100));
-        dw.should_refresh();
-
-        // First event
-        fs::write(dir.path().join("a.txt"), "a").unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        dw.should_refresh(); // picks up event
-
-        // Second event before debounce expires — should reset timer
-        fs::write(dir.path().join("b.txt"), "b").unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(!dw.should_refresh(), "debounce should reset on new events");
-
-        // Wait for debounce to fully expire after the last event
-        std::thread::sleep(Duration::from_millis(250));
-        assert!(dw.should_refresh(), "should refresh after events settle");
+        let mut state = DebounceState::new(Duration::from_millis(200));
+        let start = Instant::now();
+        state.record_event(start);
+        state.poll_at(start + Duration::from_millis(150));
+        state.record_event(start + Duration::from_millis(150));
+        state.poll_at(start + Duration::from_millis(300));
+        assert!(!state.take_refresh(), "debounce should reset on new events");
+        state.poll_at(start + Duration::from_millis(400));
+        assert!(state.take_refresh(), "should refresh after events settle");
     }
 
     #[test]
     fn debounced_watcher_clears_after_refresh() {
-        let dir = TempDir::new().unwrap();
-        let mut dw =
-            DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(50)).unwrap();
-
-        // Drain startup noise
-        std::thread::sleep(Duration::from_millis(100));
-        dw.should_refresh();
-
-        // Trigger event and let debounce expire
-        fs::write(dir.path().join("test.txt"), "hello").unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-        dw.should_refresh(); // picks up event
-        std::thread::sleep(Duration::from_millis(100));
-
-        assert!(dw.should_refresh(), "first call should return true");
+        let mut state = DebounceState::new(Duration::from_millis(50));
+        let start = Instant::now();
+        state.record_event(start);
+        state.poll_at(start + Duration::from_millis(100));
+        assert!(state.take_refresh(), "first call should return true");
         assert!(
-            !dw.should_refresh(),
+            !state.take_refresh(),
             "second call should return false (cleared)"
         );
     }
@@ -386,18 +506,14 @@ mod tests {
         }
 
         let git_dir = dir.path().join(".git");
-        let watcher = FileWatcher::new(&[&git_dir]).unwrap();
-
-        // Drain startup events
-        std::thread::sleep(Duration::from_millis(200));
+        let watcher = FileWatcher::with_polling(&[&git_dir], TEST_POLL_INTERVAL).unwrap();
         watcher.drain_events();
 
         // Simulate a ref change (like after a fetch or commit)
         let refs_dir = git_dir.join("refs").join("heads");
         fs::write(refs_dir.join("test-branch"), "fake-sha\n").unwrap();
 
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(watcher.drain_events(), "should detect git ref changes");
+        assert!(wait_for_events(&watcher), "should detect git ref changes");
     }
 
     #[test]
@@ -406,17 +522,13 @@ mod tests {
         let _repo = git2::Repository::init(dir.path()).unwrap();
 
         let git_dir = dir.path().join(".git");
-        let watcher = FileWatcher::new(&[&git_dir]).unwrap();
-
-        // Drain startup events
-        std::thread::sleep(Duration::from_millis(200));
+        let watcher = FileWatcher::with_polling(&[&git_dir], TEST_POLL_INTERVAL).unwrap();
         watcher.drain_events();
 
         // Simulate HEAD change (like switching branches)
         fs::write(git_dir.join("HEAD"), "ref: refs/heads/other-branch\n").unwrap();
 
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(watcher.drain_events(), "should detect HEAD changes");
+        assert!(wait_for_events(&watcher), "should detect HEAD changes");
     }
 
     #[test]
@@ -432,26 +544,20 @@ mod tests {
         }
 
         // Use the constructor that takes worktree paths and auto-discovers .git dirs
-        let mut dw =
-            DebouncedWatcher::from_worktree_paths(&[dir.path()], Duration::from_millis(50))
-                .unwrap();
-
-        // Drain startup noise
-        std::thread::sleep(Duration::from_millis(200));
-        dw.should_refresh();
-        std::thread::sleep(Duration::from_millis(100));
+        let mut dw = DebouncedWatcher::from_worktree_paths_with_polling(
+            &[dir.path()],
+            Duration::from_millis(50),
+            TEST_POLL_INTERVAL,
+        )
+        .unwrap();
         dw.should_refresh();
 
         // Simulate a ref change inside .git
         let refs_dir = dir.path().join(".git").join("refs").join("heads");
         fs::write(refs_dir.join("new-branch"), "deadbeef\n").unwrap();
 
-        std::thread::sleep(Duration::from_millis(100));
-        dw.should_refresh(); // picks up event
-
-        std::thread::sleep(Duration::from_millis(100));
         assert!(
-            dw.should_refresh(),
+            wait_for_refresh(&mut dw),
             "should auto-discover and watch .git directory"
         );
     }
@@ -462,10 +568,7 @@ mod tests {
         // We simulate this by watching a directory, triggering events, then verifying
         // that the watcher is still functional after errors would have occurred.
         let dir = TempDir::new().unwrap();
-        let watcher = FileWatcher::new(&[dir.path()]).unwrap();
-
-        // Drain startup noise
-        std::thread::sleep(Duration::from_millis(100));
+        let watcher = FileWatcher::with_polling(&[dir.path()], TEST_POLL_INTERVAL).unwrap();
         watcher.drain_events();
 
         // Create and immediately delete a file — may cause notify errors on some
@@ -473,14 +576,12 @@ mod tests {
         let file = dir.path().join("ephemeral.txt");
         fs::write(&file, "temp").unwrap();
         fs::remove_file(&file).unwrap();
-        std::thread::sleep(Duration::from_millis(200));
-        watcher.drain_events(); // should not panic
+        let _ = wait_for_events(&watcher);
 
         // Watcher should still be functional after potential errors
         fs::write(dir.path().join("after.txt"), "still works").unwrap();
-        std::thread::sleep(Duration::from_millis(200));
         assert!(
-            watcher.drain_events(),
+            wait_for_events(&watcher),
             "watcher should continue after error events"
         );
     }
@@ -494,24 +595,18 @@ mod tests {
         let mut dw =
             DebouncedWatcher::with_debounce(&[dir.path()], Duration::from_millis(50)).unwrap();
 
-        // Drain startup
-        std::thread::sleep(Duration::from_millis(100));
         dw.should_refresh();
 
         // Remove the subdirectory — watcher should not crash
         fs::remove_dir(&subdir).unwrap();
-        std::thread::sleep(Duration::from_millis(200));
 
         // should_refresh should not panic — just returns bool
         let _ = dw.should_refresh();
 
         // Watcher should still detect changes in the root dir
         fs::write(dir.path().join("new.txt"), "data").unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-        dw.should_refresh();
-        std::thread::sleep(Duration::from_millis(100));
         assert!(
-            dw.should_refresh(),
+            wait_for_refresh(&mut dw),
             "debounced watcher should continue after watched dir removed"
         );
     }
@@ -520,18 +615,14 @@ mod tests {
     fn watcher_watches_multiple_directories() {
         let dir1 = TempDir::new().unwrap();
         let dir2 = TempDir::new().unwrap();
-        let watcher = FileWatcher::new(&[dir1.path(), dir2.path()]).unwrap();
-
-        // Drain startup noise
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let watcher =
+            FileWatcher::with_polling(&[dir1.path(), dir2.path()], TEST_POLL_INTERVAL).unwrap();
         watcher.drain_events();
 
         // Change in dir2
         fs::write(dir2.path().join("file.txt"), "data").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
         assert!(
-            watcher.drain_events(),
+            wait_for_events(&watcher),
             "should detect changes in second directory"
         );
     }
@@ -551,26 +642,20 @@ mod tests {
         let dot_git_file = worktree_dir.join(".git");
         fs::write(&dot_git_file, "gitdir: ../real-git-dir\n").unwrap();
 
-        let mut dw = DebouncedWatcher::from_worktree_paths(
+        let mut dw = DebouncedWatcher::from_worktree_paths_with_polling(
             &[worktree_dir.as_path()],
             Duration::from_millis(50),
+            TEST_POLL_INTERVAL,
         )
         .unwrap();
 
-        // Drain startup noise
-        std::thread::sleep(Duration::from_millis(200));
-        dw.should_refresh();
-        std::thread::sleep(Duration::from_millis(100));
         dw.should_refresh();
 
         // Write a file inside the real git dir — should be detected if path was resolved
         fs::write(real_git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
-        std::thread::sleep(Duration::from_millis(100));
-        dw.should_refresh(); // picks up event
-        std::thread::sleep(Duration::from_millis(100));
         assert!(
-            dw.should_refresh(),
+            wait_for_refresh(&mut dw),
             "should resolve relative gitdir path and watch it"
         );
     }
@@ -581,7 +666,8 @@ mod tests {
         let bad_path = std::path::PathBuf::from("/nonexistent/path/that/does/not/exist");
 
         // Should succeed even though one path is unwatchable
-        let watcher = FileWatcher::new(&[dir.path(), bad_path.as_path()]);
+        let watcher =
+            FileWatcher::with_polling(&[dir.path(), bad_path.as_path()], TEST_POLL_INTERVAL);
         assert!(
             watcher.is_ok(),
             "should succeed with at least one good path"
@@ -591,25 +677,19 @@ mod tests {
 
         // Should still detect events on the valid path
         fs::write(dir.path().join("test.txt"), "hello").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(
-            watcher.drain_events(),
+            wait_for_events(&watcher),
             "should detect changes on valid watched path"
         );
     }
 
     #[test]
+    #[serial]
     fn new_logs_warning_for_nonexistent_paths() {
-        let dir = TempDir::new().unwrap();
-        let log_path = dir.path().join("test.log");
-        let file = std::fs::File::options()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .unwrap();
+        let log_buffer = SharedLogBuffer::default();
 
         let subscriber = tracing_subscriber::fmt()
-            .with_writer(std::sync::Mutex::new(file))
+            .with_writer(log_buffer.clone())
             .with_ansi(false)
             .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
             .finish();
@@ -621,11 +701,7 @@ mod tests {
             let _watcher = FileWatcher::new(&[good_dir.path(), bad_path.as_path()]).unwrap();
         });
 
-        let mut contents = String::new();
-        std::fs::File::open(&log_path)
-            .unwrap()
-            .read_to_string(&mut contents)
-            .unwrap();
+        let contents = log_buffer.contents();
 
         assert!(
             contents.contains("path does not exist, skipping"),
@@ -634,17 +710,12 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn handle_watch_event_logs_notify_errors() {
-        let dir = TempDir::new().unwrap();
-        let log_path = dir.path().join("test.log");
-        let file = std::fs::File::options()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .unwrap();
+        let log_buffer = SharedLogBuffer::default();
 
         let subscriber = tracing_subscriber::fmt()
-            .with_writer(std::sync::Mutex::new(file))
+            .with_writer(log_buffer.clone())
             .with_ansi(false)
             .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
             .finish();
@@ -656,11 +727,7 @@ mod tests {
             handle_watch_event(Err(err), &tx);
         });
 
-        let mut contents = String::new();
-        std::fs::File::open(&log_path)
-            .unwrap()
-            .read_to_string(&mut contents)
-            .unwrap();
+        let contents = log_buffer.contents();
 
         assert!(
             contents.contains("synthetic test error"),

@@ -1,9 +1,12 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 const APP_NAME: &str = "trench";
 const DEFAULT_WORKTREE_DIR: &str = ".worktrees";
+const FALLBACK_WORKTREE_DIR: &str = "trench-worktrees";
 /// Fallback path segments for platforms where `dirs::state_dir()` returns `None` (macOS/Windows).
 const STATE_DIR_FALLBACK_SEGMENTS: &[&str] = &[".local", "state"];
 
@@ -12,6 +15,56 @@ fn ensure_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path)
         .with_context(|| format!("failed to create directory: {}", path.display()))?;
     Ok(())
+}
+
+fn dir_is_writable(path: &Path) -> bool {
+    let probe = path.join(format!(".write-test-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn runtime_data_dir_fallback() -> PathBuf {
+    std::env::temp_dir()
+        .join(APP_NAME)
+        .join(format!("cwd-{:016x}", current_dir_hash()))
+}
+
+pub(crate) fn data_dir_fallback_path() -> PathBuf {
+    runtime_data_dir_fallback()
+}
+
+fn runtime_worktree_root_fallback() -> PathBuf {
+    std::env::temp_dir()
+        .join(FALLBACK_WORKTREE_DIR)
+        .join(format!("cwd-{:016x}", current_dir_hash()))
+}
+
+fn current_dir_hash() -> u64 {
+    let mut hasher = DefaultHasher::new();
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.hash(&mut hasher),
+        Err(_) => APP_NAME.hash(&mut hasher),
+    }
+    hasher.finish()
+}
+
+fn ensure_dir_with_fallback(path: &Path) -> Result<PathBuf> {
+    if ensure_dir(path).is_ok() && dir_is_writable(path) {
+        return Ok(path.to_path_buf());
+    }
+
+    let fallback = runtime_data_dir_fallback();
+    ensure_dir(&fallback)?;
+    Ok(fallback)
 }
 
 /// Return the trench config directory path (`~/.config/trench/`) without creating it.
@@ -45,11 +98,8 @@ pub fn data_dir_path() -> Result<PathBuf> {
 
 /// Return the trench data directory (`~/.local/share/trench/`), creating it if needed.
 pub fn data_dir() -> Result<PathBuf> {
-    let path = dirs::data_dir()
-        .context("could not determine data directory")?
-        .join(APP_NAME);
-    ensure_dir(&path)?;
-    Ok(path)
+    let path = data_dir_path()?;
+    ensure_dir_with_fallback(&path)
 }
 
 /// Return the trench state directory (`~/.local/state/trench/`), creating it if needed.
@@ -87,8 +137,13 @@ pub fn worktree_root_path() -> Result<PathBuf> {
 /// Return the worktree root directory (`~/.worktrees/`), creating it if needed.
 pub fn worktree_root() -> Result<PathBuf> {
     let path = worktree_root_path()?;
-    ensure_dir(&path)?;
-    Ok(path)
+    if ensure_dir(&path).is_ok() && dir_is_writable(&path) {
+        return Ok(path);
+    }
+
+    let fallback = runtime_worktree_root_fallback();
+    ensure_dir(&fallback)?;
+    Ok(fallback)
 }
 
 /// Default worktree path template (FR-17).
@@ -207,6 +262,14 @@ pub fn validate_branch_name(name: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn is_runtime_data_dir_path(path: &Path) -> bool {
+        path == data_dir_fallback_path().as_path()
+    }
+
+    fn is_runtime_worktree_root_path(path: &Path) -> bool {
+        path == runtime_worktree_root_fallback().as_path()
+    }
+
     #[test]
     fn config_dir_ends_with_trench() {
         let path = config_dir().unwrap();
@@ -218,8 +281,16 @@ mod tests {
     #[test]
     fn data_dir_ends_with_trench() {
         let path = data_dir().unwrap();
-        assert!(path.ends_with("trench"));
-        assert!(path.starts_with(dirs::data_dir().unwrap()));
+        assert!(
+            path.ends_with("trench") || is_runtime_data_dir_path(&path),
+            "unexpected data dir: {}",
+            path.display()
+        );
+        assert!(
+            path.starts_with(dirs::data_dir().unwrap()) || is_runtime_data_dir_path(&path),
+            "unexpected data dir base: {}",
+            path.display()
+        );
         assert!(path.exists());
     }
 
@@ -236,8 +307,16 @@ mod tests {
     #[test]
     fn worktree_root_is_dot_worktrees() {
         let path = worktree_root().unwrap();
-        assert!(path.ends_with(".worktrees"));
-        assert!(path.starts_with(dirs::home_dir().unwrap()));
+        assert!(
+            path.ends_with(".worktrees") || is_runtime_worktree_root_path(&path),
+            "unexpected worktree root: {}",
+            path.display()
+        );
+        assert!(
+            path.starts_with(dirs::home_dir().unwrap()) || is_runtime_worktree_root_path(&path),
+            "unexpected worktree root base: {}",
+            path.display()
+        );
         assert!(path.exists());
     }
 

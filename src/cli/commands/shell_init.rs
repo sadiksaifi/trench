@@ -29,6 +29,26 @@ fn generate_posix() -> &'static str {
             return 1
         fi
         cd -- "$dir" || return 1
+    elif [ "$#" -eq 0 ]; then
+        local switch_file
+        switch_file="$(mktemp "${TMPDIR:-/tmp}/trench-tui-switch.XXXXXX")" || return 1
+        TRENCH_TUI_SWITCH_PATH_FILE="$switch_file" command trench
+        local exit_code=$?
+        if [ "$exit_code" -eq 0 ] && [ -s "$switch_file" ]; then
+            local dir
+            dir="$(cat "$switch_file")"
+            if [ -z "$dir" ]; then
+                echo "trench: switch returned empty path" >&2
+                rm -f -- "$switch_file"
+                return 1
+            fi
+            cd -- "$dir" || {
+                rm -f -- "$switch_file"
+                return 1
+            }
+        fi
+        rm -f -- "$switch_file"
+        return "$exit_code"
     else
         command trench "$@"
     fi
@@ -50,6 +70,25 @@ fn generate_fish() -> &'static str {
             return 1
         end
         cd -- "$dir"
+    else if test (count $argv) -eq 0
+        set -l switch_file (mktemp "$TMPDIR/trench-tui-switch.XXXXXX" 2>/dev/null; or mktemp "/tmp/trench-tui-switch.XXXXXX")
+        or return 1
+        env TRENCH_TUI_SWITCH_PATH_FILE="$switch_file" command trench
+        set -l exit_code $status
+        if test $exit_code -eq 0 -a -s "$switch_file"
+            set -l dir (cat "$switch_file")
+            if test -z "$dir"
+                echo "trench: switch returned empty path" >&2
+                rm -f -- "$switch_file"
+                return 1
+            end
+            cd -- "$dir"; or begin
+                rm -f -- "$switch_file"
+                return 1
+            end
+        end
+        rm -f -- "$switch_file"
+        return $exit_code
     else
         command trench $argv
     end
@@ -98,6 +137,23 @@ mod tests {
         assert!(
             output.contains("command trench"),
             "bash output should pass non-switch commands through to trench"
+        );
+    }
+
+    #[test]
+    fn bash_output_wraps_zero_arg_tui_with_switch_sink() {
+        let output = generate(ShellType::Bash);
+        assert!(
+            output.contains("[ \"$#\" -eq 0 ]"),
+            "bash output should handle zero-arg TUI launch"
+        );
+        assert!(
+            output.contains("TRENCH_TUI_SWITCH_PATH_FILE"),
+            "bash output should set TUI switch sink env var"
+        );
+        assert!(
+            output.contains("mktemp"),
+            "bash output should create a temp sink file"
         );
     }
 
@@ -167,6 +223,23 @@ mod tests {
         assert!(
             output.contains("command trench"),
             "fish output should pass non-switch commands through to trench"
+        );
+    }
+
+    #[test]
+    fn fish_output_wraps_zero_arg_tui_with_switch_sink() {
+        let output = generate(ShellType::Fish);
+        assert!(
+            output.contains("count $argv) -eq 0"),
+            "fish output should handle zero-arg TUI launch"
+        );
+        assert!(
+            output.contains("TRENCH_TUI_SWITCH_PATH_FILE"),
+            "fish output should set TUI switch sink env var"
+        );
+        assert!(
+            output.contains("mktemp"),
+            "fish output should create a temp sink file"
         );
     }
 

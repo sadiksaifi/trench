@@ -20,6 +20,8 @@ use exit_code::ExitCode;
 
 use output::OutputConfig;
 
+const TUI_SWITCH_PATH_FILE_ENV: &str = "TRENCH_TUI_SWITCH_PATH_FILE";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "trench",
@@ -236,7 +238,7 @@ fn main() -> anyhow::Result<()> {
         std::io::stdout().is_terminal(),
     ) {
         if let Some(path) = tui::run()? {
-            println!("{path}");
+            write_tui_switch_path(&path)?;
         }
         return Ok(());
     }
@@ -337,6 +339,51 @@ fn main() -> anyhow::Result<()> {
     result
 }
 
+fn write_tui_switch_path(path: &str) -> anyhow::Result<()> {
+    if let Some(sink_path) = std::env::var_os(TUI_SWITCH_PATH_FILE_ENV) {
+        std::fs::write(&sink_path, path).with_context(|| {
+            format!(
+                "failed to write TUI switch path to {}",
+                std::path::PathBuf::from(&sink_path).display()
+            )
+        })?;
+    } else {
+        println!("{path}");
+    }
+    Ok(())
+}
+
+fn existing_db_path() -> anyhow::Result<Option<std::path::PathBuf>> {
+    let preferred = paths::data_dir_path()?.join("trench.db");
+    if db_file_is_accessible(&preferred) {
+        return Ok(Some(preferred));
+    }
+
+    let fallback = paths::data_dir_fallback_path().join("trench.db");
+    if db_file_is_accessible(&fallback) {
+        return Ok(Some(fallback));
+    }
+
+    Ok(None)
+}
+
+fn db_file_is_accessible(path: &std::path::Path) -> bool {
+    path.exists()
+        && std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .is_ok()
+}
+
+fn runtime_db_path() -> anyhow::Result<std::path::PathBuf> {
+    if let Some(existing) = existing_db_path()? {
+        Ok(existing)
+    } else {
+        Ok(paths::data_dir()?.join("trench.db"))
+    }
+}
+
 fn run_create(
     branch: &str,
     from: Option<&str>,
@@ -375,7 +422,7 @@ fn run_create(
 
     // Only real execution creates the worktree root directory on disk.
     let worktree_root = paths::worktree_root()?;
-    let db_path = paths::data_dir()?.join("trench.db");
+    let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
     let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
@@ -473,8 +520,7 @@ fn run_remove(
     };
 
     if dry_run {
-        let db_path = paths::data_dir_path()?.join("trench.db");
-        let db = if db_path.exists() {
+        let db = if let Some(db_path) = existing_db_path()? {
             Some(state::Database::open(&db_path)?)
         } else {
             None
@@ -497,7 +543,7 @@ fn run_remove(
         return Ok(());
     }
 
-    let db_path = paths::data_dir()?.join("trench.db");
+    let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
     // If not forced, resolve the worktree (adopting if unmanaged) for the prompt
@@ -615,7 +661,7 @@ fn execute_tmux_command(cmd: &[String]) -> anyhow::Result<bool> {
 
 fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = paths::data_dir()?.join("trench.db");
+    let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
     match cli::commands::switch::execute(identifier, &cwd, &db) {
@@ -679,7 +725,7 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
 
 fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = paths::data_dir()?.join("trench.db");
+    let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
     let repo_info = git::discover_repo(&cwd)?;
@@ -773,7 +819,7 @@ fn run_open_editor(
 
 fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = paths::data_dir()?.join("trench.db");
+    let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
     let output = cli::commands::tag::execute(identifier, tags, &cwd, &db)?;
@@ -803,7 +849,7 @@ fn run_log(
     }
 
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = paths::data_dir()?.join("trench.db");
+    let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
     let repo_info = git::discover_repo(&cwd)?;
@@ -901,7 +947,7 @@ fn run_log(
 
 fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = paths::data_dir()?.join("trench.db");
+    let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
     // Load config to get scan paths (FR-30)
@@ -938,7 +984,7 @@ fn run_status(
     use_color: bool,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = paths::data_dir()?.join("trench.db");
+    let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
     let result = if json {
@@ -1024,8 +1070,7 @@ fn run_sync(
 
     // Dry-run: open existing DB (read-only) for accurate base-branch metadata
     if dry_run {
-        let db_path = paths::data_dir_path()?.join("trench.db");
-        let db = if db_path.exists() {
+        let db = if let Some(db_path) = existing_db_path()? {
             Some(state::Database::open(&db_path)?)
         } else {
             None
@@ -1047,7 +1092,7 @@ fn run_sync(
     }
 
     // Real execution path — open DB here (after dry-run early-return)
-    let db_path = paths::data_dir()?.join("trench.db");
+    let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
     let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
@@ -1134,10 +1179,14 @@ fn run_sync_all(
     no_hooks: bool,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = paths::data_dir_path()?.join("trench.db");
+    let db_path = if dry_run {
+        existing_db_path()?
+    } else {
+        Some(runtime_db_path()?)
+    };
 
     // If dry-run and DB doesn't exist yet, there are no tracked worktrees
-    if dry_run && !db_path.exists() {
+    if dry_run && db_path.is_none() {
         if json {
             println!("[]");
         } else {
@@ -1146,7 +1195,7 @@ fn run_sync_all(
         return Ok(());
     }
 
-    let db = state::Database::open(&db_path)?;
+    let db = state::Database::open(db_path.as_ref().expect("db path should exist"))?;
     let repo_info = git::discover_repo(&cwd)?;
 
     let db_repo = db
@@ -1561,6 +1610,40 @@ mod tests {
     fn should_not_launch_tui_when_stdout_not_tty() {
         let cli = Cli::try_parse_from(["trench"]).unwrap();
         assert!(!cli.should_launch_tui(true, false));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn write_tui_switch_path_writes_sink_file_when_env_is_set() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let sink_path = dir.path().join("switch-path.txt");
+
+        std::env::set_var(TUI_SWITCH_PATH_FILE_ENV, &sink_path);
+        let result = write_tui_switch_path("/tmp/wt/feat-x");
+        std::env::remove_var(TUI_SWITCH_PATH_FILE_ENV);
+
+        result.expect("sink file write should succeed");
+        let written =
+            std::fs::read_to_string(&sink_path).expect("sink file should contain switch path");
+        assert_eq!(written, "/tmp/wt/feat-x");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn write_tui_switch_path_errors_when_sink_parent_missing() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let sink_path = dir.path().join("missing").join("switch-path.txt");
+
+        std::env::set_var(TUI_SWITCH_PATH_FILE_ENV, &sink_path);
+        let result = write_tui_switch_path("/tmp/wt/feat-x");
+        std::env::remove_var(TUI_SWITCH_PATH_FILE_ENV);
+
+        let err = result.expect_err("missing sink parent should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("failed to write TUI switch path"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]
