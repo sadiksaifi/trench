@@ -64,14 +64,6 @@ pub fn render_app_frame(
     };
 
     let line = Line::from(vec![
-        Span::styled(
-            " trench ",
-            Style::default()
-                .fg(theme.selection_fg)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
         pill(theme, repo, Tone::Muted),
         Span::raw("  "),
         pill(theme, status.screen_label, Tone::Accent),
@@ -201,4 +193,43 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
         .flex(Flex::Center)
         .areas(area);
     area
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        buf.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn app_frame_shows_context_without_brand_pill() {
+        let backend = TestBackend::new(100, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
+        terminal
+            .draw(|frame| {
+                let _ = render_app_frame(
+                    frame,
+                    frame.area(),
+                    &theme,
+                    &AppStatus {
+                        repo_name: Some("repo-x"),
+                        screen_label: "delete",
+                        theme_name: "ops",
+                        auto_refresh: true,
+                    },
+                );
+            })
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("repo-x"), "repo label should render");
+        assert!(text.contains("delete"), "screen label should render");
+        assert!(text.contains("watch on"), "refresh label should render");
+        assert!(text.contains("ops"), "theme label should render");
+        assert!(!text.contains(" trench "), "brand pill should not render");
+    }
 }
