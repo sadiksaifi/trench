@@ -218,7 +218,6 @@ impl App {
             &chrome::AppStatus {
                 repo_name,
                 screen_label: self.active_screen().label(),
-                theme_name: &self.ui_options.theme_name,
                 auto_refresh: self.auto_refresh,
             },
         );

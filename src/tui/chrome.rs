@@ -31,7 +31,6 @@ impl Default for UiOptions {
 pub struct AppStatus<'a> {
     pub repo_name: Option<&'a str>,
     pub screen_label: &'a str,
-    pub theme_name: &'a str,
     pub auto_refresh: bool,
 }
 
@@ -77,8 +76,6 @@ pub fn render_app_frame(
                 Tone::Warning
             },
         ),
-        Span::raw("  "),
-        pill(theme, status.theme_name, Tone::Muted),
     ]);
 
     frame.render_widget(
@@ -233,7 +230,6 @@ mod tests {
                     &AppStatus {
                         repo_name: Some("repo-x"),
                         screen_label: "delete",
-                        theme_name: "ops",
                         auto_refresh: true,
                     },
                 );
@@ -244,7 +240,6 @@ mod tests {
         assert!(text.contains("repo-x"), "repo label should render");
         assert!(text.contains("delete"), "screen label should render");
         assert!(text.contains("watch on"), "refresh label should render");
-        assert!(text.contains("ops"), "theme label should render");
         assert!(!text.contains(" trench "), "brand pill should not render");
 
         let cell = terminal
