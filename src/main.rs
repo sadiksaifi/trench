@@ -341,6 +341,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn write_tui_switch_path(path: &str) -> anyhow::Result<()> {
+    eprintln!("{}", format_switch_notice(path));
     if let Some(sink_path) = std::env::var_os(TUI_SWITCH_PATH_FILE_ENV) {
         std::fs::write(&sink_path, path).with_context(|| {
             format!(
@@ -352,6 +353,10 @@ fn write_tui_switch_path(path: &str) -> anyhow::Result<()> {
         println!("{path}");
     }
     Ok(())
+}
+
+fn format_switch_notice(path: &str) -> String {
+    format!("Switched to {path}")
 }
 
 fn existing_db_path() -> anyhow::Result<Option<std::path::PathBuf>> {
@@ -672,7 +677,7 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
             // --print-path must always write to stdout (shell-init depends on it),
             // so short-circuit before any tmux resolution.
             if print_path {
-                eprintln!("Switched to {}", result.path);
+                eprintln!("{}", format_switch_notice(&result.path));
                 println!("{}", result.path);
                 return Ok(());
             }
@@ -1645,6 +1650,14 @@ mod tests {
         assert!(
             message.contains("failed to write TUI switch path"),
             "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn format_switch_notice_includes_absolute_path() {
+        assert_eq!(
+            format_switch_notice("/tmp/wt/feat-x"),
+            "Switched to /tmp/wt/feat-x"
         );
     }
 
