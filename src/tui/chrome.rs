@@ -64,7 +64,7 @@ pub fn render_app_frame(
     };
 
     let line = Line::from(vec![
-        pill(theme, repo, Tone::Muted),
+        repo_pill(theme, repo),
         Span::raw("  "),
         pill(theme, status.screen_label, Tone::Accent),
         Span::raw("  "),
@@ -185,6 +185,16 @@ pub fn pill(theme: &Theme, label: &str, tone: Tone) -> Span<'static> {
     )
 }
 
+fn repo_pill(theme: &Theme, label: &str) -> Span<'static> {
+    Span::styled(
+        format!(" {label} "),
+        Style::default()
+            .fg(theme.selection_fg)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let [area] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
@@ -231,5 +241,19 @@ mod tests {
         assert!(text.contains("watch on"), "refresh label should render");
         assert!(text.contains("ops"), "theme label should render");
         assert!(!text.contains(" trench "), "brand pill should not render");
+
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell((0, 0))
+            .expect("repo pill should render at start");
+        assert_eq!(
+            cell.bg, theme.accent,
+            "repo pill should use accent background"
+        );
+        assert_eq!(
+            cell.fg, theme.selection_fg,
+            "repo pill should use selection foreground"
+        );
     }
 }
