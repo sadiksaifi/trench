@@ -491,6 +491,7 @@ mod tests {
             status: "clean".into(),
             ahead_behind: "+0/-0".into(),
             managed: true,
+            is_current: false,
             processes: String::new(),
         }]);
         app.delete_confirm_state = Some(DeleteConfirmState::new(

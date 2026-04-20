@@ -17,6 +17,7 @@ struct ListEntry {
     path: String,
     base_branch: Option<String>,
     tags: Vec<String>,
+    is_current: bool,
 }
 
 fn fetch_all_worktrees(
@@ -26,6 +27,9 @@ fn fetch_all_worktrees(
     scan_paths: &[String],
 ) -> Result<(PathBuf, Vec<ListEntry>)> {
     let repo_info = git::discover_repo(cwd)?;
+    let current_path = git::current_worktree_root(cwd)
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
     let live_worktrees = crate::live_worktree::list(&repo_info, db, scan_paths)?;
 
     let mut entries = Vec::with_capacity(live_worktrees.len());
@@ -53,6 +57,9 @@ fn fetch_all_worktrees(
             path: worktree.entry.path.to_string_lossy().into_owned(),
             base_branch: Some(crate::live_worktree::base_branch(&repo_info, &worktree)),
             tags,
+            is_current: current_path
+                .as_deref()
+                .is_some_and(|path| path == worktree.entry.path.to_string_lossy()),
         });
     }
 
@@ -191,7 +198,7 @@ fn render_table(
             procs.len().to_string()
         };
         table = table.row(vec![
-            &entry.name,
+            &display_name(entry),
             &entry.branch,
             &entry.path,
             &dirty_str,
@@ -226,6 +233,14 @@ fn build_worktree_json(entry: &ListEntry, status: GitStatus) -> WorktreeJson {
         tags: entry.tags.clone(),
         process_count,
         processes: process_names,
+    }
+}
+
+fn display_name(entry: &ListEntry) -> String {
+    if entry.is_current {
+        format!("* {}", entry.name)
+    } else {
+        entry.name.clone()
     }
 }
 
@@ -1189,6 +1204,10 @@ mod tests {
             output.contains(&repo_name),
             "output should contain the main worktree name '{repo_name}', got: {output}"
         );
+        assert!(
+            output.contains(&format!("* {repo_name}")),
+            "main worktree should be marked current, got: {output}"
+        );
         assert!(!output.contains("[unmanaged]"));
     }
 
@@ -1219,6 +1238,10 @@ mod tests {
         assert!(
             output.contains("linked-wt"),
             "output should contain linked worktree row, got: {output}"
+        );
+        assert!(
+            output.contains("* linked-wt"),
+            "linked worktree should be marked current when listing from it, got: {output}"
         );
     }
 

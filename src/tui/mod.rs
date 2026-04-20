@@ -1591,6 +1591,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "+0/-0".into(),
                 managed: true,
+                is_current: false,
                 processes: String::new(),
             },
             screens::list::WorktreeRow {
@@ -1600,6 +1601,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "-".into(),
                 managed: true,
+                is_current: false,
                 processes: String::new(),
             },
         ]);
@@ -1971,6 +1973,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "+0/-0".into(),
                 managed: true,
+                is_current: false,
                 processes: String::new(),
             },
             WorktreeRow {
@@ -1980,6 +1983,7 @@ mod tests {
                 status: "~2".into(),
                 ahead_behind: "+1/-0".into(),
                 managed: true,
+                is_current: false,
                 processes: String::new(),
             },
             WorktreeRow {
@@ -1989,6 +1993,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "-".into(),
                 managed: false,
+                is_current: true,
                 processes: String::new(),
             },
         ]);
@@ -3374,6 +3379,7 @@ mod tests {
             ahead_behind: String::new(),
             processes: String::new(),
             managed: true,
+            is_current: false,
         }]);
         app.rebuild_watcher();
         assert!(app.watcher.is_some(), "watcher should be initialized");
@@ -3402,6 +3408,7 @@ mod tests {
                 ahead_behind: String::new(),
                 processes: String::new(),
                 managed: true,
+                is_current: false,
             },
             screens::list::WorktreeRow {
                 name: "wt2".to_string(),
@@ -3411,6 +3418,7 @@ mod tests {
                 ahead_behind: String::new(),
                 processes: String::new(),
                 managed: true,
+                is_current: false,
             },
         ]);
         app.rebuild_watcher();

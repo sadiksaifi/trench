@@ -453,6 +453,22 @@ pub fn discover_repo(path: &Path) -> Result<RepoInfo, GitError> {
     })
 }
 
+/// Resolve the current worktree root for `path`.
+///
+/// Unlike [`discover_repo`], this returns the active checkout root for the
+/// discovered repository, not the primary checkout.
+pub fn current_worktree_root(path: &Path) -> Result<PathBuf, GitError> {
+    let repo = git2::Repository::discover(path).map_err(|e| map_repo_open_error(e, path))?;
+    repo.workdir()
+        .ok_or_else(|| GitError::NotAGitRepo {
+            path: path.to_path_buf(),
+        })?
+        .canonicalize()
+        .map_err(|_| GitError::NotAGitRepo {
+            path: path.to_path_buf(),
+        })
+}
+
 /// Create a new git worktree at `target_path` for the given branch.
 ///
 /// Opens the repository at `repo_path`, resolves `base` as a local branch

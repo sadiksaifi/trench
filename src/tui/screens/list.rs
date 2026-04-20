@@ -22,6 +22,7 @@ pub struct WorktreeRow {
     pub status: String,
     pub ahead_behind: String,
     pub managed: bool,
+    pub is_current: bool,
     /// Comma-separated process names running in this worktree.
     pub processes: String,
 }
@@ -91,6 +92,9 @@ pub fn load_worktrees(
 ) -> Result<Vec<WorktreeRow>> {
     let repo_info = git::discover_repo(cwd)?;
     let repo_path = &repo_info.path;
+    let current_path = git::current_worktree_root(cwd)
+        .ok()
+        .map(|path| path.to_string_lossy().to_string());
     let live_worktrees = crate::live_worktree::list(&repo_info, db, scan_paths)?;
 
     let mut rows = Vec::new();
@@ -117,11 +121,18 @@ pub fn load_worktrees(
             status: status.0,
             ahead_behind: status.1,
             managed: true,
+            is_current: current_path
+                .as_deref()
+                .is_some_and(|path| path == rowsafe_path(&worktree.entry.path)),
             processes,
         });
     }
 
     Ok(rows)
+}
+
+fn rowsafe_path(path: &Path) -> String {
+    path.to_string_lossy().to_string()
 }
 
 fn compute_status(
@@ -173,7 +184,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
     }
 
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
-    let header_cells = ["Name", "Branch", "Status", "Ahead/Behind", "Procs"]
+    let header_cells = ["Name", "Now", "Branch", "Status", "Ahead/Behind", "Procs"]
         .iter()
         .map(|h| {
             Cell::from(*h).style(
@@ -190,6 +201,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
         .map(|r| {
             Row::new(vec![
                 Cell::from(r.name.clone()),
+                Cell::from(if r.is_current { "*" } else { "" }),
                 Cell::from(r.branch.clone()),
                 Cell::from(r.status.clone()),
                 Cell::from(r.ahead_behind.clone()),
@@ -202,11 +214,12 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(20),
+            Constraint::Percentage(18),
+            Constraint::Length(3),
             Constraint::Percentage(24),
             Constraint::Percentage(12),
             Constraint::Percentage(18),
-            Constraint::Percentage(26),
+            Constraint::Percentage(25),
         ],
     )
     .header(header)
@@ -294,6 +307,7 @@ fn render_table(
 ) {
     let mut titles = vec![
         Cell::from("Name"),
+        Cell::from("Now"),
         Cell::from("Branch"),
         Cell::from("Status"),
     ];
@@ -316,6 +330,7 @@ fn render_table(
         .map(|row| {
             let mut cells = vec![
                 Cell::from(row.name.clone()),
+                Cell::from(if row.is_current { "*" } else { "" }),
                 Cell::from(row.branch.clone()),
                 Cell::from(display_status(&row.status, options.show_dirty_count)),
             ];
@@ -335,6 +350,7 @@ fn render_table(
     let widths = if options.show_ahead_behind {
         vec![
             Constraint::Percentage(18),
+            Constraint::Length(3),
             Constraint::Percentage(24),
             Constraint::Percentage(13),
             Constraint::Percentage(16),
@@ -344,6 +360,7 @@ fn render_table(
     } else {
         vec![
             Constraint::Percentage(20),
+            Constraint::Length(3),
             Constraint::Percentage(28),
             Constraint::Percentage(15),
             Constraint::Percentage(25),
@@ -412,6 +429,13 @@ fn render_inspector(
         &display_status(&selected.status, options.show_dirty_count),
         status_tone(&selected.status),
     )]));
+    if selected.is_current {
+        lines.push(Line::from(vec![crate::tui::chrome::pill(
+            theme,
+            "current",
+            crate::tui::chrome::Tone::Accent,
+        )]));
+    }
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
         inner,
@@ -533,6 +557,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "+1/-0".into(),
                 managed: true,
+                is_current: true,
                 processes: String::new(),
             },
             WorktreeRow {
@@ -542,6 +567,7 @@ mod tests {
                 status: "~3".into(),
                 ahead_behind: "+0/-2".into(),
                 managed: true,
+                is_current: false,
                 processes: String::new(),
             },
             WorktreeRow {
@@ -551,6 +577,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "-".into(),
                 managed: false,
+                is_current: false,
                 processes: String::new(),
             },
         ]
@@ -662,6 +689,7 @@ mod tests {
         let buf = render_to_buffer(&state, 100, 10);
         let text = buffer_text(&buf);
         assert!(text.contains("Name"), "header should contain Name");
+        assert!(text.contains("Now"), "header should contain Now");
         assert!(text.contains("Branch"), "header should contain Branch");
         assert!(text.contains("Status"), "header should contain Status");
         assert!(
@@ -678,6 +706,10 @@ mod tests {
         assert!(
             text.contains("feature-auth"),
             "should show worktree name, got: {text}"
+        );
+        assert!(
+            text.contains("*"),
+            "should show current marker, got: {text}"
         );
         assert!(
             text.contains("feature/auth"),
@@ -813,6 +845,34 @@ mod tests {
     }
 
     #[test]
+    fn load_worktrees_marks_current_checkout() {
+        use crate::cli::commands::create;
+        use crate::paths;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commit(repo_dir.path());
+        let wt_root = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+
+        let created = create::execute(
+            "focus-me",
+            None,
+            repo_dir.path(),
+            wt_root.path(),
+            paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+
+        let rows = load_worktrees(&created.path, &db, &[]).expect("load should succeed");
+        let current = rows
+            .iter()
+            .find(|row| row.name == "focus-me")
+            .expect("linked worktree should be listed");
+        assert!(current.is_current, "current checkout should be marked");
+    }
+
+    #[test]
     fn renders_process_info_in_table() {
         let rows = vec![
             WorktreeRow {
@@ -822,6 +882,7 @@ mod tests {
                 status: "clean".into(),
                 ahead_behind: "+1/-0".into(),
                 managed: true,
+                is_current: true,
                 processes: "node, vite".into(),
             },
             WorktreeRow {
@@ -831,6 +892,7 @@ mod tests {
                 status: "~3".into(),
                 ahead_behind: "+0/-2".into(),
                 managed: true,
+                is_current: false,
                 processes: String::new(),
             },
         ];
@@ -893,6 +955,23 @@ mod tests {
         assert!(
             text.contains("Enter switch"),
             "should show footer keys when no status"
+        );
+    }
+
+    #[test]
+    fn inspector_shows_current_badge_for_active_worktree() {
+        let backend = TestBackend::new(140, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::from_name("catppuccin");
+        let state = ListState::new(sample_rows());
+        let options = crate::tui::chrome::UiOptions::default();
+        terminal
+            .draw(|frame| render_with_options(&state, frame, frame.area(), &theme, &options))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            text.contains("current"),
+            "inspector should show current badge"
         );
     }
 }
