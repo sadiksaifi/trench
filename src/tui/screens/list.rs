@@ -135,6 +135,14 @@ fn rowsafe_path(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
+fn display_name(row: &WorktreeRow) -> String {
+    if row.is_current {
+        format!("* {}", row.name)
+    } else {
+        row.name.clone()
+    }
+}
+
 fn compute_status(
     repo_path: &Path,
     branch: &str,
@@ -184,7 +192,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
     }
 
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
-    let header_cells = ["Name", "Now", "Branch", "Status", "Ahead/Behind", "Procs"]
+    let header_cells = ["Name", "Branch", "Status", "Ahead/Behind", "Procs"]
         .iter()
         .map(|h| {
             Cell::from(*h).style(
@@ -200,8 +208,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
         .iter()
         .map(|r| {
             Row::new(vec![
-                Cell::from(r.name.clone()),
-                Cell::from(if r.is_current { "*" } else { "" }),
+                Cell::from(display_name(r)),
                 Cell::from(r.branch.clone()),
                 Cell::from(r.status.clone()),
                 Cell::from(r.ahead_behind.clone()),
@@ -214,12 +221,11 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(18),
-            Constraint::Length(3),
+            Constraint::Percentage(20),
             Constraint::Percentage(24),
             Constraint::Percentage(12),
             Constraint::Percentage(18),
-            Constraint::Percentage(25),
+            Constraint::Percentage(26),
         ],
     )
     .header(header)
@@ -307,7 +313,6 @@ fn render_table(
 ) {
     let mut titles = vec![
         Cell::from("Name"),
-        Cell::from("Now"),
         Cell::from("Branch"),
         Cell::from("Status"),
     ];
@@ -329,8 +334,7 @@ fn render_table(
         .iter()
         .map(|row| {
             let mut cells = vec![
-                Cell::from(row.name.clone()),
-                Cell::from(if row.is_current { "*" } else { "" }),
+                Cell::from(display_name(row)),
                 Cell::from(row.branch.clone()),
                 Cell::from(display_status(&row.status, options.show_dirty_count)),
             ];
@@ -349,21 +353,19 @@ fn render_table(
 
     let widths = if options.show_ahead_behind {
         vec![
-            Constraint::Percentage(18),
-            Constraint::Length(3),
+            Constraint::Percentage(20),
             Constraint::Percentage(24),
             Constraint::Percentage(13),
             Constraint::Percentage(16),
-            Constraint::Percentage(17),
+            Constraint::Percentage(18),
             Constraint::Percentage(12),
         ]
     } else {
         vec![
-            Constraint::Percentage(20),
-            Constraint::Length(3),
-            Constraint::Percentage(28),
+            Constraint::Percentage(22),
+            Constraint::Percentage(30),
             Constraint::Percentage(15),
-            Constraint::Percentage(25),
+            Constraint::Percentage(21),
             Constraint::Percentage(12),
         ]
     };
@@ -689,7 +691,6 @@ mod tests {
         let buf = render_to_buffer(&state, 100, 10);
         let text = buffer_text(&buf);
         assert!(text.contains("Name"), "header should contain Name");
-        assert!(text.contains("Now"), "header should contain Now");
         assert!(text.contains("Branch"), "header should contain Branch");
         assert!(text.contains("Status"), "header should contain Status");
         assert!(
@@ -704,12 +705,8 @@ mod tests {
         let buf = render_to_buffer(&state, 100, 10);
         let text = buffer_text(&buf);
         assert!(
-            text.contains("feature-auth"),
-            "should show worktree name, got: {text}"
-        );
-        assert!(
-            text.contains("*"),
-            "should show current marker, got: {text}"
+            text.contains("* feature-auth"),
+            "should show current-prefixed name, got: {text}"
         );
         assert!(
             text.contains("feature/auth"),
