@@ -672,6 +672,7 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
             // --print-path must always write to stdout (shell-init depends on it),
             // so short-circuit before any tmux resolution.
             if print_path {
+                eprintln!("Switched to {}", result.path);
                 println!("{}", result.path);
                 return Ok(());
             }

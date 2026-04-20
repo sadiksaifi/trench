@@ -395,3 +395,57 @@ fn dry_run_remove_with_prune_shows_prune_true() {
     assert_eq!(json["dry_run"], true);
     assert_eq!(json["prune"], true, "prune should be true in JSON output");
 }
+
+#[test]
+fn switch_print_path_keeps_stdout_raw_and_reports_path_on_stderr() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+
+    create_worktree(tmp.path(), "switch-print-path");
+
+    let list_output = Command::new(trench_bin())
+        .args(["list", "--json"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench list");
+    assert!(
+        list_output.status.success(),
+        "trench list --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&list_output.stderr)
+    );
+    let list_json: serde_json::Value =
+        serde_json::from_slice(&list_output.stdout).expect("list should output valid JSON");
+    let wt_path = list_json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "switch-print-path")
+        .and_then(|item| item["path"].as_str())
+        .expect("should find worktree path")
+        .to_string();
+
+    let output = Command::new(trench_bin())
+        .args(["switch", "switch-print-path", "--print-path"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench switch --print-path");
+
+    assert!(
+        output.status.success(),
+        "switch --print-path should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim_end(),
+        wt_path,
+        "stdout must stay raw path for shell integration"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("Switched to {}", wt_path)),
+        "stderr should report switched absolute path, got: {stderr}"
+    );
+}
