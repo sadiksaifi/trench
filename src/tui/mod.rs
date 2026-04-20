@@ -1097,6 +1097,11 @@ impl App {
                     self.push_screen(Screen::SyncPicker);
                 }
             }
+            KeyCode::Char('o') => {
+                if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
+                    self.editor_request = Some(row.path.clone());
+                }
+            }
             KeyCode::Char('D') => {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
                     self.delete_confirm_state =
@@ -2051,6 +2056,24 @@ mod tests {
             .as_ref()
             .expect("sync_picker_state should be set");
         assert_eq!(state.worktree_name, "feat-b");
+    }
+
+    #[test]
+    fn o_on_list_sets_editor_request_with_selected_worktree_path() {
+        let mut app = app_with_rows();
+        app.list_state.selected = 1;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.is_running(), "o on list should not quit");
+        assert_eq!(app.editor_request.as_deref(), Some("/tmp/wt/feat-b"));
+    }
+
+    #[test]
+    fn o_on_empty_list_does_not_set_editor_request() {
+        let mut app = App::new();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.editor_request.is_none());
     }
 
     #[test]

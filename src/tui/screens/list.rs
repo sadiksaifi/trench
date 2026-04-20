@@ -164,9 +164,10 @@ fn compute_status(
     (status, ab)
 }
 
-const KEYBAR_ITEMS: [(&str, &str); 7] = [
+const KEYBAR_ITEMS: [(&str, &str); 8] = [
     ("Enter", "switch"),
     ("d", "detail"),
+    ("o", "open"),
     ("n", "create"),
     ("s", "sync"),
     ("D", "delete"),
@@ -522,7 +523,7 @@ fn render_legacy_footer(
     } else {
         frame.render_widget(
             Paragraph::new(Line::from(
-                " Enter switch  d detail  n create  s sync  D delete  l log  q quit ",
+                " Enter switch  d detail  o open  n create  s sync  D delete  l log  q quit ",
             ))
             .style(*footer_style),
             area,
@@ -763,6 +764,7 @@ mod tests {
             "footer should show Enter switch"
         );
         assert!(text.contains("d detail"), "footer should show d detail");
+        assert!(text.contains("o open"), "footer should show o open");
         assert!(text.contains("n create"), "footer should show n create");
         assert!(text.contains("s sync"), "footer should show s sync");
         assert!(text.contains("D delete"), "footer should show D delete");

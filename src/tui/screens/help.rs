@@ -60,6 +60,10 @@ pub fn keybinding_groups() -> &'static [KeybindingGroup] {
                     description: "Open detail view",
                 },
                 KeybindingEntry {
+                    key: "o",
+                    description: "Open in $EDITOR",
+                },
+                KeybindingEntry {
                     key: "n",
                     description: "Create worktree",
                 },
@@ -244,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn list_group_contains_switch_detail_and_log_bindings() {
+    fn list_group_contains_switch_detail_open_and_log_bindings() {
         let groups = keybinding_groups();
         let list = groups.iter().find(|g| g.context == "List").unwrap();
         let descs: Vec<&str> = list.bindings.iter().map(|b| b.description).collect();
@@ -255,6 +259,10 @@ mod tests {
         assert!(
             descs.contains(&"Open detail view"),
             "List group missing detail binding"
+        );
+        assert!(
+            descs.contains(&"Open in $EDITOR"),
+            "List group missing open binding"
         );
         assert!(
             descs.contains(&"View hook log"),
