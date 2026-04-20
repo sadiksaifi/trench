@@ -133,7 +133,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
     let inner =
         crate::tui::chrome::render_modal(frame, area, theme, dialog_width, dialog_height, " Help ");
     let paragraph = Paragraph::new(lines)
-        .style(Style::default().fg(theme.fg).bg(theme.bg_panel))
+        .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel))
         .alignment(Alignment::Left);
     frame.render_widget(paragraph, inner);
 }

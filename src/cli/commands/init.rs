@@ -23,7 +23,7 @@ const SCAFFOLD: &str = r#"# trench — project configuration
 # ─── UI ──────────────────────────────────────────────────────────────
 
 # [ui]
-# theme = "ops"
+# theme = "ops"                 # or "transparent", "catppuccin-transparent", "gruvbox-transparent"
 # date_format = "%Y-%m-%d %H:%M"
 # show_ahead_behind = true
 # show_dirty_count = true

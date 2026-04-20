@@ -176,11 +176,13 @@ const KEYBAR_ITEMS: [(&str, &str); 8] = [
 ];
 
 pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::tui::theme::Theme) {
-    let base_style = Style::default().fg(theme.fg).bg(theme.bg);
-    let footer_style = Style::default()
-        .fg(theme.selection_fg)
-        .bg(theme.accent)
-        .add_modifier(Modifier::BOLD);
+    let base_style = theme.with_bg(Style::default().fg(theme.fg), theme.bg);
+    let footer_style = theme.with_bg(
+        Style::default()
+            .fg(theme.selection_fg)
+            .add_modifier(Modifier::BOLD),
+        theme.accent,
+    );
 
     if state.rows.is_empty() {
         let msg = Paragraph::new("No worktrees. Press n to create one.")
@@ -231,7 +233,7 @@ pub fn render(state: &ListState, frame: &mut Frame, area: Rect, theme: &crate::t
     )
     .header(header)
     .style(base_style)
-    .row_highlight_style(Style::default().bg(theme.accent).fg(theme.selection_fg));
+    .row_highlight_style(theme.with_bg(Style::default().fg(theme.selection_fg), theme.accent));
 
     let mut table_state = TableState::default();
     table_state.select(Some(state.selected));
@@ -300,7 +302,7 @@ fn render_summary_bar(
         ),
     ]);
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().fg(theme.fg).bg(theme.bg)),
+        Paragraph::new(line).style(theme.with_bg(Style::default().fg(theme.fg), theme.bg)),
         area,
     );
 }
@@ -348,7 +350,7 @@ fn render_table(
                 row.processes.clone()
             }));
 
-            Row::new(cells).style(Style::default().fg(theme.fg).bg(theme.bg_panel))
+            Row::new(cells).style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel))
         })
         .collect();
 
@@ -375,12 +377,14 @@ fn render_table(
         .header(header)
         .block(crate::tui::chrome::panel(" Worktrees ", theme))
         .row_highlight_style(
-            Style::default()
-                .fg(theme.selection_fg)
-                .bg(theme.selection_bg)
-                .add_modifier(Modifier::BOLD),
+            theme.with_bg(
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .add_modifier(Modifier::BOLD),
+                theme.selection_bg,
+            ),
         )
-        .style(Style::default().fg(theme.fg).bg(theme.bg_panel));
+        .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel));
 
     let mut table_state = TableState::default();
     table_state.select(Some(state.selected));
@@ -440,7 +444,7 @@ fn render_inspector(
         )]));
     }
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+        Paragraph::new(lines).style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
         inner,
     );
 }
@@ -490,7 +494,7 @@ fn render_footer(
                 crate::tui::chrome::pill(theme, "status", tone),
                 Span::raw(format!(" {}", status.text)),
             ]))
-            .style(Style::default().fg(theme.fg).bg(theme.bg_elevated)),
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
             area,
         );
     } else {
@@ -512,12 +516,10 @@ fn render_legacy_footer(
             theme.error
         };
         frame.render_widget(
-            Paragraph::new(Line::from(format!(" {}", status.text))).style(
-                Style::default()
-                    .fg(color)
-                    .bg(theme.bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Paragraph::new(Line::from(format!(" {}", status.text))).style(theme.with_bg(
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+                theme.bg,
+            )),
             area,
         );
     } else {
@@ -731,7 +733,6 @@ mod tests {
             cell.bg
         );
     }
-
     #[test]
     fn worktree_rows_do_not_show_unmanaged_badge() {
         let state = ListState::new(sample_rows());

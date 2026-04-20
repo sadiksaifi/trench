@@ -51,7 +51,7 @@ pub fn render_app_frame(
     status: &AppStatus<'_>,
 ) -> Rect {
     frame.render_widget(
-        Block::default().style(Style::default().fg(theme.fg).bg(theme.bg)),
+        Block::default().style(theme.with_bg(Style::default().fg(theme.fg), theme.bg)),
         area,
     );
 
@@ -82,7 +82,7 @@ pub fn render_app_frame(
     ]);
 
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().fg(theme.fg).bg(theme.bg_elevated)),
+        Paragraph::new(line).style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
         chunks[0],
     );
 
@@ -95,17 +95,15 @@ pub fn panel<'a>(title: impl Into<Line<'a>>, theme: &Theme) -> Block<'a> {
         .title_alignment(Alignment::Left)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.bg_panel))
+        .style(theme.with_bg(Style::default(), theme.bg_panel))
 }
 
 pub fn render_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[(&str, &str)]) {
     frame.render_widget(
-        Paragraph::new(keybar_line(theme, items)).style(
-            Style::default()
-                .fg(theme.fg)
-                .bg(theme.bg_elevated)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Paragraph::new(keybar_line(theme, items)).style(theme.with_bg(
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            theme.bg_elevated,
+        )),
         area,
     );
 }
@@ -154,14 +152,19 @@ pub fn keybar_line(theme: &Theme, items: &[(&str, &str)]) -> Line<'static> {
     let mut spans = Vec::new();
     for (idx, (key, desc)) in items.iter().enumerate() {
         if idx > 0 {
-            spans.push(Span::styled("  ", Style::default().bg(theme.bg_elevated)));
+            spans.push(Span::styled(
+                "  ",
+                theme.with_bg(Style::default(), theme.bg_elevated),
+            ));
         }
         spans.push(Span::styled(
             key.to_string(),
-            Style::default()
-                .fg(theme.selection_fg)
-                .bg(theme.accent_soft)
-                .add_modifier(Modifier::BOLD),
+            theme.with_bg(
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .add_modifier(Modifier::BOLD),
+                theme.accent_soft,
+            ),
         ));
         spans.push(Span::styled(
             format!(" {desc}"),
@@ -181,17 +184,19 @@ pub fn pill(theme: &Theme, label: &str, tone: Tone) -> Span<'static> {
     };
     Span::styled(
         format!(" {label} "),
-        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+        theme.with_bg(Style::default().fg(fg).add_modifier(Modifier::BOLD), bg),
     )
 }
 
 fn repo_pill(theme: &Theme, label: &str) -> Span<'static> {
     Span::styled(
         format!(" {label} "),
-        Style::default()
-            .fg(theme.selection_fg)
-            .bg(theme.accent)
-            .add_modifier(Modifier::BOLD),
+        theme.with_bg(
+            Style::default()
+                .fg(theme.selection_fg)
+                .add_modifier(Modifier::BOLD),
+            theme.accent,
+        ),
     )
 }
 

@@ -208,7 +208,7 @@ pub fn render(
                 Span::raw("  "),
                 Span::raw(&result.message),
             ]))
-            .style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
             inner,
         );
         crate::tui::chrome::render_keybar(frame, chunks[2], theme, &[("Enter", "dismiss")]);

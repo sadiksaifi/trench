@@ -1,4 +1,4 @@
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
@@ -18,11 +18,26 @@ pub struct Theme {
     pub selection_fg: Color,
 }
 
+impl Theme {
+    pub fn with_bg(&self, style: Style, color: Color) -> Style {
+        if color == Color::Reset {
+            style
+        } else {
+            style.bg(color)
+        }
+    }
+}
+
 pub fn from_name(name: &str) -> Theme {
     match name {
         "ops" | "default" | "" => ops(),
+        "transparent" | "ops-transparent" => transparent(ops()),
         "catppuccin" => catppuccin(),
+        "catppuccin-transparent" | "nord-transparent" | "solarized-transparent" => {
+            transparent(catppuccin())
+        }
         "gruvbox" | "dark" => gruvbox(),
+        "gruvbox-transparent" | "dark-transparent" => transparent(gruvbox()),
         "minimal" => minimal(),
         "nord" | "solarized" => catppuccin(),
         _ => ops(),
@@ -103,6 +118,13 @@ fn minimal() -> Theme {
         selection_bg: Color::Blue,
         selection_fg: Color::White,
     }
+}
+
+fn transparent(mut theme: Theme) -> Theme {
+    theme.bg = Color::Reset;
+    theme.bg_elevated = Color::Reset;
+    theme.bg_panel = Color::Reset;
+    theme
 }
 
 #[cfg(test)]
@@ -201,6 +223,26 @@ mod tests {
         let ops = from_name("ops");
         let min = from_name("minimal");
         assert_ne!(ops, min, "minimal and ops should be different themes");
+    }
+
+    #[test]
+    fn transparent_theme_keeps_ops_palette_but_resets_base_surfaces() {
+        let theme = from_name("transparent");
+        assert_eq!(theme.fg, Color::Rgb(250, 249, 245));
+        assert_eq!(theme.accent, Color::Rgb(217, 119, 87));
+        assert_eq!(theme.bg, Color::Reset);
+        assert_eq!(theme.bg_elevated, Color::Reset);
+        assert_eq!(theme.bg_panel, Color::Reset);
+    }
+
+    #[test]
+    fn catppuccin_transparent_alias_resets_base_surfaces() {
+        let theme = from_name("catppuccin-transparent");
+        assert_eq!(theme.fg, Color::Rgb(205, 214, 244));
+        assert_eq!(theme.accent, Color::Rgb(137, 180, 250));
+        assert_eq!(theme.bg, Color::Reset);
+        assert_eq!(theme.bg_elevated, Color::Reset);
+        assert_eq!(theme.bg_panel, Color::Reset);
     }
 
     #[test]

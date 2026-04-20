@@ -176,10 +176,12 @@ fn render_picker(
     for (i, (label, desc)) in options.iter().enumerate() {
         let marker = if i == state.selected { "▸ " } else { "  " };
         let style = if i == state.selected {
-            Style::default()
-                .bg(theme.selection_bg)
-                .fg(theme.selection_fg)
-                .add_modifier(Modifier::BOLD)
+            theme.with_bg(
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .add_modifier(Modifier::BOLD),
+                theme.selection_bg,
+            )
         } else {
             Style::default().fg(theme.fg)
         };
@@ -193,7 +195,7 @@ fn render_picker(
     frame.render_widget(
         Paragraph::new(lines)
             .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
         inner,
     );
 

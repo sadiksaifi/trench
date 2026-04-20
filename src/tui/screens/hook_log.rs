@@ -284,7 +284,7 @@ pub fn render(
         Span::styled(status_text, status_style),
     ]);
     frame.render_widget(
-        Paragraph::new(title).style(Style::default().fg(theme.fg).bg(theme.bg)),
+        Paragraph::new(title).style(theme.with_bg(Style::default().fg(theme.fg), theme.bg)),
         chunks[0],
     );
 
@@ -362,7 +362,7 @@ pub fn render(
 
     frame.render_widget(
         Paragraph::new(visible_lines)
-            .style(Style::default().fg(theme.fg).bg(theme.bg_panel))
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel))
             .block(crate::tui::chrome::panel(" Output ", theme)),
         chunks[1],
     );

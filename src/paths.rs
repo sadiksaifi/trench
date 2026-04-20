@@ -9,6 +9,7 @@ const DEFAULT_WORKTREE_DIR: &str = ".worktrees";
 const FALLBACK_WORKTREE_DIR: &str = "trench-worktrees";
 /// Fallback path segments for platforms where `dirs::state_dir()` returns `None` (macOS/Windows).
 const STATE_DIR_FALLBACK_SEGMENTS: &[&str] = &[".local", "state"];
+const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
 
 /// Ensure a directory exists, creating it (and parents) if needed.
 fn ensure_dir(path: &Path) -> Result<()> {
@@ -73,10 +74,20 @@ fn ensure_dir_with_fallback(path: &Path) -> Result<PathBuf> {
 /// side effects are allowed. For contexts that need the directory to exist,
 /// use [`config_dir`].
 pub fn config_dir_path() -> Result<PathBuf> {
-    let path = dirs::config_dir()
-        .context("could not determine config directory")?
-        .join(APP_NAME);
+    let path = config_base_dir_path()?.join(APP_NAME);
     Ok(path)
+}
+
+fn config_base_dir_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(XDG_CONFIG_HOME_ENV) {
+        let path = PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            return Ok(path);
+        }
+    }
+
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join(".config"))
 }
 
 /// Return the trench config directory (`~/.config/trench/`), creating it if needed.
@@ -274,7 +285,7 @@ mod tests {
     fn config_dir_ends_with_trench() {
         let path = config_dir().unwrap();
         assert!(path.ends_with("trench"));
-        assert!(path.starts_with(dirs::config_dir().unwrap()));
+        assert!(path.starts_with(config_base_dir_path().unwrap()));
         assert!(path.exists());
     }
 
@@ -335,7 +346,23 @@ mod tests {
     fn config_dir_path_returns_path_without_creating_it() {
         let path = config_dir_path().unwrap();
         assert!(path.ends_with("trench"));
-        assert!(path.starts_with(dirs::config_dir().unwrap()));
+        assert!(path.starts_with(config_base_dir_path().unwrap()));
+    }
+
+    #[test]
+    fn config_dir_path_prefers_xdg_config_home() {
+        let original = std::env::var_os(XDG_CONFIG_HOME_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var(XDG_CONFIG_HOME_ENV, tmp.path());
+
+        let path = config_dir_path().unwrap();
+
+        match original {
+            Some(value) => std::env::set_var(XDG_CONFIG_HOME_ENV, value),
+            None => std::env::remove_var(XDG_CONFIG_HOME_ENV),
+        }
+
+        assert_eq!(path, tmp.path().join(APP_NAME));
     }
 
     #[test]

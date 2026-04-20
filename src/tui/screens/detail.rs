@@ -264,10 +264,12 @@ pub fn render(
 
     frame.render_widget(
         Paragraph::new(Line::from(" s sync  o open  l log  Esc back ")).style(
-            Style::default()
-                .fg(theme.selection_fg)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD),
+            theme.with_bg(
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .add_modifier(Modifier::BOLD),
+                theme.accent,
+            ),
         ),
         chunks[3],
     );
@@ -301,7 +303,7 @@ pub fn render_with_options(
             Span::raw("  "),
             crate::tui::chrome::pill(theme, &state.base_branch, crate::tui::chrome::Tone::Muted),
         ]))
-        .style(Style::default().fg(theme.fg).bg(theme.bg)),
+        .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg)),
         chunks[0],
     );
 
@@ -349,7 +351,7 @@ fn render_summary_card(
     lines.push(metric_line("Hook At", &state.hook_timestamp, theme));
 
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+        Paragraph::new(lines).style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
         inner,
     );
 }
@@ -378,7 +380,7 @@ fn render_file_card(
         }
     }
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+        Paragraph::new(lines).style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
         inner,
     );
 }
@@ -407,7 +409,7 @@ fn render_commit_card(
         }
     }
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(theme.fg).bg(theme.bg_panel)),
+        Paragraph::new(lines).style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
         inner,
     );
 }
