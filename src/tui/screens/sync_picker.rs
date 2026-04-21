@@ -136,7 +136,7 @@ fn render_result(
         frame,
         chunks[2],
         theme,
-        &[("Enter", "dismiss"), ("Space", "dismiss"), ("Esc", "back")],
+        &[("Enter", "dismiss"), ("Esc", "back")],
     );
 }
 
@@ -459,14 +459,18 @@ mod tests {
     fn result_mode_shows_dismiss_footer() {
         let mut state = SyncPickerState::new("feat-auth");
         state.result = Some(SyncResultMessage {
-            success: true,
+            success: false,
             message: "Done".into(),
         });
         let buf = render_to_buffer(&state, 80, 15);
         let text = buffer_text(&buf);
         assert!(
-            text.contains("Enter"),
+            text.contains("Enter dismiss"),
             "result footer should show Enter to dismiss"
+        );
+        assert!(
+            !text.contains("Space"),
+            "result footer should not mention Space"
         );
     }
 }

@@ -323,13 +323,18 @@ pub fn render(
         frame.render_widget(error_line, chunks[6]);
     }
 
+    let enter_action = if state.focused_field == CreateField::Hooks {
+        "create"
+    } else {
+        "next"
+    };
     crate::tui::chrome::render_keybar(
         frame,
         chunks[8],
         theme,
         &[
             ("Tab", "next field"),
-            ("Enter", "create"),
+            ("Enter", enter_action),
             ("Esc", "cancel"),
         ],
     );
@@ -792,6 +797,22 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("Tab"), "should show Tab in footer");
         assert!(text.contains("Esc"), "should show Esc in footer");
+        assert!(
+            text.contains("next"),
+            "should show Enter next on early fields"
+        );
+    }
+
+    #[test]
+    fn render_shows_create_footer_when_hooks_focused() {
+        let mut state = sample_state();
+        state.focused_field = CreateField::Hooks;
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("create"),
+            "should show Enter create on final field"
+        );
     }
 
     #[test]

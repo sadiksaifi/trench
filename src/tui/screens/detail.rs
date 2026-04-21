@@ -282,6 +282,17 @@ pub fn render_with_options(
     theme: &crate::tui::theme::Theme,
     options: &crate::tui::chrome::UiOptions,
 ) {
+    render_with_options_and_status(state, frame, area, theme, options, None);
+}
+
+pub fn render_with_options_and_status(
+    state: &DetailState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+    options: &crate::tui::chrome::UiOptions,
+    status: Option<&crate::tui::screens::list::StatusMessage>,
+) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(7),
@@ -317,12 +328,37 @@ pub fn render_with_options(
     };
     render_file_card(state, frame, body_chunks[0], theme);
     render_commit_card(state, frame, body_chunks[1], theme);
-    crate::tui::chrome::render_keybar(
-        frame,
-        chunks[3],
-        theme,
-        &[("s", "sync"), ("o", "open"), ("l", "log"), ("Esc", "back")],
-    );
+    render_footer(status, frame, chunks[3], theme);
+}
+
+fn render_footer(
+    status: Option<&crate::tui::screens::list::StatusMessage>,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
+    if let Some(status) = status {
+        let tone = if status.success {
+            crate::tui::chrome::Tone::Success
+        } else {
+            crate::tui::chrome::Tone::Error
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                crate::tui::chrome::pill(theme, "status", tone),
+                Span::raw(format!(" {}", status.text)),
+            ]))
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
+            area,
+        );
+    } else {
+        crate::tui::chrome::render_keybar(
+            frame,
+            area,
+            theme,
+            &[("s", "sync"), ("o", "open"), ("l", "log"), ("Esc", "back")],
+        );
+    }
 }
 
 fn render_summary_card(
@@ -650,6 +686,7 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("s sync"), "footer should show s sync");
         assert!(text.contains("o open"), "footer should show o open");
+        assert!(text.contains("l log"), "footer should show l log");
         assert!(text.contains("Esc back"), "footer should show Esc back");
     }
 

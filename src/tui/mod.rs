@@ -149,18 +149,26 @@ pub struct App {
     pub ui_options: chrome::UiOptions,
     pub list_state: screens::list::ListState,
     pub detail_state: Option<screens::detail::DetailState>,
+    pub detail_status_message: Option<screens::list::StatusMessage>,
     pub create_state: Option<screens::create::CreateState>,
     pub sync_picker_state: Option<screens::sync_picker::SyncPickerState>,
+    pub sync_return_screen: Option<Screen>,
     pub delete_confirm_state: Option<screens::delete_confirm::DeleteConfirmState>,
     pub hook_log_state: Option<screens::hook_log::HookLogState>,
     pub hook_rx: Option<std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>>,
-    pub pending_hook_success_status: Option<screens::list::StatusMessage>,
+    pub pending_hook_success_status: Option<PendingStatusMessage>,
+    pub hook_return_screen: Option<Screen>,
     pub editor_request: Option<String>,
     pub repo_path: Option<String>,
     pub switch_path: Option<String>,
     pub tmux_enabled: bool,
     pub auto_refresh: bool,
     pub watcher: Option<watcher::DebouncedWatcher>,
+}
+
+pub struct PendingStatusMessage {
+    pub screen: Screen,
+    pub status: screens::list::StatusMessage,
 }
 
 impl App {
@@ -172,12 +180,15 @@ impl App {
             ui_options: chrome::UiOptions::default(),
             list_state: screens::list::ListState::new(vec![]),
             detail_state: None,
+            detail_status_message: None,
             create_state: None,
             sync_picker_state: None,
+            sync_return_screen: None,
             delete_confirm_state: None,
             hook_log_state: None,
             hook_rx: None,
             pending_hook_success_status: None,
+            hook_return_screen: None,
             editor_request: None,
             repo_path: None,
             switch_path: None,
@@ -204,6 +215,46 @@ impl App {
 
     pub fn push_screen(&mut self, screen: Screen) {
         self.nav_stack.push(screen);
+    }
+
+    fn clear_visible_status_for_active_screen(&mut self) {
+        match self.active_screen() {
+            Screen::List => self.list_state.status_message = None,
+            Screen::Detail => self.detail_status_message = None,
+            _ => {}
+        }
+    }
+
+    fn set_status_message(&mut self, target: Screen, status: screens::list::StatusMessage) {
+        match target {
+            Screen::Detail => self.detail_status_message = Some(status),
+            _ => self.list_state.status_message = Some(status),
+        }
+    }
+
+    fn refresh_target_screen(&mut self, target: Screen) {
+        self.refresh_list();
+        if target == Screen::Detail {
+            if let Some(name) = self.detail_state.as_ref().map(|d| d.name.clone()) {
+                let _ = self.load_detail(&name);
+            }
+        }
+    }
+
+    fn return_to_screen(&mut self, target: Screen, refresh: bool) {
+        self.create_state = None;
+        self.sync_picker_state = None;
+        self.sync_return_screen = None;
+        self.delete_confirm_state = None;
+        self.hook_log_state = None;
+        self.nav_stack.clear();
+        self.nav_stack.push(Screen::List);
+        if target == Screen::Detail {
+            self.nav_stack.push(Screen::Detail);
+        }
+        if refresh {
+            self.refresh_target_screen(target);
+        }
     }
 
     pub fn ui(&self, frame: &mut Frame) {
@@ -233,12 +284,13 @@ impl App {
             ),
             Screen::Detail => {
                 if let Some(ref detail) = self.detail_state {
-                    screens::detail::render_with_options(
+                    screens::detail::render_with_options_and_status(
                         detail,
                         frame,
                         content_area,
                         theme,
                         &self.ui_options,
+                        self.detail_status_message.as_ref(),
                     );
                 } else {
                     let placeholder =
@@ -301,12 +353,13 @@ impl App {
         match underlying {
             Some(Screen::Detail) => {
                 if let Some(ref detail) = self.detail_state {
-                    screens::detail::render_with_options(
+                    screens::detail::render_with_options_and_status(
                         detail,
                         frame,
                         area,
                         theme,
                         &self.ui_options,
+                        self.detail_status_message.as_ref(),
                     );
                 }
             }
@@ -521,15 +574,17 @@ impl App {
         &mut self,
         title: &str,
         rx: std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>,
+        return_screen: Screen,
     ) {
         self.hook_log_state = Some(screens::hook_log::HookLogState::new(title));
         self.hook_rx = Some(rx);
+        self.hook_return_screen = Some(return_screen);
         self.push_screen(Screen::HookLog);
     }
 
     /// Drain pending messages from the hook output channel and update state.
-    /// Continues draining even after dismiss (hook_log_state is None) so that
-    /// HookCompleted triggers a final refresh_list.
+    /// Continues draining even after dismiss so late completions can refresh
+    /// the source screen and apply pending status messages.
     pub fn process_hook_messages(&mut self) {
         let Some(ref rx) = self.hook_rx else { return };
         let mut received = false;
@@ -552,15 +607,20 @@ impl App {
             if !success {
                 self.pending_hook_success_status = None;
             }
-        }
-        if let Some(success) = completed {
-            if self.hook_log_state.is_none() {
-                // Hook finished after user dismissed — refresh list to reflect changes
-                self.hook_rx = None;
-                self.refresh_list();
+            if self.hook_log_state.is_some() {
                 if success {
-                    self.list_state.status_message = self.pending_hook_success_status.take();
+                    self.dismiss_hook_log();
                 }
+            } else {
+                let target = self.hook_return_screen.unwrap_or(Screen::List);
+                self.hook_rx = None;
+                self.refresh_target_screen(target);
+                if success {
+                    if let Some(pending) = self.pending_hook_success_status.take() {
+                        self.set_status_message(pending.screen, pending.status);
+                    }
+                }
+                self.hook_return_screen = None;
             }
         }
     }
@@ -575,7 +635,10 @@ impl App {
     fn clear_active_screen_state(&mut self) {
         match self.active_screen() {
             Screen::DeleteConfirm => self.delete_confirm_state = None,
-            Screen::SyncPicker => self.sync_picker_state = None,
+            Screen::SyncPicker => {
+                self.sync_picker_state = None;
+                self.sync_return_screen = None;
+            }
             Screen::Create => self.create_state = None,
             Screen::HookLog => {
                 self.hook_log_state = None;
@@ -598,10 +661,10 @@ impl App {
         }
     }
 
-    /// Dismiss the hook log screen and unwind to List, clearing any
-    /// intermediate source dialog state (Create/Sync/Delete) so the
-    /// underlying operation cannot be re-triggered.
+    /// Dismiss the live hook log and return to its source screen, clearing any
+    /// intermediate action dialog state so the operation cannot be re-triggered.
     fn dismiss_hook_log(&mut self) {
+        let target = self.hook_return_screen.unwrap_or(Screen::List);
         let should_apply_success_status = self
             .hook_log_state
             .as_ref()
@@ -622,26 +685,18 @@ impl App {
         self.hook_log_state = None;
         if hook_completed {
             self.hook_rx = None;
+            self.hook_return_screen = None;
         }
-        // Keep hook_rx alive for in-flight hooks so process_hook_messages can
-        // apply final refresh + status after dismiss.
-        self.create_state = None;
-        self.sync_picker_state = None;
-        self.delete_confirm_state = None;
-        self.nav_stack.retain(|s| *s == Screen::List);
-        if self.nav_stack.is_empty() {
-            self.nav_stack.push(Screen::List);
-        }
-        self.refresh_list();
+        // Keep hook_rx + hook_return_screen alive for in-flight hooks so
+        // process_hook_messages can finish refresh/status after dismiss.
+        self.return_to_screen(target, true);
         if let Some(status) = status {
-            self.list_state.status_message = Some(status);
+            self.set_status_message(status.screen, status.status);
         }
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
-        if self.active_screen() == Screen::List {
-            self.list_state.status_message = None;
-        }
+        self.clear_visible_status_for_active_screen();
 
         // Global keys handled at app level
         match (key.code, key.modifiers) {
@@ -762,9 +817,12 @@ impl App {
 
             let (tx, rx) = std::sync::mpsc::channel();
             let hooks = hooks_config.unwrap();
-            self.pending_hook_success_status = Some(screens::list::StatusMessage {
-                text: format!("Removed '{worktree_name}'"),
-                success: true,
+            self.pending_hook_success_status = Some(PendingStatusMessage {
+                screen: Screen::List,
+                status: screens::list::StatusMessage {
+                    text: format!("Removed '{worktree_name}'"),
+                    success: true,
+                },
             });
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
@@ -799,16 +857,19 @@ impl App {
                     error,
                 });
             });
-            self.start_hook_log("remove hooks", rx);
+            self.start_hook_log("remove hooks", rx, Screen::List);
         } else {
             match crate::cli::commands::remove::execute(&worktree_name, &cwd, &db, false) {
                 Ok(result) => {
                     self.delete_confirm_state = None;
                     self.pop_to_list(true);
-                    self.list_state.status_message = Some(screens::list::StatusMessage {
-                        text: format!("Removed '{}'", result.name),
-                        success: true,
-                    });
+                    self.set_status_message(
+                        Screen::List,
+                        screens::list::StatusMessage {
+                            text: format!("Removed '{}'", result.name),
+                            success: true,
+                        },
+                    );
                 }
                 Err(e) => {
                     if let Some(ref mut c) = self.delete_confirm_state {
@@ -844,6 +905,7 @@ impl App {
         match key.code {
             KeyCode::Char('s') => {
                 if let Some(ref detail) = self.detail_state {
+                    self.sync_return_screen = Some(Screen::Detail);
                     self.sync_picker_state =
                         Some(screens::sync_picker::SyncPickerState::new(&detail.name));
                     self.push_screen(Screen::SyncPicker);
@@ -906,6 +968,14 @@ impl App {
     }
 
     fn handle_hook_log_key(&mut self, key: KeyEvent) {
+        let should_dismiss = self
+            .hook_log_state
+            .as_ref()
+            .is_some_and(|s| s.completed && !s.replay && matches!(key.code, KeyCode::Enter));
+        if should_dismiss {
+            self.dismiss_hook_log();
+            return;
+        }
         if let Some(ref mut state) = self.hook_log_state {
             let h = state.last_body_height.get();
             match key.code {
@@ -925,9 +995,9 @@ impl App {
             .is_some_and(|p| p.is_result_mode());
         if in_result_mode {
             match key.code {
-                KeyCode::Enter | KeyCode::Char(' ') => {
-                    self.sync_picker_state = None;
-                    self.pop_to_list(true);
+                KeyCode::Enter => {
+                    let target = self.sync_return_screen.unwrap_or(Screen::List);
+                    self.return_to_screen(target, true);
                 }
                 _ => {}
             }
@@ -972,6 +1042,14 @@ impl App {
         if has_hooks {
             let (tx, rx) = std::sync::mpsc::channel();
             let hooks = hooks_config.unwrap();
+            let return_screen = self.sync_return_screen.unwrap_or(Screen::List);
+            self.pending_hook_success_status = Some(PendingStatusMessage {
+                screen: return_screen,
+                status: screens::list::StatusMessage {
+                    text: format!("Synced '{worktree_name}' via {strategy}"),
+                    success: true,
+                },
+            });
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
                     Ok(rt) => rt,
@@ -1003,25 +1081,19 @@ impl App {
                     error,
                 });
             });
-            self.start_hook_log("sync hooks", rx);
+            self.start_hook_log("sync hooks", rx, return_screen);
         } else {
             match crate::cli::commands::sync::execute(&worktree_name, &cwd, &db, strategy) {
                 Ok(result) => {
-                    let msg = format!(
-                        "Synced '{}' via {}\nBefore: +{}/-{}  After: +{}/-{}",
-                        result.name,
-                        result.strategy,
-                        result.before_ahead,
-                        result.before_behind,
-                        result.after_ahead,
-                        result.after_behind,
-                    );
-                    if let Some(ref mut p) = self.sync_picker_state {
-                        p.result = Some(screens::sync_picker::SyncResultMessage {
+                    let target = self.sync_return_screen.unwrap_or(Screen::List);
+                    self.return_to_screen(target, true);
+                    self.set_status_message(
+                        target,
+                        screens::list::StatusMessage {
+                            text: format!("Synced '{}' via {}", result.name, result.strategy),
                             success: true,
-                            message: msg,
-                        });
-                    }
+                        },
+                    );
                 }
                 Err(e) => {
                     if let Some(ref mut p) = self.sync_picker_state {
@@ -1122,6 +1194,7 @@ impl App {
             }
             KeyCode::Char('s') => {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
+                    self.sync_return_screen = Some(Screen::List);
                     self.sync_picker_state =
                         Some(screens::sync_picker::SyncPickerState::new(&row.name));
                     self.push_screen(Screen::SyncPicker);
@@ -1228,9 +1301,8 @@ impl App {
 
         if in_result_mode {
             match key.code {
-                KeyCode::Enter | KeyCode::Char(' ') => {
-                    self.create_state = None;
-                    self.pop_to_list(true);
+                KeyCode::Enter => {
+                    self.return_to_screen(Screen::List, true);
                 }
                 _ => {}
             }
@@ -1333,6 +1405,13 @@ impl App {
             // Background execution with live streaming
             let (tx, rx) = std::sync::mpsc::channel();
             let hooks = hooks_config.unwrap();
+            self.pending_hook_success_status = Some(PendingStatusMessage {
+                screen: Screen::List,
+                status: screens::list::StatusMessage {
+                    text: format!("Created '{branch}'"),
+                    success: true,
+                },
+            });
             let branch_clone = branch.clone();
             let base_clone = base.clone();
 
@@ -1370,7 +1449,7 @@ impl App {
                 });
             });
 
-            self.start_hook_log("create hooks", rx);
+            self.start_hook_log("create hooks", rx, Screen::List);
         } else {
             // Synchronous path without hooks
             match crate::cli::commands::create::execute(
@@ -1382,13 +1461,14 @@ impl App {
                 &db,
             ) {
                 Ok(result) => {
-                    let msg = format!("Created '{}' at {}", result.name, result.path.display());
-                    if let Some(ref mut s) = self.create_state {
-                        s.result = Some(screens::create::CreateResultMessage {
+                    self.return_to_screen(Screen::List, true);
+                    self.set_status_message(
+                        Screen::List,
+                        screens::list::StatusMessage {
+                            text: format!("Created '{}'", result.name),
                             success: true,
-                            message: msg,
-                        });
-                    }
+                        },
+                    );
                 }
                 Err(e) => {
                     if let Some(ref mut s) = self.create_state {
@@ -2421,8 +2501,8 @@ mod tests {
         let mut app = app_with_create_state();
         // Set result directly
         app.create_state.as_mut().unwrap().result = Some(screens::create::CreateResultMessage {
-            success: true,
-            message: "Created 'test'".into(),
+            success: false,
+            message: "Create failed".into(),
         });
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
@@ -2434,15 +2514,15 @@ mod tests {
     }
 
     #[test]
-    fn space_in_create_result_mode_pops_to_list() {
+    fn space_in_create_result_mode_does_nothing() {
         let mut app = app_with_create_state();
         app.create_state.as_mut().unwrap().result = Some(screens::create::CreateResultMessage {
             success: false,
             message: "Create failed".into(),
         });
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        assert_eq!(app.active_screen(), Screen::List);
-        assert!(app.create_state.is_none());
+        assert_eq!(app.active_screen(), Screen::Create);
+        assert!(app.create_state.is_some());
     }
 
     #[test]
@@ -2537,6 +2617,28 @@ mod tests {
 
         assert!(content.contains("file.rs"), "should show changed file");
         assert!(content.contains("abc1234"), "should show commit hash");
+    }
+
+    #[test]
+    fn detail_screen_renders_status_message_when_present() {
+        let mut app = App::new();
+        app.detail_state = Some(sample_detail_state());
+        app.detail_status_message = Some(screens::list::StatusMessage {
+            text: "Synced 'feat-a'".into(),
+            success: true,
+        });
+        app.push_screen(Screen::Detail);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+        assert!(
+            content.contains("Synced 'feat-a'"),
+            "should show detail status"
+        );
     }
 
     #[test]
@@ -2662,8 +2764,8 @@ mod tests {
         let mut app = App::new();
         let mut state = screens::sync_picker::SyncPickerState::new("feat-auth");
         state.result = Some(screens::sync_picker::SyncResultMessage {
-            success: true,
-            message: "Synced successfully".into(),
+            success: false,
+            message: "Sync failed".into(),
         });
         app.sync_picker_state = Some(state);
         app.push_screen(Screen::SyncPicker);
@@ -2681,15 +2783,16 @@ mod tests {
     }
 
     #[test]
-    fn enter_in_result_mode_pops_to_list_from_detail_path() {
+    fn enter_in_result_mode_returns_to_detail_from_detail_path() {
         let mut app = app_with_rows();
         // Simulate Detail → SyncPicker flow: nav stack = [List, Detail, SyncPicker]
         app.detail_state = Some(sample_detail_state());
         app.push_screen(Screen::Detail);
+        app.sync_return_screen = Some(Screen::Detail);
         let mut state = screens::sync_picker::SyncPickerState::new("feat-a");
         state.result = Some(screens::sync_picker::SyncResultMessage {
-            success: true,
-            message: "Synced successfully".into(),
+            success: false,
+            message: "Sync failed".into(),
         });
         app.sync_picker_state = Some(state);
         app.push_screen(Screen::SyncPicker);
@@ -2698,13 +2801,29 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             app.active_screen(),
-            Screen::List,
-            "should pop all the way to List, not Detail"
+            Screen::Detail,
+            "should return to Detail, not List"
         );
         assert!(
             app.sync_picker_state.is_none(),
             "sync_picker_state should be cleared"
         );
+    }
+
+    #[test]
+    fn space_in_sync_result_mode_does_nothing() {
+        let mut app = App::new();
+        let mut state = screens::sync_picker::SyncPickerState::new("feat-auth");
+        state.result = Some(screens::sync_picker::SyncResultMessage {
+            success: false,
+            message: "Sync failed".into(),
+        });
+        app.sync_picker_state = Some(state);
+        app.push_screen(Screen::SyncPicker);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::SyncPicker);
+        assert!(app.sync_picker_state.is_some());
     }
 
     #[test]
@@ -3047,9 +3166,9 @@ mod tests {
         })
         .unwrap();
         tx.send(HookOutputMessage::HookCompleted {
-            success: true,
+            success: false,
             duration: std::time::Duration::from_secs(1),
-            error: None,
+            error: Some("hook failed".into()),
         })
         .unwrap();
 
@@ -3062,7 +3181,7 @@ mod tests {
         assert_eq!(state.sections[0].lines.len(), 1);
         assert_eq!(state.sections[0].lines[0].text, "hello");
         assert!(state.completed);
-        assert!(state.success);
+        assert!(!state.success);
     }
 
     #[test]
@@ -3076,7 +3195,7 @@ mod tests {
     fn start_hook_log_sets_up_state_and_pushes_screen() {
         let mut app = App::new();
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.start_hook_log("post_create", rx);
+        app.start_hook_log("post_create", rx, Screen::List);
         assert_eq!(app.active_screen(), Screen::HookLog);
         assert!(app.hook_log_state.is_some());
         assert_eq!(app.hook_log_state.as_ref().unwrap().title, "post_create");
@@ -3087,7 +3206,7 @@ mod tests {
     fn esc_on_hook_log_returns_to_list_and_clears_state() {
         let mut app = App::new();
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.start_hook_log("post_create", rx);
+        app.start_hook_log("post_create", rx, Screen::List);
         assert_eq!(app.active_screen(), Screen::HookLog);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -3101,10 +3220,25 @@ mod tests {
     fn q_on_hook_log_returns_to_list() {
         let mut app = App::new();
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.start_hook_log("post_create", rx);
+        app.start_hook_log("post_create", rx, Screen::List);
         assert_eq!(app.active_screen(), Screen::HookLog);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.hook_log_state.is_none());
+    }
+
+    #[test]
+    fn enter_on_completed_hook_log_returns_to_list() {
+        let mut app = App::new();
+        let mut state = screens::hook_log::HookLogState::new("sync hooks");
+        state.completed = true;
+        state.success = false;
+        app.hook_log_state = Some(state);
+        app.push_screen(Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
         assert_eq!(app.active_screen(), Screen::List);
         assert!(app.hook_log_state.is_none());
     }
@@ -3120,7 +3254,7 @@ mod tests {
         ));
         app.push_screen(Screen::Create);
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.start_hook_log("create hooks", rx);
+        app.start_hook_log("create hooks", rx, Screen::List);
         assert_eq!(app.active_screen(), Screen::HookLog);
         assert_eq!(app.nav_stack_depth(), 3); // List → Create → HookLog
 
@@ -3147,7 +3281,7 @@ mod tests {
 
         let mut app = App::new();
         let (tx, rx) = std::sync::mpsc::channel();
-        app.start_hook_log("test hooks", rx);
+        app.start_hook_log("test hooks", rx, Screen::List);
         assert_eq!(app.active_screen(), Screen::HookLog);
 
         // Dismiss the hook log (user pressed Esc)
@@ -3180,9 +3314,12 @@ mod tests {
         state.completed = true;
         state.success = true;
         app.hook_log_state = Some(state);
-        app.pending_hook_success_status = Some(screens::list::StatusMessage {
-            text: "Removed 'feat-auth'".into(),
-            success: true,
+        app.pending_hook_success_status = Some(PendingStatusMessage {
+            screen: Screen::List,
+            status: screens::list::StatusMessage {
+                text: "Removed 'feat-auth'".into(),
+                success: true,
+            },
         });
         app.push_screen(Screen::HookLog);
 
@@ -3200,15 +3337,49 @@ mod tests {
     }
 
     #[test]
+    fn dismiss_hook_log_completed_success_returns_to_detail_with_status() {
+        let mut app = app_with_rows();
+        app.detail_state = Some(sample_detail_state());
+        app.detail_status_message = None;
+        app.hook_return_screen = Some(Screen::Detail);
+        let mut state = screens::hook_log::HookLogState::new("sync hooks");
+        state.completed = true;
+        state.success = true;
+        app.hook_log_state = Some(state);
+        app.pending_hook_success_status = Some(PendingStatusMessage {
+            screen: Screen::Detail,
+            status: screens::list::StatusMessage {
+                text: "Synced 'feat-a'".into(),
+                success: true,
+            },
+        });
+        app.push_screen(Screen::Detail);
+        app.push_screen(Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.active_screen(), Screen::Detail);
+        let status = app
+            .detail_status_message
+            .as_ref()
+            .expect("detail status should be shown after dismiss");
+        assert_eq!(status.text, "Synced 'feat-a'");
+        assert!(status.success);
+    }
+
+    #[test]
     fn process_hook_messages_after_dismiss_applies_pending_status() {
         use screens::hook_log::HookOutputMessage;
 
         let mut app = App::new();
         let (tx, rx) = std::sync::mpsc::channel();
-        app.start_hook_log("remove hooks", rx);
-        app.pending_hook_success_status = Some(screens::list::StatusMessage {
-            text: "Removed 'feat-auth'".into(),
-            success: true,
+        app.start_hook_log("remove hooks", rx, Screen::List);
+        app.pending_hook_success_status = Some(PendingStatusMessage {
+            screen: Screen::List,
+            status: screens::list::StatusMessage {
+                text: "Removed 'feat-auth'".into(),
+                success: true,
+            },
         });
 
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -3231,6 +3402,43 @@ mod tests {
         assert_eq!(status.text, "Removed 'feat-auth'");
         assert!(status.success);
         assert!(app.pending_hook_success_status.is_none());
+    }
+
+    #[test]
+    fn process_hook_messages_completed_success_auto_closes_to_detail() {
+        use screens::hook_log::HookOutputMessage;
+
+        let mut app = app_with_rows();
+        app.detail_state = Some(sample_detail_state());
+        app.detail_status_message = None;
+        app.hook_return_screen = Some(Screen::Detail);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("sync hooks", rx, Screen::Detail);
+        app.pending_hook_success_status = Some(PendingStatusMessage {
+            screen: Screen::Detail,
+            status: screens::list::StatusMessage {
+                text: "Synced 'feat-a'".into(),
+                success: true,
+            },
+        });
+        app.nav_stack.insert(1, Screen::Detail);
+
+        tx.send(HookOutputMessage::HookCompleted {
+            success: true,
+            duration: std::time::Duration::from_secs(1),
+            error: None,
+        })
+        .unwrap();
+
+        app.process_hook_messages();
+
+        assert_eq!(app.active_screen(), Screen::Detail);
+        assert!(app.hook_log_state.is_none());
+        let status = app
+            .detail_status_message
+            .as_ref()
+            .expect("detail status should be shown after auto-close");
+        assert_eq!(status.text, "Synced 'feat-a'");
     }
 
     #[test]
