@@ -13,10 +13,12 @@ pub fn render(
     theme: &crate::tui::theme::Theme,
 ) {
     if let Some(ref result) = state.result {
-        render_result(state, result, frame, area, theme);
-    } else {
-        render_confirm(state, frame, area, theme);
+        if !result.success {
+            render_result(state, result, frame, area, theme);
+            return;
+        }
     }
+    render_confirm(state, frame, area, theme);
 }
 
 fn render_confirm(
@@ -109,7 +111,7 @@ fn render_confirm(
         frame,
         chunks[6],
         theme,
-        &[("Enter/y", "confirm"), ("Esc/n", "cancel")],
+        &[("Enter", "confirm"), ("Esc", "cancel")],
     );
 }
 
@@ -170,7 +172,7 @@ fn render_result(
         chunks[2],
     );
 
-    crate::tui::chrome::render_keybar(frame, chunks[3], theme, &[("Enter/Space", "dismiss")]);
+    crate::tui::chrome::render_keybar(frame, chunks[3], theme, &[("Enter", "dismiss")]);
 }
 
 /// View model for the delete confirmation dialog.
@@ -307,9 +309,16 @@ mod tests {
         let state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("Enter"), "footer should show Enter");
-        assert!(text.contains("confirm"), "footer should show confirm");
-        assert!(text.contains("cancel"), "footer should show cancel");
+        assert!(
+            text.contains("Enter confirm"),
+            "footer should show Enter confirm"
+        );
+        assert!(text.contains("Esc cancel"), "footer should show Esc cancel");
+        assert!(
+            !text.contains("Enter/y"),
+            "footer should not show y confirm"
+        );
+        assert!(!text.contains("Esc/n"), "footer should not show n cancel");
     }
 
     #[test]
@@ -321,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_success_result() {
+    fn success_result_does_not_render_removed_modal() {
         let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
         state.result = Some(DeleteResultMessage {
             success: true,
@@ -329,8 +338,14 @@ mod tests {
         });
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
-        assert!(text.contains("Removed"), "should show removed title");
-        assert!(text.contains("successfully"), "should show result message");
+        assert!(
+            !text.contains("Worktree removed"),
+            "success path should not render removed modal"
+        );
+        assert!(
+            !text.contains("Removed"),
+            "success path should not render removed title"
+        );
     }
 
     #[test]
@@ -350,14 +365,18 @@ mod tests {
     fn result_mode_shows_dismiss_footer() {
         let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
         state.result = Some(DeleteResultMessage {
-            success: true,
+            success: false,
             message: "Done".into(),
         });
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
         assert!(
-            text.contains("Enter/Space dismiss"),
-            "result footer should show Enter/Space dismiss"
+            text.contains("Enter dismiss"),
+            "result footer should show Enter dismiss"
+        );
+        assert!(
+            !text.contains("Space"),
+            "result footer should not mention Space"
         );
     }
 
@@ -428,17 +447,17 @@ mod tests {
     }
 
     #[test]
-    fn result_footer_mentions_space() {
+    fn result_footer_does_not_mention_space() {
         let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
         state.result = Some(DeleteResultMessage {
-            success: true,
+            success: false,
             message: "Done".into(),
         });
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
         assert!(
-            text.contains("Space"),
-            "result footer should mention Space key"
+            !text.contains("Space"),
+            "result footer should not mention Space key"
         );
     }
 
@@ -463,8 +482,8 @@ mod tests {
         let theme = crate::tui::theme::from_name("catppuccin");
         let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
         state.result = Some(DeleteResultMessage {
-            success: true,
-            message: "Removed successfully".into(),
+            success: false,
+            message: "Delete failed".into(),
         });
         let buf = render_to_buffer(&state, 80, 20);
         // Result dialog: centered width=60, height=8
@@ -515,26 +534,6 @@ mod tests {
         assert!(
             content.contains("feat-a"),
             "dialog should show worktree name"
-        );
-    }
-
-    #[test]
-    fn result_success_title_uses_theme_success_color() {
-        let theme = crate::tui::theme::from_name("catppuccin");
-        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
-        state.result = Some(DeleteResultMessage {
-            success: true,
-            message: "Removed successfully".into(),
-        });
-        let buf = render_to_buffer(&state, 80, 20);
-        // Find the cell with 'W' from "Worktree removed" by scanning cells
-        let has_success_color = buf
-            .content()
-            .iter()
-            .any(|cell| cell.symbol() == "W" && cell.fg == theme.success);
-        assert!(
-            has_success_color,
-            "success result title should have a 'W' cell with theme.success color"
         );
     }
 

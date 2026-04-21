@@ -154,6 +154,7 @@ pub struct App {
     pub delete_confirm_state: Option<screens::delete_confirm::DeleteConfirmState>,
     pub hook_log_state: Option<screens::hook_log::HookLogState>,
     pub hook_rx: Option<std::sync::mpsc::Receiver<screens::hook_log::HookOutputMessage>>,
+    pub pending_hook_success_status: Option<screens::list::StatusMessage>,
     pub editor_request: Option<String>,
     pub repo_path: Option<String>,
     pub switch_path: Option<String>,
@@ -176,6 +177,7 @@ impl App {
             delete_confirm_state: None,
             hook_log_state: None,
             hook_rx: None,
+            pending_hook_success_status: None,
             editor_request: None,
             repo_path: None,
             switch_path: None,
@@ -531,13 +533,10 @@ impl App {
     pub fn process_hook_messages(&mut self) {
         let Some(ref rx) = self.hook_rx else { return };
         let mut received = false;
-        let mut completed = false;
+        let mut completed = None;
         while let Ok(msg) = rx.try_recv() {
-            if matches!(
-                &msg,
-                screens::hook_log::HookOutputMessage::HookCompleted { .. }
-            ) {
-                completed = true;
+            if let screens::hook_log::HookOutputMessage::HookCompleted { success, .. } = &msg {
+                completed = Some(*success);
             }
             if let Some(ref mut state) = self.hook_log_state {
                 state.process_message(msg);
@@ -549,10 +548,20 @@ impl App {
                 state.auto_scroll(state.last_body_height.get());
             }
         }
-        if completed && self.hook_log_state.is_none() {
-            // Hook finished after user dismissed — refresh list to reflect changes
-            self.hook_rx = None;
-            self.refresh_list();
+        if let Some(success) = completed {
+            if !success {
+                self.pending_hook_success_status = None;
+            }
+        }
+        if let Some(success) = completed {
+            if self.hook_log_state.is_none() {
+                // Hook finished after user dismissed — refresh list to reflect changes
+                self.hook_rx = None;
+                self.refresh_list();
+                if success {
+                    self.list_state.status_message = self.pending_hook_success_status.take();
+                }
+            }
         }
     }
 
@@ -593,9 +602,29 @@ impl App {
     /// intermediate source dialog state (Create/Sync/Delete) so the
     /// underlying operation cannot be re-triggered.
     fn dismiss_hook_log(&mut self) {
+        let should_apply_success_status = self
+            .hook_log_state
+            .as_ref()
+            .is_some_and(|s| !s.replay && s.completed && s.success);
+        let should_clear_pending_status = self
+            .hook_log_state
+            .as_ref()
+            .is_some_and(|s| !s.replay && s.completed && !s.success);
+        let status = if should_apply_success_status {
+            self.pending_hook_success_status.take()
+        } else {
+            None
+        };
+        if should_clear_pending_status {
+            self.pending_hook_success_status = None;
+        }
+        let hook_completed = self.hook_log_state.as_ref().is_some_and(|s| s.completed);
         self.hook_log_state = None;
-        // Keep hook_rx alive — process_hook_messages will drain it and
-        // call refresh_list when HookCompleted arrives after dismiss.
+        if hook_completed {
+            self.hook_rx = None;
+        }
+        // Keep hook_rx alive for in-flight hooks so process_hook_messages can
+        // apply final refresh + status after dismiss.
         self.create_state = None;
         self.sync_picker_state = None;
         self.delete_confirm_state = None;
@@ -604,6 +633,9 @@ impl App {
             self.nav_stack.push(Screen::List);
         }
         self.refresh_list();
+        if let Some(status) = status {
+            self.list_state.status_message = Some(status);
+        }
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
@@ -661,7 +693,7 @@ impl App {
 
         if in_result_mode {
             match key.code {
-                KeyCode::Enter | KeyCode::Char(' ') => {
+                KeyCode::Enter => {
                     self.delete_confirm_state = None;
                     self.pop_to_list(true);
                 }
@@ -671,11 +703,7 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Enter | KeyCode::Char('y') => self.execute_delete(),
-            KeyCode::Char('n') => {
-                self.delete_confirm_state = None;
-                self.pop_screen();
-            }
+            KeyCode::Enter => self.execute_delete(),
             _ => {}
         }
     }
@@ -734,6 +762,10 @@ impl App {
 
             let (tx, rx) = std::sync::mpsc::channel();
             let hooks = hooks_config.unwrap();
+            self.pending_hook_success_status = Some(screens::list::StatusMessage {
+                text: format!("Removed '{worktree_name}'"),
+                success: true,
+            });
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
                     Ok(rt) => rt,
@@ -771,13 +803,12 @@ impl App {
         } else {
             match crate::cli::commands::remove::execute(&worktree_name, &cwd, &db, false) {
                 Ok(result) => {
-                    let msg = format!("Removed '{}'", result.name);
-                    if let Some(ref mut c) = self.delete_confirm_state {
-                        c.result = Some(screens::delete_confirm::DeleteResultMessage {
-                            success: true,
-                            message: msg,
-                        });
-                    }
+                    self.delete_confirm_state = None;
+                    self.pop_to_list(true);
+                    self.list_state.status_message = Some(screens::list::StatusMessage {
+                        text: format!("Removed '{}'", result.name),
+                        success: true,
+                    });
                 }
                 Err(e) => {
                     if let Some(ref mut c) = self.delete_confirm_state {
@@ -2749,7 +2780,7 @@ mod tests {
     }
 
     #[test]
-    fn y_on_delete_confirm_triggers_delete_and_sets_result() {
+    fn y_on_delete_confirm_does_not_trigger_delete() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
             "feat-auth",
@@ -2762,11 +2793,11 @@ mod tests {
 
         assert_eq!(app.active_screen(), Screen::DeleteConfirm);
         let state = app.delete_confirm_state.as_ref().unwrap();
-        assert!(state.is_result_mode(), "y should also trigger delete");
+        assert!(!state.is_result_mode(), "y should not trigger delete");
     }
 
     #[test]
-    fn n_on_delete_confirm_cancels_dialog() {
+    fn n_on_delete_confirm_does_not_cancel_dialog() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
             "feat-auth",
@@ -2777,14 +2808,13 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
 
-        assert_eq!(
-            app.active_screen(),
-            Screen::List,
-            "n should pop back to list"
+        assert!(
+            app.active_screen() == Screen::DeleteConfirm,
+            "n should not dismiss the delete dialog"
         );
         assert!(
-            app.delete_confirm_state.is_none(),
-            "state should be cleared on cancel"
+            app.delete_confirm_state.is_some(),
+            "state should remain after pressing n"
         );
     }
 
@@ -2816,7 +2846,7 @@ mod tests {
     }
 
     #[test]
-    fn space_in_delete_result_mode_pops_to_list() {
+    fn space_in_delete_result_mode_does_nothing() {
         let mut app = App::new();
         let mut state = screens::delete_confirm::DeleteConfirmState::new(
             "feat-auth",
@@ -2824,19 +2854,15 @@ mod tests {
             "feature/auth",
         );
         state.result = Some(screens::delete_confirm::DeleteResultMessage {
-            success: true,
+            success: false,
             message: "Done".into(),
         });
         app.delete_confirm_state = Some(state);
         app.push_screen(Screen::DeleteConfirm);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        assert_eq!(
-            app.active_screen(),
-            Screen::List,
-            "Space in result mode should pop to list"
-        );
-        assert!(app.delete_confirm_state.is_none());
+        assert_eq!(app.active_screen(), Screen::DeleteConfirm);
+        assert!(app.delete_confirm_state.is_some());
     }
 
     #[test]
@@ -3145,6 +3171,66 @@ mod tests {
             app.hook_rx.is_none(),
             "hook_rx should be cleaned up after HookCompleted"
         );
+    }
+
+    #[test]
+    fn dismiss_hook_log_completed_success_applies_pending_status() {
+        let mut app = App::new();
+        let mut state = screens::hook_log::HookLogState::new("remove hooks");
+        state.completed = true;
+        state.success = true;
+        app.hook_log_state = Some(state);
+        app.pending_hook_success_status = Some(screens::list::StatusMessage {
+            text: "Removed 'feat-auth'".into(),
+            success: true,
+        });
+        app.push_screen(Screen::HookLog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.active_screen(), Screen::List);
+        let status = app
+            .list_state
+            .status_message
+            .as_ref()
+            .expect("success status should be shown after dismiss");
+        assert_eq!(status.text, "Removed 'feat-auth'");
+        assert!(status.success);
+        assert!(app.pending_hook_success_status.is_none());
+    }
+
+    #[test]
+    fn process_hook_messages_after_dismiss_applies_pending_status() {
+        use screens::hook_log::HookOutputMessage;
+
+        let mut app = App::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("remove hooks", rx);
+        app.pending_hook_success_status = Some(screens::list::StatusMessage {
+            text: "Removed 'feat-auth'".into(),
+            success: true,
+        });
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.active_screen(), Screen::List);
+
+        tx.send(HookOutputMessage::HookCompleted {
+            success: true,
+            duration: std::time::Duration::from_secs(1),
+            error: None,
+        })
+        .unwrap();
+
+        app.process_hook_messages();
+
+        let status = app
+            .list_state
+            .status_message
+            .as_ref()
+            .expect("success status should be shown after completion");
+        assert_eq!(status.text, "Removed 'feat-auth'");
+        assert!(status.success);
+        assert!(app.pending_hook_success_status.is_none());
     }
 
     #[test]
