@@ -365,8 +365,14 @@ pub enum GitError {
     #[error("worktree not found: {name}")]
     WorktreeNotFound { name: String },
 
-    #[error("remote branch '{branch}' not found on {remote}")]
-    RemoteBranchNotFound { branch: String, remote: String },
+    #[error("local branch not found: {branch}")]
+    LocalBranchNotFound { branch: String },
+
+    #[error("branch '{branch}' is not fully merged")]
+    BranchNotFullyMerged { branch: String },
+
+    #[error("branch '{branch}' could not be deleted: {message}")]
+    BranchDeleteBlocked { branch: String, message: String },
 
     #[error("merge conflict while syncing '{branch}': resolve conflicts manually")]
     MergeConflict { branch: String },
@@ -547,6 +553,70 @@ pub fn create_worktree(
         }
         return Err(GitError::Git(e));
     }
+
+    Ok(())
+}
+
+/// Delete a local branch.
+///
+/// Safe deletion refuses to remove branches that are not fully merged.
+/// Force deletion removes the ref directly.
+pub fn delete_local_branch(repo_path: &Path, branch: &str, force: bool) -> Result<(), GitError> {
+    let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
+    let local = repo
+        .find_branch(branch, git2::BranchType::Local)
+        .map_err(|_| GitError::LocalBranchNotFound {
+            branch: branch.to_string(),
+        })?;
+
+    let branch_oid = local
+        .get()
+        .target()
+        .ok_or_else(|| GitError::BranchDeleteBlocked {
+            branch: branch.to_string(),
+            message: "branch has no target".to_string(),
+        })?;
+
+    if force {
+        let mut reference = local.into_reference();
+        reference.delete()?;
+        return Ok(());
+    }
+
+    let mut local = local;
+    if let Ok(head) = repo.head() {
+        if let Some(head_oid) = head.target() {
+            let merged = head_oid == branch_oid
+                || repo
+                    .graph_descendant_of(head_oid, branch_oid)
+                    .map_err(GitError::Git)?;
+            if !merged {
+                return Err(GitError::BranchNotFullyMerged {
+                    branch: branch.to_string(),
+                });
+            }
+        }
+    }
+
+    local.delete().map_err(|e| {
+        let message = e.message().to_string();
+        if e.code() == git2::ErrorCode::NotFound {
+            GitError::LocalBranchNotFound {
+                branch: branch.to_string(),
+            }
+        } else if e.code() == git2::ErrorCode::NotFastForward
+            || message.contains("not fully merged")
+        {
+            GitError::BranchNotFullyMerged {
+                branch: branch.to_string(),
+            }
+        } else {
+            GitError::BranchDeleteBlocked {
+                branch: branch.to_string(),
+                message,
+            }
+        }
+    })?;
 
     Ok(())
 }
@@ -750,55 +820,6 @@ pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(), Git
             }
         }
     }
-
-    Ok(())
-}
-
-/// Delete a branch on a remote by pushing a delete refspec.
-///
-/// Connects to the remote to verify the branch exists, then pushes
-/// `:refs/heads/<branch>` to delete it.
-/// Returns `RemoteBranchNotFound` if the branch does not exist on the remote.
-pub fn delete_remote_branch(
-    repo_path: &Path,
-    remote_name: &str,
-    branch: &str,
-) -> Result<(), GitError> {
-    let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
-
-    let mut remote = repo.find_remote(remote_name)?;
-
-    // Query the actual remote for branch existence (not local tracking refs,
-    // which can be stale or missing after push-without-fetch).
-    let target_ref = format!("refs/heads/{branch}");
-    let exists = {
-        let connection = remote.connect_auth(git2::Direction::Push, None, None)?;
-        connection
-            .list()?
-            .iter()
-            .any(|head| head.name() == target_ref)
-    }; // connection dropped here → auto-disconnect
-
-    if !exists {
-        return Err(GitError::RemoteBranchNotFound {
-            branch: branch.to_string(),
-            remote: remote_name.to_string(),
-        });
-    }
-
-    let refspec = format!(":refs/heads/{branch}");
-    remote.push(&[&refspec], None).map_err(|e| {
-        // Fallback: if the branch was deleted between our existence check
-        // and the push, map the "not found" error accordingly.
-        if e.class() == git2::ErrorClass::Reference && e.code() == git2::ErrorCode::NotFound {
-            GitError::RemoteBranchNotFound {
-                branch: branch.to_string(),
-                remote: remote_name.to_string(),
-            }
-        } else {
-            e.into()
-        }
-    })?;
 
     Ok(())
 }
@@ -1563,84 +1584,78 @@ mod tests {
         );
     }
 
-    /// Helper: create a bare remote repo, clone it, return (clone_repo, clone_dir, remote_dir).
-    fn setup_clone_with_remote() -> (git2::Repository, tempfile::TempDir, tempfile::TempDir) {
-        let remote_dir = tempfile::tempdir().unwrap();
-        let remote_repo = git2::Repository::init_bare(remote_dir.path()).unwrap();
-        {
-            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-            let empty_tree = remote_repo.treebuilder(None).unwrap().write().unwrap();
-            let tree = remote_repo.find_tree(empty_tree).unwrap();
-            remote_repo
-                .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
-                .unwrap();
-        }
-        let clone_dir = tempfile::tempdir().unwrap();
-        let clone = git2::build::RepoBuilder::new()
-            .clone(remote_dir.path().to_str().unwrap(), clone_dir.path())
+    fn commit_file(repo: &git2::Repository, filename: &str, content: &str, message: &str) {
+        let workdir = repo.workdir().unwrap();
+        std::fs::write(workdir.join(filename), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(filename)).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
             .unwrap();
-        (clone, clone_dir, remote_dir)
     }
 
     #[test]
-    fn delete_remote_branch_deletes_branch_on_remote() {
-        let (clone, clone_dir, remote_dir) = setup_clone_with_remote();
+    fn delete_local_branch_deletes_merged_branch() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("merged-feature", &head_commit, false).unwrap();
 
-        // Create a branch and push it to the remote
-        let head_commit = clone.head().unwrap().peel_to_commit().unwrap();
-        clone
-            .branch("feature-to-delete", &head_commit, false)
-            .unwrap();
-        {
-            let mut origin = clone.find_remote("origin").unwrap();
-            origin
-                .push(
-                    &["refs/heads/feature-to-delete:refs/heads/feature-to-delete"],
-                    None,
-                )
-                .unwrap();
-        }
+        delete_local_branch(repo_dir.path(), "merged-feature", false)
+            .expect("merged branch should be deleted");
 
-        // Fetch to update remote tracking refs
-        {
-            let mut origin = clone.find_remote("origin").unwrap();
-            origin.fetch(&[] as &[&str], None, None).unwrap();
-        }
-
-        // Verify the remote tracking ref exists
         assert!(
-            clone
-                .find_branch("origin/feature-to-delete", git2::BranchType::Remote)
-                .is_ok(),
-            "remote tracking ref should exist before deletion"
-        );
-
-        // Delete the remote branch
-        delete_remote_branch(clone_dir.path(), "origin", "feature-to-delete")
-            .expect("should delete remote branch");
-
-        // Verify the branch is gone on the bare remote
-        let remote_repo = git2::Repository::open_bare(remote_dir.path()).unwrap();
-        assert!(
-            remote_repo
-                .find_branch("feature-to-delete", git2::BranchType::Local)
+            repo.find_branch("merged-feature", git2::BranchType::Local)
                 .is_err(),
-            "branch should be deleted on remote"
+            "branch should be removed after deletion"
         );
     }
 
     #[test]
-    fn delete_remote_branch_returns_not_found_when_branch_missing() {
-        let (_clone, clone_dir, _remote_dir) = setup_clone_with_remote();
+    fn delete_local_branch_returns_unmerged_for_safe_delete() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = head_branch(&repo);
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("feature-unmerged");
 
-        let result = delete_remote_branch(clone_dir.path(), "origin", "nonexistent-branch");
+        create_worktree(repo_dir.path(), "feature-unmerged", &base, &target)
+            .expect("should create worktree");
+        let wt_repo = git2::Repository::open(&target).unwrap();
+        commit_file(&wt_repo, "feature.txt", "unmerged change", "feature commit");
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = delete_local_branch(repo_dir.path(), "feature-unmerged", false)
+            .expect_err("safe delete should reject unmerged branch");
         assert!(
-            matches!(err, GitError::RemoteBranchNotFound { ref branch, ref remote }
-                if branch == "nonexistent-branch" && remote == "origin"),
-            "expected RemoteBranchNotFound, got: {err:?}"
+            matches!(err, GitError::BranchNotFullyMerged { ref branch } if branch == "feature-unmerged"),
+            "expected BranchNotFullyMerged, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn delete_local_branch_force_deletes_unmerged_branch() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(repo_dir.path());
+        let base = head_branch(&repo);
+        let wt_dir = tempfile::tempdir().unwrap();
+        let target = wt_dir.path().join("feature-force");
+
+        create_worktree(repo_dir.path(), "feature-force", &base, &target)
+            .expect("should create worktree");
+        let wt_repo = git2::Repository::open(&target).unwrap();
+        commit_file(&wt_repo, "force.txt", "force", "force commit");
+
+        delete_local_branch(repo_dir.path(), "feature-force", true)
+            .expect("force delete should remove unmerged branch");
+
+        assert!(
+            repo.find_branch("feature-force", git2::BranchType::Local)
+                .is_err(),
+            "branch should be removed after force delete"
         );
     }
 

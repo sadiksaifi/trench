@@ -17,7 +17,8 @@ pub enum RemoveError {
 }
 
 /// Hook execution status for the remove operation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RemoveHooksStatus {
     /// No hooks were configured.
     None,
@@ -43,9 +44,44 @@ pub struct RemoveWithHooksResult {
 pub struct RemoveResult {
     /// The name of the removed worktree.
     pub name: String,
-    /// Whether the remote branch was pruned (only `true` if `--prune` was
-    /// requested and the remote branch existed).
-    pub pruned_remote: bool,
+    /// The raw branch name associated with the removed worktree, when known.
+    pub branch: Option<String>,
+    /// Whether local branch deletion was requested.
+    pub delete_branch_requested: bool,
+    /// Whether the local branch was deleted.
+    pub branch_deleted: bool,
+    /// Whether branch deletion used force mode.
+    pub branch_delete_forced: bool,
+    /// Error from local branch deletion, if requested but not completed.
+    pub branch_delete_error: Option<String>,
+}
+
+/// JSON-serializable output for `trench remove --json`.
+#[derive(Debug, serde::Serialize)]
+pub struct RemoveJsonOutput {
+    pub worktree: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub hooks: RemoveHooksStatus,
+    pub delete_branch_requested: bool,
+    pub branch_deleted: bool,
+    pub branch_delete_forced: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_delete_error: Option<String>,
+}
+
+impl RemoveResult {
+    pub fn to_json_output(self, hooks: RemoveHooksStatus) -> RemoveJsonOutput {
+        RemoveJsonOutput {
+            worktree: self.name,
+            branch: self.branch,
+            hooks,
+            delete_branch_requested: self.delete_branch_requested,
+            branch_deleted: self.branch_deleted,
+            branch_delete_forced: self.branch_delete_forced,
+            branch_delete_error: self.branch_delete_error,
+        }
+    }
 }
 
 /// Plan produced by `--dry-run` showing what `trench remove` would do.
@@ -56,7 +92,8 @@ pub struct RemoveDryRunPlan {
     pub name: String,
     pub branch: String,
     pub path: String,
-    pub prune: bool,
+    pub delete_branch_requested: bool,
+    pub force: bool,
     pub hooks: Option<RemoveDryRunHooks>,
 }
 
@@ -66,7 +103,16 @@ impl fmt::Display for RemoveDryRunPlan {
         writeln!(f, "  Worktree:  {}", self.name)?;
         writeln!(f, "  Branch:    {}", self.branch)?;
         writeln!(f, "  Path:      {}", self.path)?;
-        writeln!(f, "  Prune:     {}", if self.prune { "yes" } else { "no" })?;
+        writeln!(
+            f,
+            "  Delete branch: {}",
+            if self.delete_branch_requested {
+                "yes"
+            } else {
+                "no"
+            }
+        )?;
+        writeln!(f, "  Force:     {}", if self.force { "yes" } else { "no" })?;
 
         match &self.hooks {
             Some(hooks) if hooks.pre_remove.is_some() || hooks.post_remove.is_some() => {
@@ -126,7 +172,8 @@ pub fn execute_dry_run(
     identifier: &str,
     cwd: &Path,
     db: Option<&Database>,
-    prune: bool,
+    delete_branch_requested: bool,
+    force: bool,
     hooks_config: Option<&HooksConfig>,
     no_hooks: bool,
 ) -> Result<RemoveDryRunPlan> {
@@ -159,7 +206,8 @@ pub fn execute_dry_run(
         name: live.entry.name.clone(),
         branch,
         path: live.entry.path.to_string_lossy().to_string(),
-        prune,
+        delete_branch_requested,
+        force,
         hooks,
     })
 }
@@ -168,10 +216,15 @@ pub fn execute_dry_run(
 ///
 /// Resolves the worktree from live git state, removes it from disk, and
 /// purges trench metadata for the path when present.
-pub fn execute(identifier: &str, cwd: &Path, db: &Database, prune: bool) -> Result<RemoveResult> {
+pub fn execute(
+    identifier: &str,
+    cwd: &Path,
+    db: &Database,
+    delete_branch: bool,
+) -> Result<RemoveResult> {
     let repo_info = git::discover_repo(cwd)?;
     let live = crate::live_worktree::resolve(identifier, &repo_info, db)?;
-    execute_live_resolved(&live, &repo_info, db, prune)
+    execute_live_resolved(&live, &repo_info, db, delete_branch, false)
 }
 
 /// Execute removal with pre-resolved worktree data.
@@ -182,7 +235,8 @@ pub fn execute_live_resolved(
     live: &LiveWorktree,
     repo_info: &RepoInfo,
     db: &Database,
-    prune: bool,
+    delete_branch: bool,
+    force_delete_branch: bool,
 ) -> Result<RemoveResult> {
     let worktree_path = live.entry.path.as_path();
 
@@ -204,26 +258,26 @@ pub fn execute_live_resolved(
             .context("failed to insert removed event")?;
     }
 
-    // Optionally delete the remote branch
-    let mut pruned_remote = false;
-    if prune {
-        let branch = live
-            .entry
-            .branch
-            .as_deref()
-            .unwrap_or(live.entry.name.as_str());
-        match git::delete_remote_branch(&repo_info.path, "origin", branch) {
-            Ok(()) => pruned_remote = true,
-            Err(git::GitError::RemoteBranchNotFound { branch, remote }) => {
-                eprintln!("warning: remote branch '{branch}' not found on {remote}");
+    let branch = live.entry.branch.clone();
+    let mut branch_deleted = false;
+    let mut branch_delete_error = None;
+    if delete_branch {
+        if let Some(branch_name) = branch.as_deref() {
+            match git::delete_local_branch(&repo_info.path, branch_name, force_delete_branch) {
+                Ok(()) => branch_deleted = true,
+                Err(git::GitError::LocalBranchNotFound { .. }) => {}
+                Err(e) => branch_delete_error = Some(e.to_string()),
             }
-            Err(e) => return Err(e.into()),
         }
     }
 
     Ok(RemoveResult {
         name: live.entry.name.clone(),
-        pruned_remote,
+        branch,
+        delete_branch_requested: delete_branch,
+        branch_deleted,
+        branch_delete_forced: delete_branch && force_delete_branch,
+        branch_delete_error,
     })
 }
 
@@ -232,7 +286,8 @@ pub fn execute_resolved(
     wt: &Worktree,
     repo_info: &RepoInfo,
     db: &Database,
-    prune: bool,
+    delete_branch: bool,
+    force_delete_branch: bool,
 ) -> Result<RemoveResult> {
     let live = LiveWorktree {
         entry: GitWorktreeEntry {
@@ -243,7 +298,7 @@ pub fn execute_resolved(
         },
         metadata: Some(wt.clone()),
     };
-    execute_live_resolved(&live, repo_info, db, prune)
+    execute_live_resolved(&live, repo_info, db, delete_branch, force_delete_branch)
 }
 
 /// Execute `trench remove` with lifecycle hooks.
@@ -256,7 +311,8 @@ pub async fn execute_live_resolved_with_hooks(
     live: &LiveWorktree,
     repo_info: &RepoInfo,
     db: &Database,
-    prune: bool,
+    delete_branch: bool,
+    force_delete_branch: bool,
     hooks_config: Option<&HooksConfig>,
     no_hooks: bool,
     hook_tx: Option<&std::sync::mpsc::Sender<crate::tui::screens::hook_log::HookOutputMessage>>,
@@ -272,7 +328,8 @@ pub async fn execute_live_resolved_with_hooks(
         } else {
             RemoveHooksStatus::None
         };
-        let result = execute_live_resolved(live, repo_info, db, prune)?;
+        let result =
+            execute_live_resolved(live, repo_info, db, delete_branch, force_delete_branch)?;
         return Ok(RemoveWithHooksResult {
             result,
             hooks_status,
@@ -356,22 +413,26 @@ pub async fn execute_live_resolved_with_hooks(
     db.insert_event(repo.id, Some(wt.id), "removed", None)
         .context("failed to insert removed event")?;
 
-    // Optionally delete the remote branch
-    let mut pruned_remote = false;
-    if prune {
-        match git::delete_remote_branch(&repo_info.path, "origin", &wt.branch) {
-            Ok(()) => pruned_remote = true,
-            Err(git::GitError::RemoteBranchNotFound { branch, remote }) => {
-                eprintln!("warning: remote branch '{branch}' not found on {remote}");
+    let mut branch_deleted = false;
+    let mut branch_delete_error = None;
+    if delete_branch {
+        match git::delete_local_branch(&repo_info.path, &wt.branch, force_delete_branch) {
+            Ok(()) => branch_deleted = true,
+            Err(git::GitError::LocalBranchNotFound { .. }) => {}
+            Err(e) => {
+                branch_delete_error = Some(e.to_string());
             }
-            Err(e) => return Err(e.into()),
         }
     }
 
     Ok(RemoveWithHooksResult {
         result: RemoveResult {
             name: wt.name.clone(),
-            pruned_remote,
+            branch: Some(wt.branch.clone()),
+            delete_branch_requested: delete_branch,
+            branch_deleted,
+            branch_delete_forced: delete_branch && force_delete_branch,
+            branch_delete_error,
         },
         hooks_status: RemoveHooksStatus::Ran,
         post_remove_warning,
@@ -383,7 +444,8 @@ pub async fn execute_resolved_with_hooks(
     wt: &Worktree,
     repo_info: &RepoInfo,
     db: &Database,
-    prune: bool,
+    delete_branch: bool,
+    force_delete_branch: bool,
     hooks_config: Option<&HooksConfig>,
     no_hooks: bool,
     hook_tx: Option<&std::sync::mpsc::Sender<crate::tui::screens::hook_log::HookOutputMessage>>,
@@ -398,8 +460,17 @@ pub async fn execute_resolved_with_hooks(
         metadata: Some(wt.clone()),
     };
     let _ = repo;
-    execute_live_resolved_with_hooks(&live, repo_info, db, prune, hooks_config, no_hooks, hook_tx)
-        .await
+    execute_live_resolved_with_hooks(
+        &live,
+        repo_info,
+        db,
+        delete_branch,
+        force_delete_branch,
+        hooks_config,
+        no_hooks,
+        hook_tx,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -581,16 +652,30 @@ mod tests {
         (clone_dir, remote_dir)
     }
 
+    fn commit_file(repo: &git2::Repository, filename: &str, content: &str, message: &str) {
+        let workdir = repo.workdir().unwrap();
+        std::fs::write(workdir.join(filename), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(filename)).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+            .unwrap();
+    }
+
     #[test]
-    fn remove_with_prune_deletes_remote_branch() {
-        let (clone_dir, remote_dir) = setup_repo_with_remote();
+    fn remove_with_delete_branch_deletes_local_branch() {
+        let (clone_dir, _remote_dir) = setup_repo_with_remote();
         let wt_root = tempfile::tempdir().unwrap();
         let db_dir = tempfile::tempdir().unwrap();
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
 
         // Create a worktree
         let create_result = crate::cli::commands::create::execute(
-            "prune-me",
+            "delete-me",
             None,
             clone_dir.path(),
             wt_root.path(),
@@ -600,34 +685,22 @@ mod tests {
         .expect("create should succeed");
         assert!(create_result.path.exists());
 
-        // Push the branch to the remote
         let clone = git2::Repository::open(clone_dir.path()).unwrap();
-        {
-            let mut origin = clone.find_remote("origin").unwrap();
-            origin
-                .push(&["refs/heads/prune-me:refs/heads/prune-me"], None)
-                .unwrap();
-        }
-        // Fetch to update remote-tracking refs
-        {
-            let mut origin = clone.find_remote("origin").unwrap();
-            origin.fetch(&[] as &[&str], None, None).unwrap();
-        }
-
-        // Verify the remote branch exists on the bare remote
-        let remote_repo = git2::Repository::open_bare(remote_dir.path()).unwrap();
         assert!(
-            remote_repo
-                .find_branch("prune-me", git2::BranchType::Local)
+            clone
+                .find_branch("delete-me", git2::BranchType::Local)
                 .is_ok(),
-            "branch should exist on remote before prune"
+            "local branch should exist before deletion"
         );
 
-        // Remove with prune
-        let result = execute("prune-me", clone_dir.path(), &db, true)
-            .expect("remove with prune should succeed");
-        assert_eq!(result.name, "prune-me");
-        assert!(result.pruned_remote, "should have pruned remote branch");
+        let result = execute("delete-me", clone_dir.path(), &db, true)
+            .expect("remove with local branch deletion should succeed");
+        assert_eq!(result.name, "delete-me");
+        assert_eq!(result.branch.as_deref(), Some("delete-me"));
+        assert!(result.delete_branch_requested);
+        assert!(result.branch_deleted, "branch should be deleted");
+        assert!(!result.branch_delete_forced);
+        assert!(result.branch_delete_error.is_none());
 
         // Verify: worktree directory is gone
         assert!(
@@ -635,27 +708,23 @@ mod tests {
             "worktree directory should be deleted"
         );
 
-        // Verify: remote branch is gone
-        // Reopen the bare remote to get fresh state
-        let remote_repo = git2::Repository::open_bare(remote_dir.path()).unwrap();
         assert!(
-            remote_repo
-                .find_branch("prune-me", git2::BranchType::Local)
+            clone
+                .find_branch("delete-me", git2::BranchType::Local)
                 .is_err(),
-            "branch should be deleted on remote after prune"
+            "local branch should be deleted after remove"
         );
     }
 
     #[test]
-    fn remove_with_prune_warns_when_remote_branch_missing() {
+    fn remove_with_delete_branch_reports_unmerged_failure() {
         let (clone_dir, _remote_dir) = setup_repo_with_remote();
         let wt_root = tempfile::tempdir().unwrap();
         let db_dir = tempfile::tempdir().unwrap();
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
 
-        // Create a worktree (but DON'T push the branch to remote)
         let create_result = crate::cli::commands::create::execute(
-            "no-remote",
+            "feature-unmerged",
             None,
             clone_dir.path(),
             wt_root.path(),
@@ -664,20 +733,74 @@ mod tests {
         )
         .expect("create should succeed");
         assert!(create_result.path.exists());
+        let wt_repo = git2::Repository::open(&create_result.path).unwrap();
+        commit_file(&wt_repo, "feature.txt", "feature work", "feature commit");
 
-        // Remove with prune — remote branch doesn't exist, should warn but succeed
-        let result = execute("no-remote", clone_dir.path(), &db, true)
-            .expect("remove with prune should succeed even without remote branch");
-        assert_eq!(result.name, "no-remote");
+        let result = execute("feature-unmerged", clone_dir.path(), &db, true)
+            .expect("remove should still succeed when branch delete fails");
+        assert_eq!(result.name, "feature-unmerged");
+        assert_eq!(result.branch.as_deref(), Some("feature-unmerged"));
+        assert!(result.delete_branch_requested);
         assert!(
-            !result.pruned_remote,
-            "should NOT have pruned remote branch"
+            !result.branch_deleted,
+            "branch should remain when safe delete rejects it"
+        );
+        assert_eq!(result.branch_delete_forced, false);
+        assert!(
+            result
+                .branch_delete_error
+                .as_deref()
+                .is_some_and(|error| error.contains("not fully merged")),
+            "unmerged delete should report a merge-safety error"
         );
 
-        // Verify: worktree directory is gone
         assert!(
             !create_result.path.exists(),
             "worktree directory should be deleted"
+        );
+        let clone = git2::Repository::open(clone_dir.path()).unwrap();
+        assert!(
+            clone
+                .find_branch("feature-unmerged", git2::BranchType::Local)
+                .is_ok(),
+            "branch should be preserved after safe-delete failure"
+        );
+    }
+
+    #[test]
+    fn remove_with_force_delete_branch_removes_unmerged_branch() {
+        let (clone_dir, _remote_dir) = setup_repo_with_remote();
+        let wt_root = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let create_result = crate::cli::commands::create::execute(
+            "feature-force",
+            None,
+            clone_dir.path(),
+            wt_root.path(),
+            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
+            &db,
+        )
+        .expect("create should succeed");
+        let wt_repo = git2::Repository::open(&create_result.path).unwrap();
+        commit_file(&wt_repo, "force.txt", "force work", "force commit");
+
+        let repo_info = git::discover_repo(clone_dir.path()).unwrap();
+        let live = crate::live_worktree::resolve("feature-force", &repo_info, &db).unwrap();
+        let result = execute_live_resolved(&live, &repo_info, &db, true, true)
+            .expect("force delete should succeed");
+
+        assert!(result.branch_deleted);
+        assert!(result.branch_delete_forced);
+        assert!(result.branch_delete_error.is_none());
+
+        let clone = git2::Repository::open(clone_dir.path()).unwrap();
+        assert!(
+            clone
+                .find_branch("feature-force", git2::BranchType::Local)
+                .is_err(),
+            "branch should be removed after force delete"
         );
     }
 
@@ -757,7 +880,8 @@ mod tests {
         let (repo, wt) = crate::adopt::resolve_or_adopt("pre-resolved", &repo_info, &db).unwrap();
 
         // Call execute_resolved with the pre-resolved data
-        let result = execute_resolved(&repo, &wt, &repo_info, &db, false).expect("should succeed");
+        let result =
+            execute_resolved(&repo, &wt, &repo_info, &db, false, false).expect("should succeed");
         assert_eq!(result.name, "pre-resolved");
         assert!(!create_result.path.exists(), "worktree dir should be gone");
     }
@@ -870,7 +994,7 @@ mod tests {
 
         // Remove with no hooks configured
         let outcome = execute_resolved_with_hooks(
-            &repo, &wt, &repo_info, &db, false, None,  // no hooks
+            &repo, &wt, &repo_info, &db, false, false, None,  // no hooks
             false, // no_hooks flag irrelevant
             None,
         )
@@ -915,6 +1039,7 @@ mod tests {
             &wt,
             &repo_info,
             &db,
+            false,
             false,
             Some(&hooks),
             true, // no_hooks = true
@@ -979,6 +1104,7 @@ mod tests {
             &wt,
             &repo_info,
             &db,
+            false,
             false,
             Some(&hooks),
             false,
@@ -1053,6 +1179,7 @@ mod tests {
             &repo_info,
             &db,
             false,
+            false,
             Some(&hooks),
             false,
             None,
@@ -1118,6 +1245,7 @@ mod tests {
             &wt,
             &repo_info,
             &db,
+            false,
             false,
             Some(&hooks),
             false,
@@ -1186,6 +1314,7 @@ mod tests {
             &repo_info,
             &db,
             false,
+            false,
             Some(&hooks),
             false,
             None,
@@ -1243,6 +1372,7 @@ mod tests {
             &wt,
             &repo_info,
             &db,
+            false,
             false,
             Some(&hooks),
             false,
@@ -1305,7 +1435,8 @@ mod tests {
             "dry-run-test",
             repo_dir.path(),
             Some(&db),
-            false, // prune
+            false, // delete_branch_requested
+            false, // force
             Some(&hooks),
             false, // no_hooks
         )
@@ -1314,7 +1445,8 @@ mod tests {
         assert!(plan.dry_run);
         assert_eq!(plan.name, "dry-run-test");
         assert_eq!(plan.branch, "dry-run-test");
-        assert!(!plan.prune);
+        assert!(!plan.delete_branch_requested);
+        assert!(!plan.force);
         assert!(plan.hooks.is_some());
 
         let plan_hooks = plan.hooks.unwrap();
@@ -1332,6 +1464,7 @@ mod tests {
             "no-hooks-dry",
             repo_dir.path(),
             Some(&db),
+            false,
             false,
             Some(&hooks),
             true, // no_hooks = true
@@ -1354,6 +1487,7 @@ mod tests {
             repo_dir.path(),
             Some(&db),
             true,
+            true,
             Some(&hooks),
             false,
         )
@@ -1373,7 +1507,11 @@ mod tests {
             output.contains("post_remove"),
             "should show post_remove hook"
         );
-        assert!(output.contains("Prune:"), "should mention prune status");
+        assert!(
+            output.contains("Delete branch:"),
+            "should mention branch delete status"
+        );
+        assert!(output.contains("Force:"), "should mention force status");
     }
 
     #[test]
@@ -1387,6 +1525,7 @@ mod tests {
             repo_dir.path(),
             Some(&db),
             false,
+            false,
             Some(&hooks),
             false,
         )
@@ -1398,27 +1537,33 @@ mod tests {
         assert_eq!(parsed["dry_run"], true);
         assert_eq!(parsed["name"], "json-test");
         assert_eq!(parsed["branch"], "json-test");
-        assert_eq!(parsed["prune"], false);
+        assert_eq!(parsed["delete_branch_requested"], false);
+        assert_eq!(parsed["force"], false);
         assert!(parsed["hooks"].is_object(), "hooks should be an object");
         assert!(parsed["hooks"]["pre_remove"].is_object());
         assert!(parsed["hooks"]["post_remove"].is_object());
     }
 
     #[test]
-    fn dry_run_with_prune_shows_prune_status() {
-        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("prune-dry");
+    fn dry_run_with_delete_branch_and_force_shows_requested_status() {
+        let (repo_dir, _wt_root, _db_dir, db) = create_worktree_for_dry_run("delete-branch-dry");
 
         let plan = execute_dry_run(
-            "prune-dry",
+            "delete-branch-dry",
             repo_dir.path(),
             Some(&db),
-            true, // prune
+            true, // delete_branch_requested
+            true, // force
             None,
             false,
         )
         .expect("dry-run should succeed");
 
-        assert!(plan.prune, "prune should be true");
+        assert!(
+            plan.delete_branch_requested,
+            "delete_branch_requested should be true"
+        );
+        assert!(plan.force, "force should be true");
         assert!(plan.hooks.is_none(), "no hooks configured");
     }
 
@@ -1440,6 +1585,7 @@ mod tests {
             "empty-hooks",
             repo_dir.path(),
             Some(&db),
+            false,
             false,
             Some(&empty_hooks),
             false,
@@ -1465,6 +1611,7 @@ mod tests {
             "stale-dry-run",
             repo_dir.path(),
             Some(&db),
+            false,
             false,
             None,
             false,

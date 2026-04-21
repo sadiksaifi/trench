@@ -49,6 +49,20 @@ fn init_git_repo(dir: &std::path::Path) {
         .expect("git commit failed");
 }
 
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git command failed");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // ── Exit code 8: Missing required flag ─────────────────────────────────
 
 #[test]
@@ -66,6 +80,26 @@ fn exit_code_8_sync_all_without_strategy() {
         output.status.code(),
         Some(8),
         "sync --all without --strategy should exit 8, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn exit_code_8_remove_json_without_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "json-needs-force");
+
+    let output = Command::new(trench_bin())
+        .args(["remove", "json-needs-force", "--json"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench remove --json");
+
+    assert_eq!(
+        output.status.code(),
+        Some(8),
+        "remove --json without --force should exit 8, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -352,7 +386,8 @@ fn dry_run_remove_with_json_outputs_valid_json() {
     assert_eq!(json["dry_run"], true);
     assert_eq!(json["name"], "json-dry-integ");
     assert_eq!(json["branch"], "json-dry-integ");
-    assert_eq!(json["prune"], false);
+    assert_eq!(json["delete_branch_requested"], false);
+    assert_eq!(json["force"], true);
     assert!(json["path"].is_string(), "path should be a string");
 
     // Verify worktree still exists
@@ -364,28 +399,28 @@ fn dry_run_remove_with_json_outputs_valid_json() {
 }
 
 #[test]
-fn dry_run_remove_with_prune_shows_prune_true() {
+fn dry_run_remove_with_delete_branch_shows_requested_true() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
-    create_worktree(tmp.path(), "prune-dry-integ");
+    create_worktree(tmp.path(), "delete-branch-dry-integ");
 
     let output = Command::new(trench_bin())
         .args([
             "remove",
-            "prune-dry-integ",
+            "delete-branch-dry-integ",
             "--force",
-            "--prune",
+            "--delete-branch",
             "--dry-run",
             "--json",
         ])
         .current_dir(tmp.path())
         .output()
-        .expect("failed to run trench remove --dry-run --prune --json");
+        .expect("failed to run trench remove --dry-run --delete-branch --json");
 
     assert!(
         output.status.success(),
-        "dry-run --prune --json should exit 0, stderr: {}",
+        "dry-run --delete-branch --json should exit 0, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -393,7 +428,65 @@ fn dry_run_remove_with_prune_shows_prune_true() {
         serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
 
     assert_eq!(json["dry_run"], true);
-    assert_eq!(json["prune"], true, "prune should be true in JSON output");
+    assert_eq!(
+        json["delete_branch_requested"], true,
+        "delete_branch_requested should be true in JSON output"
+    );
+}
+
+#[test]
+fn remove_live_json_with_delete_branch_outputs_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "json-delete-branch");
+
+    let output = Command::new(trench_bin())
+        .args([
+            "--json",
+            "remove",
+            "json-delete-branch",
+            "--force",
+            "--delete-branch",
+            "--no-hooks",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench remove --json --delete-branch");
+
+    assert!(
+        output.status.success(),
+        "live remove --json should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["worktree"], "json-delete-branch");
+    assert_eq!(json["branch"], "json-delete-branch");
+    assert_eq!(json["delete_branch_requested"], true);
+    assert_eq!(json["branch_deleted"], true);
+    assert_eq!(json["branch_delete_forced"], true);
+    assert!(json["branch_delete_error"].is_null());
+}
+
+#[test]
+fn exit_code_8_remove_without_force_outside_interactive_terminal() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "needs-force");
+
+    let output = Command::new(trench_bin())
+        .args(["remove", "needs-force"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run trench remove without force");
+
+    assert_eq!(
+        output.status.code(),
+        Some(8),
+        "remove without --force outside interactive terminal should exit 8, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

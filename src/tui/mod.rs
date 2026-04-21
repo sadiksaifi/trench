@@ -245,12 +245,16 @@ impl App {
         self.create_state = None;
         self.sync_picker_state = None;
         self.sync_return_screen = None;
-        self.delete_confirm_state = None;
+        if target != Screen::DeleteConfirm {
+            self.delete_confirm_state = None;
+        }
         self.hook_log_state = None;
         self.nav_stack.clear();
         self.nav_stack.push(Screen::List);
         if target == Screen::Detail {
             self.nav_stack.push(Screen::Detail);
+        } else if target == Screen::DeleteConfirm {
+            self.nav_stack.push(Screen::DeleteConfirm);
         }
         if refresh {
             self.refresh_target_screen(target);
@@ -590,8 +594,9 @@ impl App {
         let mut received = false;
         let mut completed = None;
         while let Ok(msg) = rx.try_recv() {
-            if let screens::hook_log::HookOutputMessage::HookCompleted { success, .. } = &msg {
-                completed = Some(*success);
+            if let screens::hook_log::HookOutputMessage::HookCompleted { success, error, .. } = &msg
+            {
+                completed = Some((*success, error.clone()));
             }
             if let Some(ref mut state) = self.hook_log_state {
                 state.process_message(msg);
@@ -603,7 +608,29 @@ impl App {
                 state.auto_scroll(state.last_body_height.get());
             }
         }
-        if let Some(success) = completed {
+        if let Some((success, error)) = completed {
+            if self.hook_return_screen == Some(Screen::DeleteConfirm) {
+                if success {
+                    self.hook_log_state = None;
+                    self.hook_rx = None;
+                    self.hook_return_screen = None;
+                    self.pop_screen();
+                    self.after_delete_worktree_removed();
+                } else if self.hook_log_state.is_none() {
+                    if let Some(ref mut state) = self.delete_confirm_state {
+                        state.result = Some(screens::delete_confirm::DeleteResultMessage {
+                            success: false,
+                            message: error.unwrap_or_else(|| "Delete failed".into()),
+                        });
+                    }
+                    self.hook_rx = None;
+                    self.hook_return_screen = None;
+                    if self.active_screen() != Screen::DeleteConfirm {
+                        self.push_screen(Screen::DeleteConfirm);
+                    }
+                }
+                return;
+            }
             if !success {
                 self.pending_hook_success_status = None;
             }
@@ -710,7 +737,16 @@ impl App {
             }
             (KeyCode::Esc, _) => {
                 if self.active_screen() == Screen::HookLog {
+                    if self.hook_return_screen == Some(Screen::DeleteConfirm)
+                        && self.hook_log_state.as_ref().is_some_and(|s| !s.completed)
+                    {
+                        return;
+                    }
                     self.dismiss_or_pop_hook_log();
+                } else if self.active_screen() == Screen::DeleteConfirm
+                    && self.handle_delete_confirm_cancel()
+                {
+                    return;
                 } else {
                     self.clear_active_screen_state();
                     self.pop_screen();
@@ -718,7 +754,16 @@ impl App {
             }
             (KeyCode::Char('q'), _) if !self.is_create_branch_text_entry_active() => {
                 if self.active_screen() == Screen::HookLog {
+                    if self.hook_return_screen == Some(Screen::DeleteConfirm)
+                        && self.hook_log_state.as_ref().is_some_and(|s| !s.completed)
+                    {
+                        return;
+                    }
                     self.dismiss_or_pop_hook_log();
+                } else if self.active_screen() == Screen::DeleteConfirm
+                    && self.handle_delete_confirm_cancel()
+                {
+                    return;
                 } else {
                     self.clear_active_screen_state();
                     self.pop_screen();
@@ -741,6 +786,7 @@ impl App {
     }
 
     fn handle_delete_confirm_key(&mut self, key: KeyEvent) {
+        let step = self.delete_confirm_state.as_ref().map(|s| s.step);
         let in_result_mode = self
             .delete_confirm_state
             .as_ref()
@@ -757,9 +803,17 @@ impl App {
             return;
         }
 
-        match key.code {
-            KeyCode::Enter => self.execute_delete(),
-            _ => {}
+        if key.code != KeyCode::Enter {
+            return;
+        }
+
+        match step {
+            Some(screens::delete_confirm::DeleteStep::Worktree) => self.execute_delete(),
+            Some(screens::delete_confirm::DeleteStep::Branch) => self.execute_delete_branch(false),
+            Some(screens::delete_confirm::DeleteStep::ForceBranch) => {
+                self.execute_delete_branch(true)
+            }
+            None => {}
         }
     }
 
@@ -817,13 +871,6 @@ impl App {
 
             let (tx, rx) = std::sync::mpsc::channel();
             let hooks = hooks_config.unwrap();
-            self.pending_hook_success_status = Some(PendingStatusMessage {
-                screen: Screen::List,
-                status: screens::list::StatusMessage {
-                    text: format!("Removed '{worktree_name}'"),
-                    success: true,
-                },
-            });
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
                     Ok(rt) => rt,
@@ -842,6 +889,7 @@ impl App {
                         &repo_info,
                         &db,
                         false,
+                        false,
                         Some(&hooks),
                         false,
                         Some(&tx),
@@ -857,20 +905,10 @@ impl App {
                     error,
                 });
             });
-            self.start_hook_log("remove hooks", rx, Screen::List);
+            self.start_hook_log("remove hooks", rx, Screen::DeleteConfirm);
         } else {
             match crate::cli::commands::remove::execute(&worktree_name, &cwd, &db, false) {
-                Ok(result) => {
-                    self.delete_confirm_state = None;
-                    self.pop_to_list(true);
-                    self.set_status_message(
-                        Screen::List,
-                        screens::list::StatusMessage {
-                            text: format!("Removed '{}'", result.name),
-                            success: true,
-                        },
-                    );
-                }
+                Ok(_result) => self.after_delete_worktree_removed(),
                 Err(e) => {
                     if let Some(ref mut c) = self.delete_confirm_state {
                         c.result = Some(screens::delete_confirm::DeleteResultMessage {
@@ -881,6 +919,91 @@ impl App {
                 }
             }
         }
+    }
+
+    fn handle_delete_confirm_cancel(&mut self) -> bool {
+        let Some(state) = self.delete_confirm_state.as_ref() else {
+            return false;
+        };
+        if state.is_result_mode() {
+            return false;
+        }
+
+        match state.step {
+            screens::delete_confirm::DeleteStep::Branch
+            | screens::delete_confirm::DeleteStep::ForceBranch => {
+                let branch = state.branch.clone();
+                self.finish_delete_flow(
+                    format!(
+                        "Removed worktree '{}'. Kept branch '{}'.",
+                        state.worktree_name, branch
+                    ),
+                    true,
+                );
+                true
+            }
+            screens::delete_confirm::DeleteStep::Worktree => false,
+        }
+    }
+
+    fn after_delete_worktree_removed(&mut self) {
+        let Some(state) = self.delete_confirm_state.as_mut() else {
+            return;
+        };
+        if state.branch.trim().is_empty() {
+            let worktree_name = state.worktree_name.clone();
+            self.finish_delete_flow(format!("Removed worktree '{}'.", worktree_name), true);
+        } else {
+            state.show_branch_confirm();
+        }
+    }
+
+    fn execute_delete_branch(&mut self, force: bool) {
+        let (branch, worktree_name) = match self.delete_confirm_state.as_ref() {
+            Some(state) => (state.branch.clone(), state.worktree_name.clone()),
+            None => return,
+        };
+        let repo_path = match std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::git::discover_repo(&cwd).ok().map(|r| r.path))
+        {
+            Some(path) => path,
+            None => {
+                if let Some(ref mut state) = self.delete_confirm_state {
+                    state.result = Some(screens::delete_confirm::DeleteResultMessage {
+                        success: false,
+                        message: "Delete failed: unable to resolve repository".into(),
+                    });
+                }
+                return;
+            }
+        };
+
+        match crate::git::delete_local_branch(&repo_path, &branch, force) {
+            Ok(()) => self.finish_delete_flow(
+                format!("Removed worktree '{worktree_name}' and branch '{branch}'."),
+                true,
+            ),
+            Err(crate::git::GitError::LocalBranchNotFound { .. }) => self.finish_delete_flow(
+                format!("Removed worktree '{worktree_name}'. Branch '{branch}' already absent."),
+                true,
+            ),
+            Err(crate::git::GitError::BranchNotFullyMerged { .. }) if !force => {
+                if let Some(ref mut state) = self.delete_confirm_state {
+                    state.show_force_branch_confirm();
+                }
+            }
+            Err(e) => self.finish_delete_flow(
+                format!("Removed worktree '{worktree_name}'. Branch '{branch}' not deleted: {e}"),
+                false,
+            ),
+        }
+    }
+
+    fn finish_delete_flow(&mut self, text: String, success: bool) {
+        self.delete_confirm_state = None;
+        self.pop_to_list(true);
+        self.set_status_message(Screen::List, screens::list::StatusMessage { text, success });
     }
 
     fn load_detail(&mut self, name: &str) -> bool {
@@ -3007,6 +3130,62 @@ mod tests {
     }
 
     #[test]
+    fn esc_on_delete_branch_prompt_keeps_branch_and_sets_status() {
+        let mut app = App::new();
+        let mut state = screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
+        );
+        state.show_branch_confirm();
+        app.delete_confirm_state = Some(state);
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.delete_confirm_state.is_none());
+        let status = app
+            .list_state
+            .status_message
+            .as_ref()
+            .expect("keep-branch status should be shown");
+        assert_eq!(
+            status.text,
+            "Removed worktree 'feat-auth'. Kept branch 'feature/auth'."
+        );
+        assert!(status.success);
+    }
+
+    #[test]
+    fn esc_on_delete_force_branch_prompt_keeps_branch_and_sets_status() {
+        let mut app = App::new();
+        let mut state = screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
+        );
+        state.show_force_branch_confirm();
+        app.delete_confirm_state = Some(state);
+        app.push_screen(Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.active_screen(), Screen::List);
+        assert!(app.delete_confirm_state.is_none());
+        let status = app
+            .list_state
+            .status_message
+            .as_ref()
+            .expect("keep-branch status should be shown");
+        assert_eq!(
+            status.text,
+            "Removed worktree 'feat-auth'. Kept branch 'feature/auth'."
+        );
+        assert!(status.success);
+    }
+
+    #[test]
     fn q_on_delete_confirm_clears_state() {
         let mut app = App::new();
         app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
@@ -3334,6 +3513,58 @@ mod tests {
         assert_eq!(status.text, "Removed 'feat-auth'");
         assert!(status.success);
         assert!(app.pending_hook_success_status.is_none());
+    }
+
+    #[test]
+    fn delete_hook_success_returns_to_branch_prompt() {
+        use screens::hook_log::HookOutputMessage;
+
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("remove hooks", rx, Screen::DeleteConfirm);
+
+        tx.send(HookOutputMessage::HookCompleted {
+            success: true,
+            duration: std::time::Duration::from_secs(1),
+            error: None,
+        })
+        .unwrap();
+
+        app.process_hook_messages();
+
+        assert_eq!(app.active_screen(), Screen::DeleteConfirm);
+        assert!(app.hook_log_state.is_none());
+        let state = app
+            .delete_confirm_state
+            .as_ref()
+            .expect("delete state should remain active");
+        assert_eq!(state.step, screens::delete_confirm::DeleteStep::Branch);
+        assert!(state.result.is_none());
+    }
+
+    #[test]
+    fn esc_on_running_delete_hook_log_is_ignored() {
+        let mut app = App::new();
+        app.delete_confirm_state = Some(screens::delete_confirm::DeleteConfirmState::new(
+            "feat-auth",
+            "/tmp/wt/feat-auth",
+            "feature/auth",
+        ));
+        app.push_screen(Screen::DeleteConfirm);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.start_hook_log("remove hooks", rx, Screen::DeleteConfirm);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.active_screen(), Screen::HookLog);
+        assert!(app.hook_log_state.is_some());
+        assert_eq!(app.hook_return_screen, Some(Screen::DeleteConfirm));
     }
 
     #[test]

@@ -18,10 +18,14 @@ pub fn render(
             return;
         }
     }
-    render_confirm(state, frame, area, theme);
+    match state.step {
+        DeleteStep::Worktree => render_worktree_confirm(state, frame, area, theme),
+        DeleteStep::Branch => render_branch_confirm(state, frame, area, theme),
+        DeleteStep::ForceBranch => render_force_branch_confirm(state, frame, area, theme),
+    }
 }
 
-fn render_confirm(
+fn render_worktree_confirm(
     state: &DeleteConfirmState,
     frame: &mut Frame,
     area: Rect,
@@ -115,6 +119,83 @@ fn render_confirm(
     );
 }
 
+fn render_branch_confirm(
+    state: &DeleteConfirmState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
+    let inner = crate::tui::chrome::render_modal(frame, area, theme, 60, 8, " Delete Branch ");
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(format!(
+            "Delete local branch '{}' too?",
+            state.branch
+        )))
+        .alignment(Alignment::Center),
+        chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(format!(
+            "Worktree '{}' already removed",
+            state.worktree_name
+        )))
+        .alignment(Alignment::Center),
+        chunks[2],
+    );
+    crate::tui::chrome::render_keybar(
+        frame,
+        chunks[4],
+        theme,
+        &[("Enter", "confirm"), ("Esc", "keep")],
+    );
+}
+
+fn render_force_branch_confirm(
+    state: &DeleteConfirmState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &crate::tui::theme::Theme,
+) {
+    let inner =
+        crate::tui::chrome::render_modal(frame, area, theme, 60, 9, " Force Delete Branch ");
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(format!(
+            "Branch '{}' is not fully merged.",
+            state.branch
+        )))
+        .alignment(Alignment::Center),
+        chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from("Force delete it?")).alignment(Alignment::Center),
+        chunks[2],
+    );
+    crate::tui::chrome::render_keybar(
+        frame,
+        chunks[4],
+        theme,
+        &[("Enter", "confirm"), ("Esc", "keep")],
+    );
+}
+
 fn render_result(
     state: &DeleteConfirmState,
     result: &DeleteResultMessage,
@@ -184,10 +265,19 @@ pub struct DeleteConfirmState {
     pub worktree_path: String,
     /// Branch checked out in the worktree.
     pub branch: String,
+    /// Current prompt step.
+    pub step: DeleteStep,
     /// Result message after deletion. None = confirm mode, Some = result mode.
     pub result: Option<DeleteResultMessage>,
     /// Warning about running processes (if any detected).
     pub process_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteStep {
+    Worktree,
+    Branch,
+    ForceBranch,
 }
 
 /// Outcome displayed after a delete operation completes.
@@ -204,9 +294,20 @@ impl DeleteConfirmState {
             worktree_name: worktree_name.to_string(),
             worktree_path: worktree_path.to_string(),
             branch: branch.to_string(),
+            step: DeleteStep::Worktree,
             result: None,
             process_warning,
         }
+    }
+
+    pub fn show_branch_confirm(&mut self) {
+        self.step = DeleteStep::Branch;
+        self.result = None;
+    }
+
+    pub fn show_force_branch_confirm(&mut self) {
+        self.step = DeleteStep::ForceBranch;
+        self.result = None;
     }
 
     /// Whether the dialog is showing a result (post-delete).
@@ -327,6 +428,56 @@ mod tests {
         let buf = render_to_buffer(&state, 80, 20);
         let text = buffer_text(&buf);
         assert!(text.contains("Delete Worktree"), "should show dialog title");
+    }
+
+    #[test]
+    fn branch_confirm_renders_branch_followup() {
+        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        state.show_branch_confirm();
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Delete Branch"),
+            "should show branch dialog title"
+        );
+        assert!(
+            text.contains("Delete local branch 'feature/auth' too?"),
+            "should ask about deleting the local branch"
+        );
+        assert!(
+            text.contains("Worktree 'feat-auth' already removed"),
+            "should explain worktree removal already succeeded"
+        );
+        assert!(
+            text.contains("Enter confirm"),
+            "footer should show Enter confirm"
+        );
+        assert!(text.contains("Esc keep"), "footer should show Esc keep");
+    }
+
+    #[test]
+    fn force_branch_confirm_renders_force_followup() {
+        let mut state = DeleteConfirmState::new("feat-auth", "/tmp/wt/feat-auth", "feature/auth");
+        state.show_force_branch_confirm();
+        let buf = render_to_buffer(&state, 80, 20);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Force Delete Branch"),
+            "should show force-delete dialog title"
+        );
+        assert!(
+            text.contains("Branch 'feature/auth' is not fully merged."),
+            "should explain why safe delete failed"
+        );
+        assert!(
+            text.contains("Force delete it?"),
+            "should ask for force delete"
+        );
+        assert!(
+            text.contains("Enter confirm"),
+            "footer should show Enter confirm"
+        );
+        assert!(text.contains("Esc keep"), "footer should show Esc keep");
     }
 
     #[test]
