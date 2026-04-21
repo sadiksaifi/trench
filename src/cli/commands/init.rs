@@ -18,7 +18,7 @@ const SCAFFOLD: &str = r#"# trench — project configuration
 # This file is intended to be committed to version control.
 #
 # Configuration precedence:
-#   CLI flags > .trench.toml > ~/.config/trench/config.toml > defaults
+#   CLI flags > .trench.toml > global trench config > defaults
 
 # ─── UI ──────────────────────────────────────────────────────────────
 

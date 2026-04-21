@@ -7,7 +7,6 @@ use tracing_subscriber::EnvFilter;
 
 use crate::paths;
 
-const LOG_FILENAME: &str = "trench.log";
 const DEFAULT_FILTER: &str = "warn";
 
 const ENV_FILTER_VAR: &str = "TRENCH_LOG";
@@ -37,10 +36,14 @@ fn build_subscriber<W: Write + Send + 'static>(
 
 /// Initialize the tracing subscriber with file-based logging.
 ///
-/// Writes logs to `$XDG_STATE_HOME/trench/trench.log`. Defaults to `warn`
-/// level; override with the `TRENCH_LOG` environment variable.
+/// Writes logs to trench's state directory as resolved by [`crate::paths`].
+/// Linux and macOS default to XDG-style state paths; Windows defaults to the
+/// native state directory unless `XDG_STATE_HOME` is set.
 pub fn init() -> Result<()> {
-    match paths::state_dir().and_then(|dir| init_with_log_dir(&dir)) {
+    match paths::state_dir()
+        .and_then(|_| paths::log_file_path())
+        .and_then(|path| init_with_log_path(&path))
+    {
         Ok(()) => Ok(()),
         Err(_) => {
             let subscriber = build_subscriber(std::io::sink());
@@ -50,12 +53,11 @@ pub fn init() -> Result<()> {
     }
 }
 
-fn init_with_log_dir(log_dir: &std::path::Path) -> Result<()> {
-    let log_path = log_dir.join(LOG_FILENAME);
+fn init_with_log_path(log_path: &std::path::Path) -> Result<()> {
     let file = File::options()
         .create(true)
         .append(true)
-        .open(&log_path)
+        .open(log_path)
         .with_context(|| format!("failed to open log file: {}", log_path.display()))?;
 
     let subscriber = build_subscriber(file);
@@ -78,9 +80,9 @@ mod tests {
 
         assert!(!log_path.exists(), "log file should not exist before init");
 
-        // init_with_log_dir may fail to set the global subscriber (parallel tests),
+        // init_with_log_path may fail to set the global subscriber (parallel tests),
         // but the log file should still be created.
-        let _ = init_with_log_dir(dir.path());
+        let _ = init_with_log_path(&log_path);
 
         assert!(log_path.exists(), "log file should exist after init");
     }

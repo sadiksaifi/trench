@@ -7,6 +7,17 @@ fn trench_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_trench"))
 }
 
+fn trench_cmd(dir: &std::path::Path) -> Command {
+    let xdg_root = dir.join(".test-xdg");
+    let mut cmd = Command::new(trench_bin());
+    cmd.current_dir(dir)
+        .env("XDG_CONFIG_HOME", xdg_root.join("config"))
+        .env("XDG_DATA_HOME", xdg_root.join("data"))
+        .env("XDG_STATE_HOME", xdg_root.join("state"))
+        .env("XDG_CACHE_HOME", xdg_root.join("cache"));
+    cmd
+}
+
 /// Helper to get the exit code from a status.
 fn exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(-1)
@@ -42,9 +53,8 @@ fn log_empty_state_shows_no_events() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench log");
 
@@ -66,9 +76,8 @@ fn log_json_empty_state_shows_empty_array() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench log --json");
 
@@ -88,9 +97,8 @@ fn log_shows_events_after_create_and_remove() {
     init_git_repo(tmp.path());
 
     // Create a worktree
-    let create_output = Command::new(trench_bin())
+    let create_output = trench_cmd(tmp.path())
         .args(["create", "log-test-feature", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench create");
     assert!(
@@ -100,9 +108,8 @@ fn log_shows_events_after_create_and_remove() {
     );
 
     // Remove the worktree
-    let remove_output = Command::new(trench_bin())
+    let remove_output = trench_cmd(tmp.path())
         .args(["remove", "log-test-feature", "--force", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench remove");
     assert!(
@@ -112,9 +119,8 @@ fn log_shows_events_after_create_and_remove() {
     );
 
     // Run trench log --json to get structured output
-    let log_output = Command::new(trench_bin())
+    let log_output = trench_cmd(tmp.path())
         .args(["log", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench log --json");
     assert!(
@@ -182,9 +188,8 @@ fn log_table_output_after_create() {
     init_git_repo(tmp.path());
 
     // Create a worktree
-    let create_output = Command::new(trench_bin())
+    let create_output = trench_cmd(tmp.path())
         .args(["create", "log-table-test", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench create");
     assert!(
@@ -194,9 +199,8 @@ fn log_table_output_after_create() {
     );
 
     // Run trench log (table output, with --no-color to avoid ANSI)
-    let log_output = Command::new(trench_bin())
+    let log_output = trench_cmd(tmp.path())
         .args(["log", "--no-color"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench log");
     assert!(
@@ -229,16 +233,14 @@ fn log_nonexistent_worktree_exits_2() {
     init_git_repo(tmp.path());
 
     // Create at least one worktree so the repo is tracked
-    let create = Command::new(trench_bin())
+    let create = trench_cmd(tmp.path())
         .args(["create", "real-branch", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench create");
     assert!(create.status.success());
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "nonexistent-branch"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench log");
 
@@ -256,9 +258,8 @@ fn log_scoped_to_worktree_filters_events() {
     init_git_repo(tmp.path());
 
     // Create two worktrees
-    let out = Command::new(trench_bin())
+    let out = trench_cmd(tmp.path())
         .args(["create", "alpha-branch", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("create alpha");
     assert!(
@@ -266,9 +267,8 @@ fn log_scoped_to_worktree_filters_events() {
         "trench create alpha failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let out = Command::new(trench_bin())
+    let out = trench_cmd(tmp.path())
         .args(["create", "beta-branch", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("create beta");
     assert!(
@@ -278,9 +278,8 @@ fn log_scoped_to_worktree_filters_events() {
     );
 
     // Log scoped to alpha — JSON output
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "alpha-branch", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench log alpha-branch --json");
 
@@ -310,9 +309,8 @@ fn log_tail_limits_output() {
     init_git_repo(tmp.path());
 
     // Create and remove to generate multiple events
-    let out = Command::new(trench_bin())
+    let out = trench_cmd(tmp.path())
         .args(["create", "tail-test", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("create");
     assert!(
@@ -320,9 +318,8 @@ fn log_tail_limits_output() {
         "trench create failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let out = Command::new(trench_bin())
+    let out = trench_cmd(tmp.path())
         .args(["remove", "tail-test", "--force", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("remove");
     assert!(
@@ -332,9 +329,8 @@ fn log_tail_limits_output() {
     );
 
     // tail 1 — JSON
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "--tail", "1", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("trench log --tail 1 --json");
 
@@ -351,9 +347,8 @@ fn log_scoped_and_tail_combined() {
     init_git_repo(tmp.path());
 
     // Create two worktrees
-    let out = Command::new(trench_bin())
+    let out = trench_cmd(tmp.path())
         .args(["create", "combo-a", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("create combo-a");
     assert!(
@@ -361,9 +356,8 @@ fn log_scoped_and_tail_combined() {
         "trench create combo-a failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let out = Command::new(trench_bin())
+    let out = trench_cmd(tmp.path())
         .args(["create", "combo-b", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("create combo-b");
     assert!(
@@ -373,9 +367,8 @@ fn log_scoped_and_tail_combined() {
     );
 
     // Remove combo-a to generate more events for it
-    let out = Command::new(trench_bin())
+    let out = trench_cmd(tmp.path())
         .args(["remove", "combo-a", "--force", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("remove combo-a");
     assert!(
@@ -385,9 +378,8 @@ fn log_scoped_and_tail_combined() {
     );
 
     // combo-a should have at least 2 events (created + removed), tail to 1
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "combo-a", "--tail", "1", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("trench log combo-a --tail 1 --json");
 
@@ -425,9 +417,8 @@ timeout_secs = 30
     .unwrap();
 
     // Create a worktree — triggers post_create hook
-    let create = Command::new(trench_bin())
+    let create = trench_cmd(tmp.path())
         .args(["create", "output-test"])
-        .current_dir(tmp.path())
         .output()
         .expect("create");
     assert!(
@@ -437,9 +428,8 @@ timeout_secs = 30
     );
 
     // Replay hook output via --output (table mode)
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "output-test", "--output", "--no-color"])
-        .current_dir(tmp.path())
         .output()
         .expect("trench log --output");
 
@@ -495,9 +485,8 @@ timeout_secs = 30
     .unwrap();
 
     // Create a worktree
-    let create = Command::new(trench_bin())
+    let create = trench_cmd(tmp.path())
         .args(["create", "json-output-test"])
-        .current_dir(tmp.path())
         .output()
         .expect("create");
     assert!(
@@ -507,9 +496,8 @@ timeout_secs = 30
     );
 
     // Replay hook output via --output --json
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "json-output-test", "--output", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("trench log --output --json");
 
@@ -550,9 +538,8 @@ fn log_output_without_branch_exits_8() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "--output"])
-        .current_dir(tmp.path())
         .output()
         .expect("trench log --output");
 
@@ -570,17 +557,15 @@ fn log_output_no_hooks_exits_2() {
     init_git_repo(tmp.path());
 
     // Create a worktree without hooks
-    let create = Command::new(trench_bin())
+    let create = trench_cmd(tmp.path())
         .args(["create", "no-hooks-test", "--no-hooks"])
-        .current_dir(tmp.path())
         .output()
         .expect("create");
     assert!(create.status.success());
 
     // Try to replay output — should fail since no hook events
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "no-hooks-test", "--output"])
-        .current_dir(tmp.path())
         .output()
         .expect("trench log --output");
 
@@ -597,9 +582,8 @@ fn log_summary_empty_state_shows_no_events() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "--summary"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench log --summary");
 
@@ -621,9 +605,8 @@ fn log_summary_json_empty_state_returns_zeroed_stats() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "--summary", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench log --summary --json");
 
@@ -662,9 +645,8 @@ run = ["echo hello"]
     git(tmp.path(), &["commit", "-m", "add trench config"]);
 
     // Create two worktrees (each generates "created" + "hook:post_create" events)
-    let create1 = Command::new(trench_bin())
+    let create1 = trench_cmd(tmp.path())
         .args(["create", "summary-feat-1"])
-        .current_dir(tmp.path())
         .output()
         .expect("create 1");
     assert!(
@@ -673,9 +655,8 @@ run = ["echo hello"]
         String::from_utf8_lossy(&create1.stderr)
     );
 
-    let create2 = Command::new(trench_bin())
+    let create2 = trench_cmd(tmp.path())
         .args(["create", "summary-feat-2"])
-        .current_dir(tmp.path())
         .output()
         .expect("create 2");
     assert!(
@@ -685,9 +666,8 @@ run = ["echo hello"]
     );
 
     // Get JSON summary
-    let summary_output = Command::new(trench_bin())
+    let summary_output = trench_cmd(tmp.path())
         .args(["log", "--summary", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("summary");
     assert!(
@@ -742,9 +722,8 @@ run = ["echo hello"]
     );
 
     // Also verify human-readable output has the expected labels
-    let human_output = Command::new(trench_bin())
+    let human_output = trench_cmd(tmp.path())
         .args(["log", "--summary"])
-        .current_dir(tmp.path())
         .output()
         .expect("human summary");
     assert!(human_output.status.success());
@@ -781,9 +760,8 @@ fn log_summary_and_output_conflict() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["log", "--summary", "--output"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run");
 

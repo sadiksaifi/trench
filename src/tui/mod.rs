@@ -432,7 +432,7 @@ impl App {
 
     fn open_db() -> Option<(std::path::PathBuf, Database)> {
         let cwd = std::env::current_dir().ok()?;
-        let db_path = paths::data_dir().ok()?.join("trench.db");
+        let db_path = paths::runtime_database_file_path().ok()?;
         let db = Database::open(&db_path).ok()?;
         Some((cwd, db))
     }

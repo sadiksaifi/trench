@@ -19,6 +19,17 @@ fn trench_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_trench"))
 }
 
+fn trench_cmd(dir: &Path) -> Command {
+    let xdg_root = dir.join(".test-xdg");
+    let mut cmd = Command::new(trench_bin());
+    cmd.current_dir(dir)
+        .env("XDG_CONFIG_HOME", xdg_root.join("config"))
+        .env("XDG_DATA_HOME", xdg_root.join("data"))
+        .env("XDG_STATE_HOME", xdg_root.join("state"))
+        .env("XDG_CACHE_HOME", xdg_root.join("cache"));
+    cmd
+}
+
 /// Initialize a temporary git repo with an initial commit.
 fn init_git_repo(dir: &std::path::Path) {
     Command::new("git")
@@ -70,9 +81,8 @@ fn exit_code_8_sync_all_without_strategy() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["sync", "--all"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench");
 
@@ -90,9 +100,8 @@ fn exit_code_8_remove_json_without_force() {
     init_git_repo(tmp.path());
     create_worktree(tmp.path(), "json-needs-force");
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["remove", "json-needs-force", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench remove --json");
 
@@ -114,9 +123,8 @@ fn exit_code_6_init_when_file_exists() {
     // Create .trench.toml first
     std::fs::write(tmp.path().join(".trench.toml"), "[hooks]\n").unwrap();
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["init"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench");
 
@@ -135,9 +143,8 @@ fn exit_code_2_switch_nonexistent() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["switch", "nonexistent-branch-xyz"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench");
 
@@ -163,9 +170,8 @@ fn exit_code_3_create_existing_branch() {
         .output()
         .expect("git branch failed");
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["create", "existing-feature"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench");
 
@@ -195,9 +201,8 @@ timeout_secs = 10
     )
     .unwrap();
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["create", "hook-fail-test"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench");
 
@@ -227,9 +232,8 @@ timeout_secs = 1
     )
     .unwrap();
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["create", "timeout-test"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench");
 
@@ -248,9 +252,8 @@ fn exit_code_5_git_error_not_a_repo() {
     let tmp = tempfile::tempdir().unwrap();
     // Do NOT init git — tmp is not a git repo
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["list"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench");
 
@@ -269,9 +272,8 @@ fn exit_code_1_sync_branch_with_all_flag() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["sync", "--all", "some-branch"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench");
 
@@ -287,9 +289,8 @@ fn exit_code_1_sync_branch_with_all_flag() {
 
 /// Helper: create a worktree via trench so we can test dry-run removal.
 fn create_worktree(repo_dir: &Path, branch: &str) {
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(repo_dir)
         .args(["create", branch])
-        .current_dir(repo_dir)
         .output()
         .expect("failed to run trench create");
     assert!(
@@ -308,9 +309,8 @@ fn dry_run_remove_does_not_delete_worktree() {
     create_worktree(tmp.path(), "dry-run-integ");
 
     // Get the worktree path from list
-    let list_output = Command::new(trench_bin())
+    let list_output = trench_cmd(tmp.path())
         .args(["list", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench list");
     assert!(
@@ -329,9 +329,8 @@ fn dry_run_remove_does_not_delete_worktree() {
     );
 
     // Run remove with --dry-run
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["remove", "dry-run-integ", "--force", "--dry-run"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench remove --dry-run");
 
@@ -367,9 +366,8 @@ fn dry_run_remove_with_json_outputs_valid_json() {
     create_worktree(tmp.path(), "json-dry-integ");
 
     // Run remove with --dry-run --json
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["remove", "json-dry-integ", "--force", "--dry-run", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench remove --dry-run --json");
 
@@ -405,7 +403,7 @@ fn dry_run_remove_with_delete_branch_shows_requested_true() {
 
     create_worktree(tmp.path(), "delete-branch-dry-integ");
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args([
             "remove",
             "delete-branch-dry-integ",
@@ -414,7 +412,6 @@ fn dry_run_remove_with_delete_branch_shows_requested_true() {
             "--dry-run",
             "--json",
         ])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench remove --dry-run --delete-branch --json");
 
@@ -440,7 +437,7 @@ fn remove_live_json_with_delete_branch_outputs_json() {
     init_git_repo(tmp.path());
     create_worktree(tmp.path(), "json-delete-branch");
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args([
             "--json",
             "remove",
@@ -449,7 +446,6 @@ fn remove_live_json_with_delete_branch_outputs_json() {
             "--delete-branch",
             "--no-hooks",
         ])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench remove --json --delete-branch");
 
@@ -475,9 +471,8 @@ fn exit_code_8_remove_without_force_outside_interactive_terminal() {
     init_git_repo(tmp.path());
     create_worktree(tmp.path(), "needs-force");
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["remove", "needs-force"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench remove without force");
 
@@ -496,9 +491,8 @@ fn switch_print_path_keeps_stdout_raw_and_reports_path_on_stderr() {
 
     create_worktree(tmp.path(), "switch-print-path");
 
-    let list_output = Command::new(trench_bin())
+    let list_output = trench_cmd(tmp.path())
         .args(["list", "--json"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench list");
     assert!(
@@ -517,9 +511,8 @@ fn switch_print_path_keeps_stdout_raw_and_reports_path_on_stderr() {
         .expect("should find worktree path")
         .to_string();
 
-    let output = Command::new(trench_bin())
+    let output = trench_cmd(tmp.path())
         .args(["switch", "switch-print-path", "--print-path"])
-        .current_dir(tmp.path())
         .output()
         .expect("failed to run trench switch --print-path");
 

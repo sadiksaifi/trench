@@ -325,17 +325,16 @@ pub fn load_global_config_from(path: &Path) -> Result<GlobalConfig> {
     load_optional_toml(path).map(|opt| opt.unwrap_or_default())
 }
 
-/// Return the path to the global config file (`~/.config/trench/config.toml`).
+/// Return the path to trench's global config file.
 ///
 /// Uses the non-mutating path accessor so config loading never creates
 /// directories as a side effect (important for `--dry-run`).
 pub fn global_config_path() -> Result<PathBuf> {
-    Ok(paths::config_dir_path()?.join("config.toml"))
+    paths::config_file_path()
 }
 
-/// Load global config from the XDG config directory.
+/// Load global config from trench's resolved config path.
 ///
-/// Reads `~/.config/trench/config.toml` (or platform equivalent).
 /// Returns defaults if the file does not exist.
 pub fn load_global_config() -> Result<GlobalConfig> {
     let path = global_config_path()?;
@@ -603,8 +602,7 @@ show_ahead_behind = "yes"
     #[test]
     fn global_config_path_points_to_xdg_config() {
         let path = global_config_path().unwrap();
-        assert!(path.ends_with("trench/config.toml"));
-        assert!(path.starts_with(dirs::config_dir().unwrap()));
+        assert_eq!(path, crate::paths::config_file_path().unwrap());
     }
 
     #[test]

@@ -360,33 +360,19 @@ fn format_switch_notice(path: &str) -> String {
 }
 
 fn existing_db_path() -> anyhow::Result<Option<std::path::PathBuf>> {
-    let preferred = paths::data_dir_path()?.join("trench.db");
-    if db_file_is_accessible(&preferred) {
-        return Ok(Some(preferred));
+    let path = paths::runtime_database_file_path()?;
+    if path.exists() {
+        Ok(Some(path))
+    } else {
+        Ok(None)
     }
-
-    let fallback = paths::data_dir_fallback_path().join("trench.db");
-    if db_file_is_accessible(&fallback) {
-        return Ok(Some(fallback));
-    }
-
-    Ok(None)
-}
-
-fn db_file_is_accessible(path: &std::path::Path) -> bool {
-    path.exists()
-        && std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .is_ok()
 }
 
 fn runtime_db_path() -> anyhow::Result<std::path::PathBuf> {
     if let Some(existing) = existing_db_path()? {
         Ok(existing)
     } else {
-        Ok(paths::data_dir()?.join("trench.db"))
+        paths::runtime_database_file_path()
     }
 }
 

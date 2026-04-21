@@ -21,8 +21,8 @@
 
 - `Shape:` single Rust binary; CLI first, TUI only when no subcommand and stdin/stdout are TTYs
 - `Runtime:` Rust 2021; `clap` CLI, `git2` git ops, `tokio` orchestration, `ratatui`/`crossterm` TUI, `tracing` file logging
-- `State:` SQLite via `rusqlite` + embedded migrations in `src/state/sql`; DB stored under XDG data dir as `trench.db`
-- `Config:` global `~/.config/trench/config.toml` plus project `.trench.toml`; resolver in `src/config/mod.rs`
+- `State:` SQLite via `rusqlite` + embedded migrations in `src/state/sql`; DB stored under trench's resolved app data dir as `trench.db`
+- `Config:` global trench config plus project `.trench.toml`; resolver in `src/config/mod.rs`
 - `Paths:` default worktree root `~/.worktrees`; default template `{{ repo }}/{{ branch | sanitize }}` in `src/paths.rs`
 - `Core flow:` `src/main.rs` parses flags, launches TUI or dispatches commands, maps typed failures to stable exit codes
 - `Layout:` `src/cli/commands/*` command handlers; `src/git/*` low-level git/worktree ops; `src/adopt.rs` DB-first lookup + unmanaged worktree adoption; `src/hooks/*` lifecycle hooks + streaming; `src/output/*` table/json/porcelain; `src/tui/*` screens/theme/watcher; `tests/` process-level integration tests
@@ -32,7 +32,7 @@
 - Headless-first. CLI output, exit codes, `--json`, `--porcelain`, `--dry-run` are product surface; TUI is secondary
 - TDD mandatory. New behavior starts red; keep unit tests near module, add `tests/` when behavior crosses process boundary
 - Keep `--dry-run` side-effect free. Use read-only path helpers and non-mutating resolution; no dir creation, DB writes, or git mutation
-- Preserve config contract. Precedence `CLI > .trench.toml > ~/.config/trench/config.toml > defaults`; non-hook fields merge per-field; project hooks replace global hooks entirely
+- Preserve config contract. Precedence `CLI > .trench.toml > global trench config > defaults`; non-hook fields merge per-field; project hooks replace global hooks entirely
 - Treat structured output as API. Changes to JSON, porcelain, exit codes, event ordering, or log payloads need tests
 - Centralize worktree resolution. Raw branch names and sanitized names must keep matching through `adopt`/`paths`, not ad hoc per command
 

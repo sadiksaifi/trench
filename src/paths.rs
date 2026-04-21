@@ -7,9 +7,22 @@ use anyhow::{Context, Result};
 const APP_NAME: &str = "trench";
 const DEFAULT_WORKTREE_DIR: &str = ".worktrees";
 const FALLBACK_WORKTREE_DIR: &str = "trench-worktrees";
-/// Fallback path segments for platforms where `dirs::state_dir()` returns `None` (macOS/Windows).
-const STATE_DIR_FALLBACK_SEGMENTS: &[&str] = &[".local", "state"];
-const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
+const CONFIG_FILENAME: &str = "config.toml";
+const DATABASE_FILENAME: &str = "trench.db";
+const LOG_FILENAME: &str = "trench.log";
+const CONFIG_BASE_SEGMENTS: &[&str] = &[".config"];
+const DATA_BASE_SEGMENTS: &[&str] = &[".local", "share"];
+const STATE_BASE_SEGMENTS: &[&str] = &[".local", "state"];
+const CACHE_BASE_SEGMENTS: &[&str] = &[".cache"];
+
+/// XDG environment variable honored for config files on every platform.
+pub const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
+/// XDG environment variable honored for persistent app data on every platform.
+pub const XDG_DATA_HOME_ENV: &str = "XDG_DATA_HOME";
+/// XDG environment variable honored for logs and state on every platform.
+pub const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
+/// XDG environment variable honored for cache files on every platform.
+pub const XDG_CACHE_HOME_ENV: &str = "XDG_CACHE_HOME";
 
 /// Ensure a directory exists, creating it (and parents) if needed.
 fn ensure_dir(path: &Path) -> Result<()> {
@@ -68,7 +81,88 @@ fn ensure_dir_with_fallback(path: &Path) -> Result<PathBuf> {
     Ok(fallback)
 }
 
-/// Return the trench config directory path (`~/.config/trench/`) without creating it.
+fn home_dir_path() -> Result<PathBuf> {
+    dirs::home_dir().context("could not determine home directory")
+}
+
+fn env_dir_path(env_var: &str) -> Option<PathBuf> {
+    std::env::var_os(env_var).and_then(|value| {
+        let path = PathBuf::from(value);
+        (!path.as_os_str().is_empty()).then_some(path)
+    })
+}
+
+fn home_dir_with_segments(segments: &[&str]) -> Result<PathBuf> {
+    Ok(segments
+        .iter()
+        .fold(home_dir_path()?, |path, segment| path.join(segment)))
+}
+
+#[cfg(target_os = "windows")]
+fn base_dir_path(
+    env_var: &str,
+    native: Option<PathBuf>,
+    unix_segments: &[&str],
+) -> Result<PathBuf> {
+    if let Some(path) = env_dir_path(env_var) {
+        return Ok(path);
+    }
+    native
+        .or_else(|| Some(home_dir_with_segments(unix_segments).ok()?))
+        .context(format!("could not determine base directory for {env_var}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn base_dir_path(
+    env_var: &str,
+    _native: Option<PathBuf>,
+    unix_segments: &[&str],
+) -> Result<PathBuf> {
+    if let Some(path) = env_dir_path(env_var) {
+        return Ok(path);
+    }
+    home_dir_with_segments(unix_segments)
+}
+
+fn config_base_dir_path() -> Result<PathBuf> {
+    base_dir_path(
+        XDG_CONFIG_HOME_ENV,
+        dirs::config_dir(),
+        CONFIG_BASE_SEGMENTS,
+    )
+}
+
+fn data_base_dir_path() -> Result<PathBuf> {
+    base_dir_path(XDG_DATA_HOME_ENV, dirs::data_dir(), DATA_BASE_SEGMENTS)
+}
+
+fn state_base_dir_path() -> Result<PathBuf> {
+    base_dir_path(XDG_STATE_HOME_ENV, dirs::state_dir(), STATE_BASE_SEGMENTS)
+}
+
+fn cache_base_dir_path() -> Result<PathBuf> {
+    base_dir_path(XDG_CACHE_HOME_ENV, dirs::cache_dir(), CACHE_BASE_SEGMENTS)
+}
+
+fn db_file_is_accessible(path: &Path) -> bool {
+    path.exists()
+        && std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .is_ok()
+}
+
+/// Central path policy for trench.
+///
+/// All runtime code should resolve config/data/state/cache files through this
+/// module instead of calling `dirs` directly or hand-joining filenames.
+///
+/// Defaults:
+/// - Linux/macOS: XDG-style home layout
+/// - Windows: native platform dirs, unless an explicit `XDG_*_HOME` override exists
+
+/// Return the trench config directory path without creating it.
 ///
 /// Use this in read-only contexts (e.g. config loading, `--dry-run`) where no
 /// side effects are allowed. For contexts that need the directory to exist,
@@ -78,57 +172,82 @@ pub fn config_dir_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-fn config_base_dir_path() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os(XDG_CONFIG_HOME_ENV) {
-        let path = PathBuf::from(path);
-        if !path.as_os_str().is_empty() {
-            return Ok(path);
-        }
-    }
-
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".config"))
-}
-
-/// Return the trench config directory (`~/.config/trench/`), creating it if needed.
+/// Return the trench config directory, creating it if needed.
 pub fn config_dir() -> Result<PathBuf> {
     let path = config_dir_path()?;
     ensure_dir(&path)?;
     Ok(path)
 }
 
-/// Return the trench data directory path (`~/.local/share/trench/`) without creating it.
+/// Return the global config file path without creating parent directories.
+pub fn config_file_path() -> Result<PathBuf> {
+    Ok(config_dir_path()?.join(CONFIG_FILENAME))
+}
+
+/// Return the trench data directory path without creating it.
 ///
 /// Use this in read-only contexts (e.g. `--dry-run`) where no side effects
 /// are allowed. For contexts that need the directory to exist, use [`data_dir`].
 pub fn data_dir_path() -> Result<PathBuf> {
-    Ok(dirs::data_dir()
-        .context("could not determine data directory")?
-        .join(APP_NAME))
+    Ok(data_base_dir_path()?.join(APP_NAME))
 }
 
-/// Return the trench data directory (`~/.local/share/trench/`), creating it if needed.
+/// Return the trench data directory, creating it if needed.
 pub fn data_dir() -> Result<PathBuf> {
     let path = data_dir_path()?;
     ensure_dir_with_fallback(&path)
 }
 
-/// Return the trench state directory (`~/.local/state/trench/`), creating it if needed.
+/// Return the database file path without creating parent directories.
+pub fn database_file_path() -> Result<PathBuf> {
+    Ok(data_dir_path()?.join(DATABASE_FILENAME))
+}
+
+/// Return the writable runtime database file path.
 ///
-/// Uses `dirs::state_dir()` when available (Linux), falls back to
-/// `~/.local/state` on platforms that return `None` (macOS/Windows).
+/// Prefers the canonical data directory, falls back to the temp-based runtime
+/// data directory when an existing writable DB is found there or the canonical
+/// directory cannot be created.
+pub fn runtime_database_file_path() -> Result<PathBuf> {
+    let preferred = database_file_path()?;
+    if db_file_is_accessible(&preferred) {
+        return Ok(preferred);
+    }
+
+    let fallback = data_dir_fallback_path().join(DATABASE_FILENAME);
+    if db_file_is_accessible(&fallback) {
+        return Ok(fallback);
+    }
+
+    Ok(data_dir()?.join(DATABASE_FILENAME))
+}
+
+/// Return the trench state directory path without creating it.
+pub fn state_dir_path() -> Result<PathBuf> {
+    Ok(state_base_dir_path()?.join(APP_NAME))
+}
+
+/// Return the trench state directory, creating it if needed.
+///
 pub fn state_dir() -> Result<PathBuf> {
-    let base = match dirs::state_dir() {
-        Some(path) => path,
-        None => {
-            let home = dirs::home_dir()
-                .context("could not determine home directory for state directory fallback")?;
-            STATE_DIR_FALLBACK_SEGMENTS
-                .iter()
-                .fold(home, |p, s| p.join(s))
-        }
-    };
-    let path = base.join(APP_NAME);
+    let path = state_dir_path()?;
+    ensure_dir(&path)?;
+    Ok(path)
+}
+
+/// Return the log file path without creating parent directories.
+pub fn log_file_path() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join(LOG_FILENAME))
+}
+
+/// Return the trench cache directory path without creating it.
+pub fn cache_dir_path() -> Result<PathBuf> {
+    Ok(cache_base_dir_path()?.join(APP_NAME))
+}
+
+/// Return the trench cache directory, creating it if needed.
+pub fn cache_dir() -> Result<PathBuf> {
+    let path = cache_dir_path()?;
     ensure_dir(&path)?;
     Ok(path)
 }
@@ -139,9 +258,7 @@ pub fn state_dir() -> Result<PathBuf> {
 /// are allowed. For real execution, use [`worktree_root`] which also creates
 /// the directory.
 pub fn worktree_root_path() -> Result<PathBuf> {
-    let path = dirs::home_dir()
-        .context("could not determine home directory")?
-        .join(DEFAULT_WORKTREE_DIR);
+    let path = home_dir_path()?.join(DEFAULT_WORKTREE_DIR);
     Ok(path)
 }
 
@@ -192,7 +309,7 @@ pub fn render_worktree_path(template: &str, repo: &str, branch: &str) -> Result<
 /// the home directory cannot be determined.
 pub fn expand_tilde(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Ok(home) = home_dir_path() {
             if path == "~" {
                 return home.to_string_lossy().into_owned();
             }
@@ -281,6 +398,13 @@ mod tests {
         path == runtime_worktree_root_fallback().as_path()
     }
 
+    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
     #[test]
     fn config_dir_ends_with_trench() {
         let path = config_dir().unwrap();
@@ -298,7 +422,7 @@ mod tests {
             path.display()
         );
         assert!(
-            path.starts_with(dirs::data_dir().unwrap()) || is_runtime_data_dir_path(&path),
+            path.starts_with(data_base_dir_path().unwrap()) || is_runtime_data_dir_path(&path),
             "unexpected data dir base: {}",
             path.display()
         );
@@ -309,8 +433,7 @@ mod tests {
     fn state_dir_ends_with_trench() {
         let path = state_dir().unwrap();
         assert!(path.ends_with("trench"));
-        let expected_base = dirs::state_dir()
-            .unwrap_or_else(|| dirs::home_dir().unwrap().join(".local").join("state"));
+        let expected_base = state_base_dir_path().unwrap();
         assert!(path.starts_with(expected_base));
         assert!(path.exists());
     }
@@ -357,10 +480,7 @@ mod tests {
 
         let path = config_dir_path().unwrap();
 
-        match original {
-            Some(value) => std::env::set_var(XDG_CONFIG_HOME_ENV, value),
-            None => std::env::remove_var(XDG_CONFIG_HOME_ENV),
-        }
+        restore_env(XDG_CONFIG_HOME_ENV, original);
 
         assert_eq!(path, tmp.path().join(APP_NAME));
     }
@@ -369,7 +489,102 @@ mod tests {
     fn data_dir_path_returns_path_without_creating_it() {
         let path = data_dir_path().unwrap();
         assert!(path.ends_with("trench"));
-        assert!(path.starts_with(dirs::data_dir().unwrap()));
+        assert!(path.starts_with(data_base_dir_path().unwrap()));
+    }
+
+    #[test]
+    fn data_dir_path_prefers_xdg_data_home() {
+        let original = std::env::var_os(XDG_DATA_HOME_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var(XDG_DATA_HOME_ENV, tmp.path());
+
+        let path = data_dir_path().unwrap();
+
+        restore_env(XDG_DATA_HOME_ENV, original);
+
+        assert_eq!(path, tmp.path().join(APP_NAME));
+    }
+
+    #[test]
+    fn state_dir_path_prefers_xdg_state_home() {
+        let original = std::env::var_os(XDG_STATE_HOME_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var(XDG_STATE_HOME_ENV, tmp.path());
+
+        let path = state_dir_path().unwrap();
+
+        restore_env(XDG_STATE_HOME_ENV, original);
+
+        assert_eq!(path, tmp.path().join(APP_NAME));
+    }
+
+    #[test]
+    fn cache_dir_path_prefers_xdg_cache_home() {
+        let original = std::env::var_os(XDG_CACHE_HOME_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var(XDG_CACHE_HOME_ENV, tmp.path());
+
+        let path = cache_dir_path().unwrap();
+
+        restore_env(XDG_CACHE_HOME_ENV, original);
+
+        assert_eq!(path, tmp.path().join(APP_NAME));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn data_dir_path_defaults_to_xdg_home_layout() {
+        let original = std::env::var_os(XDG_DATA_HOME_ENV);
+        std::env::remove_var(XDG_DATA_HOME_ENV);
+
+        let path = data_dir_path().unwrap();
+
+        restore_env(XDG_DATA_HOME_ENV, original);
+
+        assert_eq!(
+            path,
+            dirs::home_dir()
+                .unwrap()
+                .join(".local")
+                .join("share")
+                .join(APP_NAME)
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn state_dir_path_defaults_to_xdg_home_layout() {
+        let original = std::env::var_os(XDG_STATE_HOME_ENV);
+        std::env::remove_var(XDG_STATE_HOME_ENV);
+
+        let path = state_dir_path().unwrap();
+
+        restore_env(XDG_STATE_HOME_ENV, original);
+
+        assert_eq!(
+            path,
+            dirs::home_dir()
+                .unwrap()
+                .join(".local")
+                .join("state")
+                .join(APP_NAME)
+        );
+    }
+
+    #[test]
+    fn file_helpers_use_canonical_app_dirs() {
+        assert_eq!(
+            config_file_path().unwrap(),
+            config_dir_path().unwrap().join("config.toml")
+        );
+        assert_eq!(
+            database_file_path().unwrap(),
+            data_dir_path().unwrap().join("trench.db")
+        );
+        assert_eq!(
+            log_file_path().unwrap(),
+            state_dir_path().unwrap().join("trench.log")
+        );
     }
 
     #[test]
