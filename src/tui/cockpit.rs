@@ -465,7 +465,7 @@ mod tests {
     }
 
     fn render_buffer(state: &mut AppState, width: u16, height: u16, theme_name: &str) -> Buffer {
-        reduce(state, Event::ViewportChanged { width, height });
+        let _ = reduce(state, Event::ViewportChanged { width, height });
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = crate::tui::theme::from_name(theme_name);
@@ -550,7 +550,7 @@ mod tests {
         assert!(hidden.contains("Worktrees · 2"), "{hidden}");
         assert!(!hidden.contains("/worktrees/feature-auth"), "{hidden}");
 
-        reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('i')));
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('i')));
         let visible = text(&render_buffer(&mut state, 80, 20, "ops"));
         assert!(visible.contains("/worktrees/feature-auth"), "{visible}");
         assert!(!visible.contains("Worktrees · 2"), "{visible}");
@@ -559,7 +559,9 @@ mod tests {
     #[test]
     fn keybars_end_in_help_and_only_expose_eligible_row_actions() {
         let main = identity("/repos/trench", "trench", Some("main"), true, true);
+        let id = main.id.clone();
         let mut state = AppState::new(vec![main]);
+        state.statuses.insert(id, WorktreeStatus::default());
         let buffer = render_buffer(&mut state, 120, 20, "ops");
         let footer = lines(&buffer).last().unwrap().trim_end().to_string();
 
@@ -567,7 +569,7 @@ mod tests {
         assert!(!footer.contains("d remove"), "{footer}");
         assert!(footer.contains("s sync"), "{footer}");
 
-        reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('?')));
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('?')));
         let help = text(&render_buffer(&mut state, 120, 20, "ops"));
         assert!(
             help.contains("The main worktree cannot be removed"),

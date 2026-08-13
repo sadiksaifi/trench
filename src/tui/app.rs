@@ -139,10 +139,15 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 .take()
                 .filter(|selected| identities.iter().any(|row| &row.id == selected))
                 .or_else(|| identities.first().map(|identity| identity.id.clone()));
+            state
+                .statuses
+                .retain(|id, _| identities.iter().any(|row| &row.id == id));
             state.identities = identities;
         }
         Event::StatusLoaded { id, status } => {
-            state.statuses.insert(id, status);
+            if state.identities.iter().any(|row| row.id == id) {
+                state.statuses.insert(id, status);
+            }
         }
         Event::Select(id) if state.identities.iter().any(|row| row.id == id) => {
             state.selected = Some(id);
@@ -175,6 +180,17 @@ pub fn unavailable_reason(state: &AppState, action: Action) -> Option<&'static s
         }
         (Action::Sync, Some(identity)) if identity.detached => {
             Some("Detached worktrees cannot be synced")
+        }
+        (Action::Sync, Some(identity)) if !state.statuses.contains_key(&identity.id) => {
+            Some("Git status is still loading")
+        }
+        (Action::Sync, Some(identity))
+            if state
+                .statuses
+                .get(&identity.id)
+                .is_some_and(|status| status.staged + status.modified + status.untracked > 0) =>
+        {
+            Some("Dirty worktrees cannot be synced")
         }
         (Action::DeleteBranch, Some(identity)) if identity.detached => {
             Some("Detached worktrees have no local branch to delete")
@@ -260,9 +276,9 @@ mod tests {
         let alpha = identity("/worktrees/alpha", "alpha");
         let beta = identity("/worktrees/beta", "beta");
         let mut state = AppState::new(vec![alpha.clone(), beta.clone()]);
-        reduce(&mut state, Event::Select(beta.id.clone()));
+        let _ = reduce(&mut state, Event::Select(beta.id.clone()));
 
-        reduce(
+        let _ = reduce(
             &mut state,
             Event::IdentitiesLoaded(vec![alpha, beta.clone()]),
         );
@@ -286,5 +302,133 @@ mod tests {
                 reason: "Detached worktrees cannot be synced".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn initial_identity_snapshot_keeps_catalog_order_and_has_no_statuses() {
+        let current = identity("/worktrees/zebra", "zebra");
+        let alpha = identity("/worktrees/alpha", "alpha");
+
+        let state = AppState::new(vec![current.clone(), alpha.clone()]);
+
+        assert_eq!(state.identities, vec![current.clone(), alpha]);
+        assert_eq!(state.selected, Some(current.id));
+        assert!(state.statuses.is_empty());
+    }
+
+    #[test]
+    fn progressive_status_attaches_to_identity_after_order_changes() {
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let beta = identity("/worktrees/beta", "beta");
+        let mut state = AppState::new(vec![alpha.clone(), beta.clone()]);
+        let _ = reduce(
+            &mut state,
+            Event::IdentitiesLoaded(vec![beta.clone(), alpha]),
+        );
+        let status = WorktreeStatus {
+            staged: 1,
+            ..WorktreeStatus::default()
+        };
+
+        let _ = reduce(
+            &mut state,
+            Event::StatusLoaded {
+                id: beta.id.clone(),
+                status: status.clone(),
+            },
+        );
+
+        assert_eq!(state.statuses.get(&beta.id), Some(&status));
+    }
+
+    #[test]
+    fn detached_rows_keep_switch_open_and_remove_actions() {
+        let mut detached = identity("/worktrees/review", "detached@1234567");
+        detached.branch = None;
+        detached.detached = true;
+        let id = detached.id.clone();
+        let mut state = AppState::new(vec![detached]);
+
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Enter)),
+            vec![Effect::Switch(id.clone())]
+        );
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('o'))),
+            vec![Effect::Open(id.clone())]
+        );
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('d'))),
+            vec![Effect::OpenRemove(id)]
+        );
+        assert_eq!(
+            unavailable_reason(&state, Action::DeleteBranch),
+            Some("Detached worktrees have no local branch to delete")
+        );
+    }
+
+    #[test]
+    fn main_worktree_cannot_be_removed_but_can_be_synced() {
+        let mut main = identity("/repos/trench", "trench");
+        main.is_main = true;
+        let id = main.id.clone();
+        let mut state = AppState::new(vec![main]);
+        state.statuses.insert(id.clone(), WorktreeStatus::default());
+
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('d'))),
+            vec![Effect::Unavailable {
+                action: Action::Remove,
+                reason: "The main worktree cannot be removed".to_string(),
+            }]
+        );
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('s'))),
+            vec![Effect::OpenSync(id)]
+        );
+    }
+
+    #[test]
+    fn sync_waits_for_clean_status_without_calling_git_from_the_reducer() {
+        let row = identity("/worktrees/alpha", "alpha");
+        let id = row.id.clone();
+        let mut state = AppState::new(vec![row]);
+
+        assert_eq!(
+            unavailable_reason(&state, Action::Sync),
+            Some("Git status is still loading")
+        );
+        state.statuses.insert(
+            id,
+            WorktreeStatus {
+                modified: 1,
+                ..WorktreeStatus::default()
+            },
+        );
+        assert_eq!(
+            unavailable_reason(&state, Action::Sync),
+            Some("Dirty worktrees cannot be synced")
+        );
+    }
+
+    #[test]
+    fn tiny_view_routes_only_quit_and_help() {
+        let row = identity("/worktrees/alpha", "alpha");
+        let mut state = AppState::new(vec![row]);
+        let _ = reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: Viewport::MIN_WIDTH - 1,
+                height: Viewport::MIN_HEIGHT,
+            },
+        );
+
+        assert!(reduce(&mut state, Event::Input(Key::Char('c'))).is_empty());
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('q'))),
+            vec![Effect::Quit]
+        );
+        let _ = reduce(&mut state, Event::Input(Key::Char('?')));
+        assert!(state.help_open);
     }
 }

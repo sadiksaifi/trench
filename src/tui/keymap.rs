@@ -166,3 +166,56 @@ pub fn keybar_bindings(context: Context, narrow: bool) -> Vec<&'static Binding> 
     }
     visible
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cockpit_contract_routes_exact_primary_keys() {
+        let expected = [
+            (Key::Enter, Action::Switch),
+            (Key::Char('o'), Action::Open),
+            (Key::Char('c'), Action::Create),
+            (Key::Char('s'), Action::Sync),
+            (Key::Char('d'), Action::Remove),
+            (Key::Char('/'), Action::Search),
+            (Key::Char('r'), Action::Refresh),
+            (Key::Char('i'), Action::ToggleInspector),
+            (Key::Char('j'), Action::SelectNext),
+            (Key::Down, Action::SelectNext),
+            (Key::Char('k'), Action::SelectPrevious),
+            (Key::Up, Action::SelectPrevious),
+            (Key::Char('q'), Action::Quit),
+            (Key::Char('?'), Action::Help),
+        ];
+
+        for (key, action) in expected {
+            assert_eq!(action_for(Context::Cockpit, key), Some(action));
+        }
+        assert_eq!(action_for(Context::Cockpit, Key::Char('l')), None);
+        assert_eq!(action_for(Context::Cockpit, Key::Char('D')), None);
+    }
+
+    #[test]
+    fn every_contextual_keybar_ends_with_help() {
+        for context in [Context::Cockpit, Context::Resize] {
+            for narrow in [false, true] {
+                let items = keybar_bindings(context, narrow);
+                assert_eq!(
+                    items.last().map(|binding| binding.action),
+                    Some(Action::Help)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resize_context_has_only_quit_and_help() {
+        let actions = bindings(Context::Resize)
+            .iter()
+            .map(|binding| binding.action)
+            .collect::<Vec<_>>();
+        assert_eq!(actions, [Action::Quit, Action::Help]);
+    }
+}

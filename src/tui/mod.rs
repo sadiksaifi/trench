@@ -2,9 +2,12 @@ pub mod app;
 pub mod cockpit;
 pub mod chrome;
 pub mod keymap;
+pub mod runtime;
 pub mod screens;
 pub mod theme;
 pub mod watcher;
+
+pub use runtime::run;
 
 use std::sync::{Arc, Mutex};
 
@@ -46,7 +49,7 @@ type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
 static PREV_PANIC_HOOK: Mutex<Option<Arc<PanicHook>>> = Mutex::new(None);
 
 /// Launch the TUI. This is the single public entry point.
-pub fn run() -> Result<Option<String>> {
+pub fn run_legacy() -> Result<Option<String>> {
     // Parse configuration before changing terminal state so strict config
     // errors are reported normally.
     let global = crate::config::load_global_config()?;
