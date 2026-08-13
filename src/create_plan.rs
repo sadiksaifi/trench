@@ -426,6 +426,41 @@ mod tests {
         assert_eq!(plan.tracking, None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn checked_out_branch_navigates_before_unused_symlinked_path_validation() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let escape = tempfile::tempdir().unwrap();
+        let linked = tempfile::tempdir().unwrap();
+        let target = linked.path().join("feature-auth");
+        init_repo(repo.path());
+        let repository = git2::Repository::open(repo.path()).unwrap();
+        let head = repository.head().unwrap().peel_to_commit().unwrap();
+        let branch = repository.branch("feature/auth", &head, false).unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(branch.get()));
+        repository
+            .worktree("feature-auth", &target, Some(&options))
+            .unwrap();
+        drop(branch);
+        drop(head);
+        drop(repository);
+        let repository_name = repo.path().file_name().unwrap().to_string_lossy();
+        std::os::unix::fs::symlink(escape.path(), root.path().join(repository_name.as_ref()))
+            .unwrap();
+        let planner =
+            CreatePlanner::discover(repo.path(), root.path(), None, HookPolicy::Run).unwrap();
+
+        let plan = planner.plan("feature/auth", None).unwrap();
+
+        assert_eq!(
+            plan.action,
+            CreateAction::Navigate("feature-auth".to_string())
+        );
+        assert_eq!(plan.path, target.canonicalize().unwrap());
+    }
+
     #[test]
     fn from_is_rejected_for_non_new_branches() {
         let repo = tempfile::tempdir().unwrap();

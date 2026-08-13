@@ -109,6 +109,7 @@ impl WorktreePolicy {
 
     pub fn derive(&self, branch: &str) -> Result<WorktreeLocation, WorktreePolicyError> {
         let location = self.location(branch)?;
+        reject_intermediate_symlinks(&self.root, &location.path)?;
         let WorktreeLocation {
             branch,
             worktree,
@@ -163,7 +164,6 @@ impl WorktreePolicy {
         if !is_single_segment(&self.repository) || !path.starts_with(&self.root) {
             return Err(WorktreePolicyError::RootEscape { path });
         }
-        reject_intermediate_symlinks(&self.root, &path)?;
         Ok(WorktreeLocation {
             branch: branch.to_string(),
             worktree,
