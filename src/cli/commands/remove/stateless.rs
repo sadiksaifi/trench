@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -281,6 +282,7 @@ impl RemovalAssessment {
             force_branch_applied: options.delete_branch
                 && self.merged == Some(false)
                 && options.force_branch,
+            no_hooks: options.no_hooks,
             hook_policy: if options.no_hooks {
                 RemovalHookPolicy::Skip
             } else {
@@ -325,6 +327,7 @@ pub struct RemovalPlan {
     pub delete_branch: bool,
     pub force_branch: bool,
     pub force_branch_applied: bool,
+    pub no_hooks: bool,
     pub hook_policy: RemovalHookPolicy,
     #[serde(skip)]
     expected: RemovalAssessment,
@@ -423,6 +426,7 @@ impl RemovalEventSink for RecordingRemovalEventSink {
 #[serde(rename_all = "snake_case")]
 pub enum RemovalHooksStatus {
     None,
+    Planned,
     Ran,
     Skipped,
 }
@@ -443,6 +447,7 @@ pub struct RemovalOutcome {
     pub branch_deleted: bool,
     pub force_branch: bool,
     pub force_branch_applied: bool,
+    pub no_hooks: bool,
     pub hooks: RemovalHooksStatus,
     pub mutation_state: RemovalMutationState,
     pub warning: Option<String>,
@@ -471,11 +476,93 @@ impl RemovalOutcome {
             branch_deleted,
             force_branch: plan.force_branch,
             force_branch_applied: plan.force_branch_applied,
+            no_hooks: plan.no_hooks,
             hooks,
             mutation_state,
             warning,
         }
     }
+}
+
+impl fmt::Display for RemovalPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_human_outcome(formatter, "Would remove", self, false, None)
+    }
+}
+
+impl fmt::Display for RemovalOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let action = if self.dry_run {
+            "Would remove"
+        } else {
+            "Removed"
+        };
+        write!(
+            formatter,
+            "{action} worktree '{}' at {}",
+            self.worktree,
+            self.path.display()
+        )?;
+        match (&self.branch, self.delete_branch, self.branch_deleted) {
+            (Some(branch), true, true) => write!(formatter, "; deleted local branch '{branch}'")?,
+            (Some(branch), true, false) => {
+                write!(formatter, "; local branch '{branch}' selected for deletion")?
+            }
+            (Some(branch), false, _) => write!(formatter, "; kept local branch '{branch}'")?,
+            (None, _, _) => write!(formatter, "; detached HEAD (no local branch)")?,
+        }
+        write!(
+            formatter,
+            "; --yes={}; --force-worktree={} (applied={}); --delete-branch={}; --force-branch={} (applied={}); --no-hooks={}",
+            self.yes,
+            self.force_worktree,
+            self.force_worktree_applied,
+            self.delete_branch,
+            self.force_branch,
+            self.force_branch_applied,
+            self.no_hooks,
+        )?;
+        if let Some(warning) = &self.warning {
+            write!(formatter, "; warning: {warning}")?;
+        }
+        Ok(())
+    }
+}
+
+fn write_human_outcome(
+    formatter: &mut fmt::Formatter<'_>,
+    action: &str,
+    plan: &RemovalPlan,
+    branch_deleted: bool,
+    warning: Option<&str>,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "{action} worktree '{}' at {}",
+        plan.worktree,
+        plan.path.display()
+    )?;
+    match (&plan.branch, plan.delete_branch, branch_deleted) {
+        (Some(branch), true, true) => write!(formatter, "; deleted local branch '{branch}'")?,
+        (Some(branch), true, false) => write!(formatter, "; would delete local branch '{branch}'")?,
+        (Some(branch), false, _) => write!(formatter, "; would keep local branch '{branch}'")?,
+        (None, _, _) => write!(formatter, "; detached HEAD (no local branch)")?,
+    }
+    write!(
+        formatter,
+        "; --yes={}; --force-worktree={} (applied={}); --delete-branch={}; --force-branch={} (applied={}); --no-hooks={}",
+        plan.yes,
+        plan.force_worktree,
+        plan.force_worktree_applied,
+        plan.delete_branch,
+        plan.force_branch,
+        plan.force_branch_applied,
+        plan.no_hooks,
+    )?;
+    if let Some(warning) = warning {
+        write!(formatter, "; warning: {warning}")?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error, Serialize)]
@@ -497,7 +584,7 @@ pub async fn execute(
     sink: &dyn RemovalEventSink,
 ) -> Result<RemovalOutcome, RemovalFailure> {
     if plan.dry_run {
-        let hooks = hook_status(&plan, hooks_config);
+        let hooks = dry_run_hook_status(&plan, hooks_config);
         return Ok(RemovalOutcome::from_plan(
             &plan,
             hooks,
@@ -525,9 +612,9 @@ pub async fn execute(
 
     let hook_context = hook_context(&plan);
     let hooks_status = hook_status(&plan, hooks_config);
+    let stage_started = start_stage(sink, RemovalStage::PreRemove);
     if plan.hook_policy == RemovalHookPolicy::Run {
         if let Some(pre_remove) = hooks_config.and_then(|hooks| hooks.pre_remove.as_ref()) {
-            let stage_started = start_stage(sink, RemovalStage::PreRemove);
             let hook_sink = HookEventAdapter {
                 sink,
                 hook: HookEvent::PreRemove,
@@ -552,9 +639,9 @@ pub async fn execute(
                     error.to_string(),
                 ));
             }
-            finish_stage(sink, RemovalStage::PreRemove, stage_started, true);
         }
     }
+    finish_stage(sink, RemovalStage::PreRemove, stage_started, true);
 
     // This is the final mutation boundary. It catches hook or concurrent
     // changes and the Git helper proves the directory/repository identity
@@ -563,7 +650,7 @@ pub async fn execute(
         return Err(fail(
             sink,
             operation_started,
-            RemovalStage::RemoveWorktree,
+            RemovalStage::Revalidate,
             RemovalMutationState::NotStarted,
             RemovalErrorClass::PreconditionsChanged,
             error,
@@ -573,11 +660,16 @@ pub async fn execute(
     let stage_started = start_stage(sink, RemovalStage::RemoveWorktree);
     if let Err(error) = remove_exact_worktree(&plan.expected, plan.force_worktree_applied) {
         finish_stage(sink, RemovalStage::RemoveWorktree, stage_started, false);
+        let mutation_state = if matches!(error, git::GitError::CommandFailed { .. }) {
+            RemovalMutationState::PartiallyApplied
+        } else {
+            RemovalMutationState::NotStarted
+        };
         return Err(fail(
             sink,
             operation_started,
             RemovalStage::RemoveWorktree,
-            RemovalMutationState::NotStarted,
+            mutation_state,
             classify_git_error(&error),
             error.to_string(),
         ));
@@ -617,9 +709,9 @@ pub async fn execute(
     }
 
     let mut warning = None;
+    let stage_started = start_stage(sink, RemovalStage::PostRemove);
     if plan.hook_policy == RemovalHookPolicy::Run {
         if let Some(post_remove) = hooks_config.and_then(|hooks| hooks.post_remove.as_ref()) {
-            let stage_started = start_stage(sink, RemovalStage::PostRemove);
             let hook_sink = HookEventAdapter {
                 sink,
                 hook: HookEvent::PostRemove,
@@ -641,11 +733,18 @@ pub async fn execute(
                     message,
                 });
                 finish_stage(sink, RemovalStage::PostRemove, stage_started, false);
-            } else {
-                finish_stage(sink, RemovalStage::PostRemove, stage_started, true);
+                finish_operation(sink, operation_started, RemovalMutationState::Applied);
+                return Ok(RemovalOutcome::from_plan(
+                    &plan,
+                    hooks_status,
+                    RemovalMutationState::Applied,
+                    branch_deleted,
+                    warning,
+                ));
             }
         }
     }
+    finish_stage(sink, RemovalStage::PostRemove, stage_started, true);
 
     finish_operation(sink, operation_started, RemovalMutationState::Applied);
     Ok(RemovalOutcome::from_plan(
@@ -678,6 +777,17 @@ fn hook_status(plan: &RemovalPlan, config: Option<&HooksConfig>) -> RemovalHooks
     match (plan.hook_policy, configured) {
         (RemovalHookPolicy::Skip, true) => RemovalHooksStatus::Skipped,
         (RemovalHookPolicy::Run, true) => RemovalHooksStatus::Ran,
+        _ => RemovalHooksStatus::None,
+    }
+}
+
+fn dry_run_hook_status(plan: &RemovalPlan, config: Option<&HooksConfig>) -> RemovalHooksStatus {
+    let configured = config
+        .map(|hooks| hooks.pre_remove.is_some() || hooks.post_remove.is_some())
+        .unwrap_or(false);
+    match (plan.hook_policy, configured) {
+        (RemovalHookPolicy::Skip, true) => RemovalHooksStatus::Skipped,
+        (RemovalHookPolicy::Run, true) => RemovalHooksStatus::Planned,
         _ => RemovalHooksStatus::None,
     }
 }
@@ -848,15 +958,14 @@ fn common_git_dir(repo_path: &Path) -> Result<PathBuf, git::GitError> {
 
 #[cfg(unix)]
 struct ExactTarget {
-    parent: std::fs::File,
-    leaf: std::ffi::OsString,
+    directory: std::fs::File,
 }
 
 #[cfg(unix)]
 impl ExactTarget {
     fn open(assessment: &RemovalAssessment) -> Result<Self, git::GitError> {
         use std::ffi::CString;
-        use std::os::fd::FromRawFd;
+        use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::ffi::OsStrExt;
 
         let parent = assessment
@@ -878,46 +987,46 @@ impl ExactTarget {
         if fd < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        let target = Self {
-            parent: unsafe { std::fs::File::from_raw_fd(fd) },
-            leaf: assessment
+        let parent = unsafe { std::fs::File::from_raw_fd(fd) };
+        let leaf = CString::new(
+            assessment
                 .path
                 .file_name()
                 .ok_or(git::GitError::PreconditionsChanged)?
-                .to_os_string(),
+                .as_bytes(),
+        )
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "worktree leaf contains a NUL byte",
+            )
+        })?;
+        let target_fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                leaf.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if target_fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let target = Self {
+            directory: unsafe { std::fs::File::from_raw_fd(target_fd) },
         };
         target.verify(assessment)?;
         Ok(target)
     }
 
     fn verify(&self, assessment: &RemovalAssessment) -> Result<(), git::GitError> {
-        use std::ffi::CString;
-        use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::MetadataExt;
 
-        let leaf = CString::new(self.leaf.as_os_str().as_bytes()).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "worktree leaf contains a NUL byte",
+        let held = self.directory.metadata()?;
+        if (held.dev(), held.ino())
+            != (
+                assessment.directory_identity.device,
+                assessment.directory_identity.inode,
             )
-        })?;
-        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        let status = unsafe {
-            libc::fstatat(
-                self.parent.as_raw_fd(),
-                leaf.as_ptr(),
-                stat.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if status != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let stat = unsafe { stat.assume_init() };
-        if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR
-            || u64::try_from(stat.st_dev).ok() != Some(assessment.directory_identity.device)
-            || u64::try_from(stat.st_ino).ok() != Some(assessment.directory_identity.inode)
         {
             return Err(git::GitError::PreconditionsChanged);
         }
@@ -926,16 +1035,8 @@ impl ExactTarget {
         if live_admin != assessment.admin_dir {
             return Err(git::GitError::PreconditionsChanged);
         }
-        // Also compare the held descriptor with the path used for catalog
-        // revalidation. This detects a replaced parent before Git runs.
-        let held_parent = self.parent.metadata()?;
-        let live_parent = std::fs::metadata(
-            assessment
-                .path
-                .parent()
-                .ok_or(git::GitError::PreconditionsChanged)?,
-        )?;
-        if (held_parent.dev(), held_parent.ino()) != (live_parent.dev(), live_parent.ino()) {
+        let live = std::fs::symlink_metadata(&assessment.path)?;
+        if !live.file_type().is_dir() || (held.dev(), held.ino()) != (live.dev(), live.ino()) {
             return Err(git::GitError::PreconditionsChanged);
         }
         Ok(())
@@ -947,13 +1048,34 @@ fn remove_exact_worktree(
     assessment: &RemovalAssessment,
     allow_dirty: bool,
 ) -> Result<(), git::GitError> {
+    remove_exact_worktree_with_boundary(assessment, allow_dirty, &ProductionRemovalBoundary)
+}
+
+#[cfg(unix)]
+trait RemovalMutationBoundary {
+    fn after_target_open(&self) {}
+}
+
+#[cfg(unix)]
+struct ProductionRemovalBoundary;
+
+#[cfg(unix)]
+impl RemovalMutationBoundary for ProductionRemovalBoundary {}
+
+#[cfg(unix)]
+fn remove_exact_worktree_with_boundary(
+    assessment: &RemovalAssessment,
+    allow_dirty: bool,
+    boundary: &dyn RemovalMutationBoundary,
+) -> Result<(), git::GitError> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
     let target = ExactTarget::open(assessment)?;
     target.verify(assessment)?;
+    boundary.after_target_open();
     let common = common_git_dir(&assessment.repo_path)?;
-    let parent_fd = target.parent.as_raw_fd();
+    let target_fd = target.directory.as_raw_fd();
     let mut command = Command::new("git");
     command
         .arg(format!("--git-dir={}", common.display()))
@@ -963,14 +1085,14 @@ fn remove_exact_worktree(
         command.arg("--force");
     }
     command
-        .arg(&target.leaf)
+        .arg(".")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR");
     unsafe {
         command.pre_exec(move || {
-            if libc::fchdir(parent_fd) == 0 {
+            if libc::fchdir(target_fd) == 0 {
                 Ok(())
             } else {
                 Err(std::io::Error::last_os_error())
@@ -1046,12 +1168,15 @@ fn delete_exact_branch(assessment: &RemovalAssessment) -> Result<(), git::GitErr
         .stderr(Stdio::piped())
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "start")?;
         if let (Some(base_ref), Some(base_oid)) =
             (assessment.base_ref.as_deref(), assessment.base_oid)
         {
             writeln!(stdin, "verify {base_ref} {base_oid}")?;
         }
         writeln!(stdin, "delete {branch_ref} {branch_oid}")?;
+        writeln!(stdin, "prepare")?;
+        writeln!(stdin, "commit")?;
     }
     let output = child.wait_with_output()?;
     if output.status.success() {
@@ -1296,14 +1421,16 @@ mod tests {
             ..HooksConfig::default()
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
+        let events = RecordingRemovalEventSink::default();
         let outcome = runtime
-            .block_on(execute(plan, Some(&hooks), &NoopRemovalEventSink))
+            .block_on(execute(plan, Some(&hooks), &events))
             .unwrap();
 
         assert!(fixture.linked.exists());
         assert!(!marker.exists());
         assert_eq!(outcome.mutation_state, RemovalMutationState::NotStarted);
-        assert_eq!(outcome.hooks, RemovalHooksStatus::Ran);
+        assert_eq!(outcome.hooks, RemovalHooksStatus::Planned);
+        assert!(events.events().is_empty());
     }
 
     #[test]
@@ -1339,8 +1466,10 @@ mod tests {
             stages,
             [
                 RemovalStage::Revalidate,
+                RemovalStage::PreRemove,
                 RemovalStage::RemoveWorktree,
                 RemovalStage::Prune,
+                RemovalStage::PostRemove,
             ]
         );
     }
@@ -1517,6 +1646,120 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    struct SwapAfterTargetOpen {
+        source: PathBuf,
+        moved: PathBuf,
+        foreign: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl RemovalMutationBoundary for SwapAfterTargetOpen {
+        fn after_target_open(&self) {
+            std::fs::rename(&self.source, &self.moved).unwrap();
+            std::os::unix::fs::symlink(&self.foreign, &self.source).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_descriptor_never_removes_a_replacement_after_final_open() {
+        let fixture = Fixture::new("feature/late-path-race");
+        let assessment = fixture.assess();
+        let moved = fixture.root.path().join("moved-authorized-worktree");
+        let foreign = fixture.root.path().join("foreign-replacement");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("keep"), "safe").unwrap();
+        let boundary = SwapAfterTargetOpen {
+            source: fixture.linked.clone(),
+            moved,
+            foreign: foreign.clone(),
+        };
+
+        let _ = remove_exact_worktree_with_boundary(&assessment, false, &boundary);
+
+        assert_eq!(
+            std::fs::read_to_string(foreign.join("keep")).unwrap(),
+            "safe"
+        );
+        assert!(std::fs::symlink_metadata(&fixture.linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn branch_receipt_refuses_to_delete_a_replaced_branch() {
+        let fixture = Fixture::new("feature/replaced-branch");
+        let assessment = fixture.assess();
+        remove_exact_worktree(&assessment, false).unwrap();
+        prune_worktrees(&fixture.main).unwrap();
+
+        let repo = git2::Repository::open(&fixture.main).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = parent.tree().unwrap();
+        let replacement = repo
+            .commit(
+                None,
+                &signature,
+                &signature,
+                "replacement branch commit",
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        repo.reference(
+            &format!("refs/heads/{}", fixture.branch),
+            replacement,
+            true,
+            "replace branch after authorization",
+        )
+        .unwrap();
+
+        assert!(delete_exact_branch(&assessment).is_err());
+        assert_eq!(
+            repo.find_branch(&fixture.branch, git2::BranchType::Local)
+                .unwrap()
+                .get()
+                .target(),
+            Some(replacement)
+        );
+    }
+
+    #[test]
+    fn branch_transaction_refuses_when_the_merge_base_ref_moves() {
+        let fixture = Fixture::new("feature/moved-base");
+        let assessment = fixture.assess();
+        remove_exact_worktree(&assessment, false).unwrap();
+        prune_worktrees(&fixture.main).unwrap();
+
+        let repo = git2::Repository::open(&fixture.main).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .tree()
+            .unwrap();
+        let divergent = repo
+            .commit(None, &signature, &signature, "divergent base", &tree, &[])
+            .unwrap();
+        repo.reference(
+            "refs/heads/main",
+            divergent,
+            true,
+            "move base after authorization",
+        )
+        .unwrap();
+
+        assert!(delete_exact_branch(&assessment).is_err());
+        assert!(repo
+            .find_branch(&fixture.branch, git2::BranchType::Local)
+            .is_ok());
+    }
+
     #[test]
     fn structured_plan_and_outcome_report_every_override_explicitly() {
         let fixture = Fixture::new("feature/json");
@@ -1539,8 +1782,16 @@ mod tests {
         assert_eq!(value["delete_branch"], true);
         assert_eq!(value["force_branch"], true);
         assert_eq!(value["force_branch_applied"], false);
+        assert_eq!(value["no_hooks"], true);
         assert_eq!(value["hook_policy"], "skip");
         assert!(value.get("repo_path").is_none());
         assert!(value.get("head_oid").is_none());
+
+        let human = plan.to_string();
+        assert!(human.contains("--yes=true"));
+        assert!(human.contains("--force-worktree=true (applied=false)"));
+        assert!(human.contains("--delete-branch=true"));
+        assert!(human.contains("--force-branch=true (applied=false)"));
+        assert!(human.contains("--no-hooks=true"));
     }
 }
