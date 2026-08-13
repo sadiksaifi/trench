@@ -48,6 +48,8 @@ pub enum WorktreePolicyError {
     InvalidBranch { branch: String, reason: String },
     #[error("derived worktree path escapes its configured root: {path}")]
     RootEscape { path: PathBuf },
+    #[error("could not inspect derived worktree path component {path}: {reason}")]
+    PathInspection { path: PathBuf, reason: String },
     #[error("branch '{branch}' does not produce a usable worktree identity")]
     InvalidIdentity { branch: String },
     #[error("worktree identity '{worktree}' is already used by {path}")]
@@ -161,12 +163,42 @@ impl WorktreePolicy {
         if !is_single_segment(&self.repository) || !path.starts_with(&self.root) {
             return Err(WorktreePolicyError::RootEscape { path });
         }
+        reject_intermediate_symlinks(&self.root, &path)?;
         Ok(WorktreeLocation {
             branch: branch.to_string(),
             worktree,
             path,
         })
     }
+}
+
+fn reject_intermediate_symlinks(root: &Path, target: &Path) -> Result<(), WorktreePolicyError> {
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| WorktreePolicyError::RootEscape {
+            path: target.to_path_buf(),
+        })?;
+    let components = relative.components().collect::<Vec<_>>();
+    let mut current = root.to_path_buf();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(WorktreePolicyError::RootEscape {
+                    path: target.to_path_buf(),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(WorktreePolicyError::PathInspection {
+                    path: current,
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_branch(branch: &str) -> Result<(), WorktreePolicyError> {
@@ -314,6 +346,24 @@ mod tests {
             policy.derive("feature/auth"),
             Err(WorktreePolicyError::RootEscape { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_repository_directory_cannot_escape_the_configured_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("trench")).unwrap();
+        let policy = WorktreePolicy::new(root.path(), "trench");
+
+        assert!(matches!(
+            policy.derive("feature/auth"),
+            Err(WorktreePolicyError::RootEscape { .. })
+        ));
+        assert!(
+            !outside.path().join("feature-auth").exists(),
+            "path validation must remain read-only"
+        );
     }
 
     #[test]
