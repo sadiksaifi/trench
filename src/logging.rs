@@ -298,6 +298,8 @@ pub fn init() {
         DiagnosticFilter::from_env_value(env_filter.as_deref()),
     );
     diagnostics.prepare();
+    diagnostics.rotate_if_full();
+    diagnostics.prepare();
     let _ = DIAGNOSTICS.set(diagnostics);
 }
 

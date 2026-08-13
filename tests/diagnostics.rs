@@ -46,3 +46,44 @@ fn unavailable_state_path_does_not_change_command_results_or_exit_status() {
     assert_eq!(unavailable.stdout, baseline.stdout);
     assert_eq!(unavailable.stderr, baseline.stderr);
 }
+
+#[test]
+fn startup_rotates_one_mibibyte_logs_and_caps_retention_at_five_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let state_home = dir.path().join("state");
+    let log_dir = state_home.join("trench");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    std::fs::write(log_dir.join("trench.log"), vec![b'x'; 1024 * 1024]).unwrap();
+    for index in 1..=5 {
+        std::fs::write(
+            log_dir.join(format!("trench.log.{index}")),
+            format!("old-{index}"),
+        )
+        .unwrap();
+    }
+
+    let output = version_with_state_home(&state_home);
+
+    assert!(output.status.success());
+    let mut names = std::fs::read_dir(&log_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "trench.log",
+            "trench.log.1",
+            "trench.log.2",
+            "trench.log.3",
+            "trench.log.4",
+        ]
+    );
+    assert_eq!(
+        std::fs::metadata(log_dir.join("trench.log.1"))
+            .unwrap()
+            .len(),
+        1024 * 1024
+    );
+}
