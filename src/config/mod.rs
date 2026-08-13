@@ -19,6 +19,12 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+    #[error("invalid config file {path}: {key}: {message}")]
+    InvalidValue {
+        path: PathBuf,
+        key: &'static str,
+        message: &'static str,
+    },
 }
 
 // --- Hook types (FR-18, FR-19) ---
@@ -109,6 +115,23 @@ pub struct WorktreesConfig {
     pub root: Option<String>,
 }
 
+fn validate_worktree_root(path: &Path, worktrees: Option<&WorktreesConfig>) -> Result<()> {
+    let Some(root) = worktrees.and_then(|config| config.root.as_deref()) else {
+        return Ok(());
+    };
+
+    if root.contains("{{") || root.contains("}}") {
+        return Err(ConfigError::InvalidValue {
+            path: path.to_path_buf(),
+            key: "worktrees.root",
+            message: "path templates are not supported; configure a root directory",
+        }
+        .into());
+    }
+
+    Ok(())
+}
+
 /// Read and parse an optional TOML config file.
 ///
 /// Returns `Ok(None)` if the file does not exist.
@@ -139,7 +162,11 @@ fn load_optional_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Opt
 /// Returns `Ok(None)` if the file does not exist.
 /// Returns an error if the file exists but contains invalid TOML.
 pub fn load_project_config_from(path: &Path) -> Result<Option<ProjectConfig>> {
-    load_optional_toml(path)
+    let config: Option<ProjectConfig> = load_optional_toml(path)?;
+    if let Some(config) = config.as_ref() {
+        validate_worktree_root(path, config.worktrees.as_ref())?;
+    }
+    Ok(config)
 }
 
 // --- Resolved config (FR-1) ---
@@ -266,7 +293,9 @@ pub fn load_project_config(repo_root: &Path) -> Result<Option<ProjectConfig>> {
 /// Returns `GlobalConfig::default()` if the file does not exist.
 /// Returns an error if the file exists but contains invalid TOML.
 pub fn load_global_config_from(path: &Path) -> Result<GlobalConfig> {
-    load_optional_toml(path).map(|opt| opt.unwrap_or_default())
+    let config: GlobalConfig = load_optional_toml(path)?.unwrap_or_default();
+    validate_worktree_root(path, config.worktrees.as_ref())?;
+    Ok(config)
 }
 
 /// Return the path to trench's global config file.
