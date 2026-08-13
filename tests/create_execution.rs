@@ -244,3 +244,78 @@ fn already_checked_out_branch_navigates_without_mutation_or_hooks() {
     assert!(!root.exists());
     assert!(!hook_marker.exists());
 }
+
+#[test]
+fn hooks_stream_in_order_and_post_create_failure_rolls_back() {
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let root = outside.path().join("worktrees");
+    init_repo(repo.path());
+    std::fs::write(repo.path().join("hook-copy"), "copy-marker").unwrap();
+    write_project_config(
+        repo.path(),
+        &root,
+        r#"
+[hooks.pre_create]
+run = ["printf pre-output"]
+
+[hooks.post_create]
+copy = ["hook-copy"]
+run = ["test -f hook-copy && printf run-output"]
+shell = "printf shell-output >&2; exit 19"
+"#,
+    );
+
+    let output = trench(
+        repo.path(),
+        xdg.path(),
+        &["create", "feature/hooks", "--json"],
+    );
+
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let pre = stderr.find("pre-output").unwrap();
+    let run = stderr.find("run-output").unwrap();
+    let shell = stderr.find("shell-output").unwrap();
+    assert!(pre < run && run < shell, "{stderr}");
+    let json_start = stderr.find("{\n  \"stage\"").unwrap();
+    let failure: serde_json::Value = serde_json::from_str(&stderr[json_start..]).unwrap();
+    assert_eq!(failure["stage"], "post_hook");
+    assert_eq!(failure["mutation_state"], "rolled_back");
+    assert_eq!(failure["class"], "hook");
+    assert!(!root.exists(), "empty operation parents should be removed");
+    assert!(
+        !git_stdout(repo.path(), &["branch", "--list", "feature/hooks"]).contains("feature/hooks")
+    );
+}
+
+#[test]
+fn no_hooks_bypasses_configured_hooks() {
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let root = outside.path().join("worktrees");
+    let marker = outside.path().join("hook-ran");
+    init_repo(repo.path());
+    write_project_config(
+        repo.path(),
+        &root,
+        &format!(
+            "\n[hooks.pre_create]\nshell = {:?}\n",
+            format!("touch {}", marker.display())
+        ),
+    );
+
+    let output = trench(
+        repo.path(),
+        xdg.path(),
+        &["create", "feature/no-hooks", "--no-hooks", "--json"],
+    );
+
+    assert!(output.status.success());
+    assert!(!marker.exists());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["hook_policy"], "skip");
+}

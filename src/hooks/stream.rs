@@ -2,11 +2,21 @@ use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout};
 
+use super::types::OutputStream;
+
 /// Stream stdout/stderr from a child process to the terminal in real time,
 /// capturing both into buffers. Returns `(stdout, stderr)` strings.
 pub async fn stream_and_collect(
     stdout: ChildStdout,
     stderr: ChildStderr,
+) -> Result<(String, String)> {
+    stream_and_collect_with(stdout, stderr, |_, _| {}).await
+}
+
+pub async fn stream_and_collect_with(
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+    mut on_line: impl FnMut(OutputStream, String),
 ) -> Result<(String, String)> {
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
@@ -21,7 +31,7 @@ pub async fn stream_and_collect(
             result = stdout_reader.next_line(), if !stdout_done => {
                 match result? {
                     Some(line) => {
-                        println!("{line}");
+                        on_line(OutputStream::Stdout, line.clone());
                         if !stdout_buf.is_empty() {
                             stdout_buf.push('\n');
                         }
@@ -33,7 +43,7 @@ pub async fn stream_and_collect(
             result = stderr_reader.next_line(), if !stderr_done => {
                 match result? {
                     Some(line) => {
-                        eprintln!("{line}");
+                        on_line(OutputStream::Stderr, line.clone());
                         if !stderr_buf.is_empty() {
                             stderr_buf.push('\n');
                         }

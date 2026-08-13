@@ -432,7 +432,7 @@ fn run_create(
         hooks: resolved.hooks,
     });
 
-    match rt.block_on(operation::execute(request, &operation::NoopEmitter)) {
+    match rt.block_on(operation::execute(request, &operation::TerminalEmitter)) {
         Ok(operation::OperationOutcome::Create(outcome)) => {
             if json {
                 println!("{}", output::json::format_json_value(&outcome)?);

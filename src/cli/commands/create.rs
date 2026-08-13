@@ -147,17 +147,6 @@ pub async fn execute_with_hooks(
     let base = from.unwrap_or(&repo_info.default_branch);
     let sanitized_name = paths::sanitize_branch(branch);
 
-    // Ensure repo in DB for hook event logging
-    let repo_path_str = path_to_utf8(&repo_info.path)?;
-    let repo = match db.get_repo_by_path(repo_path_str)? {
-        Some(r) => r,
-        None => db.insert_repo(
-            &repo_info.name,
-            repo_path_str,
-            Some(&repo_info.default_branch),
-        )?,
-    };
-
     let env_ctx = HookEnvContext {
         worktree_path: worktree_path.to_string_lossy().to_string(),
         worktree_name: sanitized_name,
@@ -169,16 +158,14 @@ pub async fn execute_with_hooks(
 
     // Step 1: pre_create hook (cwd = repo path, no worktree_id yet)
     if let Some(pre_create) = &hooks.pre_create {
+        let emitter = hooks::types::LegacyHookEmitter::new(hook_tx);
         hooks::runner::execute_hook(
             &HookEvent::PreCreate,
             pre_create,
             &env_ctx,
             &repo_info.path,
             &repo_info.path,
-            db,
-            repo.id,
-            None,
-            hook_tx,
+            &emitter,
         )
         .await
         .map_err(CreateError::PreCreateHookFailed)?;
@@ -189,20 +176,14 @@ pub async fn execute_with_hooks(
 
     // Step 3: post_create hook (cwd = worktree path)
     let post_create_error = if let Some(post_create) = &hooks.post_create {
-        // Look up worktree_id for DB logging
-        let wt = db.find_worktree_by_identifier(repo.id, branch)?;
-        let worktree_id = wt.map(|w| w.id);
-
+        let emitter = hooks::types::LegacyHookEmitter::new(hook_tx);
         match hooks::runner::execute_hook(
             &HookEvent::PostCreate,
             post_create,
             &env_ctx,
             &repo_info.path,
             &result.path,
-            db,
-            repo.id,
-            worktree_id,
-            hook_tx,
+            &emitter,
         )
         .await
         {

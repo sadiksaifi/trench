@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 
 use crate::config::HooksConfig;
-use crate::create_plan::{CreateAction, CreatePlan, CreatePlanner};
+use crate::create_plan::{CreateAction, CreatePlan, CreatePlanner, HookPolicy};
 use crate::{git, logging};
 
 #[derive(Debug, Clone)]
@@ -97,6 +97,17 @@ pub struct NoopEmitter;
 
 impl Emitter for NoopEmitter {
     fn emit(&self, _event: OperationEvent) {}
+}
+
+#[derive(Debug, Default)]
+pub struct TerminalEmitter;
+
+impl Emitter for TerminalEmitter {
+    fn emit(&self, event: OperationEvent) {
+        if let OperationEvent::Output { line, .. } = event {
+            eprintln!("{line}");
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -284,6 +295,45 @@ async fn execute_create(
     }
     emitter.emit(OperationEvent::MutationStarted);
 
+    let hook_context = create_hook_context(&request);
+    if request.plan.hook_policy == HookPolicy::Run {
+        if let Some(pre_create) = request
+            .hooks
+            .as_ref()
+            .and_then(|hooks| hooks.pre_create.as_ref())
+        {
+            let stage_started = Instant::now();
+            emitter.emit(OperationEvent::StageStarted {
+                stage: OperationStage::PreHook,
+            });
+            let hook_emitter = OperationHookEmitter {
+                operation_emitter: emitter,
+                hook: crate::hooks::HookEvent::PreCreate,
+            };
+            if let Err(error) = crate::hooks::runner::execute_hook(
+                &crate::hooks::HookEvent::PreCreate,
+                pre_create,
+                &hook_context,
+                &request.repo_path,
+                &request.repo_path,
+                &hook_emitter,
+            )
+            .await
+            {
+                finish_stage(emitter, OperationStage::PreHook, stage_started, false);
+                return Err(fail(
+                    emitter,
+                    operation_started,
+                    OperationStage::PreHook,
+                    MutationState::RolledBack,
+                    ErrorClass::Hook,
+                    error.to_string(),
+                ));
+            }
+            finish_stage(emitter, OperationStage::PreHook, stage_started, true);
+        }
+    }
+
     let stage_started = Instant::now();
     emitter.emit(OperationEvent::StageStarted {
         stage: OperationStage::CreateWorktree,
@@ -324,23 +374,62 @@ async fn execute_create(
     };
 
     if let Err(error) = create_result {
-        cleanup_empty_directories(&created_parents);
         finish_stage(
             emitter,
             OperationStage::CreateWorktree,
             stage_started,
             false,
         );
-        return Err(fail(
+        return Err(rollback_failure(
+            &request,
             emitter,
             operation_started,
+            &created_parents,
             OperationStage::CreateWorktree,
-            MutationState::RolledBack,
             ErrorClass::Git,
             error.to_string(),
         ));
     }
     finish_stage(emitter, OperationStage::CreateWorktree, stage_started, true);
+
+    if request.plan.hook_policy == HookPolicy::Run {
+        if let Some(post_create) = request
+            .hooks
+            .as_ref()
+            .and_then(|hooks| hooks.post_create.as_ref())
+        {
+            let stage_started = Instant::now();
+            emitter.emit(OperationEvent::StageStarted {
+                stage: OperationStage::PostHook,
+            });
+            let hook_emitter = OperationHookEmitter {
+                operation_emitter: emitter,
+                hook: crate::hooks::HookEvent::PostCreate,
+            };
+            if let Err(error) = crate::hooks::runner::execute_hook(
+                &crate::hooks::HookEvent::PostCreate,
+                post_create,
+                &hook_context,
+                &request.repo_path,
+                &request.plan.path,
+                &hook_emitter,
+            )
+            .await
+            {
+                finish_stage(emitter, OperationStage::PostHook, stage_started, false);
+                return Err(rollback_failure(
+                    &request,
+                    emitter,
+                    operation_started,
+                    &created_parents,
+                    OperationStage::PostHook,
+                    ErrorClass::Hook,
+                    error.to_string(),
+                ));
+            }
+            finish_stage(emitter, OperationStage::PostHook, stage_started, true);
+        }
+    }
 
     let outcome = CreateOutcome {
         plan: request.plan,
@@ -389,6 +478,97 @@ fn create_parent_directories(target: &Path) -> std::io::Result<Vec<PathBuf>> {
 fn cleanup_empty_directories(directories: &[PathBuf]) {
     for directory in directories {
         let _ = std::fs::remove_dir(directory);
+    }
+}
+
+fn created_branch(plan: &CreatePlan) -> Option<&str> {
+    match plan.action {
+        CreateAction::NewBranch(_) | CreateAction::TrackRemote(_) => Some(&plan.branch),
+        CreateAction::ExistingLocal | CreateAction::Navigate(_) => None,
+    }
+}
+
+fn rollback_failure(
+    request: &CreateRequest,
+    emitter: &dyn Emitter,
+    operation_started: Instant,
+    created_parents: &[PathBuf],
+    failed_stage: OperationStage,
+    failed_class: ErrorClass,
+    failure_message: String,
+) -> OperationFailure {
+    let rollback_started = Instant::now();
+    emitter.emit(OperationEvent::StageStarted {
+        stage: OperationStage::Rollback,
+    });
+    let rollback = git::create::rollback_created_worktree(
+        &request.repo_path,
+        &request.plan.path,
+        created_branch(&request.plan),
+    );
+    cleanup_empty_directories(created_parents);
+    match rollback {
+        Ok(()) => {
+            finish_stage(emitter, OperationStage::Rollback, rollback_started, true);
+            fail(
+                emitter,
+                operation_started,
+                failed_stage,
+                MutationState::RolledBack,
+                failed_class,
+                failure_message,
+            )
+        }
+        Err(cleanup_error) => {
+            finish_stage(emitter, OperationStage::Rollback, rollback_started, false);
+            fail(
+                emitter,
+                operation_started,
+                OperationStage::Rollback,
+                MutationState::PartiallyApplied,
+                ErrorClass::Cleanup,
+                format!("operation failed and cleanup failed: {cleanup_error}"),
+            )
+        }
+    }
+}
+
+fn create_hook_context(request: &CreateRequest) -> crate::hooks::HookEnvContext {
+    crate::hooks::HookEnvContext {
+        worktree_path: request.plan.path.to_string_lossy().into_owned(),
+        worktree_name: request.plan.worktree.clone(),
+        branch: request.plan.branch.clone(),
+        repo_name: request
+            .repo_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "repository".to_string()),
+        repo_path: request.repo_path.to_string_lossy().into_owned(),
+        base_branch: request
+            .plan
+            .base
+            .as_deref()
+            .or(request.plan.tracking.as_deref())
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+struct OperationHookEmitter<'a> {
+    operation_emitter: &'a dyn Emitter,
+    hook: crate::hooks::HookEvent,
+}
+
+impl crate::hooks::types::HookEmitter for OperationHookEmitter<'_> {
+    fn emit(&self, event: crate::hooks::types::HookStreamEvent) {
+        if let crate::hooks::types::HookStreamEvent::Output { step, stream, line } = event {
+            self.operation_emitter.emit(OperationEvent::Output {
+                hook: self.hook,
+                step,
+                stream,
+                line,
+            });
+        }
     }
 }
 

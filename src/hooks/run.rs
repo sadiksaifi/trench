@@ -4,7 +4,8 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result};
 
-use super::stream::stream_and_collect;
+use super::stream::{stream_and_collect, stream_and_collect_with};
+use super::types::{HookEmitter, HookStep, HookStreamEvent};
 
 /// Output from a single command execution.
 #[derive(Debug, Clone)]
@@ -89,6 +90,57 @@ pub async fn execute_run_step(
         }
     }
 
+    Ok(RunResult { executed })
+}
+
+pub async fn execute_run_step_streaming(
+    commands: &[String],
+    cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    emitter: &dyn HookEmitter,
+) -> Result<RunResult> {
+    let mut executed = Vec::new();
+
+    for cmd in commands {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(cwd)
+            .envs(env_vars.iter())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to spawn command: {cmd}"))?;
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+        let (stdout_buf, stderr_buf) = stream_and_collect_with(stdout, stderr, |stream, line| {
+            emitter.emit(HookStreamEvent::Output {
+                step: HookStep::Run,
+                stream,
+                line,
+            });
+        })
+        .await?;
+        let status = child
+            .wait()
+            .await
+            .with_context(|| format!("failed to wait for command: {cmd}"))?;
+        let exit_code = status.code().unwrap_or(-1);
+        executed.push(CommandOutput {
+            command: cmd.clone(),
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+            exit_code,
+        });
+        if !status.success() {
+            return Err(RunStepError {
+                command: cmd.clone(),
+                exit_code,
+                results: RunResult { executed },
+            }
+            .into());
+        }
+    }
     Ok(RunResult { executed })
 }
 

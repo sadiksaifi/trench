@@ -4,7 +4,8 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result};
 
-use super::stream::stream_and_collect;
+use super::stream::{stream_and_collect, stream_and_collect_with};
+use super::types::{HookEmitter, HookStep, HookStreamEvent};
 
 /// Output from executing the shell step.
 #[derive(Debug, Clone)]
@@ -70,6 +71,48 @@ pub async fn execute_shell_step(
         return Err(ShellStepError { exit_code, output }.into());
     }
 
+    Ok(output)
+}
+
+pub async fn execute_shell_step_streaming(
+    script: &str,
+    cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    emitter: &dyn HookEmitter,
+) -> Result<ShellOutput> {
+    let mut child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(cwd)
+        .envs(env_vars.iter())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to spawn shell script")?;
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let (stdout_buf, stderr_buf) = stream_and_collect_with(stdout, stderr, |stream, line| {
+        emitter.emit(HookStreamEvent::Output {
+            step: HookStep::Shell,
+            stream,
+            line,
+        });
+    })
+    .await?;
+    let status = child
+        .wait()
+        .await
+        .context("failed to wait for shell script")?;
+    let exit_code = status.code().unwrap_or(-1);
+    let output = ShellOutput {
+        script: script.to_string(),
+        stdout: stdout_buf,
+        stderr: stderr_buf,
+        exit_code,
+    };
+    if !status.success() {
+        return Err(ShellStepError { exit_code, output }.into());
+    }
     Ok(output)
 }
 

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::Command;
 
 use super::GitError;
 
@@ -106,6 +107,49 @@ pub fn add_tracking_branch(
             let _ = orphan.delete();
         }
         return Err(error.into());
+    }
+    Ok(())
+}
+
+/// Remove a just-created worktree through Git and optionally delete the branch
+/// created for it. Existing-local branches must pass `None` and are preserved.
+pub fn rollback_created_worktree(
+    repo_path: &Path,
+    target_path: &Path,
+    created_branch: Option<&str>,
+) -> Result<(), GitError> {
+    let remove = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["worktree", "remove", "--force"])
+        .arg(target_path)
+        .output()?;
+    if !remove.status.success() && target_path.exists() {
+        return Err(GitError::CommandFailed {
+            operation: "rolling back created worktree",
+            message: String::from_utf8_lossy(&remove.stderr).trim().to_string(),
+        });
+    }
+
+    let prune = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["worktree", "prune"])
+        .output()?;
+    if !prune.status.success() {
+        return Err(GitError::CommandFailed {
+            operation: "pruning rolled back worktree",
+            message: String::from_utf8_lossy(&prune.stderr).trim().to_string(),
+        });
+    }
+
+    if let Some(branch) = created_branch {
+        let repo = git2::Repository::open(repo_path)?;
+        match repo.find_branch(branch, git2::BranchType::Local) {
+            Ok(mut local) => local.delete()?,
+            Err(error) if error.code() == git2::ErrorCode::NotFound => {}
+            Err(error) => return Err(error.into()),
+        };
     }
     Ok(())
 }

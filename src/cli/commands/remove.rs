@@ -354,16 +354,14 @@ pub async fn execute_live_resolved_with_hooks(
     if let Some(pre_remove) = &hooks.pre_remove {
         let worktree_path = Path::new(&wt.path);
         if worktree_path.exists() {
+            let emitter = hooks::types::LegacyHookEmitter::new(hook_tx);
             hooks::runner::execute_hook(
                 &HookEvent::PreRemove,
                 pre_remove,
                 &env_ctx,
                 &repo_info.path,
                 worktree_path,
-                db,
-                repo.id,
-                Some(wt.id),
-                hook_tx,
+                &emitter,
             )
             .await
             .map_err(RemoveError::PreRemoveHookFailed)?;
@@ -386,16 +384,14 @@ pub async fn execute_live_resolved_with_hooks(
 
     // Step 3: post_remove hook fires IMMEDIATELY after disk deletion (FR-22)
     let post_remove_warning = if let Some(post_remove) = &hooks.post_remove {
+        let emitter = hooks::types::LegacyHookEmitter::new(hook_tx);
         match hooks::runner::execute_hook(
             &HookEvent::PostRemove,
             post_remove,
             &env_ctx,
             &repo_info.path,
             &repo_info.path, // cwd = repo path (worktree is gone)
-            db,
-            repo.id,
-            Some(wt.id),
-            hook_tx,
+            &emitter,
         )
         .await
         {

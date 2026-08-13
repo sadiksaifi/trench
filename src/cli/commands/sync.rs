@@ -542,16 +542,14 @@ pub async fn execute_with_hooks(
 
     // Step 1: pre_sync hook (cwd = worktree path)
     if let Some(pre_sync) = &hooks.pre_sync {
+        let emitter = hooks::types::LegacyHookEmitter::new(hook_tx);
         hooks::runner::execute_hook(
             &HookEvent::PreSync,
             pre_sync,
             &env_ctx,
             &repo_info.path,
             Path::new(&wt.path),
-            db,
-            repo.id,
-            Some(wt.id),
-            hook_tx,
+            &emitter,
         )
         .await
         .map_err(SyncError::PreSyncHookFailed)?;
@@ -562,16 +560,14 @@ pub async fn execute_with_hooks(
 
     // Step 3: post_sync hook (cwd = worktree path)
     let post_sync_error = if let Some(post_sync) = &hooks.post_sync {
+        let emitter = hooks::types::LegacyHookEmitter::new(hook_tx);
         match hooks::runner::execute_hook(
             &HookEvent::PostSync,
             post_sync,
             &env_ctx,
             &repo_info.path,
             Path::new(&wt.path),
-            db,
-            repo.id,
-            Some(wt.id),
-            hook_tx,
+            &emitter,
         )
         .await
         {
