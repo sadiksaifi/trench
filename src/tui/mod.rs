@@ -2587,6 +2587,9 @@ mod tests {
     #[test]
     fn enter_on_hooks_field_with_branch_triggers_execute() {
         let mut app = app_with_create_state();
+        let blocked_root = tempfile::tempdir().unwrap();
+        app.worktree_root = blocked_root.path().join("not-a-directory");
+        std::fs::write(&app.worktree_root, "block directory creation").unwrap();
         // Type a branch name
         for c in "test-branch".chars() {
             app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
