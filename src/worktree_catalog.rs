@@ -189,3 +189,72 @@ impl WorktreeCatalog {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_repo(path: &Path) -> git2::Repository {
+        let repo = git2::Repository::init(path).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        {
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
+                .unwrap();
+        }
+        repo
+    }
+
+    fn add_worktree(repo: &git2::Repository, name: &str, branch: &str, path: &Path) {
+        let commit = repo.head().unwrap().peel_to_commit().unwrap();
+        let local = repo.branch(branch, &commit, false).unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(local.get()));
+        repo.worktree(name, path, Some(&options)).unwrap();
+    }
+
+    #[test]
+    fn resolve_accepts_exact_identity_branch_and_canonical_path() {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        let linked = root.path().join("feature-auth");
+        std::fs::create_dir(&main).unwrap();
+        let repo = init_repo(&main);
+        add_worktree(&repo, "feature-auth", "feature/auth", &linked);
+
+        let catalog = WorktreeCatalog::discover(&linked).unwrap();
+        let by_identity = catalog.resolve("feature-auth").unwrap();
+        let by_branch = catalog.resolve("feature/auth").unwrap();
+        let canonical = linked.canonicalize().unwrap();
+        let by_path = catalog.resolve(canonical.to_str().unwrap()).unwrap();
+
+        assert_eq!(by_identity.path, canonical);
+        assert_eq!(by_branch.path, canonical);
+        assert_eq!(by_path.path, canonical);
+        assert!(matches!(
+            catalog.resolve("missing"),
+            Err(CatalogError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_worktree_identities_are_ambiguous() {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        let first = root.path().join("one").join("shared");
+        let second = root.path().join("two").join("shared");
+        std::fs::create_dir(&main).unwrap();
+        std::fs::create_dir(first.parent().unwrap()).unwrap();
+        std::fs::create_dir(second.parent().unwrap()).unwrap();
+        let repo = init_repo(&main);
+        add_worktree(&repo, "first", "feature/one", &first);
+        add_worktree(&repo, "second", "feature/two", &second);
+
+        let catalog = WorktreeCatalog::discover(&main).unwrap();
+        assert!(matches!(
+            catalog.resolve("shared"),
+            Err(CatalogError::Ambiguous { .. })
+        ));
+    }
+}

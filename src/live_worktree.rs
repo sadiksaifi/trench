@@ -117,25 +117,20 @@ pub fn list_read_only(
 fn resolve_inner(
     identifier: &str,
     repo_info: &RepoInfo,
-    db: Option<&Database>,
-    purge_stale: bool,
+    _db: Option<&Database>,
+    _purge_stale: bool,
 ) -> Result<LiveWorktree> {
-    let sanitized = paths::sanitize_branch(identifier);
-    for worktree in list_inner(repo_info, db, &[], purge_stale)? {
-        let branch_match = worktree.entry.branch.as_deref() == Some(identifier);
-        let name_match = worktree.entry.name == identifier || worktree.entry.name == sanitized;
-        let sanitized_branch_match = worktree
-            .entry
-            .branch
-            .as_deref()
-            .is_some_and(|branch| paths::sanitize_branch(branch) == sanitized);
-
-        if branch_match || name_match || sanitized_branch_match {
-            return Ok(worktree);
-        }
-    }
-
-    anyhow::bail!("worktree not found: {identifier}")
+    let catalog = crate::worktree_catalog::WorktreeCatalog::discover(&repo_info.path)?;
+    let identity = catalog.resolve(identifier)?;
+    Ok(LiveWorktree {
+        entry: GitWorktreeEntry {
+            name: identity.worktree.clone(),
+            path: identity.path.clone(),
+            branch: identity.branch.clone(),
+            is_main: identity.is_main,
+        },
+        metadata: None,
+    })
 }
 
 pub fn resolve(identifier: &str, repo_info: &RepoInfo, db: &Database) -> Result<LiveWorktree> {
