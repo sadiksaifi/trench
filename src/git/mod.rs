@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 pub mod create;
 pub mod status;
+pub mod sync;
 pub mod worktrees;
 
 /// Information about a discovered git repository.
