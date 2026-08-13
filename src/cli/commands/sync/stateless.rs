@@ -393,23 +393,7 @@ pub async fn execute(
     emitter: &dyn SyncEmitter,
 ) -> Result<SyncOutcome, SyncFailure> {
     let started = Instant::now();
-    stage(emitter, SyncStage::Validate, || {
-        let planner =
-            SyncPlanner::discover(&plan.repo_path, None).map_err(|error| error.to_string())?;
-        let live = planner
-            .plan(
-                &plan.path.to_string_lossy(),
-                Some(&plan.base),
-                plan.strategy,
-                plan.hook_policy,
-            )
-            .map_err(|error| error.to_string())?;
-        if live != plan {
-            return Err("sync plan no longer matches live Git state".to_string());
-        }
-        Ok(())
-    })
-    .map_err(|message| {
+    stage(emitter, SyncStage::Validate, || revalidate(&plan)).map_err(|message| {
         failure(
             started,
             SyncStage::Validate,
@@ -442,6 +426,19 @@ pub async fn execute(
             })?;
         }
     }
+
+    // Hooks are allowed to invoke arbitrary Git commands. Freeze the same
+    // plan again at the last boundary before mutation so a hook cannot move
+    // the target or base ref underneath the displayed operation.
+    stage(emitter, SyncStage::Validate, || revalidate(&plan)).map_err(|message| {
+        failure(
+            started,
+            SyncStage::Validate,
+            MutationState::NotStarted,
+            SyncErrorClass::PreconditionsChanged,
+            message,
+        )
+    })?;
 
     let transaction = git::sync::TransactionPlan {
         worktree_path: plan.path.clone(),
@@ -554,6 +551,24 @@ pub async fn execute(
         mutation_state: MutationState::Applied,
         elapsed: started.elapsed(),
     })
+}
+
+fn revalidate(plan: &SyncPlan) -> Result<(), String> {
+    let planner =
+        SyncPlanner::discover(&plan.repo_path, None).map_err(|error| error.to_string())?;
+    let live = planner
+        .plan(
+            &plan.path.to_string_lossy(),
+            Some(&plan.base),
+            plan.strategy,
+            plan.hook_policy,
+        )
+        .map_err(|error| error.to_string())?;
+    if live == *plan {
+        Ok(())
+    } else {
+        Err("sync plan no longer matches live Git state".to_string())
+    }
 }
 
 fn stage<T>(
@@ -1129,6 +1144,43 @@ mod tests {
         let repo = git2::Repository::open(&feature).unwrap();
         assert_eq!(failure.stage, SyncStage::PreHook);
         assert_eq!(failure.class, SyncErrorClass::Hook);
+        assert_eq!(failure.mutation_state, MutationState::NotStarted);
+        assert_eq!(repo.head().unwrap().target(), Some(head_before));
+        assert!(!feature.join("main-only").exists());
+    }
+
+    #[tokio::test]
+    async fn pre_sync_ref_change_is_revalidated_before_git_mutation() {
+        let (_root, feature) = divergent_worktree();
+        let repo = git2::Repository::open(&feature).unwrap();
+        let head_before = repo.head().unwrap().target().unwrap();
+        let plan = SyncPlanner::discover(&feature, None)
+            .unwrap()
+            .plan(
+                "feature/topic",
+                Some("main"),
+                SyncStrategy::Rebase,
+                HookPolicy::Run,
+            )
+            .unwrap();
+        let hooks = crate::config::HooksConfig {
+            pre_sync: Some(crate::config::HookDef {
+                run: Some(vec![
+                    "git -C \"$TRENCH_REPO_PATH\" commit --allow-empty -m hook-moved-base"
+                        .to_string(),
+                ]),
+                ..crate::config::HookDef::default()
+            }),
+            ..crate::config::HooksConfig::default()
+        };
+
+        let failure = execute(plan, Some(&hooks), &NoopSyncEmitter)
+            .await
+            .unwrap_err();
+
+        let repo = git2::Repository::open(&feature).unwrap();
+        assert_eq!(failure.stage, SyncStage::Validate);
+        assert_eq!(failure.class, SyncErrorClass::PreconditionsChanged);
         assert_eq!(failure.mutation_state, MutationState::NotStarted);
         assert_eq!(repo.head().unwrap().target(), Some(head_before));
         assert!(!feature.join("main-only").exists());
