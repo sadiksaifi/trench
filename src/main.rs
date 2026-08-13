@@ -14,6 +14,7 @@ mod state;
 mod tmux;
 mod tui;
 mod worktree_catalog;
+mod worktree_policy;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
