@@ -111,7 +111,10 @@ fn unknown_global_key_exits_with_config_error_and_exact_diagnostic() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert_eq!(output.status.code(), Some(6), "stderr: {stderr}");
-    assert!(stderr.contains(&global_path.display().to_string()), "{stderr}");
+    assert!(
+        stderr.contains(&global_path.display().to_string()),
+        "{stderr}"
+    );
     assert!(stderr.contains("auto_prune"), "{stderr}");
 }
 

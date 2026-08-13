@@ -246,11 +246,10 @@ pub fn resolve_config(
         editor_command,
         worktrees: ResolvedWorktreesConfig {
             root: PathBuf::from(paths::expand_tilde(
-                &cli
-                    .and_then(|c| c.worktree_root.clone())
-                .or_else(|| p_wt.and_then(|w| w.root.clone()))
-                .or_else(|| g_wt.and_then(|w| w.root.clone()))
-                .unwrap_or_else(|| defaults_wt.root.to_string_lossy().into_owned()),
+                &cli.and_then(|c| c.worktree_root.clone())
+                    .or_else(|| p_wt.and_then(|w| w.root.clone()))
+                    .or_else(|| g_wt.and_then(|w| w.root.clone()))
+                    .unwrap_or_else(|| defaults_wt.root.to_string_lossy().into_owned()),
             )),
         },
         hooks,
@@ -716,7 +715,6 @@ run = ["bun install"]
         assert_eq!(resolved.ui.theme, "nord");
         assert_eq!(resolved.git.default_base.as_deref(), Some("develop"));
         assert_eq!(resolved.worktrees.root, PathBuf::from("/custom/worktrees"));
-
     }
 
     #[test]
@@ -750,7 +748,6 @@ run = ["bun install"]
         assert_eq!(resolved.ui.theme, "nord");
         assert_eq!(resolved.git.default_base.as_deref(), Some("staging"));
         assert_eq!(resolved.worktrees.root, PathBuf::from("/project/worktrees"));
-
     }
 
     #[test]
@@ -962,10 +959,7 @@ shell = "echo global-cleanup"
         assert_eq!(resolved.ui.theme, "solarized");
 
         // Project worktrees override global
-        assert_eq!(
-            resolved.worktrees.root,
-            PathBuf::from("/project/worktrees")
-        );
+        assert_eq!(resolved.worktrees.root, PathBuf::from("/project/worktrees"));
 
         // Project hooks REPLACE global hooks entirely (FR-2)
         let hooks = resolved.hooks.expect("hooks should be present");
@@ -1113,5 +1107,4 @@ command = "code"
         let resolved = resolve_config(None, None, &GlobalConfig::default());
         assert!(resolved.editor_command.is_none());
     }
-
 }

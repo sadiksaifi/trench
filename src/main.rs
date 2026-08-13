@@ -258,10 +258,7 @@ fn main() -> anyhow::Result<()> {
             delete_branch,
             no_hooks,
         }) => run_remove(&branch, force, delete_branch, no_hooks, dry_run, json),
-        Some(Commands::Switch {
-            branch,
-            print_path,
-        }) => run_switch(&branch, print_path),
+        Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
@@ -1773,10 +1770,7 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "switch", "my-feature"])
             .expect("switch with branch should succeed");
         match cli.command {
-            Some(Commands::Switch {
-                branch,
-                print_path,
-            }) => {
+            Some(Commands::Switch { branch, print_path }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(!print_path);
             }
@@ -1789,10 +1783,7 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "switch", "my-feature", "--print-path"])
             .expect("switch with --print-path should succeed");
         match cli.command {
-            Some(Commands::Switch {
-                branch,
-                print_path,
-            }) => {
+            Some(Commands::Switch { branch, print_path }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(print_path);
             }
