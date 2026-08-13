@@ -11,7 +11,6 @@ use crate::{
 };
 
 pub const WARNING_DURATION: Duration = Duration::from_secs(3);
-const FETCH_WATCHER_SUPPRESSION: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshCause {
@@ -61,7 +60,12 @@ pub struct ImmediateSnapshot {
 
 impl ImmediateSnapshot {
     fn base(&self) -> Option<String> {
-        self.refs.default_base(self.configured_base.as_deref()).ok()
+        self.refs
+            .default_base(self.configured_base.as_deref())
+            .ok()
+            .or_else(|| self.configured_base.clone())
+            .or_else(|| self.refs.origin_head.clone())
+            .or_else(|| self.refs.main_branch.clone())
     }
 }
 
@@ -325,7 +329,6 @@ pub struct RefreshCoordinator {
     active_fetch: Option<TaskToken>,
     queued_tasks: VecDeque<RefreshTask>,
     warning: Option<Warning>,
-    suppress_watcher_until: Option<Instant>,
 }
 
 impl RefreshCoordinator {
@@ -348,16 +351,7 @@ impl RefreshCoordinator {
         self.publication(clock.now())
     }
 
-    pub fn request(&mut self, cause: RefreshCause, snapshot: ImmediateSnapshot, now: Instant) {
-        if cause == RefreshCause::Watcher
-            && (self.active_fetch.is_some()
-                || self
-                    .suppress_watcher_until
-                    .is_some_and(|deadline| now <= deadline))
-        {
-            return;
-        }
-
+    pub fn request(&mut self, cause: RefreshCause, snapshot: ImmediateSnapshot, _now: Instant) {
         let changed = self.publish_immediate(snapshot.clone());
         let fetch_already_covers_request = cause.fetches_origin() && self.active_fetch.is_some();
 
@@ -552,7 +546,6 @@ impl RefreshCoordinator {
                 if let Some(snapshot) = self.snapshot.as_mut() {
                     snapshot.refs = refs;
                 }
-                self.suppress_watcher_until = Some(now + FETCH_WATCHER_SUPPRESSION);
                 if let Some(snapshot) = self.snapshot.clone() {
                     match self.active_local {
                         Some(_) => self.queue_pending(RunCause::RefsUpdated, snapshot),
@@ -939,13 +932,16 @@ mod tests {
     }
 
     #[test]
-    fn watcher_storms_during_and_just_after_fetch_do_not_schedule_work() {
+    fn watcher_storms_during_and_after_fetch_coalesce_without_losing_local_changes() {
         let now = Instant::now();
         let alpha = identity("/worktrees/alpha", "alpha");
-        let immediate = snapshot(vec![alpha], true);
+        let beta = identity("/worktrees/beta", "beta");
+        let immediate = snapshot(vec![alpha.clone()], true);
+        let changed = snapshot(vec![alpha, beta.clone()], true);
         let mut coordinator = RefreshCoordinator::default();
         coordinator.request(RefreshCause::Launch, immediate.clone(), now);
         let tasks = coordinator.drain_tasks();
+        let (active_row_token, active_row_id) = row_task(&tasks, 0);
         let fetch_token = tasks
             .iter()
             .find_map(|task| match task {
@@ -953,12 +949,11 @@ mod tests {
                 RefreshTask::Row { .. } => None,
             })
             .unwrap();
-        let generation = coordinator.generation();
-
         for _ in 0..10 {
-            coordinator.request(RefreshCause::Watcher, immediate.clone(), now);
+            coordinator.request(RefreshCause::Watcher, changed.clone(), now);
         }
-        assert_eq!(coordinator.generation(), generation);
+        let watcher_generation = coordinator.generation();
+        assert_eq!(coordinator.publication(now).identities, changed.identities);
         assert!(coordinator.drain_tasks().is_empty());
 
         coordinator.complete(
@@ -968,13 +963,50 @@ mod tests {
             },
             now,
         );
-        let after_fetch_generation = coordinator.generation();
         coordinator.request(
             RefreshCause::Watcher,
-            immediate,
+            changed,
             now + Duration::from_millis(200),
         );
-        assert_eq!(coordinator.generation(), after_fetch_generation);
+        assert_eq!(coordinator.generation(), watcher_generation + 1);
+
+        coordinator.complete(
+            RefreshCompletion::Row {
+                token: active_row_token,
+                id: active_row_id,
+                result: Err(RefreshTaskFailure),
+            },
+            now,
+        );
+        let replacement = coordinator.drain_tasks();
+        assert_eq!(
+            replacement
+                .iter()
+                .filter(|task| matches!(task, RefreshTask::Row { .. }))
+                .count(),
+            2
+        );
+        assert!(replacement.iter().any(|task| matches!(
+            task,
+            RefreshTask::Row { identity, .. } if identity.id == beta.id
+        )));
+    }
+
+    #[test]
+    fn invalid_configured_base_never_silently_falls_back_to_detected_base() {
+        let now = Instant::now();
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let mut immediate = snapshot(vec![alpha], false);
+        immediate.configured_base = Some("missing-release-base".to_string());
+        let mut coordinator = RefreshCoordinator::default();
+
+        coordinator.request(RefreshCause::Launch, immediate, now);
+
+        let tasks = coordinator.drain_tasks();
+        assert!(tasks.iter().any(|task| matches!(
+            task,
+            RefreshTask::Row { base, .. } if base.as_deref() == Some("missing-release-base")
+        )));
     }
 
     #[test]
