@@ -37,6 +37,7 @@ pub enum Operation {
     Sync,
     Remove,
     Tui,
+    Watch,
 }
 
 impl Operation {
@@ -49,6 +50,7 @@ impl Operation {
             Self::Sync => "sync",
             Self::Remove => "remove",
             Self::Tui => "tui",
+            Self::Watch => "watch",
         }
     }
 }
@@ -61,6 +63,9 @@ pub enum Stage {
     Git,
     Render,
     Complete,
+    Initialize,
+    Register,
+    Observe,
 }
 
 impl Stage {
@@ -72,6 +77,9 @@ impl Stage {
             Self::Git => "git",
             Self::Render => "render",
             Self::Complete => "complete",
+            Self::Initialize => "initialize",
+            Self::Register => "register",
+            Self::Observe => "observe",
         }
     }
 }
@@ -308,6 +316,13 @@ pub fn record(event: DiagnosticEvent) {
     if let Some(diagnostics) = DIAGNOSTICS.get() {
         diagnostics.record(event);
     }
+}
+
+#[cfg(test)]
+pub fn init_at_path_for_test(path: &Path) {
+    let diagnostics = Diagnostics::at_path(path, DiagnosticFilter::default());
+    diagnostics.prepare();
+    let _ = DIAGNOSTICS.set(diagnostics);
 }
 
 #[cfg(test)]

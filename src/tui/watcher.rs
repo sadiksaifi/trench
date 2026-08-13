@@ -41,8 +41,13 @@ fn handle_watch_event(res: notify::Result<Event>, tx: &mpsc::Sender<()>) {
         Ok(_) => {
             let _ = tx.send(());
         }
-        Err(err) => {
-            tracing::warn!("file watch error: {err}");
+        Err(_) => {
+            crate::logging::record(crate::logging::DiagnosticEvent::warning(
+                crate::logging::Operation::Watch,
+                crate::logging::Stage::Observe,
+                Duration::ZERO,
+                crate::logging::DiagnosticError::Io,
+            ));
         }
     }
 }
@@ -65,10 +70,13 @@ impl FileWatcher {
     pub fn new(paths: &[&Path]) -> Result<Self> {
         match Self::new_with_backend(paths, WatchBackend::Recommended) {
             Ok(watcher) => Ok(watcher),
-            Err(native_err) => {
-                tracing::warn!(
-                    "native watcher unavailable, falling back to polling: {native_err:#}"
-                );
+            Err(_) => {
+                crate::logging::record(crate::logging::DiagnosticEvent::warning(
+                    crate::logging::Operation::Watch,
+                    crate::logging::Stage::Initialize,
+                    Duration::ZERO,
+                    crate::logging::DiagnosticError::Io,
+                ));
                 Self::new_with_backend(
                     paths,
                     WatchBackend::Poll {
@@ -101,13 +109,23 @@ impl FileWatcher {
             if path.exists() {
                 match watcher.watch(path, notify::RecursiveMode::Recursive) {
                     Ok(()) => watched += 1,
-                    Err(err) => {
-                        tracing::warn!(path = %path.display(), "failed to watch path: {err}");
+                    Err(_) => {
+                        crate::logging::record(crate::logging::DiagnosticEvent::warning(
+                            crate::logging::Operation::Watch,
+                            crate::logging::Stage::Register,
+                            Duration::ZERO,
+                            crate::logging::DiagnosticError::Io,
+                        ));
                         watch_errors += 1;
                     }
                 }
             } else {
-                tracing::warn!(path = %path.display(), "path does not exist, skipping");
+                crate::logging::record(crate::logging::DiagnosticEvent::warning(
+                    crate::logging::Operation::Watch,
+                    crate::logging::Stage::Register,
+                    Duration::ZERO,
+                    crate::logging::DiagnosticError::NotFound,
+                ));
             }
         }
 
@@ -312,45 +330,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::fs;
-    use std::io;
-    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
-
-    #[derive(Clone, Default)]
-    struct SharedLogBuffer {
-        inner: Arc<Mutex<Vec<u8>>>,
-    }
-
-    struct SharedLogWriter {
-        inner: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogBuffer {
-        type Writer = SharedLogWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedLogWriter {
-                inner: Arc::clone(&self.inner),
-            }
-        }
-    }
-
-    impl io::Write for SharedLogWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.inner.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl SharedLogBuffer {
-        fn contents(&self) -> String {
-            String::from_utf8(self.inner.lock().unwrap().clone()).unwrap()
-        }
-    }
 
     fn wait_until(timeout: Duration, step: Duration, mut predicate: impl FnMut() -> bool) -> bool {
         let start = Instant::now();
@@ -685,53 +665,29 @@ mod tests {
 
     #[test]
     #[serial]
-    fn new_logs_warning_for_nonexistent_paths() {
-        let log_buffer = SharedLogBuffer::default();
-
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(log_buffer.clone())
-            .with_ansi(false)
-            .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
-            .finish();
-
+    fn production_watcher_diagnostics_exclude_path_and_error_details() {
+        let state = TempDir::new().unwrap();
+        let log_path = state.path().join("trench.log");
+        crate::logging::init_at_path_for_test(&log_path);
         let good_dir = TempDir::new().unwrap();
-        let bad_path = std::path::PathBuf::from("/nonexistent/path/that/does/not/exist");
+        let path_canary = "credential-path-canary";
+        let bad_path = state.path().join(path_canary);
 
-        tracing::subscriber::with_default(subscriber, || {
-            let _watcher = FileWatcher::new(&[good_dir.path(), bad_path.as_path()]).unwrap();
-        });
-
-        let contents = log_buffer.contents();
-
-        assert!(
-            contents.contains("path does not exist, skipping"),
-            "should log warning for nonexistent paths: got {contents:?}"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn handle_watch_event_logs_notify_errors() {
-        let log_buffer = SharedLogBuffer::default();
-
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(log_buffer.clone())
-            .with_ansi(false)
-            .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
-            .finish();
-
+        let _watcher =
+            FileWatcher::with_polling(&[good_dir.path(), bad_path.as_path()], TEST_POLL_INTERVAL)
+                .unwrap();
         let (tx, _rx) = mpsc::channel();
-        let err = notify::Error::generic("synthetic test error");
+        let error_canary = "token-error-canary";
+        handle_watch_event(Err(notify::Error::generic(error_canary)), &tx);
 
-        tracing::subscriber::with_default(subscriber, || {
-            handle_watch_event(Err(err), &tx);
-        });
+        let contents = std::fs::read_to_string(log_path).unwrap();
 
-        let contents = log_buffer.contents();
-
+        assert!(contents
+            .contains("level=warn operation=watch stage=register duration_ms=0 error=not_found"));
         assert!(
-            contents.contains("synthetic test error"),
-            "notify errors should be logged: got {contents:?}"
+            contents.contains("level=warn operation=watch stage=observe duration_ms=0 error=io")
         );
+        assert!(!contents.contains(path_canary));
+        assert!(!contents.contains(error_canary));
     }
 }
