@@ -1,7 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::tui::keymap::{self, Action, Context, Key};
+use crate::{
+    ref_catalog::RefSnapshot,
+    tui::{
+        keymap::{self, Action, Context, Key},
+        refresh::RefreshPublication,
+    },
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WorktreeId(PathBuf);
@@ -45,6 +51,8 @@ pub enum Event {
         id: WorktreeId,
         status: WorktreeStatus,
     },
+    RefreshPublished(RefreshPublication),
+    RefreshTick,
     Select(WorktreeId),
     Input(Key),
     ViewportChanged {
@@ -70,10 +78,20 @@ pub enum Effect {
 pub struct AppState {
     pub identities: Vec<WorktreeIdentity>,
     pub statuses: BTreeMap<WorktreeId, WorktreeStatus>,
+    pub refs: Option<RefSnapshot>,
+    pub refresh: RefreshActivity,
     pub selected: Option<WorktreeId>,
     pub viewport: Viewport,
     pub inspector_override: Option<bool>,
     pub help_open: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RefreshActivity {
+    pub waiting_rows: BTreeSet<WorktreeId>,
+    pub updating_refs: bool,
+    pub warning: Option<String>,
+    pub spinner_tick: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +120,8 @@ impl AppState {
         Self {
             identities,
             statuses: BTreeMap::new(),
+            refs: None,
+            refresh: RefreshActivity::default(),
             selected,
             viewport: Viewport {
                 width: Viewport::MIN_WIDTH,
@@ -129,6 +149,10 @@ impl AppState {
         self.inspector_override
             .unwrap_or_else(|| self.viewport.is_wide())
     }
+
+    pub fn row_is_waiting(&self, id: &WorktreeId) -> bool {
+        self.refresh.waiting_rows.contains(id)
+    }
 }
 
 pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
@@ -147,6 +171,29 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         Event::StatusLoaded { id, status } => {
             if state.identities.iter().any(|row| row.id == id) {
                 state.statuses.insert(id, status);
+            }
+        }
+        Event::RefreshPublished(publication) => {
+            state.selected = state
+                .selected
+                .take()
+                .filter(|selected| publication.identities.iter().any(|row| &row.id == selected))
+                .or_else(|| {
+                    publication
+                        .identities
+                        .first()
+                        .map(|identity| identity.id.clone())
+                });
+            state.identities = publication.identities;
+            state.statuses = publication.statuses;
+            state.refs = publication.refs;
+            state.refresh.waiting_rows = publication.waiting_rows;
+            state.refresh.updating_refs = publication.updating_refs;
+            state.refresh.warning = publication.warning;
+        }
+        Event::RefreshTick => {
+            if state.refresh.updating_refs || !state.refresh.waiting_rows.is_empty() {
+                state.refresh.spinner_tick = state.refresh.spinner_tick.wrapping_add(1);
             }
         }
         Event::Select(id) if state.identities.iter().any(|row| row.id == id) => {
@@ -430,5 +477,77 @@ mod tests {
         );
         let _ = reduce(&mut state, Event::Input(Key::Char('?')));
         assert!(state.help_open);
+    }
+
+    #[test]
+    fn refresh_publication_preserves_selection_and_stale_values_while_waiting() {
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let beta = identity("/worktrees/beta", "beta");
+        let mut state = AppState::new(vec![alpha.clone(), beta.clone()]);
+        let _ = reduce(&mut state, Event::Select(beta.id.clone()));
+        let stale = WorktreeStatus {
+            modified: 2,
+            ..WorktreeStatus::default()
+        };
+
+        let _ = reduce(
+            &mut state,
+            Event::RefreshPublished(RefreshPublication {
+                identities: vec![alpha, beta.clone()],
+                refs: Some(RefSnapshot {
+                    local: vec!["main".to_string()],
+                    origin: Vec::new(),
+                    origin_head: None,
+                    main_branch: Some("main".to_string()),
+                    has_origin: false,
+                }),
+                statuses: BTreeMap::from([(beta.id.clone(), stale.clone())]),
+                waiting_rows: BTreeSet::from([beta.id.clone()]),
+                updating_refs: true,
+                warning: None,
+            }),
+        );
+
+        assert_eq!(state.selected, Some(beta.id.clone()));
+        assert_eq!(state.statuses.get(&beta.id), Some(&stale));
+        assert!(state.row_is_waiting(&beta.id));
+        assert_eq!(state.refs.as_ref().unwrap().local, ["main"]);
+    }
+
+    #[test]
+    fn spinner_ticks_only_while_refresh_activity_is_waiting() {
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let id = alpha.id.clone();
+        let mut state = AppState::new(vec![alpha.clone()]);
+        let _ = reduce(&mut state, Event::RefreshTick);
+        assert_eq!(state.refresh.spinner_tick, 0);
+
+        let _ = reduce(
+            &mut state,
+            Event::RefreshPublished(RefreshPublication {
+                identities: vec![alpha.clone()],
+                refs: None,
+                statuses: BTreeMap::new(),
+                waiting_rows: BTreeSet::from([id]),
+                updating_refs: false,
+                warning: None,
+            }),
+        );
+        let _ = reduce(&mut state, Event::RefreshTick);
+        assert_eq!(state.refresh.spinner_tick, 1);
+
+        let _ = reduce(
+            &mut state,
+            Event::RefreshPublished(RefreshPublication {
+                identities: vec![alpha],
+                refs: None,
+                statuses: BTreeMap::new(),
+                waiting_rows: BTreeSet::new(),
+                updating_refs: false,
+                warning: None,
+            }),
+        );
+        let _ = reduce(&mut state, Event::RefreshTick);
+        assert_eq!(state.refresh.spinner_tick, 1);
     }
 }

@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
+use tui_spinner::FluxFrames;
 
 use crate::tui::{
     app::{unavailable_reason, AppState, Viewport, WorktreeIdentity, WorktreeStatus},
@@ -93,8 +94,13 @@ fn render_resize(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
 }
 
 fn render_cockpit(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
-    let [body, keybar] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(model.area);
+    let warning_height = u16::from(model.state.refresh.warning.is_some());
+    let [body, warning, keybar] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(warning_height),
+        Constraint::Length(1),
+    ])
+    .areas(model.area);
     if model.inspector_visible() && model.is_wide() {
         let [list, inspector] =
             Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
@@ -105,6 +111,19 @@ fn render_cockpit(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
         render_inspector(model, frame, body, theme);
     } else {
         render_list(model, frame, body, theme);
+    }
+    if let Some(message) = model.state.refresh.warning.as_deref() {
+        frame.render_widget(
+            Paragraph::new(message).style(
+                theme.with_bg(
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                    theme.bg_elevated,
+                ),
+            ),
+            warning,
+        );
     }
     render_keybar(
         model.state,
@@ -117,7 +136,15 @@ fn render_cockpit(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
 }
 
 fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &Theme) {
-    let title = format!(" Worktrees · {} ", model.state.identities.len());
+    let title = if model.state.refresh.updating_refs {
+        format!(
+            " Worktrees · {} · Updating refs {} ",
+            model.state.identities.len(),
+            flux_frame(model.state.refresh.spinner_tick)
+        )
+    } else {
+        format!(" Worktrees · {} ", model.state.identities.len())
+    };
     let header = Row::new(["Worktree", "Branch", "Git"])
         .style(
             Style::default()
@@ -135,12 +162,7 @@ fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &The
                     .clone()
                     .unwrap_or_else(|| "detached".to_string()),
             ),
-            Cell::from(
-                model
-                    .status_for(identity)
-                    .map(compact_git)
-                    .unwrap_or_else(|| "…".to_string()),
-            ),
+            Cell::from(row_git(model, identity)),
         ])
         .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel))
     });
@@ -173,6 +195,28 @@ fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &The
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
+fn row_git(model: &ViewModel<'_>, identity: &WorktreeIdentity) -> String {
+    let status = model.status_for(identity);
+    if model.state.row_is_waiting(&identity.id) {
+        return match status {
+            Some(status) => format!(
+                "{} {}",
+                flux_frame(model.state.refresh.spinner_tick),
+                compact_git(status)
+            ),
+            None => format!("{} Updating", flux_frame(model.state.refresh.spinner_tick)),
+        };
+    }
+    status.map(compact_git).unwrap_or_else(|| "—".to_string())
+}
+
+fn flux_frame(tick: u64) -> char {
+    let frames = FluxFrames::BRAILLE;
+    let frame_count = u64::try_from(frames.len()).expect("Flux frames fit in u64");
+    let index = usize::try_from(tick % frame_count).expect("Flux frame index fits in usize");
+    frames[index]
+}
+
 fn render_inspector(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &Theme) {
     let block = panel(None, theme);
     let inner = block.inner(area);
@@ -187,8 +231,17 @@ fn render_inspector(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme:
         return;
     };
     let status = model.status_for(identity);
+    let identity_label = if model.state.row_is_waiting(&identity.id) {
+        format!(
+            "{} {}",
+            flux_frame(model.state.refresh.spinner_tick),
+            identity.worktree
+        )
+    } else {
+        identity.worktree.clone()
+    };
     let mut lines = vec![Line::from(Span::styled(
-        identity.worktree.clone(),
+        identity_label,
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
@@ -202,6 +255,15 @@ fn render_inspector(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme:
                     .add_modifier(Modifier::BOLD),
                 theme.accent_soft,
             ),
+        )));
+    }
+    if model.state.refresh.updating_refs {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Updating refs {}",
+                flux_frame(model.state.refresh.spinner_tick)
+            ),
+            Style::default().fg(theme.fg_muted),
         )));
     }
     lines.extend([
@@ -633,5 +695,70 @@ mod tests {
 
         assert!(selected_cells > 0);
         assert_ne!(theme.selection_bg, Color::Reset);
+    }
+
+    #[test]
+    fn stale_row_values_and_ref_activity_remain_visible_during_refresh() {
+        let mut state = sample_state();
+        let id = state.identities[0].id.clone();
+        state.refresh.waiting_rows.insert(id);
+        state.refresh.updating_refs = true;
+        state.refresh.spinner_tick = 2;
+
+        let output = text(&render_buffer(&mut state, 120, 24, "ops"));
+
+        assert!(output.contains("Worktrees · 2 · Updating refs"), "{output}");
+        assert!(output.contains("3 changed · ↑2 ↓1"), "{output}");
+        assert!(output.contains(flux_frame(2)), "{output}");
+    }
+
+    #[test]
+    fn identity_renders_with_inline_flux_motion_before_first_status() {
+        let row = identity(
+            "/worktrees/feature-auth",
+            "feature-auth",
+            Some("feature/auth"),
+            false,
+            true,
+        );
+        let id = row.id.clone();
+        let mut state = AppState::new(vec![row]);
+        state.refresh.waiting_rows.insert(id);
+        state.refresh.spinner_tick = 1;
+
+        let output = text(&render_buffer(&mut state, 80, 20, "ops"));
+
+        assert!(output.contains("feature-auth"), "{output}");
+        assert!(output.contains("Updating"), "{output}");
+        assert!(output.contains(flux_frame(1)), "{output}");
+    }
+
+    #[test]
+    fn completed_rows_stop_spinner_without_blanking_their_values() {
+        let mut state = sample_state();
+        let output = text(&render_buffer(&mut state, 120, 24, "ops"));
+
+        assert!(output.contains("3 changed · ↑2 ↓1"), "{output}");
+        assert!(!output.contains("Updating refs"), "{output}");
+        for glyph in FluxFrames::BRAILLE {
+            assert!(
+                !output.contains(*glyph),
+                "unexpected spinner {glyph}\n{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_failure_warning_uses_one_brief_non_blocking_line() {
+        let mut state = sample_state();
+        state.refresh.warning = Some("Could not update origin; showing local refs".to_string());
+
+        let output = text(&render_buffer(&mut state, 120, 24, "ops"));
+
+        assert!(
+            output.contains("Could not update origin; showing local refs"),
+            "{output}"
+        );
+        assert!(output.contains("3 changed · ↑2 ↓1"), "{output}");
     }
 }
