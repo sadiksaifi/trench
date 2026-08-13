@@ -374,8 +374,9 @@ async fn execute_create(
     emitter.emit(OperationEvent::StageStarted {
         stage: OperationStage::CreateWorktree,
     });
-    let created_parents = match create_parent_directories(&request.plan.path) {
-        Ok(created) => created,
+    let prepared_parent = match prepare_parent_directory(&request.plan.path, &request.worktree_root)
+    {
+        Ok(prepared) => prepared,
         Err(error) => {
             finish_stage(
                 emitter,
@@ -395,7 +396,7 @@ async fn execute_create(
                         operation_started,
                         OperationStage::CreateWorktree,
                         MutationState::RolledBack,
-                        ErrorClass::Io,
+                        error.class,
                         format!("failed to create worktree parent: {}", error.source),
                     ));
                 }
@@ -413,6 +414,37 @@ async fn execute_create(
             }
         }
     };
+
+    // Parent creation can race with refs and filesystem actors. Confirm the
+    // complete frozen plan once more, then prove the path still resolves to
+    // the exact directory handle prepared without following new symlinks.
+    let live_plan = revalidate(&request);
+    let path_verification = prepared_parent.verify(&request.plan.path);
+    let plan_matches = live_plan.as_ref().is_ok_and(|plan| plan == &request.plan);
+    if !plan_matches || path_verification.is_err() {
+        finish_stage(
+            emitter,
+            OperationStage::CreateWorktree,
+            stage_started,
+            false,
+        );
+        let message = live_plan
+            .err()
+            .or_else(|| path_verification.err().map(|error| error.to_string()))
+            .unwrap_or_else(|| "create plan changed during path preparation".to_string());
+        return Err(rollback_failure(
+            &request.repo_path,
+            emitter,
+            operation_started,
+            &prepared_parent.created,
+            None,
+            FailureCause {
+                stage: OperationStage::CreateWorktree,
+                class: ErrorClass::PreconditionsChanged,
+                message,
+            },
+        ));
+    }
 
     let source_oid = request
         .plan
@@ -460,10 +492,10 @@ async fn execute_create(
                 ErrorClass::Git
             };
             return Err(rollback_failure(
-                &request,
+                &request.repo_path,
                 emitter,
                 operation_started,
-                &created_parents,
+                &prepared_parent.created,
                 None,
                 FailureCause {
                     stage: OperationStage::CreateWorktree,
@@ -502,11 +534,11 @@ async fn execute_create(
                 finish_stage(emitter, OperationStage::PostHook, stage_started, false);
                 let class = classify_hook_error(&error);
                 return Err(rollback_failure(
-                    &request,
+                    &request.repo_path,
                     emitter,
                     operation_started,
-                    &created_parents,
-                    receipt.created_branch.as_deref(),
+                    &prepared_parent.created,
+                    Some(&receipt),
                     FailureCause {
                         stage: OperationStage::PostHook,
                         class,
@@ -547,12 +579,288 @@ fn revalidate(request: &CreateRequest) -> Result<CreatePlan, String> {
 struct ParentCreationFailure {
     source: std::io::Error,
     created: Vec<PathBuf>,
+    class: ErrorClass,
 }
 
-fn create_parent_directories(target: &Path) -> Result<Vec<PathBuf>, ParentCreationFailure> {
-    create_parent_directories_with(target, |directory| std::fs::create_dir(directory))
+struct PreparedParent {
+    parent: PathBuf,
+    created: Vec<PathBuf>,
+    #[cfg(unix)]
+    directory: std::fs::File,
+    #[cfg(unix)]
+    identity: (u64, u64),
 }
 
+impl PreparedParent {
+    fn verify(&self, target: &Path) -> std::io::Result<()> {
+        if std::fs::symlink_metadata(target).is_ok() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "planned worktree path appeared during execution",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let live = std::fs::File::open(&self.parent)?.metadata()?;
+            if (live.dev(), live.ino()) != self.identity {
+                return Err(std::io::Error::other(
+                    "planned worktree parent changed during execution",
+                ));
+            }
+            let held = self.directory.metadata()?;
+            if (held.dev(), held.ino()) != self.identity {
+                return Err(std::io::Error::other(
+                    "prepared worktree parent identity changed",
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        if self.parent.canonicalize()? != self.parent {
+            return Err(std::io::Error::other(
+                "planned worktree parent changed during execution",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn prepare_parent_directory(
+    target: &Path,
+    worktree_root: &Path,
+) -> Result<PreparedParent, ParentCreationFailure> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(parent) = target.parent() else {
+        return Err(ParentCreationFailure {
+            source: std::io::Error::other("planned worktree has no parent"),
+            created: Vec::new(),
+            class: ErrorClass::PreconditionsChanged,
+        });
+    };
+    if !parent.is_absolute() || !worktree_root.is_absolute() || !target.starts_with(worktree_root) {
+        return Err(ParentCreationFailure {
+            source: std::io::Error::other(
+                "planned worktree path must be absolute and contained by its root",
+            ),
+            created: Vec::new(),
+            class: ErrorClass::PreconditionsChanged,
+        });
+    }
+
+    // Resolve only the pre-root prefix so platform aliases such as macOS /var
+    // remain usable. Every configured-root and repository component is then
+    // opened relative to a held directory FD with O_NOFOLLOW.
+    let mut lexical_anchor = worktree_root
+        .parent()
+        .ok_or_else(|| ParentCreationFailure {
+            source: std::io::Error::other("worktree root has no parent"),
+            created: Vec::new(),
+            class: ErrorClass::PreconditionsChanged,
+        })?;
+    while !lexical_anchor.exists() {
+        lexical_anchor = lexical_anchor
+            .parent()
+            .ok_or_else(|| ParentCreationFailure {
+                source: std::io::Error::other("no existing worktree root anchor"),
+                created: Vec::new(),
+                class: ErrorClass::PreconditionsChanged,
+            })?;
+    }
+    let canonical_anchor =
+        lexical_anchor
+            .canonicalize()
+            .map_err(|source| ParentCreationFailure {
+                source,
+                created: Vec::new(),
+                class: ErrorClass::PreconditionsChanged,
+            })?;
+
+    // Walk the canonical anchor from the filesystem root so O_NOFOLLOW still
+    // protects every component against changes after canonicalization.
+    let root = CString::new("/").expect("the root path has no NUL byte");
+    let root_fd = unsafe {
+        libc::open(
+            root.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if root_fd < 0 {
+        return Err(ParentCreationFailure {
+            source: std::io::Error::last_os_error(),
+            created: Vec::new(),
+            class: ErrorClass::Io,
+        });
+    }
+    let mut directory = unsafe { std::fs::File::from_raw_fd(root_fd) };
+    let mut current_path = PathBuf::from("/");
+    let mut created = Vec::new();
+    for component in canonical_anchor.components() {
+        let name = match component {
+            std::path::Component::RootDir => continue,
+            std::path::Component::Normal(name) => name,
+            _ => {
+                return Err(ParentCreationFailure {
+                    source: std::io::Error::other("invalid worktree parent component"),
+                    created,
+                    class: ErrorClass::PreconditionsChanged,
+                });
+            }
+        };
+        let name_c = CString::new(name.as_bytes()).map_err(|_| ParentCreationFailure {
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "worktree path contains a NUL byte",
+            ),
+            created: created.clone(),
+            class: ErrorClass::PreconditionsChanged,
+        })?;
+        current_path.push(name);
+        let next_fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if next_fd < 0 {
+            return Err(ParentCreationFailure {
+                source: std::io::Error::last_os_error(),
+                created,
+                class: ErrorClass::PreconditionsChanged,
+            });
+        }
+        directory = unsafe { std::fs::File::from_raw_fd(next_fd) };
+    }
+    let anchor_metadata =
+        std::fs::metadata(lexical_anchor).map_err(|source| ParentCreationFailure {
+            source,
+            created: created.clone(),
+            class: ErrorClass::PreconditionsChanged,
+        })?;
+    let held_anchor_metadata = directory
+        .metadata()
+        .map_err(|source| ParentCreationFailure {
+            source,
+            created: created.clone(),
+            class: ErrorClass::Io,
+        })?;
+    if (anchor_metadata.dev(), anchor_metadata.ino())
+        != (held_anchor_metadata.dev(), held_anchor_metadata.ino())
+    {
+        return Err(ParentCreationFailure {
+            source: std::io::Error::other("worktree root anchor changed during execution"),
+            created,
+            class: ErrorClass::PreconditionsChanged,
+        });
+    }
+
+    for component in parent
+        .strip_prefix(lexical_anchor)
+        .expect("worktree parent is below its root anchor")
+        .components()
+    {
+        let std::path::Component::Normal(name) = component else {
+            return Err(ParentCreationFailure {
+                source: std::io::Error::other("invalid worktree parent component"),
+                created,
+                class: ErrorClass::PreconditionsChanged,
+            });
+        };
+        let name_c = CString::new(name.as_bytes()).map_err(|_| ParentCreationFailure {
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "worktree path contains a NUL byte",
+            ),
+            created: created.clone(),
+            class: ErrorClass::PreconditionsChanged,
+        })?;
+        current_path.push(name);
+        let mut next_fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if next_fd < 0 {
+            let open_error = std::io::Error::last_os_error();
+            if open_error.kind() != std::io::ErrorKind::NotFound {
+                return Err(ParentCreationFailure {
+                    source: open_error,
+                    created,
+                    class: ErrorClass::PreconditionsChanged,
+                });
+            }
+            let created_here =
+                unsafe { libc::mkdirat(directory.as_raw_fd(), name_c.as_ptr(), 0o755) };
+            if created_here == 0 {
+                created.push(current_path.clone());
+            } else {
+                let create_error = std::io::Error::last_os_error();
+                if create_error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(ParentCreationFailure {
+                        source: create_error,
+                        created,
+                        class: ErrorClass::Io,
+                    });
+                }
+            }
+            next_fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    name_c.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+            if next_fd < 0 {
+                return Err(ParentCreationFailure {
+                    source: std::io::Error::last_os_error(),
+                    created,
+                    class: ErrorClass::PreconditionsChanged,
+                });
+            }
+        }
+        directory = unsafe { std::fs::File::from_raw_fd(next_fd) };
+    }
+    let metadata = directory
+        .metadata()
+        .map_err(|source| ParentCreationFailure {
+            source,
+            created: created.clone(),
+            class: ErrorClass::Io,
+        })?;
+    Ok(PreparedParent {
+        parent: parent.to_path_buf(),
+        created,
+        identity: (metadata.dev(), metadata.ino()),
+        directory,
+    })
+}
+
+#[cfg(not(unix))]
+fn prepare_parent_directory(
+    target: &Path,
+    _worktree_root: &Path,
+) -> Result<PreparedParent, ParentCreationFailure> {
+    let created =
+        create_parent_directories_with(target, |directory| std::fs::create_dir(directory))?;
+    let parent = target.parent().ok_or_else(|| ParentCreationFailure {
+        source: std::io::Error::other("planned worktree has no parent"),
+        created: created.clone(),
+        class: ErrorClass::PreconditionsChanged,
+    })?;
+    Ok(PreparedParent {
+        parent: parent.to_path_buf(),
+        created,
+    })
+}
+
+#[cfg(any(test, not(unix)))]
 fn create_parent_directories_with(
     target: &Path,
     mut create: impl FnMut(&Path) -> std::io::Result<()>,
@@ -572,7 +880,11 @@ fn create_parent_directories_with(
     let mut created = Vec::new();
     for directory in missing.iter().rev() {
         if let Err(source) = create(directory) {
-            return Err(ParentCreationFailure { source, created });
+            return Err(ParentCreationFailure {
+                source,
+                created,
+                class: ErrorClass::Io,
+            });
         }
         created.push(directory.clone());
     }
@@ -597,22 +909,24 @@ struct FailureCause {
 }
 
 fn rollback_failure(
-    request: &CreateRequest,
+    repo_path: &Path,
     emitter: &dyn Emitter,
     operation_started: Instant,
     created_parents: &[PathBuf],
-    created_branch: Option<&str>,
+    receipt: Option<&git::create::CreateReceipt>,
     failure: FailureCause,
 ) -> OperationFailure {
     let rollback_started = Instant::now();
     emitter.emit(OperationEvent::StageStarted {
         stage: OperationStage::Rollback,
     });
-    let git_rollback = git::create::rollback_created_worktree(
-        &request.repo_path,
-        &request.plan.path,
-        created_branch,
-    );
+    let git_rollback = receipt.map_or(Ok(()), |receipt| {
+        git::create::rollback_created_worktree(
+            repo_path,
+            &receipt.worktree_path,
+            receipt.created_branch.as_deref(),
+        )
+    });
     let parent_cleanup = cleanup_empty_directories(created_parents);
     match (git_rollback, parent_cleanup) {
         (Ok(()), Ok(())) => {
@@ -813,6 +1127,36 @@ mod tests {
         events: RecordingEmitter,
     }
 
+    struct ActorWorktreeAtCreateBoundary {
+        repo_path: PathBuf,
+        target: PathBuf,
+        worktree: String,
+        fired: AtomicBool,
+        events: RecordingEmitter,
+    }
+
+    impl Emitter for ActorWorktreeAtCreateBoundary {
+        fn emit(&self, event: OperationEvent) {
+            if matches!(
+                event,
+                OperationEvent::StageStarted {
+                    stage: OperationStage::CreateWorktree
+                }
+            ) && !self.fired.swap(true, Ordering::SeqCst)
+            {
+                std::fs::create_dir_all(self.target.parent().unwrap()).unwrap();
+                let repo = git2::Repository::open(&self.repo_path).unwrap();
+                let head = repo.head().unwrap().peel_to_commit().unwrap();
+                let actor = repo.branch("actor/owned", &head, false).unwrap();
+                let mut options = git2::WorktreeAddOptions::new();
+                options.reference(Some(actor.get()));
+                repo.worktree(&self.worktree, &self.target, Some(&options))
+                    .unwrap();
+            }
+            self.events.emit(event);
+        }
+    }
+
     impl Emitter for BranchRaceAtGitBoundary {
         fn emit(&self, event: OperationEvent) {
             if matches!(
@@ -837,6 +1181,31 @@ mod tests {
         link: PathBuf,
         outside: PathBuf,
         events: RecordingEmitter,
+    }
+
+    #[cfg(unix)]
+    struct SymlinkRaceAtCreateBoundary {
+        link: PathBuf,
+        outside: PathBuf,
+        fired: AtomicBool,
+        events: RecordingEmitter,
+    }
+
+    #[cfg(unix)]
+    impl Emitter for SymlinkRaceAtCreateBoundary {
+        fn emit(&self, event: OperationEvent) {
+            if matches!(
+                event,
+                OperationEvent::StageStarted {
+                    stage: OperationStage::CreateWorktree
+                }
+            ) && !self.fired.swap(true, Ordering::SeqCst)
+            {
+                std::fs::create_dir_all(self.link.parent().unwrap()).unwrap();
+                std::os::unix::fs::symlink(&self.outside, &self.link).unwrap();
+            }
+            self.events.emit(event);
+        }
     }
 
     #[cfg(unix)]
@@ -990,7 +1359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_failure_is_structured_and_never_recursively_removes_a_collision() {
+    async fn collision_without_a_receipt_is_preserved_without_git_rollback() {
         let repo_dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let worktree_root = outside.path().join("worktrees");
@@ -1018,13 +1387,54 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(error.stage, OperationStage::Rollback);
-        assert_eq!(error.mutation_state, MutationState::PartiallyApplied);
-        assert_eq!(error.class, ErrorClass::Cleanup);
+        assert_eq!(error.stage, OperationStage::CreateWorktree);
+        assert_eq!(error.mutation_state, MutationState::RolledBack);
+        assert_eq!(error.class, ErrorClass::PreconditionsChanged);
         assert_eq!(
             std::fs::read_to_string(collision_path.join("foreign-file")).unwrap(),
             "do not remove"
         );
+    }
+
+    #[tokio::test]
+    async fn post_create_cleanup_failure_is_structured_and_preserves_foreign_files() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        init_repo(repo_dir.path());
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("feature/cleanup-failure", None)
+            .unwrap();
+        let worktree_path = plan.path.clone();
+        let foreign_path = worktree_path.parent().unwrap().join("foreign-file");
+
+        let error = execute(
+            OperationRequest::Create(CreateRequest {
+                plan,
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root,
+                hooks: Some(HooksConfig {
+                    post_create: Some(crate::config::HookDef {
+                        shell: Some("touch ../foreign-file; exit 1".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            &RecordingEmitter::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.stage, OperationStage::Rollback);
+        assert_eq!(error.mutation_state, MutationState::PartiallyApplied);
+        assert_eq!(error.class, ErrorClass::Cleanup);
+        assert!(
+            !worktree_path.exists(),
+            "owned worktree must be rolled back"
+        );
+        assert!(foreign_path.exists(), "foreign files must never be removed");
     }
 
     #[test]
@@ -1147,7 +1557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn branch_racing_after_final_revalidation_is_not_owned_or_deleted() {
+    async fn branch_racing_before_parent_preparation_is_not_owned_or_deleted() {
         let repo_dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let worktree_root = outside.path().join("worktrees");
@@ -1176,7 +1586,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(error.class, ErrorClass::Git);
+        assert_eq!(error.class, ErrorClass::PreconditionsChanged);
         assert!(repo.find_branch(branch, git2::BranchType::Local).is_ok());
     }
 
@@ -1277,5 +1687,80 @@ mod tests {
 
         assert_eq!(error.class, ErrorClass::PreconditionsChanged);
         assert!(!escape.path().join("feature-symlink-race").exists());
+    }
+
+    #[tokio::test]
+    async fn create_failure_without_receipt_never_removes_an_actor_worktree() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        let repo = init_repo(repo_dir.path());
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("feature/actor-race", None)
+            .unwrap();
+        let emitter = ActorWorktreeAtCreateBoundary {
+            repo_path: repo_dir.path().to_path_buf(),
+            target: plan.path.clone(),
+            worktree: plan.worktree.clone(),
+            fired: AtomicBool::new(false),
+            events: RecordingEmitter::default(),
+        };
+
+        let error = execute(
+            OperationRequest::Create(CreateRequest {
+                plan: plan.clone(),
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root,
+                hooks: None,
+            }),
+            &emitter,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.mutation_state, MutationState::RolledBack);
+        assert!(plan.path.is_dir(), "actor worktree was removed");
+        let actor = repo
+            .find_branch("actor/owned", git2::BranchType::Local)
+            .unwrap();
+        assert!(actor.is_head() || actor.get().target().is_some());
+        assert!(repo.find_worktree(&plan.worktree).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_inserted_after_final_validation_cannot_escape_parent_preparation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let escape = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        init_repo(repo_dir.path());
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("feature/late-symlink-race", None)
+            .unwrap();
+        let repository_name = repo_dir.path().file_name().unwrap();
+        let emitter = SymlinkRaceAtCreateBoundary {
+            link: worktree_root.join(repository_name),
+            outside: escape.path().to_path_buf(),
+            fired: AtomicBool::new(false),
+            events: RecordingEmitter::default(),
+        };
+
+        let error = execute(
+            OperationRequest::Create(CreateRequest {
+                plan,
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root,
+                hooks: None,
+            }),
+            &emitter,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.class, ErrorClass::PreconditionsChanged);
+        assert!(!escape.path().join("feature-late-symlink-race").exists());
     }
 }

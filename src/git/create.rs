@@ -1,10 +1,12 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::GitError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateReceipt {
+    /// The exact worktree path created by this successful call.
+    pub worktree_path: PathBuf,
     /// Present only when this successful call itself created the branch.
     pub created_branch: Option<String>,
 }
@@ -47,6 +49,7 @@ pub fn add_new_branch(
     }
 
     Ok(CreateReceipt {
+        worktree_path: target_path.to_path_buf(),
         created_branch: Some(branch.to_string()),
     })
 }
@@ -78,6 +81,7 @@ pub fn add_existing_local(
     options.reference(Some(local.get()));
     repo.worktree(worktree, target_path, Some(&options))?;
     Ok(CreateReceipt {
+        worktree_path: target_path.to_path_buf(),
         created_branch: None,
     })
 }
@@ -131,6 +135,7 @@ pub fn add_tracking_branch(
         return Err(error.into());
     }
     Ok(CreateReceipt {
+        worktree_path: target_path.to_path_buf(),
         created_branch: Some(branch.to_string()),
     })
 }
