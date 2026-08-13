@@ -3,6 +3,7 @@ pub mod chrome;
 pub mod cockpit;
 pub mod keymap;
 pub mod refresh;
+pub mod refresh_runtime;
 pub mod runtime;
 pub mod screens;
 pub mod theme;
