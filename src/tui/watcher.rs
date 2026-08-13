@@ -5,8 +5,10 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use notify::{Config, Event, PollWatcher, RecommendedWatcher, Watcher};
 
-/// Default debounce window: 500ms of quiet before triggering a refresh.
-pub const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+use crate::tui::refresh::RefreshCause;
+
+/// Fixed trailing debounce window before emitting one local-only watcher cause.
+pub const DEBOUNCE_DURATION: Duration = Duration::from_millis(150);
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(test)]
 const TEST_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -176,7 +178,7 @@ impl FileWatcher {
 
 /// Wraps a `FileWatcher` with trailing-edge debounce logic.
 ///
-/// After the first filesystem event, waits until `DEBOUNCE_DURATION` (500ms)
+/// After the first filesystem event, waits until `DEBOUNCE_DURATION` (150ms)
 /// passes with no new events before signaling that a refresh is needed.
 /// This prevents excessive refreshes during rapid file changes (e.g. `git fetch`).
 #[derive(Debug)]
@@ -210,6 +212,10 @@ impl DebounceState {
 
     fn take_refresh(&mut self) -> bool {
         std::mem::take(&mut self.pending_refresh)
+    }
+
+    fn take_cause(&mut self) -> Option<RefreshCause> {
+        self.take_refresh().then_some(RefreshCause::Watcher)
     }
 
     #[cfg(test)]
@@ -291,8 +297,16 @@ impl DebouncedWatcher {
     /// detected events. Clears the pending state so subsequent calls
     /// return `false` until new events arrive.
     pub fn should_refresh(&mut self) -> bool {
+        self.refresh_cause().is_some()
+    }
+
+    /// Consume one settled filesystem burst as a local-only refresh cause.
+    ///
+    /// The watcher deliberately carries no network policy. The refresh
+    /// coordinator decides what each cause is allowed to schedule.
+    pub fn refresh_cause(&mut self) -> Option<RefreshCause> {
         self.poll_events();
-        self.state.take_refresh()
+        self.state.take_cause()
     }
 }
 
@@ -419,6 +433,20 @@ mod tests {
         let start = Instant::now();
         state.poll_at(start + Duration::from_millis(250));
         assert!(!state.take_refresh(), "should not refresh without events");
+    }
+
+    #[test]
+    fn watcher_uses_a_fixed_150ms_trailing_edge_and_emits_only_watcher_cause() {
+        assert_eq!(DEBOUNCE_DURATION, Duration::from_millis(150));
+        let mut state = DebounceState::new(DEBOUNCE_DURATION);
+        let start = Instant::now();
+        state.record_event(start);
+        state.poll_at(start + Duration::from_millis(149));
+        assert_eq!(state.take_cause(), None);
+
+        state.poll_at(start + Duration::from_millis(150));
+        assert_eq!(state.take_cause(), Some(RefreshCause::Watcher));
+        assert_eq!(state.take_cause(), None);
     }
 
     #[test]
