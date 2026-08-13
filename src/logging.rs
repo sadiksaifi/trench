@@ -20,6 +20,15 @@ pub enum DiagnosticFilter {
     Warn,
 }
 
+impl DiagnosticFilter {
+    fn from_env_value(value: Option<&str>) -> Self {
+        match value {
+            Some(value) if value.eq_ignore_ascii_case("debug") => Self::Debug,
+            _ => Self::Warn,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Operation {
     List,
@@ -274,6 +283,24 @@ mod tests {
         let contents = std::fs::read_to_string(log_path).unwrap();
         assert!(!contents.contains("duration_ms=7"));
         assert!(contents.contains("level=warn operation=list stage=git duration_ms=11 error=io"));
+    }
+
+    #[test]
+    fn trench_log_debug_enables_diagnostic_detail() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        let diagnostics =
+            Diagnostics::at_path(&log_path, DiagnosticFilter::from_env_value(Some("debug")));
+
+        diagnostics.record(DiagnosticEvent::debug(
+            Operation::Create,
+            Stage::Validate,
+            std::time::Duration::from_millis(3),
+        ));
+
+        let contents = std::fs::read_to_string(log_path).unwrap();
+        assert!(contents
+            .contains("level=debug operation=create stage=validate duration_ms=3 error=none"));
     }
 
     #[test]
