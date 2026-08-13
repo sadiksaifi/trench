@@ -1,6 +1,8 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tracing_subscriber::EnvFilter;
@@ -10,6 +12,184 @@ use crate::paths;
 const DEFAULT_FILTER: &str = "warn";
 
 const ENV_FILTER_VAR: &str = "TRENCH_LOG";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DiagnosticFilter {
+    Debug,
+    #[default]
+    Warn,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Operation {
+    List,
+    Create,
+    Switch,
+    Open,
+    Sync,
+    Remove,
+    Tui,
+}
+
+impl Operation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Create => "create",
+            Self::Switch => "switch",
+            Self::Open => "open",
+            Self::Sync => "sync",
+            Self::Remove => "remove",
+            Self::Tui => "tui",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stage {
+    Resolve,
+    Validate,
+    Hook,
+    Git,
+    Render,
+    Complete,
+}
+
+impl Stage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolve => "resolve",
+            Self::Validate => "validate",
+            Self::Hook => "hook",
+            Self::Git => "git",
+            Self::Render => "render",
+            Self::Complete => "complete",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticError {
+    Io,
+    PermissionDenied,
+    NotFound,
+    InvalidInput,
+    Git,
+    Hook,
+    Config,
+    Internal,
+}
+
+impl DiagnosticError {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Io => "io",
+            Self::PermissionDenied => "permission_denied",
+            Self::NotFound => "not_found",
+            Self::InvalidInput => "invalid_input",
+            Self::Git => "git",
+            Self::Hook => "hook",
+            Self::Config => "config",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticLevel {
+    Debug,
+    Warn,
+    Error,
+}
+
+impl DiagnosticLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiagnosticEvent {
+    level: DiagnosticLevel,
+    operation: Operation,
+    stage: Stage,
+    duration: Duration,
+    error: Option<DiagnosticError>,
+}
+
+impl DiagnosticEvent {
+    pub fn debug(operation: Operation, stage: Stage, duration: Duration) -> Self {
+        Self {
+            level: DiagnosticLevel::Debug,
+            operation,
+            stage,
+            duration,
+            error: None,
+        }
+    }
+
+    pub fn warning(
+        operation: Operation,
+        stage: Stage,
+        duration: Duration,
+        error: DiagnosticError,
+    ) -> Self {
+        Self {
+            level: DiagnosticLevel::Warn,
+            operation,
+            stage,
+            duration,
+            error: Some(error),
+        }
+    }
+}
+
+pub struct Diagnostics {
+    path: PathBuf,
+    filter: DiagnosticFilter,
+    write_lock: Mutex<()>,
+}
+
+impl Diagnostics {
+    pub fn at_path(path: &Path, filter: DiagnosticFilter) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            filter,
+            write_lock: Mutex::new(()),
+        }
+    }
+
+    pub fn record(&self, event: DiagnosticEvent) {
+        if self.filter == DiagnosticFilter::Warn && event.level == DiagnosticLevel::Debug {
+            return;
+        }
+
+        let Ok(_guard) = self.write_lock.lock() else {
+            return;
+        };
+        let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        else {
+            return;
+        };
+        let error = event.error.map(|error| error.as_str()).unwrap_or("none");
+        let _ = writeln!(
+            file,
+            "level={} operation={} stage={} duration_ms={} error={}",
+            event.level.as_str(),
+            event.operation.as_str(),
+            event.stage.as_str(),
+            event.duration.as_millis(),
+            error
+        );
+    }
+}
 
 /// Build a tracing subscriber with a specific filter, writing to the given writer.
 fn build_subscriber_with_filter<W: Write + Send + 'static>(
@@ -72,6 +252,29 @@ fn init_with_log_path(log_path: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Read as _;
+
+    #[test]
+    fn default_filter_records_warnings_but_not_debug_events() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+
+        diagnostics.record(DiagnosticEvent::debug(
+            Operation::List,
+            Stage::Git,
+            std::time::Duration::from_millis(7),
+        ));
+        diagnostics.record(DiagnosticEvent::warning(
+            Operation::List,
+            Stage::Git,
+            std::time::Duration::from_millis(11),
+            DiagnosticError::Io,
+        ));
+
+        let contents = std::fs::read_to_string(log_path).unwrap();
+        assert!(!contents.contains("duration_ms=7"));
+        assert!(contents.contains("level=warn operation=list stage=git duration_ms=11 error=io"));
+    }
 
     #[test]
     fn init_creates_log_file() {
