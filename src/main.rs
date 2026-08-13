@@ -337,7 +337,14 @@ fn main() -> anyhow::Result<()> {
             }
             ExitCode::GitError.exit();
         }
-        if e.downcast_ref::<worktree_catalog::CatalogError>().is_some() {
+        if let Some(catalog_error) = e.downcast_ref::<worktree_catalog::CatalogError>() {
+            if let worktree_catalog::CatalogError::Git(git_error) = catalog_error {
+                eprintln!("Error: {git_error}");
+                if matches!(git_error, git::GitError::NotAGitRepo { .. }) {
+                    eprintln!("hint: Run `trench` inside a Git worktree.");
+                }
+                ExitCode::GitError.exit();
+            }
             eprintln!("error: {e}");
             ExitCode::NotFound.exit();
         }

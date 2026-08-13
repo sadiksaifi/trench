@@ -108,6 +108,25 @@ fn direct_switch_prints_a_composable_path_and_parent_shell_hint_without_state() 
 }
 
 #[test]
+fn switch_outside_a_repository_reports_the_git_error_and_actionable_hint() {
+    let root = tempfile::tempdir().unwrap();
+
+    let output = trench(root.path())
+        .args(["switch", "missing"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("not a git repository"), "{stderr}");
+    assert!(
+        stderr.contains("hint: Run `trench` inside a Git worktree."),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn internal_switch_path_mode_suppresses_the_direct_use_hint() {
     let root = tempfile::tempdir().unwrap();
     let repository = root.path().join("repository");
