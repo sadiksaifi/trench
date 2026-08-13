@@ -171,6 +171,19 @@ impl DiagnosticEvent {
     }
 }
 
+fn write_event_best_effort(writer: &mut impl Write, event: DiagnosticEvent) {
+    let error = event.error.map(|error| error.as_str()).unwrap_or("none");
+    let _ = writeln!(
+        writer,
+        "level={} operation={} stage={} duration_ms={} error={}",
+        event.level.as_str(),
+        event.operation.as_str(),
+        event.stage.as_str(),
+        event.duration.as_millis(),
+        error
+    );
+}
+
 pub struct Diagnostics {
     path: PathBuf,
     filter: DiagnosticFilter,
@@ -216,16 +229,7 @@ impl Diagnostics {
         else {
             return;
         };
-        let error = event.error.map(|error| error.as_str()).unwrap_or("none");
-        let _ = writeln!(
-            file,
-            "level={} operation={} stage={} duration_ms={} error={}",
-            event.level.as_str(),
-            event.operation.as_str(),
-            event.stage.as_str(),
-            event.duration.as_millis(),
-            error
-        );
+        write_event_best_effort(&mut file, event);
     }
 
     fn rotate_if_full(&self) {
@@ -307,6 +311,16 @@ pub fn record(event: DiagnosticEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn product_outcome_with_diagnostics(diagnostics: &Diagnostics) -> &'static str {
+        diagnostics.record(DiagnosticEvent::error(
+            Operation::Switch,
+            Stage::Complete,
+            Duration::from_millis(13),
+            DiagnosticError::Io,
+        ));
+        "product-result"
+    }
 
     #[test]
     fn default_filter_records_warnings_but_not_debug_events() {
@@ -470,6 +484,78 @@ mod tests {
             std::fs::read_to_string(log_path).unwrap(),
             "level=warn operation=open stage=resolve duration_ms=5 error=not_found\n"
         );
+    }
+
+    #[test]
+    fn open_failures_do_not_change_product_outcomes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let diagnostics = Diagnostics::at_path(dir.path(), DiagnosticFilter::default());
+
+        assert_eq!(
+            product_outcome_with_diagnostics(&diagnostics),
+            "product-result"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_failures_do_not_change_product_outcomes() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let diagnostics =
+            Diagnostics::at_path(&state_dir.join("trench.log"), DiagnosticFilter::default());
+
+        let outcome = product_outcome_with_diagnostics(&diagnostics);
+
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(outcome, "product-result");
+    }
+
+    #[test]
+    fn rotation_and_deletion_failures_do_not_change_product_outcomes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        std::fs::write(&log_path, vec![b'x'; 1024 * 1024]).unwrap();
+        for index in 1..=4 {
+            let blocking_dir = dir.path().join(format!("trench.log.{index}"));
+            std::fs::create_dir(&blocking_dir).unwrap();
+            std::fs::write(blocking_dir.join("keep"), "not removable as a file").unwrap();
+        }
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+
+        assert_eq!(
+            product_outcome_with_diagnostics(&diagnostics),
+            "product-result"
+        );
+        assert!(std::fs::metadata(log_path).unwrap().len() > 1024 * 1024);
+    }
+
+    #[test]
+    fn write_failures_are_ignored_by_the_diagnostic_boundary() {
+        struct FailingWriter;
+
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("simulated full device"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let event = DiagnosticEvent::error(
+            Operation::Tui,
+            Stage::Render,
+            Duration::from_millis(17),
+            DiagnosticError::Internal,
+        );
+
+        write_event_best_effort(&mut FailingWriter, event);
     }
 
     #[test]
