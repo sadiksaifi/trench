@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 
 use crate::paths;
@@ -14,6 +14,7 @@ fn default_timeout_secs() -> Option<u64> {
 }
 
 #[derive(Debug, Deserialize, serde::Serialize, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct HookDef {
     pub copy: Option<Vec<String>>,
     pub run: Option<Vec<String>>,
@@ -34,6 +35,7 @@ impl Default for HookDef {
 }
 
 #[derive(Debug, Default, Deserialize, serde::Serialize, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct HooksConfig {
     pub pre_create: Option<HookDef>,
     pub post_create: Option<HookDef>,
@@ -46,6 +48,7 @@ pub struct HooksConfig {
 // --- Config structs ---
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
@@ -57,6 +60,7 @@ pub struct GlobalConfig {
 
 /// Project-level config parsed from `.trench.toml` at repo root.
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
@@ -67,6 +71,7 @@ pub struct ProjectConfig {
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct UiConfig {
     pub theme: Option<String>,
     pub date_format: Option<String>,
@@ -76,6 +81,7 @@ pub struct UiConfig {
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct GitConfig {
     pub default_base: Option<String>,
     pub auto_prune: Option<bool>,
@@ -83,17 +89,20 @@ pub struct GitConfig {
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct EditorConfig {
     pub command: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct WorktreesConfig {
     pub root: Option<String>,
     pub scan: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ShellConfig {
     pub tmux: Option<bool>,
 }
@@ -113,8 +122,12 @@ fn load_optional_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Opt
                 .context(format!("failed to read config file: {}", path.display())));
         }
     };
-    let config: T = toml::from_str(&contents)
-        .with_context(|| format!("invalid TOML in config file: {}", path.display()))?;
+    let config: T = toml::from_str(&contents).map_err(|source| {
+        anyhow::anyhow!(
+            "invalid TOML in config file {}: {source}",
+            path.display()
+        )
+    })?;
     Ok(Some(config))
 }
 
@@ -551,6 +564,24 @@ scan = ["/opt/trees"]
         assert!(
             msg.contains("config.toml"),
             "expected file path in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_global_section_reports_exact_file_and_key() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "[telemetry]\nenabled = true\n");
+
+        let err = load_global_config_from(&path).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "error should name exact config file: {msg}"
+        );
+        assert!(
+            msg.contains("telemetry"),
+            "error should name offending key: {msg}"
         );
     }
 
