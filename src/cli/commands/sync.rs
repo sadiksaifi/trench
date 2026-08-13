@@ -1386,31 +1386,14 @@ mod tests {
         assert_eq!(outcome.result.after_behind, 0, "sync should have completed");
         assert!(outcome.post_sync_error.is_none());
 
-        // Verify pre_sync hook event was logged
+        // Hook execution is streamed only and never persisted.
         let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
         let wt =
             f.db.find_worktree_by_identifier(db_repo.id, "feature")
                 .unwrap()
                 .unwrap();
         let hook_events = f.db.count_events(wt.id, Some("hook:pre_sync")).unwrap();
-        assert_eq!(hook_events, 1, "pre_sync hook event should be logged");
-
-        // Verify hook output was captured in logs
-        let events = f.db.list_events(wt.id, 10).unwrap();
-        let hook_event = events
-            .iter()
-            .find(|e| e.event_type == "hook:pre_sync")
-            .unwrap();
-        let logs = f.db.get_logs(hook_event.id).unwrap();
-        let stdout_lines: Vec<&str> = logs
-            .iter()
-            .filter(|(s, _, _)| s == "stdout")
-            .map(|(_, l, _)| l.as_str())
-            .collect();
-        assert!(
-            stdout_lines.contains(&"pre_sync_executed"),
-            "pre_sync output should be logged: {stdout_lines:?}"
-        );
+        assert_eq!(hook_events, 0, "pre_sync hook must not be persisted");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1507,14 +1490,14 @@ mod tests {
             "post_sync marker should exist (proves hook ran)"
         );
 
-        // Verify hook event logged
+        // Hook execution is streamed only and never persisted.
         let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
         let wt =
             f.db.find_worktree_by_identifier(db_repo.id, "feature")
                 .unwrap()
                 .unwrap();
         let hook_events = f.db.count_events(wt.id, Some("hook:post_sync")).unwrap();
-        assert_eq!(hook_events, 1, "post_sync hook event should be logged");
+        assert_eq!(hook_events, 0, "post_sync hook must not be persisted");
 
         // Verify synced event also recorded (sync did happen)
         let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
@@ -1638,7 +1621,7 @@ mod tests {
         assert_eq!(lines[0], "pre_sync", "pre_sync should run first");
         assert_eq!(lines[1], "post_sync", "post_sync should run second");
 
-        // Verify both hook events logged
+        // Hook execution is streamed only and never persisted. The sync event remains.
         let db_repo = f.db.get_repo_by_path(&f.repo_path_str).unwrap().unwrap();
         let wt =
             f.db.find_worktree_by_identifier(db_repo.id, "feature")
@@ -1647,31 +1630,9 @@ mod tests {
         let pre_events = f.db.count_events(wt.id, Some("hook:pre_sync")).unwrap();
         let post_events = f.db.count_events(wt.id, Some("hook:post_sync")).unwrap();
         let synced_events = f.db.count_events(wt.id, Some("synced")).unwrap();
-        assert_eq!(pre_events, 1, "pre_sync hook event should be logged");
-        assert_eq!(post_events, 1, "post_sync hook event should be logged");
+        assert_eq!(pre_events, 0, "pre_sync hook must not be persisted");
+        assert_eq!(post_events, 0, "post_sync hook must not be persisted");
         assert_eq!(synced_events, 1, "synced event should be logged");
-
-        // Verify event ordering in DB: hook:pre_sync < synced < hook:post_sync
-        let events = f.db.list_events(wt.id, 10).unwrap();
-        let pre_id = events
-            .iter()
-            .find(|e| e.event_type == "hook:pre_sync")
-            .unwrap()
-            .id;
-        let synced_id = events.iter().find(|e| e.event_type == "synced").unwrap().id;
-        let post_id = events
-            .iter()
-            .find(|e| e.event_type == "hook:post_sync")
-            .unwrap()
-            .id;
-        assert!(
-            pre_id < synced_id,
-            "pre_sync event (id={pre_id}) should come before synced event (id={synced_id})"
-        );
-        assert!(
-            synced_id < post_id,
-            "synced event (id={synced_id}) should come before post_sync event (id={post_id})"
-        );
     }
 
     struct MultiWorktreeFixture {

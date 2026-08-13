@@ -1110,26 +1110,9 @@ mod tests {
             "worktree dir should be deleted after hooks"
         );
 
-        // Verify hook event was logged
+        // Hook execution is streamed only and never persisted.
         let hook_events = db.count_events(wt.id, Some("hook:pre_remove")).unwrap();
-        assert_eq!(hook_events, 1, "pre_remove hook event should be logged");
-
-        // Verify hook output was captured in logs
-        let events = db.list_events(wt.id, 10).unwrap();
-        let hook_event = events
-            .iter()
-            .find(|e| e.event_type == "hook:pre_remove")
-            .unwrap();
-        let logs = db.get_logs(hook_event.id).unwrap();
-        let stdout_lines: Vec<&str> = logs
-            .iter()
-            .filter(|(s, _, _)| s == "stdout")
-            .map(|(_, l, _)| l.as_str())
-            .collect();
-        assert!(
-            stdout_lines.contains(&"pre_remove_executed"),
-            "pre_remove output should be logged: {stdout_lines:?}"
-        );
+        assert_eq!(hook_events, 0, "pre_remove hook must not be persisted");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1258,9 +1241,9 @@ mod tests {
             "post_remove marker should exist (proves cwd = repo path)"
         );
 
-        // Verify hook event logged
+        // Hook execution is streamed only and never persisted.
         let hook_events = db.count_events(wt.id, Some("hook:post_remove")).unwrap();
-        assert_eq!(hook_events, 1, "post_remove hook event should be logged");
+        assert_eq!(hook_events, 0, "post_remove hook must not be persisted");
     }
 
     #[tokio::test(flavor = "current_thread")]

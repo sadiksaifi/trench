@@ -156,10 +156,10 @@ fn exit_code_2_switch_nonexistent() {
     );
 }
 
-// ── Exit code 3: Branch exists ─────────────────────────────────────────
+// ── Existing local branch: create its worktree ─────────────────────────
 
 #[test]
-fn exit_code_3_create_existing_branch() {
+fn create_existing_local_branch_succeeds() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -175,12 +175,13 @@ fn exit_code_3_create_existing_branch() {
         .output()
         .expect("failed to run trench");
 
-    assert_eq!(
-        output.status.code(),
-        Some(3),
-        "create existing branch should exit 3, stderr: {}",
+    assert!(
+        output.status.success(),
+        "creating an existing local branch should succeed, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let path = String::from_utf8(output.stdout).unwrap();
+    assert!(Path::new(path.trim()).is_dir());
 }
 
 // ── Exit code 4: Hook failed ──────────────────────────────────────────

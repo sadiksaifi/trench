@@ -1015,7 +1015,7 @@ mod tests {
         assert!(matches!(result.hooks_status, HooksStatus::Ran));
         assert!(result.post_create_error.is_none());
 
-        // Hook event logged to DB
+        // Hook execution is streamed only and never persisted.
         let repo_path_str = repo_dir
             .path()
             .canonicalize()
@@ -1031,7 +1031,7 @@ mod tests {
         let hook_events = db
             .count_events(wts[0].id, Some("hook:post_create"))
             .unwrap();
-        assert_eq!(hook_events, 1, "post_create hook event should be logged");
+        assert_eq!(hook_events, 0, "post_create hook must not be persisted");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1154,7 +1154,7 @@ mod tests {
         assert!(matches!(result.hooks_status, HooksStatus::Ran));
         assert!(result.post_create_error.is_none());
 
-        // DB: hook events logged
+        // Hook execution is streamed only and never persisted.
         let repo_path_str = repo_dir
             .path()
             .canonicalize()
@@ -1170,10 +1170,7 @@ mod tests {
         let post_hook_count = db
             .count_events(wts[0].id, Some("hook:post_create"))
             .unwrap();
-        assert_eq!(
-            post_hook_count, 1,
-            "post_create hook event should be logged"
-        );
+        assert_eq!(post_hook_count, 0, "post_create hook must not be persisted");
     }
 
     #[tokio::test(flavor = "current_thread")]
