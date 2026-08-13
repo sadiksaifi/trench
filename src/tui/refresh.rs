@@ -1,11 +1,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
 use crate::{
-    ref_catalog::RefSnapshot,
+    ref_catalog::{RefCatalog, RefCatalogError, RefSnapshot},
     tui::app::{WorktreeId, WorktreeIdentity, WorktreeStatus},
+    worktree_catalog::{CatalogError, WorktreeCatalog},
 };
 
 pub const WARNING_DURATION: Duration = Duration::from_secs(3);
@@ -90,12 +92,15 @@ pub enum FetchOutcome {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshTaskFailure;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshCompletion {
     Row {
         token: TaskToken,
         id: WorktreeId,
-        result: Result<WorktreeStatus, ()>,
+        result: Result<WorktreeStatus, RefreshTaskFailure>,
     },
     FetchOrigin {
         token: TaskToken,
@@ -115,6 +120,74 @@ pub trait RefreshSource {
     ) -> Result<WorktreeStatus, Self::Error>;
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CatalogRefreshError {
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
+    #[error(transparent)]
+    Refs(#[from] RefCatalogError),
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogRefreshSource {
+    cwd: PathBuf,
+    configured_base: Option<String>,
+}
+
+impl CatalogRefreshSource {
+    pub fn new(cwd: impl Into<PathBuf>, configured_base: Option<String>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            configured_base,
+        }
+    }
+}
+
+impl RefreshSource for CatalogRefreshSource {
+    type Error = CatalogRefreshError;
+
+    fn immediate_snapshot(&self) -> Result<ImmediateSnapshot, Self::Error> {
+        let catalog = WorktreeCatalog::discover(&self.cwd)?;
+        let identities = catalog
+            .identities()
+            .iter()
+            .map(|identity| WorktreeIdentity {
+                id: WorktreeId::new(identity.path.clone()),
+                worktree: identity.worktree.clone(),
+                branch: identity.branch.clone(),
+                path: identity.path.clone(),
+                head: identity.head.clone(),
+                is_main: identity.is_main,
+                is_current: identity.is_current,
+                detached: identity.detached,
+            })
+            .collect();
+        Ok(ImmediateSnapshot {
+            identities,
+            refs: RefCatalog::discover(&self.cwd)?,
+            configured_base: self.configured_base.clone(),
+        })
+    }
+
+    fn row_status(
+        &self,
+        identity: &WorktreeIdentity,
+        base: Option<&str>,
+    ) -> Result<WorktreeStatus, Self::Error> {
+        let status = WorktreeCatalog::discover(&self.cwd)?
+            .with_base(base)
+            .status(identity.id.as_path())?;
+        Ok(WorktreeStatus {
+            base: status.base,
+            staged: status.staged,
+            modified: status.modified,
+            untracked: status.untracked,
+            ahead: status.ahead,
+            behind: status.behind,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OriginFetchError {
     NoOrigin,
@@ -123,6 +196,30 @@ pub enum OriginFetchError {
 
 pub trait OriginFetcher {
     fn fetch_origin(&self) -> Result<(), OriginFetchError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct GitOriginFetcher {
+    repo_path: PathBuf,
+}
+
+impl GitOriginFetcher {
+    pub fn new(repo_path: impl Into<PathBuf>) -> Self {
+        Self {
+            repo_path: repo_path.into(),
+        }
+    }
+}
+
+impl OriginFetcher for GitOriginFetcher {
+    fn fetch_origin(&self) -> Result<(), OriginFetchError> {
+        match RefCatalog::discover(&self.repo_path) {
+            Ok(snapshot) if !snapshot.has_origin => return Err(OriginFetchError::NoOrigin),
+            Ok(_) => {}
+            Err(_) => return Err(OriginFetchError::Failed),
+        }
+        RefCatalog::fetch_origin(&self.repo_path).map_err(|_| OriginFetchError::Failed)
+    }
 }
 
 pub trait Clock {
@@ -153,7 +250,7 @@ pub fn execute_task<S: RefreshSource, F: OriginFetcher>(
             id: identity.id.clone(),
             result: source
                 .row_status(&identity, base.as_deref())
-                .map_err(|_| ()),
+                .map_err(|_| RefreshTaskFailure),
         },
         RefreshTask::FetchOrigin { token } => {
             let outcome = match fetcher.fetch_origin() {
@@ -416,7 +513,7 @@ impl RefreshCoordinator {
         &mut self,
         token: TaskToken,
         id: WorktreeId,
-        result: Result<WorktreeStatus, ()>,
+        result: Result<WorktreeStatus, RefreshTaskFailure>,
     ) {
         let latest = self.latest_token();
         let Some(active) = self.active_local.as_mut() else {
@@ -689,7 +786,7 @@ mod tests {
             RefreshCompletion::Row {
                 token: beta_token,
                 id: beta_id,
-                result: Err(()),
+                result: Err(RefreshTaskFailure),
             },
             now,
         );
@@ -721,7 +818,7 @@ mod tests {
             RefreshCompletion::Row {
                 token,
                 id,
-                result: Err(()),
+                result: Err(RefreshTaskFailure),
             },
             now,
         );
@@ -755,7 +852,7 @@ mod tests {
             RefreshCompletion::Row {
                 token,
                 id,
-                result: Err(()),
+                result: Err(RefreshTaskFailure),
             },
             now,
         );
@@ -791,6 +888,7 @@ mod tests {
         let mut coordinator = RefreshCoordinator::default();
         coordinator.request(RefreshCause::Launch, snapshot(vec![alpha], true), now);
         let tasks = coordinator.drain_tasks();
+        let (stale_row_token, stale_row_id) = row_task(&tasks, 0);
         let fetch_token = tasks
             .iter()
             .find_map(|task| match task {
@@ -822,6 +920,22 @@ mod tests {
             .publication(now)
             .waiting_rows
             .contains(&WorktreeId::new("/worktrees/alpha")));
+
+        coordinator.complete(
+            RefreshCompletion::Row {
+                token: stale_row_token,
+                id: stale_row_id.clone(),
+                result: Ok(WorktreeStatus {
+                    ahead: Some(99),
+                    ..WorktreeStatus::default()
+                }),
+            },
+            now,
+        );
+        assert!(!coordinator
+            .publication(now)
+            .statuses
+            .contains_key(&stale_row_id));
     }
 
     #[test]
@@ -901,6 +1015,36 @@ mod tests {
             .drain_tasks()
             .iter()
             .all(|task| !matches!(task, RefreshTask::FetchOrigin { .. })));
+    }
+
+    #[test]
+    fn origin_removed_during_fetch_remains_a_silent_local_only_transition() {
+        let now = Instant::now();
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let mut coordinator = RefreshCoordinator::default();
+        coordinator.request(RefreshCause::Launch, snapshot(vec![alpha], true), now);
+        let fetch_token = coordinator
+            .drain_tasks()
+            .into_iter()
+            .find_map(|task| match task {
+                RefreshTask::FetchOrigin { token } => Some(token),
+                RefreshTask::Row { .. } => None,
+            })
+            .unwrap();
+
+        coordinator.complete(
+            RefreshCompletion::FetchOrigin {
+                token: fetch_token,
+                outcome: FetchOutcome::NoOrigin(refs(false)),
+            },
+            now,
+        );
+
+        let publication = coordinator.publication(now);
+        assert_eq!(coordinator.ref_revision(), 1);
+        assert!(!publication.refs.unwrap().has_origin);
+        assert!(publication.warning.is_none());
+        assert!(!publication.updating_refs);
     }
 
     #[test]
