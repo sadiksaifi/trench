@@ -55,6 +55,18 @@ pub enum CatalogError {
     },
 }
 
+pub trait BaseRefResolver {
+    fn base_for(&self, main: &WorktreeIdentity) -> Result<Option<String>, git::GitError>;
+}
+
+struct DetectedBaseRef;
+
+impl BaseRefResolver for DetectedBaseRef {
+    fn base_for(&self, main: &WorktreeIdentity) -> Result<Option<String>, git::GitError> {
+        Ok(git::status::detected_base(&main.path)?.or_else(|| main.branch.clone()))
+    }
+}
+
 pub struct WorktreeCatalog {
     identities: Vec<WorktreeIdentity>,
     base: Option<String>,
@@ -62,6 +74,13 @@ pub struct WorktreeCatalog {
 
 impl WorktreeCatalog {
     pub fn discover(cwd: &Path) -> Result<Self, CatalogError> {
+        Self::discover_with_base(cwd, &DetectedBaseRef)
+    }
+
+    fn discover_with_base(
+        cwd: &Path,
+        base_resolver: &impl BaseRefResolver,
+    ) -> Result<Self, CatalogError> {
         let mut identities: Vec<_> = git::worktrees::discover(cwd)?
             .into_iter()
             .map(|entry| {
@@ -102,10 +121,12 @@ impl WorktreeCatalog {
                 .then_with(|| left.worktree.cmp(&right.worktree))
                 .then_with(|| left.path.cmp(&right.path))
         });
-        let main = identities.iter().find(|identity| identity.is_main);
-        let base = main
-            .and_then(|identity| git::status::detected_base(&identity.path).ok().flatten())
-            .or_else(|| main.and_then(|identity| identity.branch.clone()));
+        let base = identities
+            .iter()
+            .find(|identity| identity.is_main)
+            .map(|identity| base_resolver.base_for(identity))
+            .transpose()?
+            .flatten();
         Ok(Self { identities, base })
     }
 
@@ -256,5 +277,26 @@ mod tests {
             catalog.resolve("shared"),
             Err(CatalogError::Ambiguous { .. })
         ));
+    }
+
+    #[test]
+    fn current_is_first_then_identities_are_alphabetical() {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        let alpha = root.path().join("alpha");
+        let zebra = root.path().join("zebra");
+        std::fs::create_dir(&main).unwrap();
+        let repo = init_repo(&main);
+        add_worktree(&repo, "zebra", "feature/zebra", &zebra);
+        add_worktree(&repo, "alpha", "feature/alpha", &alpha);
+
+        let catalog = WorktreeCatalog::discover(&zebra).unwrap();
+        let names: Vec<_> = catalog
+            .identities()
+            .iter()
+            .map(|identity| identity.worktree.as_str())
+            .collect();
+
+        assert_eq!(names, ["zebra", "alpha", "main"]);
     }
 }
