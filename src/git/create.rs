@@ -38,6 +38,78 @@ pub fn add_new_branch(
     Ok(())
 }
 
+/// Add a worktree for an existing local branch without creating or rewriting it.
+pub fn add_existing_local(
+    repo_path: &Path,
+    worktree: &str,
+    branch: &str,
+    target_path: &Path,
+) -> Result<(), GitError> {
+    let repo = git2::Repository::open(repo_path)?;
+    let local = repo
+        .find_branch(branch, git2::BranchType::Local)
+        .map_err(|error| {
+            if error.code() == git2::ErrorCode::NotFound {
+                GitError::LocalBranchNotFound {
+                    branch: branch.to_string(),
+                }
+            } else {
+                error.into()
+            }
+        })?;
+    let mut options = git2::WorktreeAddOptions::new();
+    options.reference(Some(local.get()));
+    repo.worktree(worktree, target_path, Some(&options))?;
+    Ok(())
+}
+
+/// Create a local branch from a remote-only ref, establish its upstream, and
+/// add a worktree at the exact planned path.
+pub fn add_tracking_branch(
+    repo_path: &Path,
+    worktree: &str,
+    branch: &str,
+    upstream: &str,
+    target_path: &Path,
+) -> Result<(), GitError> {
+    let repo = git2::Repository::open(repo_path)?;
+    if repo.find_branch(branch, git2::BranchType::Local).is_ok() {
+        return Err(GitError::BranchAlreadyExists {
+            branch: branch.to_string(),
+        });
+    }
+    let remote = repo
+        .find_branch(upstream, git2::BranchType::Remote)
+        .map_err(|error| {
+            if error.code() == git2::ErrorCode::NotFound {
+                GitError::BaseBranchNotFound {
+                    base: upstream.to_string(),
+                }
+            } else {
+                error.into()
+            }
+        })?;
+    let commit = remote.get().peel_to_commit()?;
+    let worktree_result = {
+        let mut local = repo.branch(branch, &commit, false)?;
+        if let Err(error) = local.set_upstream(Some(upstream)) {
+            let _ = local.delete();
+            return Err(error.into());
+        }
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(local.get()));
+        repo.worktree(worktree, target_path, Some(&options))
+    };
+
+    if let Err(error) = worktree_result {
+        if let Ok(mut orphan) = repo.find_branch(branch, git2::BranchType::Local) {
+            let _ = orphan.delete();
+        }
+        return Err(error.into());
+    }
+    Ok(())
+}
+
 fn resolve_commit<'repo>(
     repo: &'repo git2::Repository,
     name: &str,

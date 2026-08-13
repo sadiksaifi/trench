@@ -236,15 +236,22 @@ async fn execute_create(
     emitter.emit(OperationEvent::StageStarted {
         stage: OperationStage::Revalidate,
     });
-    let live_plan = revalidate(&request).map_err(|message| OperationFailure {
-        stage: OperationStage::Revalidate,
-        mutation_state: MutationState::NotStarted,
-        class: ErrorClass::PreconditionsChanged,
-        message,
-    })?;
-    finish_stage(emitter, OperationStage::Revalidate, stage_started, true);
-
+    let live_plan = match revalidate(&request) {
+        Ok(plan) => plan,
+        Err(message) => {
+            finish_stage(emitter, OperationStage::Revalidate, stage_started, false);
+            return Err(fail(
+                emitter,
+                operation_started,
+                OperationStage::Revalidate,
+                MutationState::NotStarted,
+                ErrorClass::PreconditionsChanged,
+                message,
+            ));
+        }
+    };
     if live_plan != request.plan {
+        finish_stage(emitter, OperationStage::Revalidate, stage_started, false);
         return Err(fail(
             emitter,
             operation_started,
@@ -254,6 +261,7 @@ async fn execute_create(
             "create plan no longer matches live Git state".to_string(),
         ));
     }
+    finish_stage(emitter, OperationStage::Revalidate, stage_started, true);
 
     if let CreateAction::Navigate(_) = &request.plan.action {
         let outcome = CreateOutcome {
@@ -299,10 +307,20 @@ async fn execute_create(
             base,
             &request.plan.path,
         ),
-        _ => Err(git::GitError::CommandFailed {
-            operation: "creating worktree",
-            message: "planned create action is not implemented".to_string(),
-        }),
+        CreateAction::ExistingLocal => git::create::add_existing_local(
+            &request.repo_path,
+            &request.plan.worktree,
+            &request.plan.branch,
+            &request.plan.path,
+        ),
+        CreateAction::TrackRemote(upstream) => git::create::add_tracking_branch(
+            &request.repo_path,
+            &request.plan.worktree,
+            &request.plan.branch,
+            upstream,
+            &request.plan.path,
+        ),
+        CreateAction::Navigate(_) => unreachable!("navigate returned before mutation"),
     };
 
     if let Err(error) = create_result {
@@ -445,5 +463,56 @@ fn diagnostic_error(class: ErrorClass) -> logging::DiagnosticError {
         ErrorClass::Hook => logging::DiagnosticError::Hook,
         ErrorClass::Io => logging::DiagnosticError::Io,
         ErrorClass::Internal => logging::DiagnosticError::Internal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::create_plan::HookPolicy;
+
+    fn init_repo(path: &Path) -> git2::Repository {
+        let repo = git2::Repository::init(path).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
+            .unwrap();
+        drop(tree);
+        repo
+    }
+
+    #[tokio::test]
+    async fn changed_ref_precondition_aborts_before_mutation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        let repo = init_repo(repo_dir.path());
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("feature/race", None)
+            .unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature/race", &head, false).unwrap();
+        let emitter = RecordingEmitter::default();
+
+        let error = execute(
+            OperationRequest::Create(CreateRequest {
+                plan,
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root: worktree_root.clone(),
+                hooks: None,
+            }),
+            &emitter,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.stage, OperationStage::Revalidate);
+        assert_eq!(error.mutation_state, MutationState::NotStarted);
+        assert_eq!(error.class, ErrorClass::PreconditionsChanged);
+        assert!(!worktree_root.exists());
+        assert!(!emitter.events().contains(&OperationEvent::MutationStarted));
     }
 }
