@@ -165,7 +165,7 @@ pub struct ResolvedUiConfig {
     pub theme: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct ResolvedGitConfig {
     pub default_base: Option<String>,
 }
@@ -180,12 +180,6 @@ impl Default for ResolvedUiConfig {
         Self {
             theme: "ops".to_string(),
         }
-    }
-}
-
-impl Default for ResolvedGitConfig {
-    fn default() -> Self {
-        Self { default_base: None }
     }
 }
 
@@ -809,7 +803,6 @@ run = ["bun install"]
         let project = ProjectConfig {
             git: Some(GitConfig {
                 default_base: Some("staging".to_string()),
-                ..GitConfig::default()
             }),
             hooks: None, // no hooks in project
             ..ProjectConfig::default()
@@ -828,7 +821,6 @@ run = ["bun install"]
         let global = GlobalConfig {
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
-                ..GitConfig::default()
             }),
             worktrees: Some(WorktreesConfig {
                 root: Some("/global/worktrees".to_string()),
@@ -839,7 +831,6 @@ run = ["bun install"]
         let project = ProjectConfig {
             git: Some(GitConfig {
                 default_base: Some("staging".to_string()),
-                ..GitConfig::default()
             }),
             worktrees: Some(WorktreesConfig {
                 root: Some("/project/worktrees".to_string()),
@@ -863,7 +854,6 @@ run = ["bun install"]
         let global = GlobalConfig {
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
-                ..GitConfig::default()
             }),
             ..GlobalConfig::default()
         };
