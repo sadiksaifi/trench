@@ -52,6 +52,27 @@ fn add_worktree(repository: &Path, root: &Path, branch: &str) -> PathBuf {
     path.canonicalize().unwrap()
 }
 
+fn add_detached_worktree(repository: &Path, root: &Path) -> (String, PathBuf) {
+    let path = root.join("detached worktree");
+    git(
+        repository,
+        &["worktree", "add", "--detach", path.to_str().unwrap()],
+    );
+    let output = Command::new("git")
+        .args(["rev-parse", "--short=7", "HEAD"])
+        .current_dir(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    (
+        format!(
+            "detached@{}",
+            String::from_utf8(output.stdout).unwrap().trim()
+        ),
+        path.canonicalize().unwrap(),
+    )
+}
+
 fn executable(path: &Path, contents: &str) {
     fs::write(path, contents).unwrap();
     let mut permissions = fs::metadata(path).unwrap().permissions();
@@ -115,6 +136,53 @@ fn internal_switch_path_mode_suppresses_the_direct_use_hint() {
     assert!(!String::from_utf8(help.stdout)
         .unwrap()
         .contains("--print-path"));
+}
+
+#[test]
+fn detached_worktrees_remain_switchable_and_openable() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("repository");
+    let worktrees = root.path().join("worktrees");
+    fs::create_dir_all(&repository).unwrap();
+    fs::create_dir_all(&worktrees).unwrap();
+    init_repo(&repository);
+    let (selector, path) = add_detached_worktree(&repository, &worktrees);
+
+    let switched = trench(&repository)
+        .args(["switch", &selector, "--print-path"])
+        .output()
+        .unwrap();
+    assert!(
+        switched.status.success(),
+        "detached switch failed: {}",
+        String::from_utf8_lossy(&switched.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(switched.stdout).unwrap(),
+        format!("{}\n", path.display())
+    );
+
+    let editor = root.path().join("fake-editor");
+    let argv = root.path().join("detached-argv");
+    executable(
+        &editor,
+        &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", argv.display()),
+    );
+    let opened = trench(&repository)
+        .args(["open", &selector])
+        .env("EDITOR", &editor)
+        .env_remove("VISUAL")
+        .output()
+        .unwrap();
+    assert!(
+        opened.status.success(),
+        "detached open failed: {}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(argv).unwrap(),
+        format!("{}\n", path.display())
+    );
 }
 
 fn configured_editor_fixture(exit_code: i32) -> (tempfile::TempDir, PathBuf, PathBuf) {

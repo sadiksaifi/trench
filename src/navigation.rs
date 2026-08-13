@@ -62,6 +62,7 @@ impl EditorCommand {
         &self.program
     }
 
+    #[cfg(test)]
     pub fn args(&self) -> &[OsString] {
         &self.args
     }
