@@ -409,12 +409,12 @@ impl App {
     }
 
     /// Load hooks config from the project config.
-    fn load_hooks_config(cwd: &std::path::Path) -> Option<crate::config::HooksConfig> {
-        let repo_info = crate::git::discover_repo(cwd).ok()?;
-        let project_config = crate::config::load_project_config(&repo_info.path).ok()?;
-        let global_config = crate::config::load_global_config().ok()?;
+    fn load_hooks_config(cwd: &std::path::Path) -> Result<Option<crate::config::HooksConfig>> {
+        let repo_info = crate::git::discover_repo(cwd)?;
+        let project_config = crate::config::load_project_config(&repo_info.path)?;
+        let global_config = crate::config::load_global_config()?;
         let resolved = crate::config::resolve_config(None, project_config.as_ref(), &global_config);
-        resolved.hooks
+        Ok(resolved.hooks)
     }
 
     fn open_db() -> Option<(std::path::PathBuf, Database)> {
@@ -822,7 +822,18 @@ impl App {
         };
 
         // Check for hooks
-        let hooks_config = Self::load_hooks_config(&cwd);
+        let hooks_config = match Self::load_hooks_config(&cwd) {
+            Ok(config) => config,
+            Err(e) => {
+                if let Some(ref mut c) = self.delete_confirm_state {
+                    c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                        success: false,
+                        message: format!("Delete failed to load config: {e:#}"),
+                    });
+                }
+                return;
+            }
+        };
         let has_hooks = hooks_config
             .as_ref()
             .map(|h| h.pre_remove.is_some() || h.post_remove.is_some())
@@ -1143,7 +1154,18 @@ impl App {
         };
 
         // Check for hooks
-        let hooks_config = Self::load_hooks_config(&cwd);
+        let hooks_config = match Self::load_hooks_config(&cwd) {
+            Ok(config) => config,
+            Err(e) => {
+                if let Some(ref mut p) = self.sync_picker_state {
+                    p.result = Some(screens::sync_picker::SyncResultMessage {
+                        success: false,
+                        message: format!("Sync failed to load config: {e:#}"),
+                    });
+                }
+                return;
+            }
+        };
         let has_hooks = hooks_config
             .as_ref()
             .map(|h| h.pre_sync.is_some() || h.post_sync.is_some())
@@ -1497,7 +1519,16 @@ impl App {
 
         // Load config to check for hooks
         let hooks_config = if hooks_enabled {
-            Self::load_hooks_config(&cwd)
+            match Self::load_hooks_config(&cwd) {
+                Ok(config) => config,
+                Err(e) => {
+                    state.result = Some(screens::create::CreateResultMessage {
+                        success: false,
+                        message: format!("Create failed to load config: {e:#}"),
+                    });
+                    return;
+                }
+            }
         } else {
             None
         };
@@ -1596,6 +1627,28 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serial_test::serial;
+
+    #[test]
+    fn hook_config_reload_propagates_strict_project_error() {
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        let config_path = repo.path().join(crate::config::PROJECT_CONFIG_FILENAME);
+        std::fs::write(
+            &config_path,
+            "[hooks.pre_remove]\ncontinue_on_error = true\n",
+        )
+        .unwrap();
+
+        let error = App::load_hooks_config(repo.path())
+            .expect_err("strict config errors must abort action-time hook reload");
+        let diagnostic = format!("{error:#}");
+
+        assert!(
+            diagnostic.contains(&config_path.display().to_string()),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("continue_on_error"), "{diagnostic}");
+    }
 
     #[test]
     fn app_has_repo_path_initially_none() {
