@@ -319,3 +319,127 @@ fn no_hooks_bypasses_configured_hooks() {
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["hook_policy"], "skip");
 }
+
+#[test]
+fn pre_create_failure_never_creates_the_worktree_or_branch() {
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let root = outside.path().join("worktrees");
+    init_repo(repo.path());
+    write_project_config(
+        repo.path(),
+        &root,
+        "\n[hooks.pre_create]\nshell = \"printf pre-failed >&2; exit 12\"\n",
+    );
+
+    let output = trench(
+        repo.path(),
+        xdg.path(),
+        &["create", "feature/pre-failure", "--json"],
+    );
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(!root.exists());
+    assert!(
+        git_stdout(repo.path(), &["branch", "--list", "feature/pre-failure"])
+            .trim()
+            .is_empty()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let json_start = stderr.find("{\n  \"stage\"").unwrap();
+    let failure: serde_json::Value = serde_json::from_str(&stderr[json_start..]).unwrap();
+    assert_eq!(failure["stage"], "pre_hook");
+    assert_eq!(failure["mutation_state"], "rolled_back");
+    assert_eq!(failure["class"], "hook");
+}
+
+#[test]
+fn post_create_failure_preserves_an_existing_local_branch() {
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let root = outside.path().join("worktrees");
+    init_repo(repo.path());
+    git(repo.path(), &["branch", "release"]);
+    write_project_config(
+        repo.path(),
+        &root,
+        "\n[hooks.post_create]\nshell = \"exit 13\"\n",
+    );
+
+    let output = trench(repo.path(), xdg.path(), &["create", "release", "--json"]);
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(!root.exists());
+    assert!(git_stdout(repo.path(), &["branch", "--list", "release"]).contains("release"));
+}
+
+#[test]
+fn create_success_human_output_is_only_the_planned_path() {
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let root = outside.path().join("worktrees");
+    init_repo(repo.path());
+    write_project_config(repo.path(), &root, "");
+
+    let output = trench(repo.path(), xdg.path(), &["create", "feature/human"]);
+
+    assert!(output.status.success());
+    let repository = repo.path().file_name().unwrap().to_string_lossy();
+    let expected = root.join(repository.as_ref()).join("feature-human");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\n", expected.display())
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn hook_output_is_never_written_to_application_state_or_diagnostics() {
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let root = outside.path().join("worktrees");
+    let canary = "HOOK_OUTPUT_SECRET_CANARY_138";
+    init_repo(repo.path());
+    write_project_config(
+        repo.path(),
+        &root,
+        &format!(
+            "\n[hooks.post_create]\nshell = {:?}\n",
+            format!("printf {canary}")
+        ),
+    );
+
+    let output = trench(repo.path(), xdg.path(), &["create", "feature/canary"]);
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains(canary));
+    let mut stack = vec![xdg.path().to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let contents = std::fs::read(&path).unwrap_or_default();
+                assert!(
+                    !contents
+                        .windows(canary.len())
+                        .any(|bytes| bytes == canary.as_bytes()),
+                    "hook output persisted to {}",
+                    path.display()
+                );
+                assert_ne!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("trench.db")
+                );
+            }
+        }
+    }
+}

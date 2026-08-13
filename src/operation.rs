@@ -651,6 +651,21 @@ mod tests {
     use super::*;
     use crate::create_plan::HookPolicy;
 
+    struct CreateCollisionAtMutation {
+        path: PathBuf,
+        events: RecordingEmitter,
+    }
+
+    impl Emitter for CreateCollisionAtMutation {
+        fn emit(&self, event: OperationEvent) {
+            if event == OperationEvent::MutationStarted {
+                std::fs::create_dir_all(&self.path).unwrap();
+                std::fs::write(self.path.join("foreign-file"), "do not remove").unwrap();
+            }
+            self.events.emit(event);
+        }
+    }
+
     fn init_repo(path: &Path) -> git2::Repository {
         let repo = git2::Repository::init(path).unwrap();
         repo.set_head("refs/heads/main").unwrap();
@@ -694,5 +709,87 @@ mod tests {
         assert_eq!(error.class, ErrorClass::PreconditionsChanged);
         assert!(!worktree_root.exists());
         assert!(!emitter.events().contains(&OperationEvent::MutationStarted));
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_checked_immediately_before_the_pre_hook_boundary() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        init_repo(repo_dir.path());
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("feature/cancelled", None)
+            .unwrap();
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let emitter = RecordingEmitter::default();
+
+        let error = execute_cancellable(
+            OperationRequest::Create(CreateRequest {
+                plan,
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root: worktree_root.clone(),
+                hooks: Some(HooksConfig {
+                    pre_create: Some(crate::config::HookDef {
+                        shell: Some("exit 99".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            &emitter,
+            &cancellation,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.class, ErrorClass::Cancelled);
+        assert_eq!(error.mutation_state, MutationState::NotStarted);
+        assert!(!worktree_root.exists());
+        assert!(!emitter.events().contains(&OperationEvent::MutationStarted));
+        assert!(!emitter.events().iter().any(|event| matches!(
+            event,
+            OperationEvent::StageStarted {
+                stage: OperationStage::PreHook
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_is_structured_and_never_recursively_removes_a_collision() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        init_repo(repo_dir.path());
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("feature/collision", None)
+            .unwrap();
+        let collision_path = plan.path.clone();
+        let emitter = CreateCollisionAtMutation {
+            path: collision_path.clone(),
+            events: RecordingEmitter::default(),
+        };
+
+        let error = execute(
+            OperationRequest::Create(CreateRequest {
+                plan,
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root,
+                hooks: None,
+            }),
+            &emitter,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.stage, OperationStage::Rollback);
+        assert_eq!(error.mutation_state, MutationState::PartiallyApplied);
+        assert_eq!(error.class, ErrorClass::Cleanup);
+        assert_eq!(
+            std::fs::read_to_string(collision_path.join("foreign-file")).unwrap(),
+            "do not remove"
+        );
     }
 }
