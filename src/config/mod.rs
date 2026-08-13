@@ -80,8 +80,6 @@ pub struct UiConfig {
 #[serde(deny_unknown_fields)]
 pub struct GitConfig {
     pub default_base: Option<String>,
-    pub auto_prune: Option<bool>,
-    pub fetch_on_open: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -173,8 +171,6 @@ pub struct ResolvedUiConfig {
 #[derive(Debug, PartialEq)]
 pub struct ResolvedGitConfig {
     pub default_base: String,
-    pub auto_prune: bool,
-    pub fetch_on_open: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -195,8 +191,6 @@ impl Default for ResolvedGitConfig {
     fn default() -> Self {
         Self {
             default_base: "main".to_string(),
-            auto_prune: false,
-            fetch_on_open: true,
         }
     }
 }
@@ -260,14 +254,6 @@ pub fn resolve_config(
                 .or_else(|| p_git.and_then(|g| g.default_base.clone()))
                 .or_else(|| g_git.and_then(|g| g.default_base.clone()))
                 .unwrap_or(defaults_git.default_base),
-            auto_prune: p_git
-                .and_then(|g| g.auto_prune)
-                .or_else(|| g_git.and_then(|g| g.auto_prune))
-                .unwrap_or(defaults_git.auto_prune),
-            fetch_on_open: p_git
-                .and_then(|g| g.fetch_on_open)
-                .or_else(|| g_git.and_then(|g| g.fetch_on_open))
-                .unwrap_or(defaults_git.fetch_on_open),
         },
         editor_command,
         shell: ResolvedShellConfig {
@@ -361,8 +347,6 @@ theme = "dark"
 
 [git]
 default_base = "main"
-auto_prune = true
-fetch_on_open = false
 
 [worktrees]
 root = "{{ repo }}/{{ branch | sanitize }}"
@@ -377,8 +361,6 @@ scan = ["/home/user/projects", "/tmp/worktrees"]
 
         let git = config.git.unwrap();
         assert_eq!(git.default_base.as_deref(), Some("main"));
-        assert_eq!(git.auto_prune, Some(true));
-        assert_eq!(git.fetch_on_open, Some(false));
 
         let wt = config.worktrees.unwrap();
         assert_eq!(
@@ -434,8 +416,6 @@ scan = ["/opt/trees"]
 
         let git = config.git.unwrap();
         assert_eq!(git.default_base.as_deref(), Some("develop"));
-        assert!(git.auto_prune.is_none());
-        assert!(git.fetch_on_open.is_none());
 
         let wt = config.worktrees.unwrap();
         assert!(wt.root.is_none());
@@ -497,6 +477,21 @@ scan = ["/opt/trees"]
             "auto_refresh = true",
         ] {
             let path = write_config(&dir, &format!("[ui]\n{key_value}\n"));
+            let key = key_value.split_once(" = ").unwrap().0;
+
+            let err = load_global_config_from(&path).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains(&path.display().to_string()), "{msg}");
+            assert!(msg.contains(key), "{msg}");
+        }
+    }
+
+    #[test]
+    fn former_automatic_git_options_are_rejected() {
+        let dir = TempDir::new().unwrap();
+
+        for key_value in ["auto_prune = true", "fetch_on_open = true"] {
+            let path = write_config(&dir, &format!("[git]\n{key_value}\n"));
             let key = key_value.split_once(" = ").unwrap().0;
 
             let err = load_global_config_from(&path).unwrap_err();
@@ -684,8 +679,6 @@ run = ["bun install"]
         assert_eq!(resolved.ui.theme, "ops");
 
         assert_eq!(resolved.git.default_base, "main");
-        assert!(!resolved.git.auto_prune);
-        assert!(resolved.git.fetch_on_open);
 
         assert_eq!(
             resolved.worktrees.root,
@@ -704,8 +697,6 @@ run = ["bun install"]
             }),
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
-                auto_prune: Some(true),
-                fetch_on_open: None,
             }),
             worktrees: Some(WorktreesConfig {
                 root: Some("custom/{{ repo }}/{{ branch }}".to_string()),
@@ -719,12 +710,9 @@ run = ["bun install"]
         // Overridden fields
         assert_eq!(resolved.ui.theme, "nord");
         assert_eq!(resolved.git.default_base, "develop");
-        assert!(resolved.git.auto_prune);
         assert_eq!(resolved.worktrees.root, "custom/{{ repo }}/{{ branch }}");
         assert_eq!(resolved.worktrees.scan, vec!["/extra".to_string()]);
 
-        // Fallback to defaults
-        assert!(resolved.git.fetch_on_open);
     }
 
     #[test]
@@ -735,8 +723,6 @@ run = ["bun install"]
             }),
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
-                auto_prune: Some(true),
-                fetch_on_open: None,
             }),
             ..GlobalConfig::default()
         };
@@ -747,8 +733,6 @@ run = ["bun install"]
             }),
             git: Some(GitConfig {
                 default_base: Some("staging".to_string()),
-                auto_prune: None, // fall through to global
-                fetch_on_open: Some(false),
             }),
             worktrees: Some(WorktreesConfig {
                 root: Some("proj/{{ repo }}/{{ branch }}".to_string()),
@@ -762,11 +746,7 @@ run = ["bun install"]
         // Project wins over global
         assert_eq!(resolved.ui.theme, "nord");
         assert_eq!(resolved.git.default_base, "staging");
-        assert!(!resolved.git.fetch_on_open);
         assert_eq!(resolved.worktrees.root, "proj/{{ repo }}/{{ branch }}");
-
-        // Global fills in where project is None
-        assert!(resolved.git.auto_prune);
 
         // Default fills in where both are None
         assert!(resolved.worktrees.scan.is_empty());
@@ -952,7 +932,6 @@ theme = "solarized"
 
 [git]
 default_base = "main"
-auto_prune = true
 
 [hooks.post_create]
 run = ["npm install"]
@@ -980,14 +959,8 @@ shell = "echo global-cleanup"
         // Project git.default_base overrides global
         assert_eq!(resolved.git.default_base, "develop");
 
-        // Global auto_prune fills in (project didn't set it)
-        assert!(resolved.git.auto_prune);
-
         // Global UI fills in (project has no UI section)
         assert_eq!(resolved.ui.theme, "solarized");
-
-        // Defaults fill in for unset fields
-        assert!(resolved.git.fetch_on_open);
 
         // Project worktrees override global
         assert_eq!(
