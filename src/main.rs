@@ -238,8 +238,14 @@ fn main() -> anyhow::Result<()> {
         std::io::stdin().is_terminal(),
         std::io::stdout().is_terminal(),
     ) {
-        if let Some(path) = tui::run()? {
-            write_tui_switch_path(&path)?;
+        match tui::run() {
+            Ok(Some(path)) => write_tui_switch_path(&path)?,
+            Ok(None) => {}
+            Err(e) if e.downcast_ref::<config::ConfigError>().is_some() => {
+                eprintln!("error: {e}");
+                ExitCode::ConfigError.exit();
+            }
+            Err(e) => return Err(e),
         }
         return Ok(());
     }

@@ -44,30 +44,24 @@ static PREV_PANIC_HOOK: Mutex<Option<Arc<PanicHook>>> = Mutex::new(None);
 
 /// Launch the TUI. This is the single public entry point.
 pub fn run() -> Result<Option<String>> {
+    // Parse configuration before changing terminal state so strict config
+    // errors are reported normally.
+    let global = crate::config::load_global_config()?;
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::git::discover_repo(&cwd).ok())
+        .map(|repo| crate::config::load_project_config(&repo.path))
+        .transpose()?
+        .flatten();
+    let resolved_config = crate::config::resolve_config(None, project.as_ref(), &global);
+
     install_panic_hook();
     let mut terminal = ratatui::init();
     let mut app = App::new();
 
-    // Load config once and apply the configurable theme.
-    let resolved_config = if let Ok(global) = crate::config::load_global_config() {
-        let project = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| crate::git::discover_repo(&cwd).ok())
-            .and_then(|ri| crate::config::load_project_config(&ri.path).ok().flatten());
-        Some(crate::config::resolve_config(
-            None,
-            project.as_ref(),
-            &global,
-        ))
-    } else {
-        None
-    };
-
-    if let Some(ref resolved) = resolved_config {
-        app.theme = theme::from_name(&resolved.ui.theme);
-        app.ui_options.theme_name = resolved.ui.theme.clone();
-        app.worktree_root = resolved.worktrees.root.clone();
-    }
+    app.theme = theme::from_name(&resolved_config.ui.theme);
+    app.ui_options.theme_name = resolved_config.ui.theme.clone();
+    app.worktree_root = resolved_config.worktrees.root.clone();
 
     // Load worktree data before entering the event loop
     app.refresh_list();
