@@ -92,3 +92,23 @@ fn parse_porcelain(bytes: &[u8], current_path: &Path) -> Result<Vec<DiscoveredWo
     }
     Ok(entries)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn porcelain_fixture_preserves_detached_head_and_classification() {
+        let fixture = b"worktree /repo\0HEAD 0123456789abcdef\0branch refs/heads/main\0\0worktree /repo/wt\0HEAD abcdef0123456789\0detached\0\0";
+        let entries = parse_porcelain(fixture, Path::new("/repo/wt")).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].is_main);
+        assert!(!entries[0].is_current);
+        assert_eq!(entries[0].branch.as_deref(), Some("main"));
+        assert!(entries[1].is_current);
+        assert!(entries[1].detached);
+        assert_eq!(entries[1].head.as_deref(), Some("abcdef0123456789"));
+        assert_eq!(entries[1].branch, None);
+    }
+}

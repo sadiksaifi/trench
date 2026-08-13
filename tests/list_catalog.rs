@@ -162,3 +162,51 @@ fn list_json_reports_exact_raw_status_and_base_fields() {
     assert_eq!(linked_record["ahead"], 1);
     assert_eq!(linked_record["behind"], 0);
 }
+
+#[test]
+fn list_reports_detached_worktree_with_stable_identity_and_porcelain_shape() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("detached-repo");
+    let detached = root.path().join("detached-checkout");
+    let xdg = root.path().join("xdg");
+    std::fs::create_dir(&repo).unwrap();
+    init_repo(&repo);
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            detached.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let head = String::from_utf8(
+        Command::new("git")
+            .current_dir(&detached)
+            .args(["rev-parse", "--short=7", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let records = output_json(&trench(&detached, &xdg, &["list", "--json"]));
+    let record = &records[0];
+    assert_eq!(record["worktree"], format!("detached@{head}"));
+    assert!(record["branch"].is_null());
+    assert_eq!(record["detached"], true);
+    assert_eq!(record["is_current"], true);
+
+    let porcelain = trench(&detached, &xdg, &["list", "--porcelain"]);
+    assert!(porcelain.status.success());
+    let stdout = String::from_utf8(porcelain.stdout).unwrap();
+    let line = stdout.lines().next().unwrap();
+    assert_eq!(line.split(':').count(), 7);
+    assert!(
+        line.starts_with(&format!("detached@{head}:(detached):")),
+        "{line}"
+    );
+}
