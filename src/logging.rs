@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 use crate::paths;
 
 const DEFAULT_FILTER: &str = "warn";
+const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
 const ENV_FILTER_VAR: &str = "TRENCH_LOG";
 
@@ -180,6 +181,7 @@ impl Diagnostics {
         let Ok(_guard) = self.write_lock.lock() else {
             return;
         };
+        self.rotate_if_full();
         let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
@@ -197,6 +199,19 @@ impl Diagnostics {
             event.duration.as_millis(),
             error
         );
+    }
+
+    fn rotate_if_full(&self) {
+        let Ok(metadata) = std::fs::metadata(&self.path) else {
+            return;
+        };
+        if metadata.len() < MAX_FILE_BYTES {
+            return;
+        }
+
+        let rotated = PathBuf::from(format!("{}.1", self.path.display()));
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::rename(&self.path, rotated);
     }
 }
 
@@ -301,6 +316,33 @@ mod tests {
         let contents = std::fs::read_to_string(log_path).unwrap();
         assert!(contents
             .contains("level=debug operation=create stage=validate duration_ms=3 error=none"));
+    }
+
+    #[test]
+    fn rotates_the_active_file_at_one_mibibyte() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        std::fs::write(&log_path, vec![b'x'; 1024 * 1024]).unwrap();
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+
+        diagnostics.record(DiagnosticEvent::warning(
+            Operation::Sync,
+            Stage::Git,
+            std::time::Duration::from_millis(29),
+            DiagnosticError::Git,
+        ));
+
+        assert_eq!(
+            std::fs::metadata(dir.path().join("trench.log.1"))
+                .unwrap()
+                .len(),
+            1024 * 1024
+        );
+        let active = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            active,
+            "level=warn operation=sync stage=git duration_ms=29 error=git\n"
+        );
     }
 
     #[test]
