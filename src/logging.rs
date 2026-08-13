@@ -229,6 +229,7 @@ impl Diagnostics {
             return;
         };
         self.prepare();
+        self.normalize_retention();
         self.rotate_if_full();
         let Ok(mut file) = OpenOptions::new()
             .create(true)
@@ -248,7 +249,7 @@ impl Diagnostics {
             return;
         }
 
-        self.remove_excess_rotated_files();
+        let _ = std::fs::remove_file(self.rotated_path(ROTATED_FILE_COUNT));
         for index in (1..ROTATED_FILE_COUNT).rev() {
             let source = self.rotated_path(index);
             let destination = self.rotated_path(index + 1);
@@ -258,7 +259,7 @@ impl Diagnostics {
         let _ = std::fs::rename(&self.path, self.rotated_path(1));
     }
 
-    fn remove_excess_rotated_files(&self) {
+    fn normalize_retention(&self) {
         let Some(parent) = self.path.parent() else {
             return;
         };
@@ -279,7 +280,7 @@ impl Diagnostics {
             else {
                 continue;
             };
-            if index >= ROTATED_FILE_COUNT {
+            if index > ROTATED_FILE_COUNT {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -306,6 +307,7 @@ pub fn init() {
         DiagnosticFilter::from_env_value(env_filter.as_deref()),
     );
     diagnostics.prepare();
+    diagnostics.normalize_retention();
     diagnostics.rotate_if_full();
     diagnostics.prepare();
     let _ = DIAGNOSTICS.set(diagnostics);
@@ -450,6 +452,48 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("trench.log.4")).unwrap(),
             "old-3"
+        );
+    }
+
+    #[test]
+    fn normalizes_excess_retention_when_active_file_is_below_limit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        std::fs::write(&log_path, "active").unwrap();
+        for index in 1..=9 {
+            std::fs::write(
+                dir.path().join(format!("trench.log.{index}")),
+                format!("old-{index}"),
+            )
+            .unwrap();
+        }
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+
+        diagnostics.record(DiagnosticEvent::warning(
+            Operation::Watch,
+            Stage::Observe,
+            Duration::ZERO,
+            DiagnosticError::Io,
+        ));
+
+        let mut names = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "trench.log",
+                "trench.log.1",
+                "trench.log.2",
+                "trench.log.3",
+                "trench.log.4",
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("trench.log.4")).unwrap(),
+            "old-4"
         );
     }
 
