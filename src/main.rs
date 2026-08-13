@@ -221,10 +221,11 @@ impl Cli {
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    if !cli.dry_run {
+    let read_only_startup = std::env::args_os().any(|argument| argument == "--dry-run");
+    if !read_only_startup {
         logging::init();
     }
+    let cli = Cli::parse();
     let output_config = cli.output_config();
 
     if cli.should_launch_tui(
