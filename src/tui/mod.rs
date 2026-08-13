@@ -48,7 +48,7 @@ pub fn run() -> Result<Option<String>> {
     let mut terminal = ratatui::init();
     let mut app = App::new();
 
-    // Load config once and apply theme + auto_refresh
+    // Load config once and apply the configurable theme.
     let resolved_config = if let Ok(global) = crate::config::load_global_config() {
         let project = std::env::current_dir()
             .ok()
@@ -65,20 +65,9 @@ pub fn run() -> Result<Option<String>> {
 
     if let Some(ref resolved) = resolved_config {
         app.theme = theme::from_name(&resolved.ui.theme);
-        app.ui_options = chrome::UiOptions {
-            theme_name: resolved.ui.theme.clone(),
-            date_format: resolved.ui.date_format.clone(),
-            show_ahead_behind: resolved.ui.show_ahead_behind,
-            show_dirty_count: resolved.ui.show_dirty_count,
-        };
+        app.ui_options.theme_name = resolved.ui.theme.clone();
         app.tmux_enabled = resolved.shell.tmux;
     }
-
-    // Set auto_refresh before any refresh that may build a watcher
-    app.auto_refresh = resolved_config
-        .as_ref()
-        .map(|c| c.ui.auto_refresh)
-        .unwrap_or(true);
 
     // Load worktree data before entering the event loop
     app.refresh_list();

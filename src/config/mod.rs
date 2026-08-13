@@ -74,10 +74,6 @@ pub struct ProjectConfig {
 #[serde(deny_unknown_fields)]
 pub struct UiConfig {
     pub theme: Option<String>,
-    pub date_format: Option<String>,
-    pub show_ahead_behind: Option<bool>,
-    pub show_dirty_count: Option<bool>,
-    pub auto_refresh: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -172,10 +168,6 @@ impl Default for ResolvedShellConfig {
 #[derive(Debug, PartialEq)]
 pub struct ResolvedUiConfig {
     pub theme: String,
-    pub date_format: String,
-    pub show_ahead_behind: bool,
-    pub show_dirty_count: bool,
-    pub auto_refresh: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -195,10 +187,6 @@ impl Default for ResolvedUiConfig {
     fn default() -> Self {
         Self {
             theme: "ops".to_string(),
-            date_format: "%Y-%m-%d %H:%M".to_string(),
-            show_ahead_behind: true,
-            show_dirty_count: true,
-            auto_refresh: true,
         }
     }
 }
@@ -265,22 +253,6 @@ pub fn resolve_config(
                 .and_then(|u| u.theme.clone())
                 .or_else(|| g_ui.and_then(|u| u.theme.clone()))
                 .unwrap_or(defaults_ui.theme),
-            date_format: p_ui
-                .and_then(|u| u.date_format.clone())
-                .or_else(|| g_ui.and_then(|u| u.date_format.clone()))
-                .unwrap_or(defaults_ui.date_format),
-            show_ahead_behind: p_ui
-                .and_then(|u| u.show_ahead_behind)
-                .or_else(|| g_ui.and_then(|u| u.show_ahead_behind))
-                .unwrap_or(defaults_ui.show_ahead_behind),
-            show_dirty_count: p_ui
-                .and_then(|u| u.show_dirty_count)
-                .or_else(|| g_ui.and_then(|u| u.show_dirty_count))
-                .unwrap_or(defaults_ui.show_dirty_count),
-            auto_refresh: p_ui
-                .and_then(|u| u.auto_refresh)
-                .or_else(|| g_ui.and_then(|u| u.auto_refresh))
-                .unwrap_or(defaults_ui.auto_refresh),
         },
         git: ResolvedGitConfig {
             default_base: cli
@@ -366,68 +338,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_refresh_defaults_to_true() {
-        let resolved = resolve_config(None, None, &GlobalConfig::default());
-        assert!(
-            resolved.ui.auto_refresh,
-            "auto_refresh should default to true"
-        );
-    }
-
-    #[test]
-    fn auto_refresh_can_be_disabled_via_global_config() {
-        let global = GlobalConfig {
-            ui: Some(UiConfig {
-                auto_refresh: Some(false),
-                ..UiConfig::default()
-            }),
-            ..GlobalConfig::default()
-        };
-        let resolved = resolve_config(None, None, &global);
-        assert!(
-            !resolved.ui.auto_refresh,
-            "auto_refresh should be false when disabled in global config"
-        );
-    }
-
-    #[test]
-    fn auto_refresh_from_toml() {
-        let dir = TempDir::new().unwrap();
-        let path = write_config(
-            &dir,
-            r#"
-[ui]
-auto_refresh = false
-"#,
-        );
-        let config = load_global_config_from(&path).unwrap();
-        assert_eq!(config.ui.unwrap().auto_refresh, Some(false));
-    }
-
-    #[test]
-    fn auto_refresh_project_overrides_global() {
-        let global = GlobalConfig {
-            ui: Some(UiConfig {
-                auto_refresh: Some(true),
-                ..UiConfig::default()
-            }),
-            ..GlobalConfig::default()
-        };
-        let project = ProjectConfig {
-            ui: Some(UiConfig {
-                auto_refresh: Some(false),
-                ..UiConfig::default()
-            }),
-            ..ProjectConfig::default()
-        };
-        let resolved = resolve_config(None, Some(&project), &global);
-        assert!(
-            !resolved.ui.auto_refresh,
-            "project auto_refresh should override global"
-        );
-    }
-
-    #[test]
     fn missing_file_returns_defaults() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nonexistent.toml");
@@ -448,9 +358,6 @@ auto_refresh = false
             r#"
 [ui]
 theme = "dark"
-date_format = "%Y-%m-%d"
-show_ahead_behind = true
-show_dirty_count = false
 
 [git]
 default_base = "main"
@@ -467,9 +374,6 @@ scan = ["/home/user/projects", "/tmp/worktrees"]
 
         let ui = config.ui.unwrap();
         assert_eq!(ui.theme.as_deref(), Some("dark"));
-        assert_eq!(ui.date_format.as_deref(), Some("%Y-%m-%d"));
-        assert_eq!(ui.show_ahead_behind, Some(true));
-        assert_eq!(ui.show_dirty_count, Some(false));
 
         let git = config.git.unwrap();
         assert_eq!(git.default_base.as_deref(), Some("main"));
@@ -505,9 +409,6 @@ theme = "solarized"
 
         let ui = config.ui.unwrap();
         assert_eq!(ui.theme.as_deref(), Some("solarized"));
-        assert!(ui.date_format.is_none());
-        assert!(ui.show_ahead_behind.is_none());
-        assert!(ui.show_dirty_count.is_none());
 
         assert!(config.git.is_none());
         assert!(config.worktrees.is_none());
@@ -586,13 +487,33 @@ scan = ["/opt/trees"]
     }
 
     #[test]
+    fn former_ui_options_are_rejected() {
+        let dir = TempDir::new().unwrap();
+
+        for key_value in [
+            "date_format = \"%Y-%m-%d\"",
+            "show_ahead_behind = true",
+            "show_dirty_count = true",
+            "auto_refresh = true",
+        ] {
+            let path = write_config(&dir, &format!("[ui]\n{key_value}\n"));
+            let key = key_value.split_once(" = ").unwrap().0;
+
+            let err = load_global_config_from(&path).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains(&path.display().to_string()), "{msg}");
+            assert!(msg.contains(key), "{msg}");
+        }
+    }
+
+    #[test]
     fn wrong_type_returns_error() {
         let dir = TempDir::new().unwrap();
         let path = write_config(
             &dir,
             r#"
 [ui]
-show_ahead_behind = "yes"
+theme = true
 "#,
         );
 
@@ -761,9 +682,6 @@ run = ["bun install"]
         let resolved = resolve_config(None, None, &GlobalConfig::default());
 
         assert_eq!(resolved.ui.theme, "ops");
-        assert_eq!(resolved.ui.date_format, "%Y-%m-%d %H:%M");
-        assert!(resolved.ui.show_ahead_behind);
-        assert!(resolved.ui.show_dirty_count);
 
         assert_eq!(resolved.git.default_base, "main");
         assert!(!resolved.git.auto_prune);
@@ -783,10 +701,6 @@ run = ["bun install"]
         let global = GlobalConfig {
             ui: Some(UiConfig {
                 theme: Some("nord".to_string()),
-                date_format: None,
-                show_ahead_behind: Some(false),
-                show_dirty_count: None,
-                auto_refresh: None,
             }),
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
@@ -804,15 +718,12 @@ run = ["bun install"]
 
         // Overridden fields
         assert_eq!(resolved.ui.theme, "nord");
-        assert!(!resolved.ui.show_ahead_behind);
         assert_eq!(resolved.git.default_base, "develop");
         assert!(resolved.git.auto_prune);
         assert_eq!(resolved.worktrees.root, "custom/{{ repo }}/{{ branch }}");
         assert_eq!(resolved.worktrees.scan, vec!["/extra".to_string()]);
 
         // Fallback to defaults
-        assert_eq!(resolved.ui.date_format, "%Y-%m-%d %H:%M");
-        assert!(resolved.ui.show_dirty_count);
         assert!(resolved.git.fetch_on_open);
     }
 
@@ -821,10 +732,6 @@ run = ["bun install"]
         let global = GlobalConfig {
             ui: Some(UiConfig {
                 theme: Some("dark".to_string()),
-                date_format: Some("%d/%m/%Y".to_string()),
-                show_ahead_behind: None,
-                show_dirty_count: None,
-                auto_refresh: None,
             }),
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
@@ -837,10 +744,6 @@ run = ["bun install"]
         let project = ProjectConfig {
             ui: Some(UiConfig {
                 theme: Some("nord".to_string()),
-                date_format: None, // not overridden — should fall through to global
-                show_ahead_behind: Some(false),
-                show_dirty_count: None,
-                auto_refresh: None,
             }),
             git: Some(GitConfig {
                 default_base: Some("staging".to_string()),
@@ -858,17 +761,14 @@ run = ["bun install"]
 
         // Project wins over global
         assert_eq!(resolved.ui.theme, "nord");
-        assert!(!resolved.ui.show_ahead_behind);
         assert_eq!(resolved.git.default_base, "staging");
         assert!(!resolved.git.fetch_on_open);
         assert_eq!(resolved.worktrees.root, "proj/{{ repo }}/{{ branch }}");
 
         // Global fills in where project is None
-        assert_eq!(resolved.ui.date_format, "%d/%m/%Y");
         assert!(resolved.git.auto_prune);
 
         // Default fills in where both are None
-        assert!(resolved.ui.show_dirty_count);
         assert!(resolved.worktrees.scan.is_empty());
     }
 
@@ -1049,7 +949,6 @@ run = ["bun install"]
             r#"
 [ui]
 theme = "solarized"
-show_ahead_behind = false
 
 [git]
 default_base = "main"
@@ -1086,10 +985,8 @@ shell = "echo global-cleanup"
 
         // Global UI fills in (project has no UI section)
         assert_eq!(resolved.ui.theme, "solarized");
-        assert!(!resolved.ui.show_ahead_behind);
 
         // Defaults fill in for unset fields
-        assert!(resolved.ui.show_dirty_count);
         assert!(resolved.git.fetch_on_open);
 
         // Project worktrees override global
