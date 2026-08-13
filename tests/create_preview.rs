@@ -244,3 +244,61 @@ fn preview_classifies_local_remote_and_checked_out_refs() {
     assert_eq!(navigate["action"], "navigate");
     assert_eq!(navigate["worktree"], "feature-auth");
 }
+
+#[cfg(unix)]
+#[test]
+fn rejected_symlink_escape_does_not_mutate_state() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let marker = outside.path().join("hook-ran");
+    init_repo(repo.path());
+    let repository = repo.path().file_name().unwrap().to_string_lossy();
+    std::os::unix::fs::symlink(outside.path(), root.path().join(repository.as_ref())).unwrap();
+    write_project_config(
+        repo.path(),
+        root.path(),
+        &format!(
+            "\n[hooks.pre_create]\nshell = {:?}\n",
+            format!("touch {}", marker.display())
+        ),
+    );
+    let refs_before = git_stdout(
+        repo.path(),
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let worktrees_before = git_stdout(repo.path(), &["worktree", "list", "--porcelain"]);
+
+    let output = trench(
+        repo.path(),
+        xdg.path(),
+        &["create", "feature/auth", "--dry-run", "--json"],
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("escapes its configured root"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git_stdout(
+            repo.path(),
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        ),
+        refs_before
+    );
+    assert_eq!(
+        git_stdout(repo.path(), &["worktree", "list", "--porcelain"]),
+        worktrees_before
+    );
+    assert!(!outside.path().join("feature-auth").exists());
+    assert!(!marker.exists());
+    for directory in ["config", "data", "state", "cache"] {
+        assert!(
+            !xdg.path().join(directory).exists(),
+            "rejected preview created the XDG {directory} directory"
+        );
+    }
+}
