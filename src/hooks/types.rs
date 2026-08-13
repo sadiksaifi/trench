@@ -1,5 +1,35 @@
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookStep {
+    Copy,
+    Run,
+    Shell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookStreamEvent {
+    StepStarted {
+        step: HookStep,
+    },
+    Output {
+        step: HookStep,
+        stream: OutputStream,
+        line: String,
+    },
+    StepFinished {
+        step: HookStep,
+        success: bool,
+        duration: Duration,
+    },
+}
+
 /// A message sent from the hook runner for live streaming of hook execution.
 ///
 /// This type lives in the hooks module (not TUI) so that the hook runner

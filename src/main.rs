@@ -7,6 +7,7 @@ mod git;
 mod hooks;
 mod live_worktree;
 mod logging;
+mod operation;
 mod output;
 mod paths;
 mod process;
@@ -415,85 +416,46 @@ fn run_create(
         return Ok(());
     }
 
-    // Only real execution creates the configured worktree root directory.
-    std::fs::create_dir_all(&worktree_root).with_context(|| {
-        format!(
-            "failed to create worktree root: {}",
-            worktree_root.display()
-        )
-    })?;
-    let db_path = runtime_db_path()?;
-    let db = state::Database::open(&db_path)?;
-
     let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
-
-    match rt.block_on(cli::commands::create::execute_with_hooks(
+    let plan = cli::commands::create::execute_dry_run(
         branch,
         from,
         &cwd,
         &worktree_root,
-        paths::DEFAULT_WORKTREE_TEMPLATE,
-        &db,
-        resolved.hooks.as_ref(),
+        resolved.git.default_base.as_deref(),
         no_hooks,
-        None,
-    )) {
-        Ok(outcome) => {
-            // Report post_create hook failure to stderr
-            if let Some(ref hook_err) = outcome.post_create_error {
-                eprintln!("error: post_create hook failed: {hook_err:#}");
-            }
+    )?;
+    let request = operation::OperationRequest::Create(operation::CreateRequest {
+        plan,
+        repo_path: repo_info.path,
+        worktree_root,
+        hooks: resolved.hooks,
+    });
 
+    match rt.block_on(operation::execute(request, &operation::NoopEmitter)) {
+        Ok(operation::OperationOutcome::Create(outcome)) => {
             if json {
-                let json_output = outcome.result.to_json_output(outcome.hooks_status);
-                println!("{}", output::json::format_json_value(&json_output)?);
+                println!("{}", output::json::format_json_value(&outcome)?);
             } else {
-                println!("{}", outcome.result.path.display());
-            }
-
-            // Exit 4 if post_create hook failed (FR-24: hard stop)
-            if let Some(ref hook_err) = outcome.post_create_error {
-                if hook_err.chain().any(|c| {
-                    c.downcast_ref::<hooks::runner::HookTimeoutError>()
-                        .is_some()
-                }) {
-                    ExitCode::HookTimeout.exit();
-                }
-                ExitCode::HookFailed.exit();
+                println!("{}", outcome.plan.path.display());
             }
             Ok(())
         }
-        Err(e) => {
-            // Check for hook timeout first (more specific than hook failure)
-            if e.chain().any(|c| {
-                c.downcast_ref::<hooks::runner::HookTimeoutError>()
-                    .is_some()
-            }) {
-                eprintln!("error: {e:#}");
-                ExitCode::HookTimeout.exit();
+        Err(failure) => {
+            if json {
+                eprintln!("{}", output::json::format_json_value(&failure)?);
+            } else {
+                eprintln!("error: {failure}");
             }
-            // Check for hook failure (pre_create) via typed error
-            if e.downcast_ref::<cli::commands::create::CreateError>()
-                .is_some()
-            {
-                eprintln!("error: {e:#}");
-                ExitCode::HookFailed.exit();
+            match failure.class {
+                operation::ErrorClass::Hook => ExitCode::HookFailed.exit(),
+                operation::ErrorClass::Git => ExitCode::GitError.exit(),
+                operation::ErrorClass::Cancelled
+                | operation::ErrorClass::PreconditionsChanged
+                | operation::ErrorClass::Cleanup
+                | operation::ErrorClass::Io
+                | operation::ErrorClass::Internal => ExitCode::GeneralError.exit(),
             }
-            if let Some(git_err) = e.downcast_ref::<git::GitError>() {
-                match git_err {
-                    git::GitError::BranchAlreadyExists { .. }
-                    | git::GitError::RemoteBranchAlreadyExists { .. } => {
-                        eprintln!("error: {e}");
-                        ExitCode::BranchExists.exit();
-                    }
-                    git::GitError::BaseBranchNotFound { .. } => {
-                        eprintln!("error: {e}");
-                        ExitCode::NotFound.exit();
-                    }
-                    _ => {}
-                }
-            }
-            Err(e)
         }
     }
 }

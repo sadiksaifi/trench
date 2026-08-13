@@ -1,0 +1,449 @@
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde::ser::{Serialize, SerializeStruct, Serializer};
+
+use crate::config::HooksConfig;
+use crate::create_plan::{CreateAction, CreatePlan, CreatePlanner};
+use crate::{git, logging};
+
+#[derive(Debug, Clone)]
+pub enum OperationRequest {
+    Create(CreateRequest),
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateRequest {
+    pub plan: CreatePlan,
+    pub repo_path: PathBuf,
+    pub worktree_root: PathBuf,
+    pub hooks: Option<HooksConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationKind {
+    Create,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationStage {
+    Revalidate,
+    PreHook,
+    CreateWorktree,
+    PostHook,
+    Rollback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationState {
+    NotStarted,
+    RolledBack,
+    Applied,
+    PartiallyApplied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorClass {
+    Cancelled,
+    PreconditionsChanged,
+    Git,
+    Hook,
+    Cleanup,
+    Io,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperationEvent {
+    Started {
+        operation: OperationKind,
+    },
+    StageStarted {
+        stage: OperationStage,
+    },
+    MutationStarted,
+    Output {
+        hook: crate::hooks::HookEvent,
+        step: crate::hooks::types::HookStep,
+        stream: crate::hooks::types::OutputStream,
+        line: String,
+    },
+    StageFinished {
+        stage: OperationStage,
+        duration: Duration,
+        success: bool,
+    },
+    Warning {
+        stage: OperationStage,
+        message: String,
+    },
+    Finished {
+        mutation_state: MutationState,
+        duration: Duration,
+    },
+}
+
+pub trait Emitter: Send + Sync {
+    fn emit(&self, event: OperationEvent);
+}
+
+#[derive(Debug, Default)]
+pub struct NoopEmitter;
+
+impl Emitter for NoopEmitter {
+    fn emit(&self, _event: OperationEvent) {}
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RecordingEmitter {
+    events: Arc<Mutex<Vec<OperationEvent>>>,
+}
+
+impl RecordingEmitter {
+    pub fn events(&self) -> Vec<OperationEvent> {
+        self.events
+            .lock()
+            .map(|events| events.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl Emitter for RecordingEmitter {
+    fn emit(&self, event: OperationEvent) {
+        if let Ok(mut events) = self.events.lock() {
+            events.push(event);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelEmitter {
+    sender: mpsc::Sender<OperationEvent>,
+}
+
+impl ChannelEmitter {
+    pub fn new(sender: mpsc::Sender<OperationEvent>) -> Self {
+        Self { sender }
+    }
+}
+
+impl Emitter for ChannelEmitter {
+    fn emit(&self, event: OperationEvent) {
+        let _ = self.sender.send(event);
+    }
+}
+
+pub trait CancellationCheck: Send + Sync {
+    fn is_cancelled(&self) -> bool;
+}
+
+#[derive(Debug, Default)]
+pub struct NeverCancelled;
+
+impl CancellationCheck for NeverCancelled {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+impl CancellationCheck for CancellationToken {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperationOutcome {
+    Create(CreateOutcome),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateOutcome {
+    pub plan: CreatePlan,
+    pub mutation_state: MutationState,
+}
+
+impl Serialize for CreateOutcome {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut output = serializer.serialize_struct("CreateOutcome", 9)?;
+        output.serialize_field("dry_run", &false)?;
+        output.serialize_field("action", self.plan.action.name())?;
+        output.serialize_field("branch", &self.plan.branch)?;
+        output.serialize_field("worktree", &self.plan.worktree)?;
+        output.serialize_field("path", &self.plan.path)?;
+        output.serialize_field("base", &self.plan.base)?;
+        output.serialize_field("tracking", &self.plan.tracking)?;
+        output.serialize_field("hook_policy", &self.plan.hook_policy)?;
+        output.serialize_field("mutation_state", &self.mutation_state)?;
+        output.end()
+    }
+}
+
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+#[error("{message}")]
+pub struct OperationFailure {
+    pub stage: OperationStage,
+    pub mutation_state: MutationState,
+    pub class: ErrorClass,
+    pub message: String,
+}
+
+pub async fn execute(
+    request: OperationRequest,
+    emitter: &dyn Emitter,
+) -> Result<OperationOutcome, OperationFailure> {
+    execute_cancellable(request, emitter, &NeverCancelled).await
+}
+
+pub async fn execute_cancellable(
+    request: OperationRequest,
+    emitter: &dyn Emitter,
+    cancellation: &dyn CancellationCheck,
+) -> Result<OperationOutcome, OperationFailure> {
+    match request {
+        OperationRequest::Create(request) => execute_create(request, emitter, cancellation).await,
+    }
+}
+
+async fn execute_create(
+    request: CreateRequest,
+    emitter: &dyn Emitter,
+    cancellation: &dyn CancellationCheck,
+) -> Result<OperationOutcome, OperationFailure> {
+    let operation_started = Instant::now();
+    emitter.emit(OperationEvent::Started {
+        operation: OperationKind::Create,
+    });
+
+    let stage_started = Instant::now();
+    emitter.emit(OperationEvent::StageStarted {
+        stage: OperationStage::Revalidate,
+    });
+    let live_plan = revalidate(&request).map_err(|message| OperationFailure {
+        stage: OperationStage::Revalidate,
+        mutation_state: MutationState::NotStarted,
+        class: ErrorClass::PreconditionsChanged,
+        message,
+    })?;
+    finish_stage(emitter, OperationStage::Revalidate, stage_started, true);
+
+    if live_plan != request.plan {
+        return Err(fail(
+            emitter,
+            operation_started,
+            OperationStage::Revalidate,
+            MutationState::NotStarted,
+            ErrorClass::PreconditionsChanged,
+            "create plan no longer matches live Git state".to_string(),
+        ));
+    }
+
+    if let CreateAction::Navigate(_) = &request.plan.action {
+        let outcome = CreateOutcome {
+            plan: request.plan,
+            mutation_state: MutationState::NotStarted,
+        };
+        finish_operation(emitter, operation_started, MutationState::NotStarted);
+        return Ok(OperationOutcome::Create(outcome));
+    }
+
+    if cancellation.is_cancelled() {
+        return Err(fail(
+            emitter,
+            operation_started,
+            OperationStage::Revalidate,
+            MutationState::NotStarted,
+            ErrorClass::Cancelled,
+            "operation cancelled before mutation".to_string(),
+        ));
+    }
+    emitter.emit(OperationEvent::MutationStarted);
+
+    let stage_started = Instant::now();
+    emitter.emit(OperationEvent::StageStarted {
+        stage: OperationStage::CreateWorktree,
+    });
+    let created_parents = create_parent_directories(&request.plan.path).map_err(|error| {
+        fail(
+            emitter,
+            operation_started,
+            OperationStage::CreateWorktree,
+            MutationState::NotStarted,
+            ErrorClass::Io,
+            format!("failed to create worktree parent: {error}"),
+        )
+    })?;
+
+    let create_result = match &request.plan.action {
+        CreateAction::NewBranch(base) => git::create::add_new_branch(
+            &request.repo_path,
+            &request.plan.worktree,
+            &request.plan.branch,
+            base,
+            &request.plan.path,
+        ),
+        _ => Err(git::GitError::CommandFailed {
+            operation: "creating worktree",
+            message: "planned create action is not implemented".to_string(),
+        }),
+    };
+
+    if let Err(error) = create_result {
+        cleanup_empty_directories(&created_parents);
+        finish_stage(
+            emitter,
+            OperationStage::CreateWorktree,
+            stage_started,
+            false,
+        );
+        return Err(fail(
+            emitter,
+            operation_started,
+            OperationStage::CreateWorktree,
+            MutationState::RolledBack,
+            ErrorClass::Git,
+            error.to_string(),
+        ));
+    }
+    finish_stage(emitter, OperationStage::CreateWorktree, stage_started, true);
+
+    let outcome = CreateOutcome {
+        plan: request.plan,
+        mutation_state: MutationState::Applied,
+    };
+    finish_operation(emitter, operation_started, MutationState::Applied);
+    Ok(OperationOutcome::Create(outcome))
+}
+
+fn revalidate(request: &CreateRequest) -> Result<CreatePlan, String> {
+    let planner = CreatePlanner::discover(
+        &request.repo_path,
+        &request.worktree_root,
+        None,
+        request.plan.hook_policy,
+    )
+    .map_err(|error| error.to_string())?;
+    let from = match &request.plan.action {
+        CreateAction::NewBranch(_) => request.plan.base.as_deref(),
+        _ => None,
+    };
+    planner
+        .plan(&request.plan.branch, from)
+        .map_err(|error| error.to_string())
+}
+
+fn create_parent_directories(target: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let Some(parent) = target.parent() else {
+        return Ok(Vec::new());
+    };
+    let mut missing = Vec::new();
+    let mut cursor = parent;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        let Some(next) = cursor.parent() else {
+            break;
+        };
+        cursor = next;
+    }
+    for directory in missing.iter().rev() {
+        std::fs::create_dir(directory)?;
+    }
+    Ok(missing)
+}
+
+fn cleanup_empty_directories(directories: &[PathBuf]) {
+    for directory in directories {
+        let _ = std::fs::remove_dir(directory);
+    }
+}
+
+fn finish_stage(emitter: &dyn Emitter, stage: OperationStage, started: Instant, success: bool) {
+    let duration = started.elapsed();
+    emitter.emit(OperationEvent::StageFinished {
+        stage,
+        duration,
+        success,
+    });
+    logging::record(logging::DiagnosticEvent::debug(
+        logging::Operation::Create,
+        diagnostic_stage(stage),
+        duration,
+    ));
+}
+
+fn finish_operation(emitter: &dyn Emitter, started: Instant, state: MutationState) {
+    let duration = started.elapsed();
+    emitter.emit(OperationEvent::Finished {
+        mutation_state: state,
+        duration,
+    });
+    logging::record(logging::DiagnosticEvent::debug(
+        logging::Operation::Create,
+        logging::Stage::Complete,
+        duration,
+    ));
+}
+
+fn fail(
+    emitter: &dyn Emitter,
+    started: Instant,
+    stage: OperationStage,
+    state: MutationState,
+    class: ErrorClass,
+    message: String,
+) -> OperationFailure {
+    let duration = started.elapsed();
+    emitter.emit(OperationEvent::Finished {
+        mutation_state: state,
+        duration,
+    });
+    logging::record(logging::DiagnosticEvent::error(
+        logging::Operation::Create,
+        diagnostic_stage(stage),
+        duration,
+        diagnostic_error(class),
+    ));
+    OperationFailure {
+        stage,
+        mutation_state: state,
+        class,
+        message,
+    }
+}
+
+fn diagnostic_stage(stage: OperationStage) -> logging::Stage {
+    match stage {
+        OperationStage::Revalidate => logging::Stage::Validate,
+        OperationStage::PreHook | OperationStage::PostHook => logging::Stage::Hook,
+        OperationStage::CreateWorktree | OperationStage::Rollback => logging::Stage::Git,
+    }
+}
+
+fn diagnostic_error(class: ErrorClass) -> logging::DiagnosticError {
+    match class {
+        ErrorClass::Cancelled | ErrorClass::PreconditionsChanged => {
+            logging::DiagnosticError::InvalidInput
+        }
+        ErrorClass::Git | ErrorClass::Cleanup => logging::DiagnosticError::Git,
+        ErrorClass::Hook => logging::DiagnosticError::Hook,
+        ErrorClass::Io => logging::DiagnosticError::Io,
+        ErrorClass::Internal => logging::DiagnosticError::Internal,
+    }
+}

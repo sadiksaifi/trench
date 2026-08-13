@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+pub mod create;
 pub mod status;
 pub mod worktrees;
 
