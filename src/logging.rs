@@ -181,15 +181,15 @@ impl DiagnosticEvent {
 
 fn write_event_best_effort(writer: &mut impl Write, event: DiagnosticEvent) {
     let error = event.error.map(|error| error.as_str()).unwrap_or("none");
-    let _ = writeln!(
-        writer,
-        "level={} operation={} stage={} duration_ms={} error={}",
+    let line = format!(
+        "level={} operation={} stage={} duration_ms={} error={}\n",
         event.level.as_str(),
         event.operation.as_str(),
         event.stage.as_str(),
         event.duration.as_millis(),
         error
     );
+    let _ = writer.write_all(line.as_bytes());
 }
 
 pub struct Diagnostics {
@@ -617,6 +617,43 @@ mod tests {
         );
 
         write_event_best_effort(&mut FailingWriter, event);
+    }
+
+    #[test]
+    fn each_event_is_written_as_one_buffer() {
+        #[derive(Default)]
+        struct CountingWriter {
+            calls: usize,
+            bytes: Vec<u8>,
+        }
+
+        impl std::io::Write for CountingWriter {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.calls += 1;
+                self.bytes.extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = CountingWriter::default();
+        let event = DiagnosticEvent::warning(
+            Operation::Watch,
+            Stage::Observe,
+            Duration::from_millis(23),
+            DiagnosticError::Io,
+        );
+
+        write_event_best_effort(&mut writer, event);
+
+        assert_eq!(writer.calls, 1);
+        assert_eq!(
+            String::from_utf8(writer.bytes).unwrap(),
+            "level=warn operation=watch stage=observe duration_ms=23 error=io\n"
+        );
     }
 
     #[test]
