@@ -449,6 +449,7 @@ fn run_create(
             }
             match failure.class {
                 operation::ErrorClass::Hook => ExitCode::HookFailed.exit(),
+                operation::ErrorClass::HookTimeout => ExitCode::HookTimeout.exit(),
                 operation::ErrorClass::Git => ExitCode::GitError.exit(),
                 operation::ErrorClass::Cancelled
                 | operation::ErrorClass::PreconditionsChanged

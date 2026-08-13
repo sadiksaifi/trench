@@ -53,6 +53,7 @@ pub enum ErrorClass {
     PreconditionsChanged,
     Git,
     Hook,
+    HookTimeout,
     Cleanup,
     Io,
     Internal,
@@ -321,12 +322,13 @@ async fn execute_create(
             .await
             {
                 finish_stage(emitter, OperationStage::PreHook, stage_started, false);
+                let class = classify_hook_error(&error);
                 return Err(fail(
                     emitter,
                     operation_started,
                     OperationStage::PreHook,
                     MutationState::RolledBack,
-                    ErrorClass::Hook,
+                    class,
                     error.to_string(),
                 ));
             }
@@ -338,16 +340,45 @@ async fn execute_create(
     emitter.emit(OperationEvent::StageStarted {
         stage: OperationStage::CreateWorktree,
     });
-    let created_parents = create_parent_directories(&request.plan.path).map_err(|error| {
-        fail(
-            emitter,
-            operation_started,
-            OperationStage::CreateWorktree,
-            MutationState::NotStarted,
-            ErrorClass::Io,
-            format!("failed to create worktree parent: {error}"),
-        )
-    })?;
+    let created_parents = match create_parent_directories(&request.plan.path) {
+        Ok(created) => created,
+        Err(error) => {
+            finish_stage(
+                emitter,
+                OperationStage::CreateWorktree,
+                stage_started,
+                false,
+            );
+            let rollback_started = Instant::now();
+            emitter.emit(OperationEvent::StageStarted {
+                stage: OperationStage::Rollback,
+            });
+            match cleanup_empty_directories(&error.created) {
+                Ok(()) => {
+                    finish_stage(emitter, OperationStage::Rollback, rollback_started, true);
+                    return Err(fail(
+                        emitter,
+                        operation_started,
+                        OperationStage::CreateWorktree,
+                        MutationState::RolledBack,
+                        ErrorClass::Io,
+                        format!("failed to create worktree parent: {}", error.source),
+                    ));
+                }
+                Err(cleanup_error) => {
+                    finish_stage(emitter, OperationStage::Rollback, rollback_started, false);
+                    return Err(fail(
+                        emitter,
+                        operation_started,
+                        OperationStage::Rollback,
+                        MutationState::PartiallyApplied,
+                        ErrorClass::Cleanup,
+                        format!("failed to create worktree parent and clean up: {cleanup_error}"),
+                    ));
+                }
+            }
+        }
+    };
 
     let create_result = match &request.plan.action {
         CreateAction::NewBranch(base) => git::create::add_new_branch(
@@ -417,13 +448,14 @@ async fn execute_create(
             .await
             {
                 finish_stage(emitter, OperationStage::PostHook, stage_started, false);
+                let class = classify_hook_error(&error);
                 return Err(rollback_failure(
                     &request,
                     emitter,
                     operation_started,
                     &created_parents,
                     OperationStage::PostHook,
-                    ErrorClass::Hook,
+                    class,
                     error.to_string(),
                 ));
             }
@@ -456,7 +488,20 @@ fn revalidate(request: &CreateRequest) -> Result<CreatePlan, String> {
         .map_err(|error| error.to_string())
 }
 
-fn create_parent_directories(target: &Path) -> std::io::Result<Vec<PathBuf>> {
+#[derive(Debug)]
+struct ParentCreationFailure {
+    source: std::io::Error,
+    created: Vec<PathBuf>,
+}
+
+fn create_parent_directories(target: &Path) -> Result<Vec<PathBuf>, ParentCreationFailure> {
+    create_parent_directories_with(target, |directory| std::fs::create_dir(directory))
+}
+
+fn create_parent_directories_with(
+    target: &Path,
+    mut create: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<Vec<PathBuf>, ParentCreationFailure> {
     let Some(parent) = target.parent() else {
         return Ok(Vec::new());
     };
@@ -469,16 +514,25 @@ fn create_parent_directories(target: &Path) -> std::io::Result<Vec<PathBuf>> {
         };
         cursor = next;
     }
+    let mut created = Vec::new();
     for directory in missing.iter().rev() {
-        std::fs::create_dir(directory)?;
+        if let Err(source) = create(directory) {
+            return Err(ParentCreationFailure { source, created });
+        }
+        created.push(directory.clone());
     }
-    Ok(missing)
+    Ok(created)
 }
 
-fn cleanup_empty_directories(directories: &[PathBuf]) {
-    for directory in directories {
-        let _ = std::fs::remove_dir(directory);
+fn cleanup_empty_directories(directories: &[PathBuf]) -> std::io::Result<()> {
+    for directory in directories.iter().rev() {
+        match std::fs::remove_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
+    Ok(())
 }
 
 fn created_branch(plan: &CreatePlan) -> Option<&str> {
@@ -501,14 +555,14 @@ fn rollback_failure(
     emitter.emit(OperationEvent::StageStarted {
         stage: OperationStage::Rollback,
     });
-    let rollback = git::create::rollback_created_worktree(
+    let git_rollback = git::create::rollback_created_worktree(
         &request.repo_path,
         &request.plan.path,
         created_branch(&request.plan),
     );
-    cleanup_empty_directories(created_parents);
-    match rollback {
-        Ok(()) => {
+    let parent_cleanup = cleanup_empty_directories(created_parents);
+    match (git_rollback, parent_cleanup) {
+        (Ok(()), Ok(())) => {
             finish_stage(emitter, OperationStage::Rollback, rollback_started, true);
             fail(
                 emitter,
@@ -519,8 +573,13 @@ fn rollback_failure(
                 failure_message,
             )
         }
-        Err(cleanup_error) => {
+        (git_result, parent_result) => {
             finish_stage(emitter, OperationStage::Rollback, rollback_started, false);
+            let cleanup_error = git_result
+                .err()
+                .map(|error| error.to_string())
+                .or_else(|| parent_result.err().map(|error| error.to_string()))
+                .unwrap_or_else(|| "unknown cleanup failure".to_string());
             fail(
                 emitter,
                 operation_started,
@@ -551,6 +610,17 @@ fn create_hook_context(request: &CreateRequest) -> crate::hooks::HookEnvContext 
             .or(request.plan.tracking.as_deref())
             .unwrap_or("")
             .to_string(),
+    }
+}
+
+fn classify_hook_error(error: &anyhow::Error) -> ErrorClass {
+    if error
+        .chain()
+        .any(|cause| cause.is::<crate::hooks::runner::HookTimeoutError>())
+    {
+        ErrorClass::HookTimeout
+    } else {
+        ErrorClass::Hook
     }
 }
 
@@ -640,7 +710,7 @@ fn diagnostic_error(class: ErrorClass) -> logging::DiagnosticError {
             logging::DiagnosticError::InvalidInput
         }
         ErrorClass::Git | ErrorClass::Cleanup => logging::DiagnosticError::Git,
-        ErrorClass::Hook => logging::DiagnosticError::Hook,
+        ErrorClass::Hook | ErrorClass::HookTimeout => logging::DiagnosticError::Hook,
         ErrorClass::Io => logging::DiagnosticError::Io,
         ErrorClass::Internal => logging::DiagnosticError::Internal,
     }
@@ -791,5 +861,28 @@ mod tests {
             std::fs::read_to_string(collision_path.join("foreign-file")).unwrap(),
             "do not remove"
         );
+    }
+
+    #[test]
+    fn parent_creation_failure_removes_only_directories_created_before_the_error() {
+        let outside = tempfile::tempdir().unwrap();
+        let root = outside.path().join("root");
+        let target = root.join("repository/worktree");
+        let mut calls = 0;
+
+        let error = create_parent_directories_with(&target, |directory| {
+            calls += 1;
+            if calls == 2 {
+                return Err(std::io::Error::other("injected parent creation failure"));
+            }
+            std::fs::create_dir(directory)
+        })
+        .unwrap_err();
+
+        assert_eq!(error.source.kind(), std::io::ErrorKind::Other);
+        assert_eq!(error.created.as_slice(), std::slice::from_ref(&root));
+        cleanup_empty_directories(&error.created).unwrap();
+        assert!(!root.exists(), "partially-created parents must be cleaned");
+        assert!(outside.path().is_dir(), "pre-existing parent must remain");
     }
 }
