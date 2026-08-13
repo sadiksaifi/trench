@@ -11,6 +11,7 @@ use crate::paths;
 
 const DEFAULT_FILTER: &str = "warn";
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
+const ROTATED_FILE_COUNT: usize = 4;
 
 const ENV_FILTER_VAR: &str = "TRENCH_LOG";
 
@@ -209,9 +210,47 @@ impl Diagnostics {
             return;
         }
 
-        let rotated = PathBuf::from(format!("{}.1", self.path.display()));
-        let _ = std::fs::remove_file(&rotated);
-        let _ = std::fs::rename(&self.path, rotated);
+        self.remove_excess_rotated_files();
+        for index in (1..ROTATED_FILE_COUNT).rev() {
+            let source = self.rotated_path(index);
+            let destination = self.rotated_path(index + 1);
+            let _ = std::fs::remove_file(&destination);
+            let _ = std::fs::rename(source, destination);
+        }
+        let _ = std::fs::rename(&self.path, self.rotated_path(1));
+    }
+
+    fn remove_excess_rotated_files(&self) {
+        let Some(parent) = self.path.parent() else {
+            return;
+        };
+        let Some(file_name) = self.path.file_name().and_then(|name| name.to_str()) else {
+            return;
+        };
+        let prefix = format!("{file_name}.");
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(index) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix(&prefix))
+                .and_then(|suffix| suffix.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            if index >= ROTATED_FILE_COUNT {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    fn rotated_path(&self, index: usize) -> PathBuf {
+        let mut path = self.path.as_os_str().to_os_string();
+        path.push(format!(".{index}"));
+        PathBuf::from(path)
     }
 }
 
@@ -342,6 +381,52 @@ mod tests {
         assert_eq!(
             active,
             "level=warn operation=sync stage=git duration_ms=29 error=git\n"
+        );
+    }
+
+    #[test]
+    fn retains_only_the_active_file_and_four_rotated_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        std::fs::write(&log_path, vec![b'x'; 1024 * 1024]).unwrap();
+        for index in 1..=5 {
+            std::fs::write(
+                dir.path().join(format!("trench.log.{index}")),
+                format!("old-{index}"),
+            )
+            .unwrap();
+        }
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+
+        diagnostics.record(DiagnosticEvent::warning(
+            Operation::Remove,
+            Stage::Complete,
+            std::time::Duration::from_millis(31),
+            DiagnosticError::Io,
+        ));
+
+        let mut names = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "trench.log",
+                "trench.log.1",
+                "trench.log.2",
+                "trench.log.3",
+                "trench.log.4",
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("trench.log.1")).unwrap(),
+            "x".repeat(1024 * 1024)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("trench.log.4")).unwrap(),
+            "old-3"
         );
     }
 
