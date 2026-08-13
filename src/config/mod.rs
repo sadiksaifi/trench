@@ -8,6 +8,7 @@ use crate::paths;
 // --- Hook types (FR-18, FR-19) ---
 
 pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_WORKTREE_ROOT: &str = "~/.worktrees";
 
 fn default_timeout_secs() -> Option<u64> {
     Some(DEFAULT_HOOK_TIMEOUT_SECS)
@@ -92,7 +93,6 @@ pub struct EditorConfig {
 #[serde(deny_unknown_fields)]
 pub struct WorktreesConfig {
     pub root: Option<String>,
-    pub scan: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -176,7 +176,6 @@ pub struct ResolvedGitConfig {
 #[derive(Debug, PartialEq)]
 pub struct ResolvedWorktreesConfig {
     pub root: String,
-    pub scan: Vec<String>,
 }
 
 impl Default for ResolvedUiConfig {
@@ -198,8 +197,7 @@ impl Default for ResolvedGitConfig {
 impl Default for ResolvedWorktreesConfig {
     fn default() -> Self {
         Self {
-            root: crate::paths::DEFAULT_WORKTREE_TEMPLATE.to_string(),
-            scan: Vec::new(),
+            root: DEFAULT_WORKTREE_ROOT.to_string(),
         }
     }
 }
@@ -268,10 +266,6 @@ pub fn resolve_config(
                 .or_else(|| p_wt.and_then(|w| w.root.clone()))
                 .or_else(|| g_wt.and_then(|w| w.root.clone()))
                 .unwrap_or(defaults_wt.root),
-            scan: p_wt
-                .and_then(|w| w.scan.clone())
-                .or_else(|| g_wt.and_then(|w| w.scan.clone()))
-                .unwrap_or(defaults_wt.scan),
         },
         hooks,
     }
@@ -349,8 +343,7 @@ theme = "dark"
 default_base = "main"
 
 [worktrees]
-root = "{{ repo }}/{{ branch | sanitize }}"
-scan = ["/home/user/projects", "/tmp/worktrees"]
+root = "/home/user/.worktrees"
 "#,
         );
 
@@ -363,17 +356,7 @@ scan = ["/home/user/projects", "/tmp/worktrees"]
         assert_eq!(git.default_base.as_deref(), Some("main"));
 
         let wt = config.worktrees.unwrap();
-        assert_eq!(
-            wt.root.as_deref(),
-            Some("{{ repo }}/{{ branch | sanitize }}")
-        );
-        assert_eq!(
-            wt.scan,
-            Some(vec![
-                "/home/user/projects".to_string(),
-                "/tmp/worktrees".to_string()
-            ])
-        );
+        assert_eq!(wt.root.as_deref(), Some("/home/user/.worktrees"));
     }
 
     #[test]
@@ -406,7 +389,7 @@ theme = "solarized"
 default_base = "develop"
 
 [worktrees]
-scan = ["/opt/trees"]
+root = "/opt/trees"
 "#,
         );
 
@@ -418,8 +401,7 @@ scan = ["/opt/trees"]
         assert_eq!(git.default_base.as_deref(), Some("develop"));
 
         let wt = config.worktrees.unwrap();
-        assert!(wt.root.is_none());
-        assert_eq!(wt.scan, Some(vec!["/opt/trees".to_string()]));
+        assert_eq!(wt.root.as_deref(), Some("/opt/trees"));
     }
 
     #[test]
@@ -499,6 +481,17 @@ scan = ["/opt/trees"]
             assert!(msg.contains(&path.display().to_string()), "{msg}");
             assert!(msg.contains(key), "{msg}");
         }
+    }
+
+    #[test]
+    fn former_worktree_scan_option_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "[worktrees]\nscan = [\"~/src\"]\n");
+
+        let err = load_global_config_from(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        assert!(msg.contains("scan"), "{msg}");
     }
 
     #[test]
@@ -682,9 +675,8 @@ run = ["bun install"]
 
         assert_eq!(
             resolved.worktrees.root,
-            crate::paths::DEFAULT_WORKTREE_TEMPLATE
+            "~/.worktrees"
         );
-        assert!(resolved.worktrees.scan.is_empty());
 
         assert!(resolved.hooks.is_none());
     }
@@ -699,8 +691,7 @@ run = ["bun install"]
                 default_base: Some("develop".to_string()),
             }),
             worktrees: Some(WorktreesConfig {
-                root: Some("custom/{{ repo }}/{{ branch }}".to_string()),
-                scan: Some(vec!["/extra".to_string()]),
+                root: Some("/custom/worktrees".to_string()),
             }),
             ..GlobalConfig::default()
         };
@@ -710,8 +701,7 @@ run = ["bun install"]
         // Overridden fields
         assert_eq!(resolved.ui.theme, "nord");
         assert_eq!(resolved.git.default_base, "develop");
-        assert_eq!(resolved.worktrees.root, "custom/{{ repo }}/{{ branch }}");
-        assert_eq!(resolved.worktrees.scan, vec!["/extra".to_string()]);
+        assert_eq!(resolved.worktrees.root, "/custom/worktrees");
 
     }
 
@@ -735,8 +725,7 @@ run = ["bun install"]
                 default_base: Some("staging".to_string()),
             }),
             worktrees: Some(WorktreesConfig {
-                root: Some("proj/{{ repo }}/{{ branch }}".to_string()),
-                scan: None,
+                root: Some("/project/worktrees".to_string()),
             }),
             ..ProjectConfig::default()
         };
@@ -746,10 +735,8 @@ run = ["bun install"]
         // Project wins over global
         assert_eq!(resolved.ui.theme, "nord");
         assert_eq!(resolved.git.default_base, "staging");
-        assert_eq!(resolved.worktrees.root, "proj/{{ repo }}/{{ branch }}");
+        assert_eq!(resolved.worktrees.root, "/project/worktrees");
 
-        // Default fills in where both are None
-        assert!(resolved.worktrees.scan.is_empty());
     }
 
     #[test]
@@ -833,8 +820,7 @@ run = ["bun install"]
                 ..GitConfig::default()
             }),
             worktrees: Some(WorktreesConfig {
-                root: Some("global/{{ repo }}".to_string()),
-                scan: None,
+                root: Some("/global/worktrees".to_string()),
             }),
             ..GlobalConfig::default()
         };
@@ -845,21 +831,20 @@ run = ["bun install"]
                 ..GitConfig::default()
             }),
             worktrees: Some(WorktreesConfig {
-                root: Some("project/{{ repo }}".to_string()),
-                scan: None,
+                root: Some("/project/worktrees".to_string()),
             }),
             ..ProjectConfig::default()
         };
 
         let cli = CliConfigOverrides {
             default_base: Some("cli-branch".to_string()),
-            worktree_root: Some("cli/{{ repo }}".to_string()),
+            worktree_root: Some("/cli/worktrees".to_string()),
         };
 
         let resolved = resolve_config(Some(&cli), Some(&project), &global);
 
         assert_eq!(resolved.git.default_base, "cli-branch");
-        assert_eq!(resolved.worktrees.root, "cli/{{ repo }}");
+        assert_eq!(resolved.worktrees.root, "/cli/worktrees");
     }
 
     #[test]
@@ -874,13 +859,13 @@ run = ["bun install"]
 
         let cli = CliConfigOverrides {
             default_base: None,
-            worktree_root: Some("cli-root/{{ repo }}".to_string()),
+            worktree_root: Some("/cli/worktrees".to_string()),
         };
 
         let resolved = resolve_config(Some(&cli), None, &global);
 
         // CLI worktree_root wins
-        assert_eq!(resolved.worktrees.root, "cli-root/{{ repo }}");
+        assert_eq!(resolved.worktrees.root, "/cli/worktrees");
         // No CLI default_base → falls through to global
         assert_eq!(resolved.git.default_base, "develop");
     }
@@ -912,7 +897,7 @@ run = ["bun install"]
 default_base = "develop"
 
 [worktrees]
-root = "project/{{ repo }}/{{ branch | sanitize }}"
+root = "/project/worktrees"
 
 [hooks.post_create]
 copy = [".env"]
@@ -965,7 +950,7 @@ shell = "echo global-cleanup"
         // Project worktrees override global
         assert_eq!(
             resolved.worktrees.root,
-            "project/{{ repo }}/{{ branch | sanitize }}"
+            "/project/worktrees"
         );
 
         // Project hooks REPLACE global hooks entirely (FR-2)
@@ -1044,7 +1029,7 @@ theme = "nord"
 default_base = "develop"
 
 [worktrees]
-root = "custom/{{ repo }}/{{ branch | sanitize }}"
+root = "/custom/worktrees"
 
 [hooks.post_create]
 run = ["make setup"]
@@ -1055,7 +1040,7 @@ run = ["make setup"]
         assert_eq!(config.git.unwrap().default_base.as_deref(), Some("develop"));
         assert_eq!(
             config.worktrees.unwrap().root.as_deref(),
-            Some("custom/{{ repo }}/{{ branch | sanitize }}")
+            Some("/custom/worktrees")
         );
         assert!(config.hooks.unwrap().post_create.is_some());
     }

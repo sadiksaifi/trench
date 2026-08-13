@@ -385,22 +385,21 @@ fn run_create(
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
 
-    // Load config once so both dry-run and actual execution use the same
-    // resolved template and hooks.
+    // Load config once so both dry-run and actual execution use the same root
+    // and hooks.
     let repo_info = git::discover_repo(&cwd)?;
     let project_config = config::load_project_config(&repo_info.path)?;
     let global_config = config::load_global_config()?;
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+    let worktree_root = std::path::PathBuf::from(paths::expand_tilde(&resolved.worktrees.root));
 
     if dry_run {
-        // Use the non-mutating path accessor — dry-run must not create dirs.
-        let worktree_root = paths::worktree_root_path()?;
         let plan = cli::commands::create::execute_dry_run(
             branch,
             from,
             &cwd,
             &worktree_root,
-            &resolved.worktrees.root,
+            paths::DEFAULT_WORKTREE_TEMPLATE,
             resolved.hooks.as_ref(),
         )?;
 
@@ -412,8 +411,13 @@ fn run_create(
         return Ok(());
     }
 
-    // Only real execution creates the worktree root directory on disk.
-    let worktree_root = paths::worktree_root()?;
+    // Only real execution creates the configured worktree root directory.
+    std::fs::create_dir_all(&worktree_root).with_context(|| {
+        format!(
+            "failed to create worktree root: {}",
+            worktree_root.display()
+        )
+    })?;
     let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
@@ -424,7 +428,7 @@ fn run_create(
         from,
         &cwd,
         &worktree_root,
-        &resolved.worktrees.root,
+        paths::DEFAULT_WORKTREE_TEMPLATE,
         &db,
         resolved.hooks.as_ref(),
         no_hooks,
@@ -1074,17 +1078,13 @@ fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()
     let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
-    // Load config to get scan paths (FR-30)
+    // Loading config here keeps invalid project/global files visible to every
+    // command even though list has no configurable scan paths.
     let repo_info = git::discover_repo(&cwd)?;
     let project_config = config::load_project_config(&repo_info.path)?;
     let global_config = config::load_global_config()?;
-    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-    let scan_paths: Vec<String> = resolved
-        .worktrees
-        .scan
-        .iter()
-        .map(|p| paths::expand_tilde(p))
-        .collect();
+    let _resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+    let scan_paths: Vec<String> = Vec::new();
 
     let output = if json {
         cli::commands::list::execute_json(&cwd, &db, tag, &scan_paths)?

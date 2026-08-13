@@ -67,6 +67,7 @@ pub fn run() -> Result<Option<String>> {
         app.theme = theme::from_name(&resolved.ui.theme);
         app.ui_options.theme_name = resolved.ui.theme.clone();
         app.tmux_enabled = resolved.shell.tmux;
+        app.worktree_root = std::path::PathBuf::from(paths::expand_tilde(&resolved.worktrees.root));
     }
 
     // Load worktree data before entering the event loop
@@ -151,6 +152,7 @@ pub struct App {
     pub repo_path: Option<String>,
     pub switch_path: Option<String>,
     pub tmux_enabled: bool,
+    pub worktree_root: std::path::PathBuf,
     pub auto_refresh: bool,
     pub watcher: Option<watcher::DebouncedWatcher>,
 }
@@ -182,6 +184,9 @@ impl App {
             repo_path: None,
             switch_path: None,
             tmux_enabled: false,
+            worktree_root: std::path::PathBuf::from(paths::expand_tilde(
+                crate::config::DEFAULT_WORKTREE_ROOT,
+            )),
             auto_refresh: true,
             watcher: None,
         }
@@ -1488,16 +1493,14 @@ impl App {
             return;
         };
 
-        let worktree_root = match paths::worktree_root() {
-            Ok(r) => r,
-            Err(e) => {
-                state.result = Some(screens::create::CreateResultMessage {
-                    success: false,
-                    message: format!("Failed to resolve worktree root: {e:#}"),
-                });
-                return;
-            }
-        };
+        let worktree_root = self.worktree_root.clone();
+        if let Err(e) = std::fs::create_dir_all(&worktree_root) {
+            state.result = Some(screens::create::CreateResultMessage {
+                success: false,
+                message: format!("Failed to create worktree root: {e}"),
+            });
+            return;
+        }
 
         // Load config to check for hooks
         let hooks_config = if hooks_enabled {
