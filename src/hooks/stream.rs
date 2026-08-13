@@ -1,6 +1,8 @@
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Child;
 use tokio::process::{ChildStderr, ChildStdout};
+use tokio::time::Instant;
 
 use super::types::OutputStream;
 
@@ -56,6 +58,64 @@ pub async fn stream_and_collect_with(
     }
 
     Ok((stdout_buf, stderr_buf))
+}
+
+pub async fn stream_child_with_deadline(
+    child: &mut Child,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+    deadline: Instant,
+    timeout_secs: u64,
+    on_line: impl FnMut(OutputStream, String),
+) -> Result<(String, String)> {
+    let stream = stream_and_collect_with(stdout, stderr, on_line);
+    tokio::pin!(stream);
+    tokio::select! {
+        result = &mut stream => result,
+        _ = tokio::time::sleep_until(deadline) => {
+            kill_process_group_and_reap(child).await?;
+            Err(super::runner::HookTimeoutError { timeout_secs }.into())
+        }
+    }
+}
+
+pub async fn wait_child_with_deadline(
+    child: &mut Child,
+    deadline: Instant,
+    timeout_secs: u64,
+) -> Result<std::process::ExitStatus> {
+    tokio::select! {
+        result = child.wait() => Ok(result?),
+        _ = tokio::time::sleep_until(deadline) => {
+            kill_process_group_and_reap(child).await?;
+            Err(super::runner::HookTimeoutError { timeout_secs }.into())
+        }
+    }
+}
+
+async fn kill_process_group_and_reap(child: &mut Child) -> Result<()> {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // Hook commands are spawned into their own process groups. Killing
+            // the negative PID stops the shell and every descendant before we
+            // reap the direct child.
+            let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    child.start_kill()?;
+                }
+            }
+        } else {
+            child.start_kill()?;
+        }
+    }
+    #[cfg(not(unix))]
+    child.start_kill()?;
+
+    let _ = child.wait().await?;
+    Ok(())
 }
 
 #[cfg(test)]

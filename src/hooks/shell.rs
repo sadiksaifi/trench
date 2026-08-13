@@ -4,7 +4,7 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result};
 
-use super::stream::{stream_and_collect, stream_and_collect_with};
+use super::stream::{stream_and_collect, stream_child_with_deadline, wait_child_with_deadline};
 use super::types::{HookEmitter, HookStep, HookStreamEvent};
 
 /// Output from executing the shell step.
@@ -79,28 +79,39 @@ pub async fn execute_shell_step_streaming(
     cwd: &Path,
     env_vars: &HashMap<String, String>,
     emitter: &dyn HookEmitter,
+    deadline: tokio::time::Instant,
+    timeout_secs: u64,
 ) -> Result<ShellOutput> {
-    let mut child = tokio::process::Command::new("sh")
+    let mut command = tokio::process::Command::new("sh");
+    command
         .arg("-c")
         .arg(script)
         .current_dir(cwd)
         .envs(env_vars.iter())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to spawn shell script")?;
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn().context("failed to spawn shell script")?;
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
-    let (stdout_buf, stderr_buf) = stream_and_collect_with(stdout, stderr, |stream, line| {
-        emitter.emit(HookStreamEvent::Output {
-            step: HookStep::Shell,
-            stream,
-            line,
-        });
-    })
+    let (stdout_buf, stderr_buf) = stream_child_with_deadline(
+        &mut child,
+        stdout,
+        stderr,
+        deadline,
+        timeout_secs,
+        |stream, line| {
+            emitter.emit(HookStreamEvent::Output {
+                step: HookStep::Shell,
+                stream,
+                line,
+            });
+        },
+    )
     .await?;
-    let status = child
-        .wait()
+    let status = wait_child_with_deadline(&mut child, deadline, timeout_secs)
         .await
         .context("failed to wait for shell script")?;
     let exit_code = status.code().unwrap_or(-1);

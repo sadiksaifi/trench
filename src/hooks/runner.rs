@@ -44,27 +44,26 @@ pub async fn execute_hook(
         })?;
     }
 
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     if let Some(commands) = &config.run {
         let step_started = Instant::now();
         emitter.emit(HookStreamEvent::StepStarted {
             step: HookStep::Run,
         });
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(
-            remaining,
-            execute_run_step_streaming(commands, work_dir, &environment, emitter),
+        match execute_run_step_streaming(
+            commands,
+            work_dir,
+            &environment,
+            emitter,
+            deadline,
+            timeout_secs,
         )
         .await
         {
-            Ok(Ok(_)) => finish_step(emitter, HookStep::Run, step_started, true),
-            Ok(Err(error)) => {
+            Ok(_) => finish_step(emitter, HookStep::Run, step_started, true),
+            Err(error) => {
                 finish_step(emitter, HookStep::Run, step_started, false);
                 return Err(error);
-            }
-            Err(_) => {
-                finish_step(emitter, HookStep::Run, step_started, false);
-                return Err(HookTimeoutError { timeout_secs }.into());
             }
         }
     }
@@ -74,21 +73,20 @@ pub async fn execute_hook(
         emitter.emit(HookStreamEvent::StepStarted {
             step: HookStep::Shell,
         });
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(
-            remaining,
-            execute_shell_step_streaming(script, work_dir, &environment, emitter),
+        match execute_shell_step_streaming(
+            script,
+            work_dir,
+            &environment,
+            emitter,
+            deadline,
+            timeout_secs,
         )
         .await
         {
-            Ok(Ok(_)) => finish_step(emitter, HookStep::Shell, step_started, true),
-            Ok(Err(error)) => {
+            Ok(_) => finish_step(emitter, HookStep::Shell, step_started, true),
+            Err(error) => {
                 finish_step(emitter, HookStep::Shell, step_started, false);
                 return Err(error);
-            }
-            Err(_) => {
-                finish_step(emitter, HookStep::Shell, step_started, false);
-                return Err(HookTimeoutError { timeout_secs }.into());
             }
         }
     }
@@ -185,5 +183,68 @@ mod tests {
             stream: OutputStream::Stderr,
             line: "shell-output".into(),
         }));
+    }
+
+    #[tokio::test]
+    async fn timeout_kills_hook_process_group_before_it_can_mutate_later() {
+        let source = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let marker = work.path().join("late-side-effect");
+        let hook = HookDef {
+            run: Some(vec![format!(
+                "(sleep 2; touch '{}') & wait",
+                marker.display()
+            )]),
+            timeout_secs: Some(1),
+            ..Default::default()
+        };
+
+        let error = execute_hook(
+            &HookEvent::PreCreate,
+            &hook,
+            &context(source.path(), work.path()),
+            source.path(),
+            work.path(),
+            &crate::hooks::types::NoopHookEmitter,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.is::<HookTimeoutError>());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            !marker.exists(),
+            "timed-out hook kept mutating after return"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_still_applies_after_hook_closes_its_output_streams() {
+        let source = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let marker = work.path().join("closed-stream-side-effect");
+        let hook = HookDef {
+            shell: Some(format!(
+                "exec >/dev/null 2>/dev/null; sleep 2; touch '{}'",
+                marker.display()
+            )),
+            timeout_secs: Some(1),
+            ..Default::default()
+        };
+
+        let error = execute_hook(
+            &HookEvent::PreCreate,
+            &hook,
+            &context(source.path(), work.path()),
+            source.path(),
+            work.path(),
+            &crate::hooks::types::NoopHookEmitter,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.is::<HookTimeoutError>());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!marker.exists());
     }
 }
