@@ -116,17 +116,15 @@ mod tests {
     }
 
     #[test]
-    fn switch_resolves_sanitized_fallback() {
-        // When the identifier doesn't directly match, but sanitizing it does
+    fn switch_rejects_nonexact_sanitized_fallback() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
-        let (_wt_root, wt_path) = create_live_worktree(repo_dir.path(), &db, "feat-login");
+        let (_wt_root, _wt_path) = create_live_worktree(repo_dir.path(), &db, "feat-login");
 
         // User passes "feat/login" which sanitizes to "feat-login"
-        let switch = execute("feat/login", repo_dir.path(), &db)
-            .expect("switch by sanitized fallback should succeed");
-        assert_eq!(switch.path, wt_path.to_string_lossy());
+        let switch = execute("feat/login", repo_dir.path(), &db);
+        assert!(switch.is_err(), "only exact live identities should resolve");
     }
 
     #[test]

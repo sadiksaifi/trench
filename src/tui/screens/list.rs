@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn load_worktrees_hides_externally_deleted_worktree() {
+    fn load_worktrees_keeps_worktree_until_git_stops_reporting_it() {
         use crate::cli::commands::create;
         use crate::paths;
 
@@ -791,8 +791,8 @@ mod tests {
         let rows = load_worktrees(repo_dir.path()).expect("load should succeed");
 
         assert!(
-            rows.iter().all(|row| row.name != "ephemeral"),
-            "externally deleted worktree should not appear: {rows:?}"
+            rows.iter().any(|row| row.name == "ephemeral"),
+            "Git-reported worktree identity should remain visible: {rows:?}"
         );
     }
 

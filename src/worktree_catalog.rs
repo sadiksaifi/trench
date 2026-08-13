@@ -147,6 +147,12 @@ impl WorktreeCatalog {
                 selector: id.to_string_lossy().into_owned(),
             });
         };
+        if !id.exists() {
+            return Ok(WorktreeStatus {
+                base: self.base.clone(),
+                ..WorktreeStatus::default()
+            });
+        }
         let counts = git::status::counts(id)?;
         let comparison =
             git::status::ahead_behind(id, identity.head.as_deref(), self.base.as_deref())?;

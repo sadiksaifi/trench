@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_happy_path_end_to_end() {
+    fn remove_does_not_update_legacy_database_state() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let wt_root = tempfile::tempdir().unwrap();
@@ -537,28 +537,24 @@ mod tests {
             "worktree directory should be deleted"
         );
 
-        // Verify: DB record has removed_at set
+        // Resolution is live-Git-only; legacy metadata is not updated.
         let wt = db
             .get_worktree(wt_id)
             .unwrap()
             .expect("worktree record should still exist in DB");
-        assert!(wt.removed_at.is_some(), "removed_at should be set");
+        assert!(wt.removed_at.is_none(), "removed_at should stay untouched");
 
         // list_worktrees should no longer include the removed worktree
         let worktrees = db.list_worktrees(db_repo.id).unwrap();
-        assert_eq!(
-            worktrees.len(),
-            0,
-            "removed worktree should not appear in list"
-        );
+        assert_eq!(worktrees.len(), 1, "legacy metadata should stay untouched");
 
         // Verify: "removed" event was inserted
         let event_count = db.count_events(wt_id, Some("removed")).unwrap();
-        assert_eq!(event_count, 1, "exactly one 'removed' event should exist");
+        assert_eq!(event_count, 0, "no legacy removal event should be written");
     }
 
     #[test]
-    fn remove_resolves_by_branch_name_with_slash() {
+    fn remove_does_not_resolve_branch_from_legacy_database_metadata() {
         // Test DB resolution of branch names with slashes.
         // We manually insert the DB record since git2 worktree names can't contain slashes.
         let repo_dir = tempfile::tempdir().unwrap();
@@ -594,13 +590,12 @@ mod tests {
             )
             .unwrap();
 
-        // Remove using the original branch name (feature/auth)
-        let result = execute("feature/auth", repo_dir.path(), &db, false)
-            .expect("remove by branch name should succeed");
-        assert_eq!(result.name, "feature-auth");
+        // Live Git still names the branch feature-auth; the DB alias is ignored.
+        let result = execute("feature/auth", repo_dir.path(), &db, false);
+        assert!(result.is_err());
         assert!(
-            !create_result.path.exists(),
-            "worktree directory should be deleted"
+            create_result.path.exists(),
+            "failed live resolution must not delete the worktree"
         );
     }
 
