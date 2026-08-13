@@ -221,9 +221,10 @@ impl Cli {
 }
 
 fn main() -> anyhow::Result<()> {
-    logging::init();
-
     let cli = Cli::parse();
+    if !cli.dry_run {
+        logging::init();
+    }
     let output_config = cli.output_config();
 
     if cli.should_launch_tui(
@@ -401,8 +402,8 @@ fn run_create(
             from,
             &cwd,
             &worktree_root,
-            paths::DEFAULT_WORKTREE_TEMPLATE,
-            resolved.hooks.as_ref(),
+            resolved.git.default_base.as_deref(),
+            no_hooks,
         )?;
 
         if json {

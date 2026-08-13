@@ -1,4 +1,7 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+use serde::ser::{Serialize, SerializeStruct, Serializer};
 
 use crate::git;
 use crate::ref_catalog::{DefaultBaseError, RefCatalog, RefCatalogError, RefSnapshot};
@@ -18,6 +21,17 @@ pub enum CreateAction {
     ExistingLocal,
     TrackRemote(String),
     Navigate(String),
+}
+
+impl CreateAction {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::NewBranch(_) => "new_branch",
+            Self::ExistingLocal => "existing_local",
+            Self::TrackRemote(_) => "track_remote",
+            Self::Navigate(_) => "navigate",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +57,43 @@ pub struct CreatePlan {
     pub tracking: Option<String>,
     pub hook_policy: HookPolicy,
     pub preconditions: Vec<CreatePrecondition>,
+}
+
+impl Serialize for CreatePlan {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut output = serializer.serialize_struct("CreatePlan", 8)?;
+        output.serialize_field("dry_run", &self.dry_run)?;
+        output.serialize_field("action", self.action.name())?;
+        output.serialize_field("branch", &self.branch)?;
+        output.serialize_field("worktree", &self.worktree)?;
+        output.serialize_field("path", &self.path)?;
+        output.serialize_field("base", &self.base)?;
+        output.serialize_field("tracking", &self.tracking)?;
+        output.serialize_field("hook_policy", &self.hook_policy)?;
+        output.end()
+    }
+}
+
+impl fmt::Display for CreatePlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let base = self.base.as_deref().unwrap_or("(none)");
+        let tracking = self.tracking.as_deref().unwrap_or("(none)");
+        let hook_policy = match self.hook_policy {
+            HookPolicy::Run => "run",
+            HookPolicy::Skip => "skip",
+        };
+        writeln!(f, "Dry run — no changes will be made\n")?;
+        writeln!(f, "  Action:       {}", self.action.name())?;
+        writeln!(f, "  Branch:       {}", self.branch)?;
+        writeln!(f, "  Worktree:     {}", self.worktree)?;
+        writeln!(f, "  Path:         {}", self.path.display())?;
+        writeln!(f, "  Base:         {base}")?;
+        writeln!(f, "  Tracking:     {tracking}")?;
+        writeln!(f, "  Hook policy:  {hook_policy}")
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,7 +133,6 @@ impl RefClass<'_> {
 }
 
 pub struct CreatePlanner {
-    repo_info: git::RepoInfo,
     refs: RefSnapshot,
     catalog: WorktreeCatalog,
     policy: WorktreePolicy,
@@ -107,7 +157,6 @@ impl CreatePlanner {
             &repo_info.path,
         )?;
         Ok(Self {
-            repo_info,
             refs,
             catalog,
             policy,
@@ -223,18 +272,6 @@ impl CreatePlanner {
         }
         RefClass::New(selection)
     }
-
-    pub fn repository(&self) -> &git::RepoInfo {
-        &self.repo_info
-    }
-
-    pub fn refs(&self) -> &RefSnapshot {
-        &self.refs
-    }
-
-    pub fn catalog(&self) -> &WorktreeCatalog {
-        &self.catalog
-    }
 }
 
 #[cfg(test)]
@@ -283,6 +320,14 @@ mod tests {
         let repository = git2::Repository::open(repo.path()).unwrap();
         let head = repository.head().unwrap().peel_to_commit().unwrap();
         repository.branch("release", &head, false).unwrap();
+        repository
+            .reference(
+                "refs/remotes/origin/release",
+                head.id(),
+                false,
+                "test remote ref",
+            )
+            .unwrap();
         drop(head);
         drop(repository);
         let planner =
@@ -294,6 +339,11 @@ mod tests {
         assert_eq!(plan.branch, "release");
         assert_eq!(plan.base, None);
         assert_eq!(plan.tracking, None);
+
+        let explicit_origin = planner.plan("origin/release", None).unwrap();
+        assert_eq!(explicit_origin.action, CreateAction::ExistingLocal);
+        assert_eq!(explicit_origin.branch, "release");
+        assert_eq!(explicit_origin.tracking, None);
     }
 
     #[test]
@@ -394,5 +444,54 @@ mod tests {
             planner.plan("feature", Some("missing")),
             Err(CreatePlanError::BaseNotFound { base }) if base == "missing"
         ));
+    }
+
+    #[test]
+    fn json_preview_has_only_the_frozen_flat_contract() {
+        let plan = CreatePlan {
+            dry_run: true,
+            action: CreateAction::NewBranch("main".to_string()),
+            branch: "feature/auth".to_string(),
+            worktree: "feature-auth".to_string(),
+            path: PathBuf::from("/worktrees/trench/feature-auth"),
+            base: Some("main".to_string()),
+            tracking: None,
+            hook_policy: HookPolicy::Run,
+            preconditions: vec![CreatePrecondition::ValidRef],
+        };
+
+        assert_eq!(
+            serde_json::to_value(&plan).unwrap(),
+            serde_json::json!({
+                "dry_run": true,
+                "action": "new_branch",
+                "branch": "feature/auth",
+                "worktree": "feature-auth",
+                "path": "/worktrees/trench/feature-auth",
+                "base": "main",
+                "tracking": null,
+                "hook_policy": "run"
+            })
+        );
+    }
+
+    #[test]
+    fn human_preview_reports_raw_plan_fields() {
+        let plan = CreatePlan {
+            dry_run: true,
+            action: CreateAction::TrackRemote("origin/release".to_string()),
+            branch: "release".to_string(),
+            worktree: "release".to_string(),
+            path: PathBuf::from("/worktrees/trench/release"),
+            base: None,
+            tracking: Some("origin/release".to_string()),
+            hook_policy: HookPolicy::Skip,
+            preconditions: Vec::new(),
+        };
+
+        assert_eq!(
+            plan.to_string(),
+            "Dry run — no changes will be made\n\n  Action:       track_remote\n  Branch:       release\n  Worktree:     release\n  Path:         /worktrees/trench/release\n  Base:         (none)\n  Tracking:     origin/release\n  Hook policy:  skip\n"
+        );
     }
 }
