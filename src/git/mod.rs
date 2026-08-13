@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+pub mod status;
 pub mod worktrees;
 
 /// Information about a discovered git repository.

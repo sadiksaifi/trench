@@ -62,6 +62,15 @@ fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap()
 }
 
+fn output_json(output: &Output) -> Vec<serde_json::Value> {
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("list should return JSON records")
+}
+
 #[test]
 fn list_json_uses_live_git_worktrees_without_creating_a_database() {
     let root = tempfile::tempdir().unwrap();
@@ -73,12 +82,7 @@ fn list_json_uses_live_git_worktrees_without_creating_a_database() {
     add_worktree(&repo, &linked, "feature/live");
 
     let output = trench(&linked, &xdg, &["list", "--json"]);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let records: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let records = output_json(&output);
     assert_eq!(records.len(), 2);
     assert_eq!(records[0]["worktree"], "feature-live");
     assert_eq!(records[0]["branch"], "feature/live");
@@ -87,9 +91,74 @@ fn list_json_uses_live_git_worktrees_without_creating_a_database() {
         canonical(&linked).to_string_lossy().as_ref()
     );
     assert_eq!(records[0]["is_current"], true);
+    assert_eq!(records[0]["base"], "main");
     assert_eq!(
         records[1]["path"],
         canonical(&repo).to_string_lossy().as_ref()
     );
     assert!(!xdg.join("data/trench/trench.db").exists());
+}
+
+#[test]
+fn list_json_reports_exact_raw_status_and_base_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("status-repo");
+    let linked = root.path().join("feature-status");
+    let xdg = root.path().join("xdg");
+    std::fs::create_dir(&repo).unwrap();
+    init_repo(&repo);
+    add_worktree(&repo, &linked, "feature/status");
+    std::fs::write(linked.join("README.md"), "worktree change\n").unwrap();
+    std::fs::write(linked.join("staged.txt"), "staged\n").unwrap();
+    git(&linked, &["add", "staged.txt"]);
+    std::fs::write(linked.join("untracked.txt"), "untracked\n").unwrap();
+    git(
+        &linked,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "feature commit",
+            "staged.txt",
+        ],
+    );
+    std::fs::write(linked.join("staged-two.txt"), "staged\n").unwrap();
+    git(&linked, &["add", "staged-two.txt"]);
+    std::fs::write(
+        repo.join(".trench.toml"),
+        "[git]\ndefault_base = \"main\"\n",
+    )
+    .unwrap();
+
+    let records = output_json(&trench(&linked, &xdg, &["list", "--json"]));
+    let linked_record = records
+        .iter()
+        .find(|record| record["worktree"] == "feature-status")
+        .unwrap();
+    let expected_keys = [
+        "ahead",
+        "base",
+        "behind",
+        "branch",
+        "detached",
+        "is_current",
+        "is_main",
+        "modified",
+        "path",
+        "staged",
+        "untracked",
+        "worktree",
+    ];
+    let mut actual_keys: Vec<_> = linked_record.as_object().unwrap().keys().cloned().collect();
+    actual_keys.sort();
+    assert_eq!(actual_keys, expected_keys);
+    assert_eq!(linked_record["base"], "main");
+    assert_eq!(linked_record["staged"], 1);
+    assert_eq!(linked_record["modified"], 1);
+    assert_eq!(linked_record["untracked"], 1);
+    assert_eq!(linked_record["ahead"], 1);
+    assert_eq!(linked_record["behind"], 0);
 }

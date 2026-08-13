@@ -102,10 +102,10 @@ impl WorktreeCatalog {
                 .then_with(|| left.worktree.cmp(&right.worktree))
                 .then_with(|| left.path.cmp(&right.path))
         });
-        let base = identities
-            .iter()
-            .find(|identity| identity.is_main)
-            .and_then(|identity| identity.branch.clone());
+        let main = identities.iter().find(|identity| identity.is_main);
+        let base = main
+            .and_then(|identity| git::status::detected_base(&identity.path).ok().flatten())
+            .or_else(|| main.and_then(|identity| identity.branch.clone()));
         Ok(Self { identities, base })
     }
 
@@ -121,14 +121,21 @@ impl WorktreeCatalog {
     }
 
     pub fn status(&self, id: &Path) -> Result<WorktreeStatus, CatalogError> {
-        if !self.identities.iter().any(|identity| identity.path == id) {
+        let Some(identity) = self.identities.iter().find(|identity| identity.path == id) else {
             return Err(CatalogError::NotFound {
                 selector: id.to_string_lossy().into_owned(),
             });
-        }
+        };
+        let counts = git::status::counts(id)?;
+        let comparison =
+            git::status::ahead_behind(id, identity.head.as_deref(), self.base.as_deref())?;
         Ok(WorktreeStatus {
             base: self.base.clone(),
-            ..WorktreeStatus::default()
+            staged: counts.staged,
+            modified: counts.modified,
+            untracked: counts.untracked,
+            ahead: comparison.map(|(ahead, _)| ahead),
+            behind: comparison.map(|(_, behind)| behind),
         })
     }
 
