@@ -24,6 +24,7 @@ pub struct RefreshRuntime {
     clock: SystemClock,
     filesystem_watcher: Option<DebouncedWatcher>,
     watched_rows: BTreeSet<WorktreeId>,
+    pending_watcher_retry: bool,
     completion_tx: mpsc::Sender<RefreshCompletion>,
     completion_rx: mpsc::Receiver<RefreshCompletion>,
     publications: VecDeque<RefreshPublication>,
@@ -44,6 +45,7 @@ impl RefreshRuntime {
             clock: SystemClock,
             filesystem_watcher: None,
             watched_rows: BTreeSet::new(),
+            pending_watcher_retry: false,
             completion_tx,
             completion_rx,
             publications: VecDeque::new(),
@@ -83,9 +85,10 @@ impl RefreshRuntime {
             .as_mut()
             .and_then(DebouncedWatcher::refresh_cause);
         if watcher_cause.is_some() {
-            // Watcher discovery is best-effort: transient Git state should not
-            // tear down the terminal session or discard the last publication.
-            let _ = self.watcher();
+            self.pending_watcher_retry = true;
+        }
+        if self.pending_watcher_retry && self.watcher().is_ok() {
+            self.pending_watcher_retry = false;
         }
 
         while let Ok(completion) = self.completion_rx.try_recv() {
@@ -212,5 +215,37 @@ mod tests {
         assert_eq!(refreshing[0].statuses, settled.statuses);
         assert_eq!(refreshing[0].waiting_rows.len(), 1);
         assert!(!refreshing[0].updating_refs);
+    }
+
+    #[test]
+    fn consumed_watcher_refresh_retries_after_transient_discovery_failure() {
+        let repo = init_repo();
+        let git_dir = repo.path().join(".git");
+        let unavailable_git_dir = repo.path().join(".git-unavailable");
+        let mut runtime = RefreshRuntime::new(repo.path(), repo.path(), None);
+        runtime.launch().unwrap();
+        runtime.drain_publications();
+
+        std::fs::rename(&git_dir, &unavailable_git_dir).unwrap();
+        runtime.pending_watcher_retry = true;
+        runtime.tick();
+        assert!(runtime.pending_watcher_retry);
+
+        std::fs::rename(&unavailable_git_dir, &git_dir).unwrap();
+        let repository = git2::Repository::open(repo.path()).unwrap();
+        let commit = repository.head().unwrap().peel_to_commit().unwrap();
+        repository
+            .branch("created-during-retry", &commit, false)
+            .unwrap();
+        drop(commit);
+        drop(repository);
+        runtime.tick();
+
+        assert!(!runtime.pending_watcher_retry);
+        assert!(runtime
+            .drain_publications()
+            .iter()
+            .filter_map(|publication| publication.refs.as_ref())
+            .any(|refs| refs.local.contains(&"created-during-retry".to_string())));
     }
 }

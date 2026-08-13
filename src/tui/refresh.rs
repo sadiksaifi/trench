@@ -544,7 +544,11 @@ impl RefreshCoordinator {
             FetchOutcome::Updated(refs) | FetchOutcome::NoOrigin(refs) => {
                 self.ref_revision = self.ref_revision.wrapping_add(1);
                 if let Some(snapshot) = self.snapshot.as_mut() {
-                    snapshot.refs = refs;
+                    // Fetch owns origin-tracking data only. A newer local refresh
+                    // may have published branches after this task captured refs.
+                    snapshot.refs.origin = refs.origin;
+                    snapshot.refs.origin_head = refs.origin_head;
+                    snapshot.refs.has_origin = refs.has_origin;
                 }
                 if let Some(snapshot) = self.snapshot.clone() {
                     match self.active_local {
@@ -929,6 +933,48 @@ mod tests {
             .publication(now)
             .statuses
             .contains_key(&stale_row_id));
+    }
+
+    #[test]
+    fn fetch_completion_never_overwrites_local_refs_from_a_newer_generation() {
+        let now = Instant::now();
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let initial = snapshot(vec![alpha], true);
+        let mut coordinator = RefreshCoordinator::default();
+        coordinator.request(RefreshCause::Launch, initial.clone(), now);
+        let fetch_token = coordinator
+            .drain_tasks()
+            .into_iter()
+            .find_map(|task| match task {
+                RefreshTask::FetchOrigin { token } => Some(token),
+                RefreshTask::Row { .. } => None,
+            })
+            .unwrap();
+
+        let mut newer_local = initial.clone();
+        newer_local
+            .refs
+            .local
+            .push("topic-created-locally".to_string());
+        coordinator.request(RefreshCause::Watcher, newer_local, now);
+
+        coordinator.complete(
+            RefreshCompletion::FetchOrigin {
+                token: fetch_token,
+                outcome: FetchOutcome::Updated(RefSnapshot {
+                    local: vec!["main".to_string()],
+                    origin: vec!["origin/main".to_string()],
+                    origin_head: Some("origin/main".to_string()),
+                    main_branch: Some("main".to_string()),
+                    has_origin: true,
+                }),
+            },
+            now,
+        );
+
+        let refs = coordinator.publication(now).refs.unwrap();
+        assert_eq!(refs.local, ["main", "topic-created-locally"]);
+        assert_eq!(refs.origin, ["origin/main"]);
     }
 
     #[test]
