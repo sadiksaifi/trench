@@ -411,8 +411,8 @@ root = "/opt/trees"
             "expected 'invalid TOML' in error: {msg}"
         );
         assert!(
-            msg.contains("config.toml"),
-            "expected file path in error: {msg}"
+            msg.contains(&path.display().to_string()),
+            "expected exact file path in error: {msg}"
         );
     }
 
@@ -470,14 +470,30 @@ root = "/opt/trees"
     }
 
     #[test]
-    fn former_worktree_scan_option_is_rejected() {
+    fn former_worktree_options_are_rejected() {
         let dir = TempDir::new().unwrap();
-        let path = write_config(&dir, "[worktrees]\nscan = [\"~/src\"]\n");
+
+        for (setting, key) in [
+            ("scan = [\"~/src\"]", "scan"),
+            ("template = \"{{ repo }}/{{ branch }}\"", "template"),
+        ] {
+            let path = write_config(&dir, &format!("[worktrees]\n{setting}\n"));
+            let err = load_global_config_from(&path).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains(&path.display().to_string()), "{msg}");
+            assert!(msg.contains(key), "{msg}");
+        }
+    }
+
+    #[test]
+    fn unknown_hook_lifecycle_reports_exact_file_and_key() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "[hooks.deploy]\nrun = [\"true\"]\n");
 
         let err = load_global_config_from(&path).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains(&path.display().to_string()), "{msg}");
-        assert!(msg.contains("scan"), "{msg}");
+        assert!(msg.contains("deploy"), "{msg}");
     }
 
     #[test]
