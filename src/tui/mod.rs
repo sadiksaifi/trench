@@ -66,8 +66,7 @@ pub fn run() -> Result<Option<String>> {
     if let Some(ref resolved) = resolved_config {
         app.theme = theme::from_name(&resolved.ui.theme);
         app.ui_options.theme_name = resolved.ui.theme.clone();
-        app.tmux_enabled = resolved.shell.tmux;
-        app.worktree_root = std::path::PathBuf::from(paths::expand_tilde(&resolved.worktrees.root));
+        app.worktree_root = resolved.worktrees.root.clone();
     }
 
     // Load worktree data before entering the event loop

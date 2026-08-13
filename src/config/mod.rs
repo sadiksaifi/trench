@@ -54,7 +54,6 @@ pub struct GlobalConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
     pub editor: Option<EditorConfig>,
-    pub shell: Option<ShellConfig>,
     pub worktrees: Option<WorktreesConfig>,
     pub hooks: Option<HooksConfig>,
 }
@@ -66,7 +65,6 @@ pub struct ProjectConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
     pub editor: Option<EditorConfig>,
-    pub shell: Option<ShellConfig>,
     pub worktrees: Option<WorktreesConfig>,
     pub hooks: Option<HooksConfig>,
 }
@@ -93,12 +91,6 @@ pub struct EditorConfig {
 #[serde(deny_unknown_fields)]
 pub struct WorktreesConfig {
     pub root: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ShellConfig {
-    pub tmux: Option<bool>,
 }
 
 /// Read and parse an optional TOML config file.
@@ -147,20 +139,8 @@ pub struct ResolvedConfig {
     pub ui: ResolvedUiConfig,
     pub git: ResolvedGitConfig,
     pub editor_command: Option<String>,
-    pub shell: ResolvedShellConfig,
     pub worktrees: ResolvedWorktreesConfig,
     pub hooks: Option<HooksConfig>,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct ResolvedShellConfig {
-    pub tmux: bool,
-}
-
-impl Default for ResolvedShellConfig {
-    fn default() -> Self {
-        Self { tmux: false }
-    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -170,12 +150,12 @@ pub struct ResolvedUiConfig {
 
 #[derive(Debug, PartialEq)]
 pub struct ResolvedGitConfig {
-    pub default_base: String,
+    pub default_base: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct ResolvedWorktreesConfig {
-    pub root: String,
+    pub root: PathBuf,
 }
 
 impl Default for ResolvedUiConfig {
@@ -188,16 +168,14 @@ impl Default for ResolvedUiConfig {
 
 impl Default for ResolvedGitConfig {
     fn default() -> Self {
-        Self {
-            default_base: "main".to_string(),
-        }
+        Self { default_base: None }
     }
 }
 
 impl Default for ResolvedWorktreesConfig {
     fn default() -> Self {
         Self {
-            root: DEFAULT_WORKTREE_ROOT.to_string(),
+            root: PathBuf::from(paths::expand_tilde(DEFAULT_WORKTREE_ROOT)),
         }
     }
 }
@@ -230,11 +208,6 @@ pub fn resolve_config(
         .and_then(|e| e.command.clone())
         .or_else(|| g_editor.and_then(|e| e.command.clone()));
 
-    // Shell: project > global > defaults
-    let p_shell = project.and_then(|p| p.shell.as_ref());
-    let g_shell = global.shell.as_ref();
-    let defaults_shell = ResolvedShellConfig::default();
-
     // Hooks: project replaces global entirely (FR-2)
     let p_hooks = project.and_then(|p| p.hooks.as_ref());
     let hooks = p_hooks.or(global.hooks.as_ref()).cloned();
@@ -251,21 +224,17 @@ pub fn resolve_config(
                 .and_then(|c| c.default_base.clone())
                 .or_else(|| p_git.and_then(|g| g.default_base.clone()))
                 .or_else(|| g_git.and_then(|g| g.default_base.clone()))
-                .unwrap_or(defaults_git.default_base),
+                .or(defaults_git.default_base),
         },
         editor_command,
-        shell: ResolvedShellConfig {
-            tmux: p_shell
-                .and_then(|s| s.tmux)
-                .or_else(|| g_shell.and_then(|s| s.tmux))
-                .unwrap_or(defaults_shell.tmux),
-        },
         worktrees: ResolvedWorktreesConfig {
-            root: cli
-                .and_then(|c| c.worktree_root.clone())
+            root: PathBuf::from(paths::expand_tilde(
+                &cli
+                    .and_then(|c| c.worktree_root.clone())
                 .or_else(|| p_wt.and_then(|w| w.root.clone()))
                 .or_else(|| g_wt.and_then(|w| w.root.clone()))
-                .unwrap_or(defaults_wt.root),
+                .unwrap_or_else(|| defaults_wt.root.to_string_lossy().into_owned()),
+            )),
         },
         hooks,
     }
@@ -495,6 +464,18 @@ root = "/opt/trees"
     }
 
     #[test]
+    fn former_project_shell_section_reports_exact_file_and_key() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".trench.toml");
+        std::fs::write(&path, "[shell]\ntmux = true\n").unwrap();
+
+        let err = load_project_config_from(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        assert!(msg.contains("shell"), "{msg}");
+    }
+
+    #[test]
     fn wrong_type_returns_error() {
         let dir = TempDir::new().unwrap();
         let path = write_config(
@@ -671,11 +652,11 @@ run = ["bun install"]
 
         assert_eq!(resolved.ui.theme, "ops");
 
-        assert_eq!(resolved.git.default_base, "main");
+        assert_eq!(resolved.git.default_base, None);
 
         assert_eq!(
             resolved.worktrees.root,
-            "~/.worktrees"
+            PathBuf::from(paths::expand_tilde(DEFAULT_WORKTREE_ROOT))
         );
 
         assert!(resolved.hooks.is_none());
@@ -700,8 +681,8 @@ run = ["bun install"]
 
         // Overridden fields
         assert_eq!(resolved.ui.theme, "nord");
-        assert_eq!(resolved.git.default_base, "develop");
-        assert_eq!(resolved.worktrees.root, "/custom/worktrees");
+        assert_eq!(resolved.git.default_base.as_deref(), Some("develop"));
+        assert_eq!(resolved.worktrees.root, PathBuf::from("/custom/worktrees"));
 
     }
 
@@ -734,8 +715,8 @@ run = ["bun install"]
 
         // Project wins over global
         assert_eq!(resolved.ui.theme, "nord");
-        assert_eq!(resolved.git.default_base, "staging");
-        assert_eq!(resolved.worktrees.root, "/project/worktrees");
+        assert_eq!(resolved.git.default_base.as_deref(), Some("staging"));
+        assert_eq!(resolved.worktrees.root, PathBuf::from("/project/worktrees"));
 
     }
 
@@ -809,7 +790,7 @@ run = ["bun install"]
         // Global hooks used because project has no hooks section
         let hooks = resolved.hooks.expect("global hooks should be used");
         assert!(hooks.post_create.is_some());
-        assert_eq!(resolved.git.default_base, "staging");
+        assert_eq!(resolved.git.default_base.as_deref(), Some("staging"));
     }
 
     #[test]
@@ -843,8 +824,8 @@ run = ["bun install"]
 
         let resolved = resolve_config(Some(&cli), Some(&project), &global);
 
-        assert_eq!(resolved.git.default_base, "cli-branch");
-        assert_eq!(resolved.worktrees.root, "/cli/worktrees");
+        assert_eq!(resolved.git.default_base.as_deref(), Some("cli-branch"));
+        assert_eq!(resolved.worktrees.root, PathBuf::from("/cli/worktrees"));
     }
 
     #[test]
@@ -865,9 +846,9 @@ run = ["bun install"]
         let resolved = resolve_config(Some(&cli), None, &global);
 
         // CLI worktree_root wins
-        assert_eq!(resolved.worktrees.root, "/cli/worktrees");
+        assert_eq!(resolved.worktrees.root, PathBuf::from("/cli/worktrees"));
         // No CLI default_base → falls through to global
-        assert_eq!(resolved.git.default_base, "develop");
+        assert_eq!(resolved.git.default_base.as_deref(), Some("develop"));
     }
 
     #[test]
@@ -942,7 +923,7 @@ shell = "echo global-cleanup"
         let resolved = resolve_config(None, Some(&project), &global);
 
         // Project git.default_base overrides global
-        assert_eq!(resolved.git.default_base, "develop");
+        assert_eq!(resolved.git.default_base.as_deref(), Some("develop"));
 
         // Global UI fills in (project has no UI section)
         assert_eq!(resolved.ui.theme, "solarized");
@@ -950,7 +931,7 @@ shell = "echo global-cleanup"
         // Project worktrees override global
         assert_eq!(
             resolved.worktrees.root,
-            "/project/worktrees"
+            PathBuf::from("/project/worktrees")
         );
 
         // Project hooks REPLACE global hooks entirely (FR-2)
@@ -1100,72 +1081,4 @@ command = "code"
         assert!(resolved.editor_command.is_none());
     }
 
-    #[test]
-    fn shell_config_tmux_deserializes_from_global() {
-        let dir = TempDir::new().unwrap();
-        let path = write_config(
-            &dir,
-            r#"
-[shell]
-tmux = true
-"#,
-        );
-
-        let config = load_global_config_from(&path).unwrap();
-        let shell = config.shell.expect("shell section should be present");
-        assert_eq!(shell.tmux, Some(true));
-    }
-
-    #[test]
-    fn shell_config_tmux_deserializes_from_project() {
-        let toml_str = r#"
-[shell]
-tmux = true
-"#;
-        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
-        let shell = config.shell.expect("shell section should be present");
-        assert_eq!(shell.tmux, Some(true));
-    }
-
-    #[test]
-    fn shell_config_absent_by_default() {
-        let config = GlobalConfig::default();
-        assert!(config.shell.is_none());
-    }
-
-    #[test]
-    fn shell_tmux_defaults_to_false_in_resolved() {
-        let resolved = resolve_config(None, None, &GlobalConfig::default());
-        assert!(!resolved.shell.tmux, "shell.tmux should default to false");
-    }
-
-    #[test]
-    fn shell_tmux_enabled_via_global_config() {
-        let global = GlobalConfig {
-            shell: Some(ShellConfig { tmux: Some(true) }),
-            ..GlobalConfig::default()
-        };
-        let resolved = resolve_config(None, None, &global);
-        assert!(
-            resolved.shell.tmux,
-            "shell.tmux should be true when set in global"
-        );
-    }
-
-    #[test]
-    fn shell_tmux_project_overrides_global() {
-        let global = GlobalConfig {
-            shell: Some(ShellConfig { tmux: Some(true) }),
-            ..GlobalConfig::default()
-        };
-        let project = ProjectConfig {
-            shell: Some(ShellConfig { tmux: Some(false) }),
-            ..ProjectConfig::default()
-        };
-        let resolved = resolve_config(None, Some(&project), &global);
-        assert!(
-            !resolved.shell.tmux,
-            "project shell.tmux should override global"
-        );
-    }
 }

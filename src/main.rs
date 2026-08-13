@@ -391,7 +391,7 @@ fn run_create(
     let project_config = config::load_project_config(&repo_info.path)?;
     let global_config = config::load_global_config()?;
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-    let worktree_root = std::path::PathBuf::from(paths::expand_tilde(&resolved.worktrees.root));
+    let worktree_root = resolved.worktrees.root;
 
     if dry_run {
         let plan = cli::commands::create::execute_dry_run(
@@ -798,22 +798,9 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
                 return Ok(());
             }
 
-            // Defer config loading until after early-exit paths so that
-            // malformed config files don't break --print-path or --tmux.
-            let config_tmux = if tmux_flag {
-                false // --tmux overrides config; skip loading
-            } else {
-                let repo_info = git::discover_repo(&cwd)?;
-                let project_config = config::load_project_config(&repo_info.path)?;
-                let global_config = config::load_global_config()?;
-                let resolved =
-                    config::resolve_config(None, project_config.as_ref(), &global_config);
-                resolved.shell.tmux
-            };
-
             let action = tmux::resolve_tmux_action(
                 tmux_flag,
-                config_tmux,
+                false,
                 tmux::is_inside_tmux(),
                 &result.path,
                 &result.name,
@@ -855,25 +842,22 @@ fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
 
     let repo_info = git::discover_repo(&cwd)?;
 
-    // Load config once. When --tmux is explicit, skip loading so malformed
-    // config files don't break --tmux (same as run_switch).
-    let (config_tmux, editor_command) = if tmux_flag {
-        (false, None) // --tmux overrides config; defer editor lookup to fallback
+    // Explicit tmux use does not need editor configuration.
+    let editor_command = if tmux_flag {
+        None
     } else {
         let project_config = config::load_project_config(&repo_info.path)?;
         let global_config = config::load_global_config()?;
         let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-        (resolved.shell.tmux, resolved.editor_command)
+        resolved.editor_command
     };
 
-    let use_tmux = tmux_flag || config_tmux;
-
-    if use_tmux {
+    if tmux_flag {
         let live = crate::live_worktree::resolve(identifier, &repo_info, &db)?;
 
         let action = tmux::resolve_tmux_action(
             tmux_flag,
-            config_tmux,
+            false,
             tmux::is_inside_tmux(),
             &live.entry.path.to_string_lossy(),
             &live.entry.name,
