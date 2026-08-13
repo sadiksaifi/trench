@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -220,6 +221,37 @@ impl Diagnostics {
             .open(&self.path);
     }
 
+    fn with_process_lock(&self, action: impl FnOnce()) {
+        let Some(parent) = self.path.parent() else {
+            return;
+        };
+        let Some(file_name) = self.path.file_name() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+
+        let mut lock_name = OsString::from(".");
+        lock_name.push(file_name);
+        lock_name.push(".lock");
+        let Ok(lock_file) = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(parent.join(lock_name))
+        else {
+            return;
+        };
+        if lock_file.try_lock().is_err() {
+            return;
+        }
+
+        action();
+        let _ = lock_file.unlock();
+    }
+
     pub fn record(&self, event: DiagnosticEvent) {
         if self.filter == DiagnosticFilter::Warn && event.level == DiagnosticLevel::Debug {
             return;
@@ -228,17 +260,31 @@ impl Diagnostics {
         let Ok(_guard) = self.write_lock.lock() else {
             return;
         };
-        self.prepare();
-        self.normalize_retention();
-        self.rotate_if_full();
-        let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        else {
+        self.with_process_lock(|| {
+            self.prepare();
+            self.normalize_retention();
+            self.rotate_if_full();
+            let Ok(mut file) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+            else {
+                return;
+            };
+            write_event_best_effort(&mut file, event);
+        });
+    }
+
+    fn maintain(&self) {
+        let Ok(_guard) = self.write_lock.lock() else {
             return;
         };
-        write_event_best_effort(&mut file, event);
+        self.with_process_lock(|| {
+            self.prepare();
+            self.normalize_retention();
+            self.rotate_if_full();
+            self.prepare();
+        });
     }
 
     fn rotate_if_full(&self) {
@@ -306,10 +352,7 @@ pub fn init() {
         &path,
         DiagnosticFilter::from_env_value(env_filter.as_deref()),
     );
-    diagnostics.prepare();
-    diagnostics.normalize_retention();
-    diagnostics.rotate_if_full();
-    diagnostics.prepare();
+    diagnostics.maintain();
     let _ = DIAGNOSTICS.set(diagnostics);
 }
 
@@ -323,13 +366,28 @@ pub fn record(event: DiagnosticEvent) {
 #[cfg(test)]
 pub fn init_at_path_for_test(path: &Path) {
     let diagnostics = Diagnostics::at_path(path, DiagnosticFilter::default());
-    diagnostics.prepare();
+    diagnostics.maintain();
     let _ = DIAGNOSTICS.set(diagnostics);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn diagnostic_log_names(directory: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| {
+                name == "trench.log"
+                    || name
+                        .strip_prefix("trench.log.")
+                        .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
 
     fn product_outcome_with_diagnostics(diagnostics: &Diagnostics) -> &'static str {
         diagnostics.record(DiagnosticEvent::error(
@@ -430,11 +488,7 @@ mod tests {
             DiagnosticError::Io,
         ));
 
-        let mut names = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect::<Vec<_>>();
-        names.sort();
+        let names = diagnostic_log_names(dir.path());
         assert_eq!(
             names,
             [
@@ -476,11 +530,7 @@ mod tests {
             DiagnosticError::Io,
         ));
 
-        let mut names = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect::<Vec<_>>();
-        names.sort();
+        let names = diagnostic_log_names(dir.path());
         assert_eq!(
             names,
             [
@@ -653,6 +703,62 @@ mod tests {
         assert_eq!(
             String::from_utf8(writer.bytes).unwrap(),
             "level=warn operation=watch stage=observe duration_ms=23 error=io\n"
+        );
+    }
+
+    #[test]
+    fn a_busy_process_lock_skips_diagnostics_without_blocking() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        let process_lock_path = dir.path().join(".trench.log.lock");
+        let process_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(process_lock_path)
+            .unwrap();
+        process_lock.lock().unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+            started_tx.send(()).unwrap();
+            diagnostics.record(DiagnosticEvent::warning(
+                Operation::Watch,
+                Stage::Observe,
+                Duration::ZERO,
+                DiagnosticError::Io,
+            ));
+            finished_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        let finished_while_locked = finished_rx.recv_timeout(Duration::from_millis(250)).is_ok();
+
+        process_lock.unlock().unwrap();
+        if !finished_while_locked {
+            finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        writer.join().unwrap();
+
+        assert!(finished_while_locked, "diagnostics blocked on a busy lock");
+        assert!(!dir.path().join("trench.log").exists());
+
+        let diagnostics =
+            Diagnostics::at_path(&dir.path().join("trench.log"), DiagnosticFilter::default());
+        diagnostics.record(DiagnosticEvent::warning(
+            Operation::Watch,
+            Stage::Observe,
+            Duration::ZERO,
+            DiagnosticError::Io,
+        ));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("trench.log")).unwrap(),
+            "level=warn operation=watch stage=observe duration_ms=0 error=io\n"
         );
     }
 
