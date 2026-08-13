@@ -323,9 +323,16 @@ fn main() -> anyhow::Result<()> {
             eprintln!("error: {e}");
             ExitCode::ConfigError.exit();
         }
-        if e.downcast_ref::<git::GitError>().is_some() {
+        if let Some(git_error) = e.downcast_ref::<git::GitError>() {
             eprintln!("Error: {e}");
+            if matches!(git_error, git::GitError::NotAGitRepo { .. }) {
+                eprintln!("hint: Run `trench` inside a Git worktree.");
+            }
             ExitCode::GitError.exit();
+        }
+        if e.downcast_ref::<worktree_catalog::CatalogError>().is_some() {
+            eprintln!("error: {e}");
+            ExitCode::NotFound.exit();
         }
     }
 

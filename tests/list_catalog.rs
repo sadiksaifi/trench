@@ -210,3 +210,19 @@ fn list_reports_detached_worktree_with_stable_identity_and_porcelain_shape() {
         "{line}"
     );
 }
+
+#[test]
+fn list_outside_repository_has_direct_error_and_actionable_hint() {
+    let root = tempfile::tempdir().unwrap();
+    let xdg = root.path().join("xdg");
+
+    let output = trench(root.path(), &xdg, &["list"]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!output.status.success());
+    assert!(stderr.contains("not a git repository"), "{stderr}");
+    assert!(
+        stderr.contains("Run `trench` inside a Git worktree"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("select"), "{stderr}");
+}
