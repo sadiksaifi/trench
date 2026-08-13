@@ -2,6 +2,7 @@ pub mod app;
 pub mod chrome;
 pub mod cockpit;
 pub mod keymap;
+pub mod refresh;
 pub mod runtime;
 pub mod screens;
 pub mod theme;
