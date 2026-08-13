@@ -18,6 +18,7 @@ pub struct ExistingWorktree {
 }
 
 impl ExistingWorktree {
+    #[cfg(test)]
     pub fn new(
         worktree: impl Into<String>,
         branch: Option<impl Into<String>>,

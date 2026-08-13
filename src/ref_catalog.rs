@@ -188,6 +188,7 @@ impl RefCatalog {
     }
 
     /// Refresh origin only when the caller explicitly requests network access.
+    #[allow(dead_code)]
     pub fn fetch_origin(repo_path: &Path) -> Result<(), git::GitError> {
         git::fetch_remote(repo_path)
     }

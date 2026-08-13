@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 
 use crate::git;
-use crate::ref_catalog::{DefaultBaseError, RefCatalog, RefCatalogError, RefSnapshot};
+use crate::ref_catalog::{DefaultBaseError, RefCatalog, RefCatalogError, RefKind, RefSnapshot};
 use crate::worktree_catalog::{CatalogError, WorktreeCatalog};
 use crate::worktree_policy::{WorktreePolicy, WorktreePolicyError};
 
@@ -249,22 +249,35 @@ impl CreatePlanner {
     }
 
     fn classify<'a>(&self, selection: &'a str) -> RefClass<'a> {
+        let candidates = self.refs.candidates();
         if let Some(branch) = selection.strip_prefix("origin/") {
-            if self.refs.local.iter().any(|local| local == branch) {
+            if candidates
+                .iter()
+                .any(|candidate| candidate.kind == RefKind::Local && candidate.name == branch)
+            {
                 return RefClass::Local(branch);
             }
-            if self.refs.origin.iter().any(|remote| remote == selection) {
+            if candidates
+                .iter()
+                .any(|candidate| candidate.kind == RefKind::Remote && candidate.name == selection)
+            {
                 return RefClass::Remote {
                     branch,
                     upstream: selection.to_string(),
                 };
             }
         }
-        if self.refs.local.iter().any(|local| local == selection) {
+        if candidates
+            .iter()
+            .any(|candidate| candidate.kind == RefKind::Local && candidate.name == selection)
+        {
             return RefClass::Local(selection);
         }
         let upstream = format!("origin/{selection}");
-        if self.refs.origin.iter().any(|remote| remote == &upstream) {
+        if candidates
+            .iter()
+            .any(|candidate| candidate.kind == RefKind::Remote && candidate.name == upstream)
+        {
             return RefClass::Remote {
                 branch: selection,
                 upstream,
