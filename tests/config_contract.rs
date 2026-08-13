@@ -114,3 +114,19 @@ fn unknown_global_key_exits_with_config_error_and_exact_diagnostic() {
     assert!(stderr.contains(&global_path.display().to_string()), "{stderr}");
     assert!(stderr.contains("auto_prune"), "{stderr}");
 }
+
+#[test]
+fn removed_config_controls_do_not_appear_in_cli_help() {
+    let repo = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+
+    for args in [&["--help"][..], &["switch", "--help"], &["open", "--help"]] {
+        let output = trench(repo.path(), xdg.path(), args);
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains("tmux"), "help {args:?}: {stdout}");
+        assert!(!stdout.contains("template"), "help {args:?}: {stdout}");
+        assert!(!stdout.contains("auto-refresh"), "help {args:?}: {stdout}");
+    }
+}
