@@ -384,6 +384,9 @@ pub enum GitError {
         message: String,
     },
 
+    #[error("Git preconditions changed after planning")]
+    PreconditionsChanged,
+
     #[error("merge conflict while syncing '{branch}': resolve conflicts manually")]
     MergeConflict { branch: String },
 

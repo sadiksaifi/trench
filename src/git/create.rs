@@ -3,6 +3,12 @@ use std::process::Command;
 
 use super::GitError;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateReceipt {
+    /// Present only when this successful call itself created the branch.
+    pub created_branch: Option<String>,
+}
+
 /// Add a worktree for a newly-created local branch at the exact planned path.
 ///
 /// This operation is deliberately local-only: ref refresh belongs to planning,
@@ -12,8 +18,9 @@ pub fn add_new_branch(
     worktree: &str,
     branch: &str,
     base: &str,
+    base_oid: git2::Oid,
     target_path: &Path,
-) -> Result<(), GitError> {
+) -> Result<CreateReceipt, GitError> {
     let repo = git2::Repository::open(repo_path)?;
     if repo.find_branch(branch, git2::BranchType::Local).is_ok() {
         return Err(GitError::BranchAlreadyExists {
@@ -21,7 +28,10 @@ pub fn add_new_branch(
         });
     }
 
-    let base_commit = resolve_commit(&repo, base)?;
+    if resolve_named_commit(&repo, base)? != base_oid {
+        return Err(GitError::PreconditionsChanged);
+    }
+    let base_commit = repo.find_commit(base_oid)?;
     let worktree_result = {
         let new_branch = repo.branch(branch, &base_commit, false)?;
         let mut options = git2::WorktreeAddOptions::new();
@@ -36,7 +46,9 @@ pub fn add_new_branch(
         return Err(error.into());
     }
 
-    Ok(())
+    Ok(CreateReceipt {
+        created_branch: Some(branch.to_string()),
+    })
 }
 
 /// Add a worktree for an existing local branch without creating or rewriting it.
@@ -44,8 +56,9 @@ pub fn add_existing_local(
     repo_path: &Path,
     worktree: &str,
     branch: &str,
+    expected_oid: git2::Oid,
     target_path: &Path,
-) -> Result<(), GitError> {
+) -> Result<CreateReceipt, GitError> {
     let repo = git2::Repository::open(repo_path)?;
     let local = repo
         .find_branch(branch, git2::BranchType::Local)
@@ -58,10 +71,15 @@ pub fn add_existing_local(
                 error.into()
             }
         })?;
+    if local.get().peel_to_commit()?.id() != expected_oid {
+        return Err(GitError::PreconditionsChanged);
+    }
     let mut options = git2::WorktreeAddOptions::new();
     options.reference(Some(local.get()));
     repo.worktree(worktree, target_path, Some(&options))?;
-    Ok(())
+    Ok(CreateReceipt {
+        created_branch: None,
+    })
 }
 
 /// Create a local branch from a remote-only ref, establish its upstream, and
@@ -71,8 +89,9 @@ pub fn add_tracking_branch(
     worktree: &str,
     branch: &str,
     upstream: &str,
+    upstream_oid: git2::Oid,
     target_path: &Path,
-) -> Result<(), GitError> {
+) -> Result<CreateReceipt, GitError> {
     let repo = git2::Repository::open(repo_path)?;
     if repo.find_branch(branch, git2::BranchType::Local).is_ok() {
         return Err(GitError::BranchAlreadyExists {
@@ -91,6 +110,9 @@ pub fn add_tracking_branch(
             }
         })?;
     let commit = remote.get().peel_to_commit()?;
+    if commit.id() != upstream_oid {
+        return Err(GitError::PreconditionsChanged);
+    }
     let worktree_result = {
         let mut local = repo.branch(branch, &commit, false)?;
         if let Err(error) = local.set_upstream(Some(upstream)) {
@@ -108,7 +130,9 @@ pub fn add_tracking_branch(
         }
         return Err(error.into());
     }
-    Ok(())
+    Ok(CreateReceipt {
+        created_branch: Some(branch.to_string()),
+    })
 }
 
 /// Remove a just-created worktree through Git and optionally delete the branch
@@ -121,7 +145,7 @@ pub fn rollback_created_worktree(
     let remove = Command::new("git")
         .arg("-C")
         .arg(repo_path)
-        .args(["worktree", "remove", "--force"])
+        .args(["worktree", "remove", "--force", "--force"])
         .arg(target_path)
         .output()?;
     if !remove.status.success() && target_path.exists() {
@@ -154,28 +178,11 @@ pub fn rollback_created_worktree(
     Ok(())
 }
 
-fn resolve_commit<'repo>(
-    repo: &'repo git2::Repository,
-    name: &str,
-) -> Result<git2::Commit<'repo>, GitError> {
-    if let Ok(local) = repo.find_branch(name, git2::BranchType::Local) {
-        return local.get().peel_to_commit().map_err(Into::into);
-    }
-    if let Ok(remote) = repo.find_branch(name, git2::BranchType::Remote) {
-        return remote.get().peel_to_commit().map_err(Into::into);
-    }
-    let remote_name = format!("origin/{name}");
-    repo.find_branch(&remote_name, git2::BranchType::Remote)
-        .map_err(|error| {
-            if error.code() == git2::ErrorCode::NotFound {
-                GitError::BaseBranchNotFound {
-                    base: name.to_string(),
-                }
-            } else {
-                error.into()
-            }
-        })?
-        .get()
-        .peel_to_commit()
-        .map_err(Into::into)
+fn resolve_named_commit(repo: &git2::Repository, name: &str) -> Result<git2::Oid, GitError> {
+    let reference = if name.starts_with("origin/") {
+        format!("refs/remotes/{name}")
+    } else {
+        format!("refs/heads/{name}")
+    };
+    Ok(repo.revparse_single(&reference)?.peel_to_commit()?.id())
 }

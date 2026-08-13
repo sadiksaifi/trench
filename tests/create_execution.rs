@@ -274,20 +274,53 @@ shell = "printf shell-output >&2; exit 19"
     );
 
     assert_eq!(output.status.code(), Some(4));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let pre = stderr.find("pre-output").unwrap();
     let run = stderr.find("run-output").unwrap();
     let shell = stderr.find("shell-output").unwrap();
     assert!(pre < run && run < shell, "{stderr}");
-    let json_start = stderr.find("{\n  \"stage\"").unwrap();
-    let failure: serde_json::Value = serde_json::from_str(&stderr[json_start..]).unwrap();
+    let failure: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(failure["stage"], "post_hook");
     assert_eq!(failure["mutation_state"], "rolled_back");
     assert_eq!(failure["class"], "hook");
     assert!(!root.exists(), "empty operation parents should be removed");
     assert!(
         !git_stdout(repo.path(), &["branch", "--list", "feature/hooks"]).contains("feature/hooks")
+    );
+}
+
+#[test]
+fn json_hook_failure_is_one_standalone_document_and_rolls_back_dirty_worktree() {
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let root = outside.path().join("worktrees");
+    init_repo(repo.path());
+    write_project_config(
+        repo.path(),
+        &root,
+        r#"
+[hooks.post_create]
+shell = "printf streamed-output; touch untracked.tmp ignored.tmp; printf 'ignored.tmp\\n' >> \"$TRENCH_REPO_PATH/.git/info/exclude\"; git -C \"$TRENCH_REPO_PATH\" worktree lock \"$TRENCH_WORKTREE_PATH\"; exit 19"
+"#,
+    );
+
+    let output = trench(
+        repo.path(),
+        xdg.path(),
+        &["create", "feature/json-failure", "--json"],
+    );
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("streamed-output"));
+    let failure: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(failure["stage"], "post_hook");
+    assert_eq!(failure["mutation_state"], "rolled_back");
+    assert!(!root.exists());
+    assert!(
+        git_stdout(repo.path(), &["branch", "--list", "feature/json-failure"])
+            .trim()
+            .is_empty()
     );
 }
 
@@ -346,9 +379,7 @@ fn pre_create_failure_never_creates_the_worktree_or_branch() {
             .trim()
             .is_empty()
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let json_start = stderr.find("{\n  \"stage\"").unwrap();
-    let failure: serde_json::Value = serde_json::from_str(&stderr[json_start..]).unwrap();
+    let failure: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(failure["stage"], "pre_hook");
     assert_eq!(failure["mutation_state"], "rolled_back");
     assert_eq!(failure["class"], "hook");

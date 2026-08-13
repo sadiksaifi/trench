@@ -336,6 +336,40 @@ async fn execute_create(
         }
     }
 
+    // Hooks and concurrent actors may change refs or filesystem components.
+    // Revalidate the frozen plan at the last boundary before any Git or path
+    // mutation, including its hidden source commit OID.
+    let stage_started = Instant::now();
+    emitter.emit(OperationEvent::StageStarted {
+        stage: OperationStage::Revalidate,
+    });
+    let live_plan = match revalidate(&request) {
+        Ok(plan) => plan,
+        Err(message) => {
+            finish_stage(emitter, OperationStage::Revalidate, stage_started, false);
+            return Err(fail(
+                emitter,
+                operation_started,
+                OperationStage::Revalidate,
+                MutationState::RolledBack,
+                ErrorClass::PreconditionsChanged,
+                message,
+            ));
+        }
+    };
+    if live_plan != request.plan {
+        finish_stage(emitter, OperationStage::Revalidate, stage_started, false);
+        return Err(fail(
+            emitter,
+            operation_started,
+            OperationStage::Revalidate,
+            MutationState::RolledBack,
+            ErrorClass::PreconditionsChanged,
+            "create plan changed before Git mutation".to_string(),
+        ));
+    }
+    finish_stage(emitter, OperationStage::Revalidate, stage_started, true);
+
     let stage_started = Instant::now();
     emitter.emit(OperationEvent::StageStarted {
         stage: OperationStage::CreateWorktree,
@@ -380,18 +414,24 @@ async fn execute_create(
         }
     };
 
+    let source_oid = request
+        .plan
+        .source_oid
+        .expect("mutating create plans always freeze a source commit");
     let create_result = match &request.plan.action {
         CreateAction::NewBranch(base) => git::create::add_new_branch(
             &request.repo_path,
             &request.plan.worktree,
             &request.plan.branch,
             base,
+            source_oid,
             &request.plan.path,
         ),
         CreateAction::ExistingLocal => git::create::add_existing_local(
             &request.repo_path,
             &request.plan.worktree,
             &request.plan.branch,
+            source_oid,
             &request.plan.path,
         ),
         CreateAction::TrackRemote(upstream) => git::create::add_tracking_branch(
@@ -399,28 +439,40 @@ async fn execute_create(
             &request.plan.worktree,
             &request.plan.branch,
             upstream,
+            source_oid,
             &request.plan.path,
         ),
         CreateAction::Navigate(_) => unreachable!("navigate returned before mutation"),
     };
 
-    if let Err(error) = create_result {
-        finish_stage(
-            emitter,
-            OperationStage::CreateWorktree,
-            stage_started,
-            false,
-        );
-        return Err(rollback_failure(
-            &request,
-            emitter,
-            operation_started,
-            &created_parents,
-            OperationStage::CreateWorktree,
-            ErrorClass::Git,
-            error.to_string(),
-        ));
-    }
+    let receipt = match create_result {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            finish_stage(
+                emitter,
+                OperationStage::CreateWorktree,
+                stage_started,
+                false,
+            );
+            let class = if matches!(error, git::GitError::PreconditionsChanged) {
+                ErrorClass::PreconditionsChanged
+            } else {
+                ErrorClass::Git
+            };
+            return Err(rollback_failure(
+                &request,
+                emitter,
+                operation_started,
+                &created_parents,
+                None,
+                FailureCause {
+                    stage: OperationStage::CreateWorktree,
+                    class,
+                    message: error.to_string(),
+                },
+            ));
+        }
+    };
     finish_stage(emitter, OperationStage::CreateWorktree, stage_started, true);
 
     if request.plan.hook_policy == HookPolicy::Run {
@@ -454,9 +506,12 @@ async fn execute_create(
                     emitter,
                     operation_started,
                     &created_parents,
-                    OperationStage::PostHook,
-                    class,
-                    error.to_string(),
+                    receipt.created_branch.as_deref(),
+                    FailureCause {
+                        stage: OperationStage::PostHook,
+                        class,
+                        message: error.to_string(),
+                    },
                 ));
             }
             finish_stage(emitter, OperationStage::PostHook, stage_started, true);
@@ -535,11 +590,10 @@ fn cleanup_empty_directories(directories: &[PathBuf]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn created_branch(plan: &CreatePlan) -> Option<&str> {
-    match plan.action {
-        CreateAction::NewBranch(_) | CreateAction::TrackRemote(_) => Some(&plan.branch),
-        CreateAction::ExistingLocal | CreateAction::Navigate(_) => None,
-    }
+struct FailureCause {
+    stage: OperationStage,
+    class: ErrorClass,
+    message: String,
 }
 
 fn rollback_failure(
@@ -547,9 +601,8 @@ fn rollback_failure(
     emitter: &dyn Emitter,
     operation_started: Instant,
     created_parents: &[PathBuf],
-    failed_stage: OperationStage,
-    failed_class: ErrorClass,
-    failure_message: String,
+    created_branch: Option<&str>,
+    failure: FailureCause,
 ) -> OperationFailure {
     let rollback_started = Instant::now();
     emitter.emit(OperationEvent::StageStarted {
@@ -558,7 +611,7 @@ fn rollback_failure(
     let git_rollback = git::create::rollback_created_worktree(
         &request.repo_path,
         &request.plan.path,
-        created_branch(&request.plan),
+        created_branch,
     );
     let parent_cleanup = cleanup_empty_directories(created_parents);
     match (git_rollback, parent_cleanup) {
@@ -567,10 +620,10 @@ fn rollback_failure(
             fail(
                 emitter,
                 operation_started,
-                failed_stage,
+                failure.stage,
                 MutationState::RolledBack,
-                failed_class,
-                failure_message,
+                failure.class,
+                failure.message,
             )
         }
         (git_result, parent_result) => {
@@ -720,15 +773,125 @@ fn diagnostic_error(class: ErrorClass) -> logging::DiagnosticError {
 mod tests {
     use super::*;
     use crate::create_plan::HookPolicy;
+    use std::sync::atomic::AtomicUsize;
 
     struct CreateCollisionAtMutation {
         path: PathBuf,
+        revalidations: AtomicUsize,
         events: RecordingEmitter,
+    }
+
+    struct RefChangeAfterPreHook {
+        repo_path: PathBuf,
+        reference: String,
+        replacement: git2::Oid,
+        events: RecordingEmitter,
+    }
+
+    impl Emitter for RefChangeAfterPreHook {
+        fn emit(&self, event: OperationEvent) {
+            if matches!(
+                event,
+                OperationEvent::StageFinished {
+                    stage: OperationStage::PreHook,
+                    success: true,
+                    ..
+                }
+            ) {
+                let repo = git2::Repository::open(&self.repo_path).unwrap();
+                repo.reference(&self.reference, self.replacement, true, "test race")
+                    .unwrap();
+            }
+            self.events.emit(event);
+        }
+    }
+
+    struct BranchRaceAtGitBoundary {
+        repo_path: PathBuf,
+        branch: String,
+        revalidations: AtomicUsize,
+        events: RecordingEmitter,
+    }
+
+    impl Emitter for BranchRaceAtGitBoundary {
+        fn emit(&self, event: OperationEvent) {
+            if matches!(
+                event,
+                OperationEvent::StageFinished {
+                    stage: OperationStage::Revalidate,
+                    success: true,
+                    ..
+                }
+            ) && self.revalidations.fetch_add(1, Ordering::SeqCst) == 1
+            {
+                let repo = git2::Repository::open(&self.repo_path).unwrap();
+                let head = repo.head().unwrap().peel_to_commit().unwrap();
+                repo.branch(&self.branch, &head, false).unwrap();
+            }
+            self.events.emit(event);
+        }
+    }
+
+    #[cfg(unix)]
+    struct SymlinkRaceAfterPreHook {
+        link: PathBuf,
+        outside: PathBuf,
+        events: RecordingEmitter,
+    }
+
+    #[cfg(unix)]
+    impl Emitter for SymlinkRaceAfterPreHook {
+        fn emit(&self, event: OperationEvent) {
+            if matches!(
+                event,
+                OperationEvent::StageFinished {
+                    stage: OperationStage::PreHook,
+                    success: true,
+                    ..
+                }
+            ) {
+                std::fs::create_dir_all(self.link.parent().unwrap()).unwrap();
+                std::os::unix::fs::symlink(&self.outside, &self.link).unwrap();
+            }
+            self.events.emit(event);
+        }
+    }
+
+    struct BranchRaceAfterPreHook {
+        repo_path: PathBuf,
+        branch: String,
+        events: RecordingEmitter,
+    }
+
+    impl Emitter for BranchRaceAfterPreHook {
+        fn emit(&self, event: OperationEvent) {
+            if matches!(
+                event,
+                OperationEvent::StageFinished {
+                    stage: OperationStage::PreHook,
+                    success: true,
+                    ..
+                }
+            ) {
+                let repo = git2::Repository::open(&self.repo_path).unwrap();
+                let head = repo.head().unwrap().peel_to_commit().unwrap();
+                repo.branch(&self.branch, &head, false).unwrap();
+            }
+            self.events.emit(event);
+        }
     }
 
     impl Emitter for CreateCollisionAtMutation {
         fn emit(&self, event: OperationEvent) {
-            if event == OperationEvent::MutationStarted {
+            if matches!(
+                event,
+                OperationEvent::StageFinished {
+                    stage: OperationStage::Revalidate,
+                    success: true,
+                    ..
+                }
+            ) && self.revalidations.fetch_add(1, Ordering::SeqCst) == 1
+            {
                 std::fs::create_dir_all(&self.path).unwrap();
                 std::fs::write(self.path.join("foreign-file"), "do not remove").unwrap();
             }
@@ -839,6 +1002,7 @@ mod tests {
         let collision_path = plan.path.clone();
         let emitter = CreateCollisionAtMutation {
             path: collision_path.clone(),
+            revalidations: AtomicUsize::new(0),
             events: RecordingEmitter::default(),
         };
 
@@ -884,5 +1048,234 @@ mod tests {
         cleanup_empty_directories(&error.created).unwrap();
         assert!(!root.exists(), "partially-created parents must be cleaned");
         assert!(outside.path().is_dir(), "pre-existing parent must remain");
+    }
+
+    #[tokio::test]
+    async fn base_oid_changed_after_pre_hook_aborts_before_worktree_creation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        let repo = init_repo(repo_dir.path());
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("feature/base-race", None)
+            .unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree = repo
+            .find_tree(repo.index().unwrap().write_tree().unwrap())
+            .unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let replacement = repo
+            .commit(
+                None,
+                &signature,
+                &signature,
+                "replacement",
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        let emitter = RefChangeAfterPreHook {
+            repo_path: repo_dir.path().to_path_buf(),
+            reference: "refs/heads/main".into(),
+            replacement,
+            events: RecordingEmitter::default(),
+        };
+
+        let error = execute(
+            OperationRequest::Create(CreateRequest {
+                plan,
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root: worktree_root.clone(),
+                hooks: Some(HooksConfig {
+                    pre_create: Some(crate::config::HookDef {
+                        run: Some(vec!["true".into()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            &emitter,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.class, ErrorClass::PreconditionsChanged);
+        assert!(!worktree_root.exists());
+        assert!(repo
+            .find_branch("feature/base-race", git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn branch_created_after_pre_hook_is_never_deleted_as_rollback_ownership() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        let repo = init_repo(repo_dir.path());
+        let branch = "feature/branch-race";
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan(branch, None)
+            .unwrap();
+        let emitter = BranchRaceAfterPreHook {
+            repo_path: repo_dir.path().to_path_buf(),
+            branch: branch.into(),
+            events: RecordingEmitter::default(),
+        };
+
+        let error = execute(
+            OperationRequest::Create(CreateRequest {
+                plan,
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root,
+                hooks: Some(HooksConfig {
+                    pre_create: Some(crate::config::HookDef {
+                        run: Some(vec!["true".into()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            &emitter,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.class, ErrorClass::PreconditionsChanged);
+        assert!(repo.find_branch(branch, git2::BranchType::Local).is_ok());
+    }
+
+    #[tokio::test]
+    async fn branch_racing_after_final_revalidation_is_not_owned_or_deleted() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        let repo = init_repo(repo_dir.path());
+        let branch = "feature/git-boundary-race";
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan(branch, None)
+            .unwrap();
+        let emitter = BranchRaceAtGitBoundary {
+            repo_path: repo_dir.path().to_path_buf(),
+            branch: branch.into(),
+            revalidations: AtomicUsize::new(0),
+            events: RecordingEmitter::default(),
+        };
+
+        let error = execute(
+            OperationRequest::Create(CreateRequest {
+                plan,
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root,
+                hooks: None,
+            }),
+            &emitter,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.class, ErrorClass::Git);
+        assert!(repo.find_branch(branch, git2::BranchType::Local).is_ok());
+    }
+
+    #[tokio::test]
+    async fn remote_oid_changed_after_pre_hook_aborts_before_tracking_branch_creation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        let repo = init_repo(repo_dir.path());
+        repo.remote("origin", "unused-test-remote").unwrap();
+        let original = repo.head().unwrap().target().unwrap();
+        repo.reference("refs/remotes/origin/topic", original, false, "test remote")
+            .unwrap();
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("origin/topic", None)
+            .unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree = repo
+            .find_tree(repo.index().unwrap().write_tree().unwrap())
+            .unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let replacement = repo
+            .commit(
+                None,
+                &signature,
+                &signature,
+                "replacement",
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        let emitter = RefChangeAfterPreHook {
+            repo_path: repo_dir.path().to_path_buf(),
+            reference: "refs/remotes/origin/topic".into(),
+            replacement,
+            events: RecordingEmitter::default(),
+        };
+
+        let error = execute(
+            OperationRequest::Create(CreateRequest {
+                plan,
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root,
+                hooks: Some(HooksConfig {
+                    pre_create: Some(crate::config::HookDef {
+                        run: Some(vec!["true".into()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            &emitter,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.class, ErrorClass::PreconditionsChanged);
+        assert!(repo.find_branch("topic", git2::BranchType::Local).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_inserted_after_pre_hook_is_rejected_before_path_mutation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let escape = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        init_repo(repo_dir.path());
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("feature/symlink-race", None)
+            .unwrap();
+        let repository_name = repo_dir.path().file_name().unwrap();
+        let emitter = SymlinkRaceAfterPreHook {
+            link: worktree_root.join(repository_name),
+            outside: escape.path().to_path_buf(),
+            events: RecordingEmitter::default(),
+        };
+
+        let error = execute(
+            OperationRequest::Create(CreateRequest {
+                plan,
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root,
+                hooks: Some(HooksConfig {
+                    pre_create: Some(crate::config::HookDef {
+                        run: Some(vec!["true".into()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            &emitter,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.class, ErrorClass::PreconditionsChanged);
+        assert!(!escape.path().join("feature-symlink-race").exists());
     }
 }

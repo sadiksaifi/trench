@@ -57,6 +57,9 @@ pub struct CreatePlan {
     pub tracking: Option<String>,
     pub hook_policy: HookPolicy,
     pub preconditions: Vec<CreatePrecondition>,
+    /// The exact commit selected by planning. This is intentionally omitted
+    /// from the stable human/JSON surface but participates in revalidation.
+    pub source_oid: Option<git2::Oid>,
 }
 
 impl Serialize for CreatePlan {
@@ -133,6 +136,7 @@ impl RefClass<'_> {
 }
 
 pub struct CreatePlanner {
+    repo_path: PathBuf,
     refs: RefSnapshot,
     catalog: WorktreeCatalog,
     policy: WorktreePolicy,
@@ -157,6 +161,7 @@ impl CreatePlanner {
             &repo_info.path,
         )?;
         Ok(Self {
+            repo_path: repo_info.path,
             refs,
             catalog,
             policy,
@@ -204,6 +209,7 @@ impl CreatePlanner {
                     CreatePrecondition::ClassifiedRef,
                     CreatePrecondition::ExistingWorktreeResolved,
                 ],
+                source_oid: None,
             });
         }
         let location = self.policy.derive(class.branch())?;
@@ -227,6 +233,15 @@ impl CreatePlanner {
                 Some(upstream),
             ),
         };
+        let source_name = match &action {
+            CreateAction::NewBranch(base) => Some(base.as_str()),
+            CreateAction::ExistingLocal => Some(location.branch.as_str()),
+            CreateAction::TrackRemote(upstream) => Some(upstream.as_str()),
+            CreateAction::Navigate(_) => None,
+        };
+        let source_oid = source_name
+            .map(|name| self.resolve_source_oid(name))
+            .transpose()?;
         Ok(CreatePlan {
             dry_run: true,
             action,
@@ -245,7 +260,20 @@ impl CreatePlanner {
                 CreatePrecondition::AvailablePath,
                 CreatePrecondition::ContainedByRoot,
             ],
+            source_oid,
         })
+    }
+
+    fn resolve_source_oid(&self, name: &str) -> Result<git2::Oid, CreatePlanError> {
+        let repo = git2::Repository::open(&self.repo_path)?;
+        let reference = if name.starts_with("origin/") {
+            format!("refs/remotes/{name}")
+        } else {
+            format!("refs/heads/{name}")
+        };
+        let object = repo.revparse_single(&reference)?;
+        let oid = object.peel_to_commit()?.id();
+        Ok(oid)
     }
 
     fn classify<'a>(&self, selection: &'a str) -> RefClass<'a> {
@@ -506,6 +534,7 @@ mod tests {
             tracking: None,
             hook_policy: HookPolicy::Run,
             preconditions: vec![CreatePrecondition::ValidRef],
+            source_oid: None,
         };
 
         assert_eq!(
@@ -535,6 +564,7 @@ mod tests {
             tracking: Some("origin/release".to_string()),
             hook_policy: HookPolicy::Skip,
             preconditions: Vec::new(),
+            source_oid: None,
         };
 
         assert_eq!(

@@ -443,7 +443,7 @@ fn run_create(
         }
         Err(failure) => {
             if json {
-                eprintln!("{}", output::json::format_json_value(&failure)?);
+                println!("{}", output::json::format_json_value(&failure)?);
             } else {
                 eprintln!("error: {failure}");
             }
