@@ -105,17 +105,12 @@ impl WorktreePolicy {
     }
 
     pub fn derive(&self, branch: &str) -> Result<WorktreeLocation, WorktreePolicyError> {
-        validate_branch(branch)?;
-        let worktree = paths::sanitize_branch(branch);
-        if worktree.is_empty() || worktree == "." || worktree == ".." {
-            return Err(WorktreePolicyError::InvalidIdentity {
-                branch: branch.to_string(),
-            });
-        }
-        let path = absolute_lexical(&self.root.join(&self.repository).join(&worktree));
-        if !is_single_segment(&self.repository) || !path.starts_with(&self.root) {
-            return Err(WorktreePolicyError::RootEscape { path });
-        }
+        let location = self.location(branch)?;
+        let WorktreeLocation {
+            branch,
+            worktree,
+            path,
+        } = location;
         if let Some(existing) = self
             .existing
             .iter()
@@ -132,15 +127,38 @@ impl WorktreePolicy {
         if let Some(existing) = self
             .existing
             .iter()
-            .find(|existing| existing.branch.as_deref() == Some(branch))
+            .find(|existing| existing.branch.as_deref() == Some(&branch))
         {
             return Err(WorktreePolicyError::BranchCheckedOut {
-                branch: branch.to_string(),
+                branch,
                 path: existing.path.clone(),
             });
         }
         if std::fs::symlink_metadata(&path).is_ok() {
             return Err(WorktreePolicyError::PathExists { path });
+        }
+        Ok(WorktreeLocation {
+            branch,
+            worktree,
+            path,
+        })
+    }
+
+    pub fn validate(&self, branch: &str) -> Result<(), WorktreePolicyError> {
+        self.location(branch).map(|_| ())
+    }
+
+    fn location(&self, branch: &str) -> Result<WorktreeLocation, WorktreePolicyError> {
+        validate_branch(branch)?;
+        let worktree = paths::sanitize_branch(branch);
+        if worktree.is_empty() || worktree == "." || worktree == ".." {
+            return Err(WorktreePolicyError::InvalidIdentity {
+                branch: branch.to_string(),
+            });
+        }
+        let path = absolute_lexical(&self.root.join(&self.repository).join(&worktree));
+        if !is_single_segment(&self.repository) || !path.starts_with(&self.root) {
+            return Err(WorktreePolicyError::RootEscape { path });
         }
         Ok(WorktreeLocation {
             branch: branch.to_string(),
