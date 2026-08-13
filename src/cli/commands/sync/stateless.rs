@@ -707,6 +707,7 @@ mod tests {
             config.set_str("user.email", "test@example.com").unwrap();
         }
         commit_file(&repo, "common", "initial\n", "initial");
+        commit_file(&repo, ".gitignore", "ignored-state\n", "ignore local state");
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         let branch = repo.branch("feature/topic", &head, false).unwrap();
         let mut options = git2::WorktreeAddOptions::new();
@@ -848,6 +849,35 @@ mod tests {
     #[tokio::test]
     async fn merge_conflict_restores_exact_prestate_without_residue() {
         assert_conflict_is_atomic(SyncStrategy::Merge).await;
+    }
+
+    #[tokio::test]
+    async fn checkout_failure_never_overwrites_ignored_user_state() {
+        let (root, feature) = divergent_worktree();
+        let main = git2::Repository::open(root.path().join("main")).unwrap();
+        commit_file(&main, "ignored-state", "from-main\n", "track ignored path");
+        std::fs::write(feature.join("ignored-state"), "preserve-user-state\n").unwrap();
+        let repo = git2::Repository::open(&feature).unwrap();
+        let head_before = repo.head().unwrap().target().unwrap();
+        let plan = SyncPlanner::discover(&feature, None)
+            .unwrap()
+            .plan(
+                "feature/topic",
+                Some("main"),
+                SyncStrategy::Merge,
+                HookPolicy::Skip,
+            )
+            .unwrap();
+
+        let failure = execute(plan, None, &NoopSyncEmitter).await.unwrap_err();
+
+        let repo = git2::Repository::open(&feature).unwrap();
+        assert_eq!(failure.mutation_state, MutationState::RolledBack);
+        assert_eq!(repo.head().unwrap().target(), Some(head_before));
+        assert_eq!(
+            std::fs::read_to_string(feature.join("ignored-state")).unwrap(),
+            "preserve-user-state\n"
+        );
     }
 
     #[test]

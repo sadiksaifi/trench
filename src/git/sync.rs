@@ -47,28 +47,33 @@ pub fn execute(plan: &TransactionPlan) -> Result<Oid, SyncGitError> {
     if new_head == plan.expected_head {
         return Ok(new_head);
     }
-    let update = repo.reference_matching(
-        &plan.branch_ref,
-        new_head,
-        true,
-        plan.expected_head,
-        "trench sync",
-    );
-    if let Err(error) = update {
-        return if error.code() == git2::ErrorCode::Modified {
-            Err(SyncGitError::PreconditionsChanged)
-        } else {
-            Err(error.into())
-        };
-    }
+    let mut transaction = repo.transaction()?;
+    transaction.lock_ref(&plan.branch_ref)?;
+    // Freeze the ref while performing the final eligibility check and safe
+    // checkout so another Git actor cannot move the branch between them.
+    validate_clean_attached(&repo, &plan.branch_ref, plan.expected_head)?;
     let object = repo.find_object(new_head, None)?;
-    if let Err(error) = repo.reset(&object, git2::ResetType::Hard, None) {
-        return rollback_ref(
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout.safe().update_index(true).overwrite_ignored(false);
+    if let Err(error) = repo.checkout_tree(&object, Some(&mut checkout)) {
+        return restore_prestate(
             &repo,
             &plan.branch_ref,
             new_head,
             plan.expected_head,
             format!("checkout failed: {error}"),
+        );
+    }
+    if let Err(error) = transaction
+        .set_target(&plan.branch_ref, new_head, None, "trench sync")
+        .and_then(|()| transaction.commit())
+    {
+        return restore_prestate(
+            &repo,
+            &plan.branch_ref,
+            new_head,
+            plan.expected_head,
+            format!("reference update failed: {error}"),
         );
     }
     Ok(new_head)
@@ -157,7 +162,7 @@ fn merge_in_memory(repo: &Repository, plan: &TransactionPlan) -> Result<Oid, Syn
     )?)
 }
 
-fn rollback_ref(
+fn restore_prestate(
     repo: &Repository,
     branch_ref: &str,
     applied: Oid,
@@ -165,7 +170,20 @@ fn rollback_ref(
     cause: String,
 ) -> Result<Oid, SyncGitError> {
     let cleanup = (|| {
-        repo.reference_matching(branch_ref, original, true, applied, "trench sync rollback")?;
+        let live = repo
+            .find_reference(branch_ref)?
+            .target()
+            .ok_or_else(|| git2::Error::from_str("sync branch has no direct target"))?;
+        if live != original && live != applied {
+            return Err(git2::Error::from_str("sync branch changed before rollback"));
+        }
+        let object = repo.find_object(original, None)?;
+        let mut checkout = git2::build::CheckoutBuilder::new();
+        checkout.safe().update_index(true).overwrite_ignored(false);
+        repo.checkout_tree(&object, Some(&mut checkout))?;
+        if live == applied {
+            repo.reference_matching(branch_ref, original, true, applied, "trench sync rollback")?;
+        }
         repo.cleanup_state()?;
         Ok::<(), git2::Error>(())
     })();
