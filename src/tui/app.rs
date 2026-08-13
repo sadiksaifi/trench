@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::tui::keymap::{self, Action, Context, Key};
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WorktreeId(PathBuf);
 
@@ -44,6 +46,20 @@ pub enum Event {
         status: WorktreeStatus,
     },
     Select(WorktreeId),
+    Input(Key),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    Switch(WorktreeId),
+    Open(WorktreeId),
+    OpenCreate,
+    OpenSync(WorktreeId),
+    OpenRemove(WorktreeId),
+    OpenSearch,
+    Refresh,
+    Quit,
+    Unavailable { action: Action, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +80,7 @@ impl AppState {
     }
 }
 
-pub fn reduce(state: &mut AppState, event: Event) {
+pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
     match event {
         Event::IdentitiesLoaded(identities) => {
             state.selected = state
@@ -81,6 +97,55 @@ pub fn reduce(state: &mut AppState, event: Event) {
             state.selected = Some(id);
         }
         Event::Select(_) => {}
+        Event::Input(key) => {
+            let Some(action) = keymap::action_for(Context::Cockpit, key) else {
+                return Vec::new();
+            };
+            if let Some(reason) = unavailable_reason(state, action) {
+                return vec![Effect::Unavailable {
+                    action,
+                    reason: reason.to_string(),
+                }];
+            }
+            return reduce_action(state, action);
+        }
+    }
+    Vec::new()
+}
+
+pub fn unavailable_reason(state: &AppState, action: Action) -> Option<&'static str> {
+    let selected = state
+        .selected
+        .as_ref()
+        .and_then(|id| state.identities.iter().find(|row| &row.id == id));
+    match (action, selected) {
+        (Action::Switch | Action::Open | Action::Sync | Action::Remove, None) => {
+            Some("No worktree selected")
+        }
+        (Action::Sync, Some(identity)) if identity.detached => {
+            Some("Detached worktrees cannot be synced")
+        }
+        (Action::Remove, Some(identity)) if identity.is_main => {
+            Some("The main worktree cannot be removed")
+        }
+        _ => None,
+    }
+}
+
+fn reduce_action(state: &mut AppState, action: Action) -> Vec<Effect> {
+    let selected = || state.selected.clone().expect("eligibility checked selection");
+    match action {
+        Action::Switch => vec![Effect::Switch(selected())],
+        Action::Open => vec![Effect::Open(selected())],
+        Action::Create => vec![Effect::OpenCreate],
+        Action::Sync => vec![Effect::OpenSync(selected())],
+        Action::Remove => vec![Effect::OpenRemove(selected())],
+        Action::Search => vec![Effect::OpenSearch],
+        Action::Refresh => vec![Effect::Refresh],
+        Action::Quit => vec![Effect::Quit],
+        Action::ToggleInspector | Action::SelectNext | Action::SelectPrevious | Action::Help => {
+            Vec::new()
+        }
     }
 }
 
@@ -114,5 +179,23 @@ mod tests {
         );
 
         assert_eq!(state.selected, Some(beta.id));
+    }
+
+    #[test]
+    fn detached_selection_disables_sync_with_an_explanation() {
+        let mut detached = identity("/worktrees/review", "detached@1234567");
+        detached.branch = None;
+        detached.detached = true;
+        let mut state = AppState::new(vec![detached]);
+
+        let effects = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('s')));
+
+        assert_eq!(
+            effects,
+            vec![Effect::Unavailable {
+                action: crate::tui::keymap::Action::Sync,
+                reason: "Detached worktrees cannot be synced".to_string(),
+            }]
+        );
     }
 }
