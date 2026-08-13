@@ -9,6 +9,7 @@ mod logging;
 mod output;
 mod paths;
 mod process;
+mod ref_catalog;
 mod state;
 mod tmux;
 mod tui;
