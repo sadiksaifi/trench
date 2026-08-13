@@ -1,14 +1,28 @@
+#[cfg(unix)]
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
+use std::sync::Arc;
 
 use super::GitError;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTarget<'a> {
+    pub planned_path: &'a Path,
+    #[cfg(unix)]
+    pub parent_directory: Arc<std::fs::File>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CreateReceipt {
-    /// The exact worktree path created by this successful call.
-    pub worktree_path: PathBuf,
+    /// The canonical path Git recorded for this successful worktree add.
+    pub recorded_path: Option<PathBuf>,
     /// Present only when this successful call itself created the branch.
     pub created_branch: Option<String>,
+    #[cfg(unix)]
+    parent_directory: Arc<std::fs::File>,
+    #[cfg(unix)]
+    leaf: OsString,
 }
 
 /// Add a worktree for a newly-created local branch at the exact planned path.
@@ -21,7 +35,7 @@ pub fn add_new_branch(
     branch: &str,
     base: &str,
     base_oid: git2::Oid,
-    target_path: &Path,
+    target: CreateTarget<'_>,
 ) -> Result<CreateReceipt, GitError> {
     let repo = git2::Repository::open(repo_path)?;
     if repo.find_branch(branch, git2::BranchType::Local).is_ok() {
@@ -35,23 +49,21 @@ pub fn add_new_branch(
     }
     let base_commit = repo.find_commit(base_oid)?;
     let worktree_result = {
-        let new_branch = repo.branch(branch, &base_commit, false)?;
-        let mut options = git2::WorktreeAddOptions::new();
-        options.reference(Some(new_branch.get()));
-        repo.worktree(worktree, target_path, Some(&options))
+        repo.branch(branch, &base_commit, false)?;
+        add_worktree_descriptor_bound(&repo, worktree, branch, target)
     };
 
-    if let Err(error) = worktree_result {
-        if let Ok(mut orphan) = repo.find_branch(branch, git2::BranchType::Local) {
-            let _ = orphan.delete();
+    let mut receipt = match worktree_result {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            if let Ok(mut orphan) = repo.find_branch(branch, git2::BranchType::Local) {
+                let _ = orphan.delete();
+            }
+            return Err(error);
         }
-        return Err(error.into());
-    }
-
-    Ok(CreateReceipt {
-        worktree_path: target_path.to_path_buf(),
-        created_branch: Some(branch.to_string()),
-    })
+    };
+    receipt.created_branch = Some(branch.to_string());
+    Ok(receipt)
 }
 
 /// Add a worktree for an existing local branch without creating or rewriting it.
@@ -60,7 +72,7 @@ pub fn add_existing_local(
     worktree: &str,
     branch: &str,
     expected_oid: git2::Oid,
-    target_path: &Path,
+    target: CreateTarget<'_>,
 ) -> Result<CreateReceipt, GitError> {
     let repo = git2::Repository::open(repo_path)?;
     let local = repo
@@ -77,13 +89,7 @@ pub fn add_existing_local(
     if local.get().peel_to_commit()?.id() != expected_oid {
         return Err(GitError::PreconditionsChanged);
     }
-    let mut options = git2::WorktreeAddOptions::new();
-    options.reference(Some(local.get()));
-    repo.worktree(worktree, target_path, Some(&options))?;
-    Ok(CreateReceipt {
-        worktree_path: target_path.to_path_buf(),
-        created_branch: None,
-    })
+    add_worktree_descriptor_bound(&repo, worktree, branch, target)
 }
 
 /// Create a local branch from a remote-only ref, establish its upstream, and
@@ -94,7 +100,7 @@ pub fn add_tracking_branch(
     branch: &str,
     upstream: &str,
     upstream_oid: git2::Oid,
-    target_path: &Path,
+    target: CreateTarget<'_>,
 ) -> Result<CreateReceipt, GitError> {
     let repo = git2::Repository::open(repo_path)?;
     if repo.find_branch(branch, git2::BranchType::Local).is_ok() {
@@ -123,37 +129,100 @@ pub fn add_tracking_branch(
             let _ = local.delete();
             return Err(error.into());
         }
-        let mut options = git2::WorktreeAddOptions::new();
-        options.reference(Some(local.get()));
-        repo.worktree(worktree, target_path, Some(&options))
+        add_worktree_descriptor_bound(&repo, worktree, branch, target)
     };
 
-    if let Err(error) = worktree_result {
-        if let Ok(mut orphan) = repo.find_branch(branch, git2::BranchType::Local) {
-            let _ = orphan.delete();
+    let mut receipt = match worktree_result {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            if let Ok(mut orphan) = repo.find_branch(branch, git2::BranchType::Local) {
+                let _ = orphan.delete();
+            }
+            return Err(error);
         }
-        return Err(error.into());
+    };
+    receipt.created_branch = Some(branch.to_string());
+    Ok(receipt)
+}
+
+#[cfg(unix)]
+fn add_worktree_descriptor_bound(
+    repo: &git2::Repository,
+    worktree: &str,
+    branch: &str,
+    target: CreateTarget<'_>,
+) -> Result<CreateReceipt, GitError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let leaf = target
+        .planned_path
+        .file_name()
+        .ok_or(GitError::PreconditionsChanged)?
+        .to_os_string();
+    let parent_fd = target.parent_directory.as_raw_fd();
+    let mut command = Command::new("git");
+    command
+        .arg(format!("--git-dir={}", repo.path().display()))
+        .args(["-c", "core.hooksPath=/dev/null"])
+        .args([
+            "worktree",
+            "add",
+            "--no-guess-remote",
+            "--no-relative-paths",
+        ])
+        .arg(&leaf)
+        .arg(branch)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR");
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(parent_fd) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
     }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(GitError::CommandFailed {
+            operation: "creating descriptor-bound worktree",
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
     Ok(CreateReceipt {
-        worktree_path: target_path.to_path_buf(),
-        created_branch: Some(branch.to_string()),
+        recorded_path: repo
+            .find_worktree(worktree)
+            .ok()
+            .map(|created| created.path().to_path_buf()),
+        created_branch: None,
+        parent_directory: target.parent_directory,
+        leaf,
     })
 }
 
+#[cfg(not(unix))]
+fn add_worktree_descriptor_bound(
+    _repo: &git2::Repository,
+    _worktree: &str,
+    _branch: &str,
+    _target: CreateTarget<'_>,
+) -> Result<CreateReceipt, GitError> {
+    Err(GitError::PreconditionsChanged)
+}
+
 /// Remove a just-created worktree through Git and optionally delete the branch
-/// created for it. Existing-local branches must pass `None` and are preserved.
+/// created for it. Existing-local branches retain `created_branch: None`.
 pub fn rollback_created_worktree(
     repo_path: &Path,
-    target_path: &Path,
-    created_branch: Option<&str>,
+    receipt: &CreateReceipt,
 ) -> Result<(), GitError> {
-    let remove = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["worktree", "remove", "--force", "--force"])
-        .arg(target_path)
-        .output()?;
-    if !remove.status.success() && target_path.exists() {
+    let remove = remove_worktree_descriptor_bound(repo_path, receipt)?;
+    if !remove.status.success() && descriptor_target_exists(receipt)? {
         return Err(GitError::CommandFailed {
             operation: "rolling back created worktree",
             message: String::from_utf8_lossy(&remove.stderr).trim().to_string(),
@@ -172,7 +241,7 @@ pub fn rollback_created_worktree(
         });
     }
 
-    if let Some(branch) = created_branch {
+    if let Some(branch) = receipt.created_branch.as_deref() {
         let repo = git2::Repository::open(repo_path)?;
         match repo.find_branch(branch, git2::BranchType::Local) {
             Ok(mut local) => local.delete()?,
@@ -181,6 +250,82 @@ pub fn rollback_created_worktree(
         };
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn remove_worktree_descriptor_bound(
+    repo_path: &Path,
+    receipt: &CreateReceipt,
+) -> Result<std::process::Output, GitError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let parent_fd = receipt.parent_directory.as_raw_fd();
+    let repo = git2::Repository::open(repo_path)?;
+    let mut command = Command::new("git");
+    command
+        .arg(format!("--git-dir={}", repo.path().display()))
+        .args(["worktree", "remove", "--force", "--force"])
+        .arg(&receipt.leaf)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR");
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(parent_fd) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    command.output().map_err(Into::into)
+}
+
+#[cfg(not(unix))]
+fn remove_worktree_descriptor_bound(
+    _repo_path: &Path,
+    _receipt: &CreateReceipt,
+) -> Result<std::process::Output, GitError> {
+    Err(GitError::PreconditionsChanged)
+}
+
+#[cfg(unix)]
+fn descriptor_target_exists(receipt: &CreateReceipt) -> Result<bool, GitError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let leaf = std::ffi::CString::new(receipt.leaf.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "worktree leaf contains a NUL byte",
+        )
+    })?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let status = unsafe {
+        libc::fstatat(
+            receipt.parent_directory.as_raw_fd(),
+            leaf.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status == 0 {
+        Ok(true)
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            Ok(false)
+        } else {
+            Err(error.into())
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn descriptor_target_exists(_receipt: &CreateReceipt) -> Result<bool, GitError> {
+    Err(GitError::PreconditionsChanged)
 }
 
 fn resolve_named_commit(repo: &git2::Repository, name: &str) -> Result<git2::Oid, GitError> {

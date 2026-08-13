@@ -239,6 +239,23 @@ async fn execute_create(
     emitter: &dyn Emitter,
     cancellation: &dyn CancellationCheck,
 ) -> Result<OperationOutcome, OperationFailure> {
+    execute_create_with_boundary(request, emitter, cancellation, &ProductionCreateBoundary).await
+}
+
+trait CreateBoundary: Send + Sync {
+    fn after_final_verify(&self) {}
+}
+
+struct ProductionCreateBoundary;
+
+impl CreateBoundary for ProductionCreateBoundary {}
+
+async fn execute_create_with_boundary(
+    request: CreateRequest,
+    emitter: &dyn Emitter,
+    cancellation: &dyn CancellationCheck,
+    boundary: &dyn CreateBoundary,
+) -> Result<OperationOutcome, OperationFailure> {
     let operation_started = Instant::now();
     emitter.emit(OperationEvent::Started {
         operation: OperationKind::Create,
@@ -445,6 +462,13 @@ async fn execute_create(
             },
         ));
     }
+    boundary.after_final_verify();
+
+    let target = git::create::CreateTarget {
+        planned_path: &request.plan.path,
+        #[cfg(unix)]
+        parent_directory: Arc::clone(&prepared_parent.directory),
+    };
 
     let source_oid = request
         .plan
@@ -457,14 +481,14 @@ async fn execute_create(
             &request.plan.branch,
             base,
             source_oid,
-            &request.plan.path,
+            target,
         ),
         CreateAction::ExistingLocal => git::create::add_existing_local(
             &request.repo_path,
             &request.plan.worktree,
             &request.plan.branch,
             source_oid,
-            &request.plan.path,
+            target,
         ),
         CreateAction::TrackRemote(upstream) => git::create::add_tracking_branch(
             &request.repo_path,
@@ -472,7 +496,7 @@ async fn execute_create(
             &request.plan.branch,
             upstream,
             source_oid,
-            &request.plan.path,
+            target,
         ),
         CreateAction::Navigate(_) => unreachable!("navigate returned before mutation"),
     };
@@ -505,6 +529,27 @@ async fn execute_create(
             ));
         }
     };
+    let expected_path = prepared_parent.expected_path(&request.plan.path);
+    if receipt.recorded_path.as_ref() != Some(&expected_path) {
+        finish_stage(
+            emitter,
+            OperationStage::CreateWorktree,
+            stage_started,
+            false,
+        );
+        return Err(rollback_failure(
+            &request.repo_path,
+            emitter,
+            operation_started,
+            &prepared_parent.created,
+            Some(&receipt),
+            FailureCause {
+                stage: OperationStage::CreateWorktree,
+                class: ErrorClass::PreconditionsChanged,
+                message: "Git recorded a different worktree destination than planned".to_string(),
+            },
+        ));
+    }
     finish_stage(emitter, OperationStage::CreateWorktree, stage_started, true);
 
     if request.plan.hook_policy == HookPolicy::Run {
@@ -586,9 +631,10 @@ struct PreparedParent {
     parent: PathBuf,
     created: Vec<PathBuf>,
     #[cfg(unix)]
-    directory: std::fs::File,
+    directory: Arc<std::fs::File>,
     #[cfg(unix)]
     identity: (u64, u64),
+    canonical_parent: PathBuf,
 }
 
 impl PreparedParent {
@@ -622,6 +668,11 @@ impl PreparedParent {
             ));
         }
         Ok(())
+    }
+
+    fn expected_path(&self, target: &Path) -> PathBuf {
+        self.canonical_parent
+            .join(target.file_name().expect("planned path has a leaf"))
     }
 }
 
@@ -834,11 +885,32 @@ fn prepare_parent_directory(
             created: created.clone(),
             class: ErrorClass::Io,
         })?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|source| ParentCreationFailure {
+            source,
+            created: created.clone(),
+            class: ErrorClass::PreconditionsChanged,
+        })?;
+    let canonical_metadata =
+        std::fs::metadata(&canonical_parent).map_err(|source| ParentCreationFailure {
+            source,
+            created: created.clone(),
+            class: ErrorClass::PreconditionsChanged,
+        })?;
+    if (canonical_metadata.dev(), canonical_metadata.ino()) != (metadata.dev(), metadata.ino()) {
+        return Err(ParentCreationFailure {
+            source: std::io::Error::other("prepared worktree parent changed during execution"),
+            created,
+            class: ErrorClass::PreconditionsChanged,
+        });
+    }
     Ok(PreparedParent {
         parent: parent.to_path_buf(),
         created,
         identity: (metadata.dev(), metadata.ino()),
-        directory,
+        directory: Arc::new(directory),
+        canonical_parent,
     })
 }
 
@@ -857,6 +929,7 @@ fn prepare_parent_directory(
     Ok(PreparedParent {
         parent: parent.to_path_buf(),
         created,
+        canonical_parent: parent.to_path_buf(),
     })
 }
 
@@ -921,11 +994,7 @@ fn rollback_failure(
         stage: OperationStage::Rollback,
     });
     let git_rollback = receipt.map_or(Ok(()), |receipt| {
-        git::create::rollback_created_worktree(
-            repo_path,
-            &receipt.worktree_path,
-            receipt.created_branch.as_deref(),
-        )
+        git::create::rollback_created_worktree(repo_path, receipt)
     });
     let parent_cleanup = cleanup_empty_directories(created_parents);
     match (git_rollback, parent_cleanup) {
@@ -1133,6 +1202,21 @@ mod tests {
         worktree: String,
         fired: AtomicBool,
         events: RecordingEmitter,
+    }
+
+    #[cfg(unix)]
+    struct ParentSwapAfterFinalVerify {
+        parent: PathBuf,
+        held_parent: PathBuf,
+        outside: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl CreateBoundary for ParentSwapAfterFinalVerify {
+        fn after_final_verify(&self) {
+            std::fs::rename(&self.parent, &self.held_parent).unwrap();
+            std::os::unix::fs::symlink(&self.outside, &self.parent).unwrap();
+        }
     }
 
     impl Emitter for ActorWorktreeAtCreateBoundary {
@@ -1762,5 +1846,61 @@ mod tests {
 
         assert_eq!(error.class, ErrorClass::PreconditionsChanged);
         assert!(!escape.path().join("feature-late-symlink-race").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parent_swap_after_final_verify_cannot_redirect_git_mutation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let escape = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        let repository_parent = worktree_root.join(repo_dir.path().file_name().unwrap());
+        std::fs::create_dir_all(&repository_parent).unwrap();
+        std::fs::write(escape.path().join("foreign-file"), "preserve").unwrap();
+        let repo = init_repo(repo_dir.path());
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("feature/verify-swap", None)
+            .unwrap();
+        let held_parent = outside.path().join("held-repository-parent");
+        let boundary = ParentSwapAfterFinalVerify {
+            parent: repository_parent.clone(),
+            held_parent: held_parent.clone(),
+            outside: escape.path().to_path_buf(),
+        };
+        let process_cwd = std::env::current_dir().unwrap();
+
+        let error = execute_create_with_boundary(
+            CreateRequest {
+                plan: plan.clone(),
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root,
+                hooks: None,
+            },
+            &RecordingEmitter::default(),
+            &NeverCancelled,
+            &boundary,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.class, ErrorClass::PreconditionsChanged);
+        assert_eq!(error.mutation_state, MutationState::RolledBack);
+        assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+        assert!(std::fs::symlink_metadata(&repository_parent)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(escape.path().join("foreign-file")).unwrap(),
+            "preserve"
+        );
+        assert!(!escape.path().join(&plan.worktree).exists());
+        assert!(!held_parent.join(&plan.worktree).exists());
+        assert!(repo
+            .find_branch(&plan.branch, git2::BranchType::Local)
+            .is_err());
+        assert!(repo.find_worktree(&plan.worktree).is_err());
     }
 }
