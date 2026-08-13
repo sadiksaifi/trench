@@ -318,6 +318,31 @@ struct Warning {
     expires_at: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveFetch {
+    token: TaskToken,
+    origin: Vec<String>,
+    origin_head: Option<String>,
+    has_origin: bool,
+}
+
+impl ActiveFetch {
+    fn new(token: TaskToken, refs: &RefSnapshot) -> Self {
+        Self {
+            token,
+            origin: refs.origin.clone(),
+            origin_head: refs.origin_head.clone(),
+            has_origin: refs.has_origin,
+        }
+    }
+
+    fn still_current(&self, refs: &RefSnapshot) -> bool {
+        self.origin == refs.origin
+            && self.origin_head == refs.origin_head
+            && self.has_origin == refs.has_origin
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct RefreshCoordinator {
     generation: u64,
@@ -326,7 +351,7 @@ pub struct RefreshCoordinator {
     statuses: BTreeMap<WorktreeId, WorktreeStatus>,
     active_local: Option<LocalRun>,
     pending_local: Option<PendingRun>,
-    active_fetch: Option<TaskToken>,
+    active_fetch: Option<ActiveFetch>,
     queued_tasks: VecDeque<RefreshTask>,
     warning: Option<Warning>,
 }
@@ -376,7 +401,8 @@ impl RefreshCoordinator {
                 .is_some_and(|snapshot| snapshot.refs.has_origin)
         {
             let token = self.latest_token();
-            self.active_fetch = Some(token);
+            let refs = &self.snapshot.as_ref().expect("snapshot checked above").refs;
+            self.active_fetch = Some(ActiveFetch::new(token, refs));
             self.queued_tasks
                 .push_back(RefreshTask::FetchOrigin { token });
         }
@@ -536,19 +562,28 @@ impl RefreshCoordinator {
     }
 
     fn complete_fetch(&mut self, token: TaskToken, outcome: FetchOutcome, now: Instant) {
-        if self.active_fetch != Some(token) {
+        let Some(active_fetch) = self.active_fetch.as_ref() else {
+            return;
+        };
+        if active_fetch.token != token {
             return;
         }
-        self.active_fetch = None;
+        let active_fetch = self
+            .active_fetch
+            .take()
+            .expect("active fetch checked above");
         match outcome {
             FetchOutcome::Updated(refs) | FetchOutcome::NoOrigin(refs) => {
                 self.ref_revision = self.ref_revision.wrapping_add(1);
                 if let Some(snapshot) = self.snapshot.as_mut() {
                     // Fetch owns origin-tracking data only. A newer local refresh
-                    // may have published branches after this task captured refs.
-                    snapshot.refs.origin = refs.origin;
-                    snapshot.refs.origin_head = refs.origin_head;
-                    snapshot.refs.has_origin = refs.has_origin;
+                    // may have published branches after this task captured refs,
+                    // and newer remote state must not be resurrected either.
+                    if active_fetch.still_current(&snapshot.refs) {
+                        snapshot.refs.origin = refs.origin;
+                        snapshot.refs.origin_head = refs.origin_head;
+                        snapshot.refs.has_origin = refs.has_origin;
+                    }
                 }
                 if let Some(snapshot) = self.snapshot.clone() {
                     match self.active_local {
@@ -975,6 +1010,48 @@ mod tests {
         let refs = coordinator.publication(now).refs.unwrap();
         assert_eq!(refs.local, ["main", "topic-created-locally"]);
         assert_eq!(refs.origin, ["origin/main"]);
+    }
+
+    #[test]
+    fn fetch_completion_never_resurrects_origin_removed_by_a_newer_generation() {
+        let now = Instant::now();
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let initial = snapshot(vec![alpha], true);
+        let mut coordinator = RefreshCoordinator::default();
+        coordinator.request(RefreshCause::Launch, initial.clone(), now);
+        let fetch_token = coordinator
+            .drain_tasks()
+            .into_iter()
+            .find_map(|task| match task {
+                RefreshTask::FetchOrigin { token } => Some(token),
+                RefreshTask::Row { .. } => None,
+            })
+            .unwrap();
+
+        let mut origin_removed = initial;
+        origin_removed.refs.origin.clear();
+        origin_removed.refs.origin_head = None;
+        origin_removed.refs.has_origin = false;
+        coordinator.request(RefreshCause::Watcher, origin_removed, now);
+
+        coordinator.complete(
+            RefreshCompletion::FetchOrigin {
+                token: fetch_token,
+                outcome: FetchOutcome::Updated(RefSnapshot {
+                    local: vec!["main".to_string()],
+                    origin: vec!["origin/main".to_string()],
+                    origin_head: Some("origin/main".to_string()),
+                    main_branch: Some("main".to_string()),
+                    has_origin: true,
+                }),
+            },
+            now,
+        );
+
+        let refs = coordinator.publication(now).refs.unwrap();
+        assert!(!refs.has_origin);
+        assert!(refs.origin.is_empty());
+        assert!(refs.origin_head.is_none());
     }
 
     #[test]
