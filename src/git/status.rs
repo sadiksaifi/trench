@@ -77,8 +77,10 @@ pub fn detected_base(repo_path: &Path) -> Result<Option<String>, GitError> {
 }
 
 fn resolve_base(repo: &git2::Repository, base: &str) -> Result<Option<git2::Oid>, git2::Error> {
-    let candidates = if base.starts_with("refs/") || base.starts_with("origin/") {
+    let candidates = if base.starts_with("refs/") {
         vec![base.to_string()]
+    } else if base.starts_with("origin/") {
+        vec![format!("refs/remotes/{base}")]
     } else {
         vec![
             format!("refs/heads/{base}"),
@@ -93,4 +95,31 @@ fn resolve_base(repo: &git2::Repository, base: &str) -> Result<Option<git2::Oid>
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_origin_base_resolves_remote_tracking_ref() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(root.path()).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let commit_id = {
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
+                .unwrap()
+        };
+        repo.reference(
+            "refs/remotes/origin/main",
+            commit_id,
+            false,
+            "test remote ref",
+        )
+        .unwrap();
+
+        assert_eq!(resolve_base(&repo, "origin/main").unwrap(), Some(commit_id));
+    }
 }
