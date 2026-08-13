@@ -1,6 +1,6 @@
 pub mod app;
-pub mod cockpit;
 pub mod chrome;
+pub mod cockpit;
 pub mod keymap;
 pub mod runtime;
 pub mod screens;
