@@ -5,6 +5,22 @@ use serde::Deserialize;
 
 use crate::paths;
 
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("failed to read config file {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid TOML in config file {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+}
+
 // --- Hook types (FR-18, FR-19) ---
 
 pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 120;
@@ -104,15 +120,16 @@ fn load_optional_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Opt
             return Ok(None);
         }
         Err(e) => {
-            return Err(anyhow::Error::new(e)
-                .context(format!("failed to read config file: {}", path.display())));
+            return Err(ConfigError::Read {
+                path: path.to_path_buf(),
+                source: e,
+            }
+            .into());
         }
     };
-    let config: T = toml::from_str(&contents).map_err(|source| {
-        anyhow::anyhow!(
-            "invalid TOML in config file {}: {source}",
-            path.display()
-        )
+    let config: T = toml::from_str(&contents).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
     })?;
     Ok(Some(config))
 }

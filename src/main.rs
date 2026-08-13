@@ -331,6 +331,10 @@ fn main() -> anyhow::Result<()> {
     // Catch-all: map unhandled typed errors to their exit codes before
     // they fall through to anyhow's default "Error: ..." formatter.
     if let Err(ref e) = result {
+        if e.downcast_ref::<config::ConfigError>().is_some() {
+            eprintln!("error: {e}");
+            ExitCode::ConfigError.exit();
+        }
         if e.downcast_ref::<git::GitError>().is_some() {
             eprintln!("Error: {e}");
             ExitCode::GitError.exit();
