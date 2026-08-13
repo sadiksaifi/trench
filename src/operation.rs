@@ -623,13 +623,24 @@ fn revalidate(request: &CreateRequest) -> Result<CreatePlan, String> {
 #[derive(Debug)]
 struct ParentCreationFailure {
     source: std::io::Error,
-    created: Vec<PathBuf>,
+    created: Vec<CreatedDirectory>,
     class: ErrorClass,
+}
+
+#[derive(Debug, Clone)]
+struct CreatedDirectory {
+    path: PathBuf,
+    #[cfg(unix)]
+    parent_directory: Arc<std::fs::File>,
+    #[cfg(unix)]
+    leaf: std::ffi::OsString,
+    #[cfg(unix)]
+    identity: (u64, u64),
 }
 
 struct PreparedParent {
     parent: PathBuf,
-    created: Vec<PathBuf>,
+    created: Vec<CreatedDirectory>,
     #[cfg(unix)]
     directory: Arc<std::fs::File>,
     #[cfg(unix)]
@@ -747,7 +758,7 @@ fn prepare_parent_directory(
             class: ErrorClass::Io,
         });
     }
-    let mut directory = unsafe { std::fs::File::from_raw_fd(root_fd) };
+    let mut directory = Arc::new(unsafe { std::fs::File::from_raw_fd(root_fd) });
     let mut current_path = PathBuf::from("/");
     let mut created = Vec::new();
     for component in canonical_anchor.components() {
@@ -785,7 +796,7 @@ fn prepare_parent_directory(
                 class: ErrorClass::PreconditionsChanged,
             });
         }
-        directory = unsafe { std::fs::File::from_raw_fd(next_fd) };
+        directory = Arc::new(unsafe { std::fs::File::from_raw_fd(next_fd) });
     }
     let anchor_metadata =
         std::fs::metadata(lexical_anchor).map_err(|source| ParentCreationFailure {
@@ -838,7 +849,7 @@ fn prepare_parent_directory(
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };
-        if next_fd < 0 {
+        let created_here = if next_fd < 0 {
             let open_error = std::io::Error::last_os_error();
             if open_error.kind() != std::io::ErrorKind::NotFound {
                 return Err(ParentCreationFailure {
@@ -847,11 +858,10 @@ fn prepare_parent_directory(
                     class: ErrorClass::PreconditionsChanged,
                 });
             }
-            let created_here =
+            let mkdir_status =
                 unsafe { libc::mkdirat(directory.as_raw_fd(), name_c.as_ptr(), 0o755) };
-            if created_here == 0 {
-                created.push(current_path.clone());
-            } else {
+            let created_here = mkdir_status == 0;
+            if !created_here {
                 let create_error = std::io::Error::last_os_error();
                 if create_error.kind() != std::io::ErrorKind::AlreadyExists {
                     return Err(ParentCreationFailure {
@@ -875,8 +885,27 @@ fn prepare_parent_directory(
                     class: ErrorClass::PreconditionsChanged,
                 });
             }
+            created_here
+        } else {
+            false
+        };
+        let next_directory = Arc::new(unsafe { std::fs::File::from_raw_fd(next_fd) });
+        if created_here {
+            let metadata = next_directory
+                .metadata()
+                .map_err(|source| ParentCreationFailure {
+                    source,
+                    created: created.clone(),
+                    class: ErrorClass::Io,
+                })?;
+            created.push(CreatedDirectory {
+                path: current_path.clone(),
+                parent_directory: Arc::clone(&directory),
+                leaf: name.to_os_string(),
+                identity: (metadata.dev(), metadata.ino()),
+            });
         }
-        directory = unsafe { std::fs::File::from_raw_fd(next_fd) };
+        directory = next_directory;
     }
     let metadata = directory
         .metadata()
@@ -909,7 +938,7 @@ fn prepare_parent_directory(
         parent: parent.to_path_buf(),
         created,
         identity: (metadata.dev(), metadata.ino()),
-        directory: Arc::new(directory),
+        directory,
         canonical_parent,
     })
 }
@@ -919,8 +948,21 @@ fn prepare_parent_directory(
     target: &Path,
     _worktree_root: &Path,
 ) -> Result<PreparedParent, ParentCreationFailure> {
-    let created =
-        create_parent_directories_with(target, |directory| std::fs::create_dir(directory))?;
+    let created_paths =
+        create_parent_directories_with(target, |directory| std::fs::create_dir(directory))
+            .map_err(|error| ParentCreationFailure {
+                source: error.source,
+                created: error
+                    .created
+                    .into_iter()
+                    .map(|path| CreatedDirectory { path })
+                    .collect(),
+                class: ErrorClass::Io,
+            })?;
+    let created = created_paths
+        .into_iter()
+        .map(|path| CreatedDirectory { path })
+        .collect::<Vec<_>>();
     let parent = target.parent().ok_or_else(|| ParentCreationFailure {
         source: std::io::Error::other("planned worktree has no parent"),
         created: created.clone(),
@@ -934,10 +976,17 @@ fn prepare_parent_directory(
 }
 
 #[cfg(any(test, not(unix)))]
+#[derive(Debug)]
+struct PathParentCreationFailure {
+    source: std::io::Error,
+    created: Vec<PathBuf>,
+}
+
+#[cfg(any(test, not(unix)))]
 fn create_parent_directories_with(
     target: &Path,
     mut create: impl FnMut(&Path) -> std::io::Result<()>,
-) -> Result<Vec<PathBuf>, ParentCreationFailure> {
+) -> Result<Vec<PathBuf>, PathParentCreationFailure> {
     let Some(parent) = target.parent() else {
         return Ok(Vec::new());
     };
@@ -953,20 +1002,71 @@ fn create_parent_directories_with(
     let mut created = Vec::new();
     for directory in missing.iter().rev() {
         if let Err(source) = create(directory) {
-            return Err(ParentCreationFailure {
-                source,
-                created,
-                class: ErrorClass::Io,
-            });
+            return Err(PathParentCreationFailure { source, created });
         }
         created.push(directory.clone());
     }
     Ok(created)
 }
 
-fn cleanup_empty_directories(directories: &[PathBuf]) -> std::io::Result<()> {
+#[cfg(unix)]
+fn cleanup_empty_directories(directories: &[CreatedDirectory]) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
     for directory in directories.iter().rev() {
-        match std::fs::remove_dir(directory) {
+        let leaf = std::ffi::CString::new(directory.leaf.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "created directory name contains a NUL byte",
+            )
+        })?;
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let status = unsafe {
+            libc::fstatat(
+                directory.parent_directory.as_raw_fd(),
+                leaf.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if status != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                continue;
+            }
+            return Err(error);
+        }
+        let stat = unsafe { stat.assume_init() };
+        #[allow(clippy::unnecessary_cast)]
+        let live_identity = (stat.st_dev as u64, stat.st_ino as u64);
+        if live_identity != directory.identity {
+            return Err(std::io::Error::other(format!(
+                "created directory identity changed before cleanup: {}",
+                directory.path.display()
+            )));
+        }
+        let status = unsafe {
+            libc::unlinkat(
+                directory.parent_directory.as_raw_fd(),
+                leaf.as_ptr(),
+                libc::AT_REMOVEDIR,
+            )
+        };
+        if status != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn cleanup_empty_directories(directories: &[CreatedDirectory]) -> std::io::Result<()> {
+    for directory in directories.iter().rev() {
+        match std::fs::remove_dir(&directory.path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
@@ -985,7 +1085,7 @@ fn rollback_failure(
     repo_path: &Path,
     emitter: &dyn Emitter,
     operation_started: Instant,
-    created_parents: &[PathBuf],
+    created_parents: &[CreatedDirectory],
     receipt: Option<&git::create::CreateReceipt>,
     failure: FailureCause,
 ) -> OperationFailure {
@@ -1539,7 +1639,9 @@ mod tests {
 
         assert_eq!(error.source.kind(), std::io::ErrorKind::Other);
         assert_eq!(error.created.as_slice(), std::slice::from_ref(&root));
-        cleanup_empty_directories(&error.created).unwrap();
+        for directory in error.created.iter().rev() {
+            std::fs::remove_dir(directory).unwrap();
+        }
         assert!(!root.exists(), "partially-created parents must be cleaned");
         assert!(outside.path().is_dir(), "pre-existing parent must remain");
     }
@@ -1898,6 +2000,63 @@ mod tests {
         );
         assert!(!escape.path().join(&plan.worktree).exists());
         assert!(!held_parent.join(&plan.worktree).exists());
+        assert!(repo
+            .find_branch(&plan.branch, git2::BranchType::Local)
+            .is_err());
+        assert!(repo.find_worktree(&plan.worktree).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn swapped_created_ancestor_cleanup_never_removes_a_foreign_empty_directory() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let escape = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("missing/worktrees");
+        let repository_name = repo_dir.path().file_name().unwrap();
+        let foreign_empty = escape.path().join(repository_name);
+        std::fs::create_dir(&foreign_empty).unwrap();
+        std::fs::write(escape.path().join("foreign-file"), "preserve").unwrap();
+        let repo = init_repo(repo_dir.path());
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("feature/ancestor-swap", None)
+            .unwrap();
+        let held_root = outside.path().join("held-worktree-root");
+        let boundary = ParentSwapAfterFinalVerify {
+            parent: worktree_root.clone(),
+            held_parent: held_root.clone(),
+            outside: escape.path().to_path_buf(),
+        };
+
+        let error = execute_create_with_boundary(
+            CreateRequest {
+                plan: plan.clone(),
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root: worktree_root.clone(),
+                hooks: None,
+            },
+            &RecordingEmitter::default(),
+            &NeverCancelled,
+            &boundary,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.class, ErrorClass::Cleanup);
+        assert_eq!(error.mutation_state, MutationState::PartiallyApplied);
+        assert!(
+            foreign_empty.is_dir(),
+            "foreign empty directory was removed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(escape.path().join("foreign-file")).unwrap(),
+            "preserve"
+        );
+        assert!(!held_root
+            .join(repository_name)
+            .join(&plan.worktree)
+            .exists());
         assert!(repo
             .find_branch(&plan.branch, git2::BranchType::Local)
             .is_err());
