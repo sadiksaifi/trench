@@ -47,6 +47,10 @@ pub enum Event {
     },
     Select(WorktreeId),
     Input(Key),
+    ViewportChanged {
+        width: u16,
+        height: u16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +71,29 @@ pub struct AppState {
     pub identities: Vec<WorktreeIdentity>,
     pub statuses: BTreeMap<WorktreeId, WorktreeStatus>,
     pub selected: Option<WorktreeId>,
+    pub viewport: Viewport,
+    pub inspector_override: Option<bool>,
+    pub help_open: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Viewport {
+    pub width: u16,
+    pub height: u16,
+}
+
+impl Viewport {
+    pub const MIN_WIDTH: u16 = 60;
+    pub const MIN_HEIGHT: u16 = 16;
+    pub const WIDE_WIDTH: u16 = 100;
+
+    pub fn is_tiny(self) -> bool {
+        self.width < Self::MIN_WIDTH || self.height < Self::MIN_HEIGHT
+    }
+
+    pub fn is_wide(self) -> bool {
+        self.width >= Self::WIDE_WIDTH
+    }
 }
 
 impl AppState {
@@ -76,7 +103,31 @@ impl AppState {
             identities,
             statuses: BTreeMap::new(),
             selected,
+            viewport: Viewport {
+                width: Viewport::MIN_WIDTH,
+                height: Viewport::MIN_HEIGHT,
+            },
+            inspector_override: None,
+            help_open: false,
         }
+    }
+
+    pub fn context(&self) -> Context {
+        if self.viewport.is_tiny() {
+            Context::Resize
+        } else {
+            Context::Cockpit
+        }
+    }
+
+    pub fn selected_identity(&self) -> Option<&WorktreeIdentity> {
+        let selected = self.selected.as_ref()?;
+        self.identities.iter().find(|row| &row.id == selected)
+    }
+
+    pub fn inspector_visible(&self) -> bool {
+        self.inspector_override
+            .unwrap_or_else(|| self.viewport.is_wide())
     }
 }
 
@@ -98,7 +149,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         }
         Event::Select(_) => {}
         Event::Input(key) => {
-            let Some(action) = keymap::action_for(Context::Cockpit, key) else {
+            let Some(action) = keymap::action_for(state.context(), key) else {
                 return Vec::new();
             };
             if let Some(reason) = unavailable_reason(state, action) {
@@ -109,21 +160,24 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             }
             return reduce_action(state, action);
         }
+        Event::ViewportChanged { width, height } => {
+            state.viewport = Viewport { width, height };
+        }
     }
     Vec::new()
 }
 
 pub fn unavailable_reason(state: &AppState, action: Action) -> Option<&'static str> {
-    let selected = state
-        .selected
-        .as_ref()
-        .and_then(|id| state.identities.iter().find(|row| &row.id == id));
+    let selected = state.selected_identity();
     match (action, selected) {
         (Action::Switch | Action::Open | Action::Sync | Action::Remove, None) => {
             Some("No worktree selected")
         }
         (Action::Sync, Some(identity)) if identity.detached => {
             Some("Detached worktrees cannot be synced")
+        }
+        (Action::DeleteBranch, Some(identity)) if identity.detached => {
+            Some("Detached worktrees have no local branch to delete")
         }
         (Action::Remove, Some(identity)) if identity.is_main => {
             Some("The main worktree cannot be removed")
@@ -133,20 +187,55 @@ pub fn unavailable_reason(state: &AppState, action: Action) -> Option<&'static s
 }
 
 fn reduce_action(state: &mut AppState, action: Action) -> Vec<Effect> {
-    let selected = || state.selected.clone().expect("eligibility checked selection");
+    let selected = || {
+        state
+            .selected
+            .clone()
+            .expect("eligibility checked selection")
+    };
     match action {
         Action::Switch => vec![Effect::Switch(selected())],
         Action::Open => vec![Effect::Open(selected())],
         Action::Create => vec![Effect::OpenCreate],
         Action::Sync => vec![Effect::OpenSync(selected())],
         Action::Remove => vec![Effect::OpenRemove(selected())],
+        Action::DeleteBranch => Vec::new(),
         Action::Search => vec![Effect::OpenSearch],
         Action::Refresh => vec![Effect::Refresh],
         Action::Quit => vec![Effect::Quit],
-        Action::ToggleInspector | Action::SelectNext | Action::SelectPrevious | Action::Help => {
+        Action::ToggleInspector => {
+            state.inspector_override = Some(!state.inspector_visible());
+            Vec::new()
+        }
+        Action::SelectNext => {
+            select_relative(state, 1);
+            Vec::new()
+        }
+        Action::SelectPrevious => {
+            select_relative(state, -1);
+            Vec::new()
+        }
+        Action::Help => {
+            state.help_open = !state.help_open;
             Vec::new()
         }
     }
+}
+
+fn select_relative(state: &mut AppState, delta: isize) {
+    if state.identities.is_empty() {
+        state.selected = None;
+        return;
+    }
+    let selected = state
+        .selected
+        .as_ref()
+        .and_then(|id| state.identities.iter().position(|row| &row.id == id))
+        .unwrap_or(0);
+    let next = selected
+        .saturating_add_signed(delta)
+        .min(state.identities.len() - 1);
+    state.selected = Some(state.identities[next].id.clone());
 }
 
 #[cfg(test)]

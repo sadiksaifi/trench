@@ -1,4 +1,5 @@
 pub mod app;
+pub mod cockpit;
 pub mod chrome;
 pub mod keymap;
 pub mod screens;

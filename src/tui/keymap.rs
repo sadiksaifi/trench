@@ -14,6 +14,7 @@ pub enum Action {
     Create,
     Sync,
     Remove,
+    DeleteBranch,
     Search,
     Refresh,
     ToggleInspector,
@@ -139,4 +140,29 @@ pub fn action_for(context: Context, key: Key) -> Option<Action> {
         .iter()
         .find(|binding| binding.keys.contains(&key))
         .map(|binding| binding.action)
+}
+
+pub fn keybar_bindings(context: Context, narrow: bool) -> Vec<&'static Binding> {
+    let mut visible: Vec<_> = bindings(context)
+        .iter()
+        .filter(|binding| {
+            let is_navigation =
+                matches!(binding.action, Action::SelectNext | Action::SelectPrevious);
+            !is_navigation
+                && (!narrow
+                    || context == Context::Resize
+                    || matches!(
+                        binding.action,
+                        Action::Switch | Action::Create | Action::Search | Action::Help
+                    ))
+        })
+        .collect();
+    if let Some(help) = visible
+        .iter()
+        .position(|binding| binding.action == Action::Help)
+        .map(|index| visible.remove(index))
+    {
+        visible.push(help);
+    }
+    visible
 }
