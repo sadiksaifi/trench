@@ -63,8 +63,8 @@ pub struct BranchSuggestion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateMode {
-    Form,
-    BasePicker,
+    SelectBase,
+    Name,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +137,7 @@ impl CreateDialog {
             checked_out: checked_out.into_iter().collect(),
             branch: LineInput::default(),
             branch_selection: 0,
-            mode: CreateMode::Form,
+            mode: CreateMode::SelectBase,
             validation_error: None,
         }
     }
@@ -146,6 +146,7 @@ impl CreateDialog {
         let branch = branch.into();
         self.branch = LineInput::from(branch.as_str());
         self.branch_selection = 0;
+        self.mode = CreateMode::Name;
         self.validation_error = None;
     }
 
@@ -208,11 +209,11 @@ impl CreateDialog {
 
     pub fn open_base_picker(&mut self) {
         self.base_picker.open();
-        self.mode = CreateMode::BasePicker;
+        self.mode = CreateMode::SelectBase;
     }
 
     pub fn close_base_picker(&mut self) {
-        self.mode = CreateMode::Form;
+        self.mode = CreateMode::Name;
     }
 
     pub fn mode(&self) -> CreateMode {
@@ -295,8 +296,8 @@ impl CreateDialog {
 
     pub fn handle_key(&mut self, key: CreateKey) -> Option<CreateEffect> {
         match self.mode {
-            CreateMode::Form => self.handle_form_key(key),
-            CreateMode::BasePicker => self.handle_base_picker_key(key),
+            CreateMode::Name => self.handle_form_key(key),
+            CreateMode::SelectBase => self.handle_base_picker_key(key),
         }
     }
 
@@ -317,18 +318,17 @@ impl CreateDialog {
                 self.branch_selection = 0;
                 self.validation_error = None;
             }
-            CreateKey::Tab if self.preview().is_some_and(|preview| preview.base_visible) => {
-                self.open_base_picker();
-                return Some(CreateEffect::RefreshOrigin);
-            }
-            CreateKey::Enter => {
+            CreateKey::Tab => {
                 if let Some(selection) = self
                     .branch_suggestions()
                     .get(self.branch_selection)
                     .map(|suggestion| suggestion.selection.clone())
                 {
                     self.branch = LineInput::from(selection.as_str());
+                    self.validation_error = None;
                 }
+            }
+            CreateKey::Enter => {
                 let preview = self.preview()?;
                 return match preview.kind {
                     BranchKind::CheckedOut { id } => Some(CreateEffect::Navigate(id)),
@@ -344,7 +344,7 @@ impl CreateDialog {
                     }
                 };
             }
-            CreateKey::Escape => return Some(CreateEffect::Close),
+            CreateKey::Escape => self.mode = CreateMode::SelectBase,
             CreateKey::Up => {
                 self.branch_selection = self.branch_selection.saturating_sub(1);
             }
@@ -354,7 +354,6 @@ impl CreateDialog {
                     .saturating_add(1)
                     .min(self.branch_suggestions().len().saturating_sub(1));
             }
-            CreateKey::Tab => {}
         }
         None
     }
@@ -386,7 +385,7 @@ impl CreateDialog {
                     self.close_base_picker();
                 }
             }
-            CreateKey::Escape => self.close_base_picker(),
+            CreateKey::Escape => return Some(CreateEffect::Close),
             CreateKey::Tab => {}
         }
         None
@@ -449,6 +448,26 @@ mod tests {
             Some("main"),
             true,
         )
+    }
+
+    #[test]
+    fn create_starts_by_selecting_a_base_then_names_the_worktree() {
+        let mut dialog = CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs(),
+            [] as [CheckedOutBranch; 0],
+        );
+
+        assert_eq!(dialog.mode(), CreateMode::SelectBase);
+        assert_eq!(dialog.handle_key(CreateKey::Enter), None);
+        assert_eq!(dialog.mode(), CreateMode::Name);
+        assert_eq!(dialog.handle_key(CreateKey::Escape), None);
+        assert_eq!(dialog.mode(), CreateMode::SelectBase);
+        assert_eq!(
+            dialog.handle_key(CreateKey::Escape),
+            Some(CreateEffect::Close)
+        );
     }
 
     #[test]
@@ -526,11 +545,13 @@ mod tests {
     }
 
     #[test]
-    fn branch_suggestions_are_keyboard_selectable_before_submission() {
+    fn tab_applies_branch_suggestions_without_submitting() {
         let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs(), []);
         dialog.set_branch("ttwo");
 
         assert_eq!(dialog.branch_selection(), 0);
+        assert_eq!(dialog.handle_key(CreateKey::Tab), None);
+        assert_eq!(dialog.branch(), "origin/topic/two");
         assert_eq!(
             dialog.handle_key(CreateKey::Enter),
             Some(CreateEffect::Submit(CreateSubmission {
@@ -542,6 +563,8 @@ mod tests {
         dialog.set_branch("ttwo");
         assert_eq!(dialog.handle_key(CreateKey::Down), None);
         assert_eq!(dialog.branch_selection(), 1);
+        assert_eq!(dialog.handle_key(CreateKey::Tab), None);
+        assert_eq!(dialog.branch(), "ttwo");
         assert_eq!(
             dialog.handle_key(CreateKey::Enter),
             Some(CreateEffect::Submit(CreateSubmission {
@@ -588,7 +611,7 @@ mod tests {
 
         dialog.open_base_picker();
         dialog.set_origin_refresh(OriginRefresh::Loading);
-        assert_eq!(dialog.mode(), CreateMode::BasePicker);
+        assert_eq!(dialog.mode(), CreateMode::SelectBase);
         assert!(dialog.origin_spinner_visible());
         assert_eq!(
             dialog
@@ -615,7 +638,7 @@ mod tests {
         );
 
         dialog.close_base_picker();
-        assert_eq!(dialog.mode(), CreateMode::Form);
+        assert_eq!(dialog.mode(), CreateMode::Name);
         assert_eq!(
             dialog.preview().unwrap().base.as_deref(),
             Some("origin/main")
@@ -623,15 +646,9 @@ mod tests {
     }
 
     #[test]
-    fn keys_transform_the_form_select_a_base_and_emit_a_typed_submission() {
+    fn keys_select_a_base_then_name_and_submit_the_worktree() {
         let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs(), []);
-        dialog.set_branch("feature/auth");
-
-        assert_eq!(
-            dialog.handle_key(CreateKey::Tab),
-            Some(CreateEffect::RefreshOrigin)
-        );
-        assert_eq!(dialog.mode(), CreateMode::BasePicker);
+        assert_eq!(dialog.mode(), CreateMode::SelectBase);
 
         dialog.handle_key(CreateKey::Character('r'));
         dialog.handle_key(CreateKey::Character('e'));
@@ -644,8 +661,11 @@ mod tests {
             ["release"]
         );
         assert_eq!(dialog.handle_key(CreateKey::Enter), None);
-        assert_eq!(dialog.mode(), CreateMode::Form);
+        assert_eq!(dialog.mode(), CreateMode::Name);
 
+        for character in "feature/auth".chars() {
+            dialog.handle_key(CreateKey::Character(character));
+        }
         assert_eq!(
             dialog.handle_key(CreateKey::Enter),
             Some(CreateEffect::Submit(CreateSubmission {
@@ -653,6 +673,8 @@ mod tests {
                 from: Some("release".to_string()),
             }))
         );
+        assert_eq!(dialog.handle_key(CreateKey::Escape), None);
+        assert_eq!(dialog.mode(), CreateMode::SelectBase);
         assert_eq!(
             dialog.handle_key(CreateKey::Escape),
             Some(CreateEffect::Close)
@@ -675,7 +697,7 @@ mod tests {
         dialog.set_branch("release");
 
         assert_eq!(dialog.handle_key(CreateKey::Tab), None);
-        assert_eq!(dialog.mode(), CreateMode::Form);
+        assert_eq!(dialog.mode(), CreateMode::Name);
         assert_eq!(
             dialog.handle_key(CreateKey::Enter),
             Some(CreateEffect::Navigate(checked_out.id))

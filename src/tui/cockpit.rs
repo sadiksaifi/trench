@@ -505,7 +505,7 @@ fn render_create_dialog(
         ..area
     };
     match dialog.mode() {
-        CreateMode::Form => {
+        CreateMode::Name => {
             let modal = centered_rect(
                 content_area.width.saturating_sub(8).min(76),
                 13,
@@ -583,7 +583,7 @@ fn render_create_dialog(
             ]);
             render_dialog_keybar(frame, footer, theme, &items);
         }
-        CreateMode::BasePicker => {
+        CreateMode::SelectBase => {
             let modal = centered_rect(
                 content_area.width.saturating_sub(6).min(86),
                 content_area.height.saturating_sub(4).min(20),
@@ -1461,7 +1461,7 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
         } else if state
             .create_dialog
             .as_ref()
-            .is_some_and(|dialog| dialog.mode() == CreateMode::BasePicker)
+            .is_some_and(|dialog| dialog.mode() == CreateMode::SelectBase)
         {
             (
                 " Help · Create worktree ",
