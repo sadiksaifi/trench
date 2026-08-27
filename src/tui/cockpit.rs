@@ -451,14 +451,16 @@ fn render_search(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &T
     } else {
         format!("{result_count} results")
     };
-    let value = if query.as_str().is_empty() {
-        Span::styled(
-            "Type to filter worktrees",
-            Style::default().fg(theme.fg_muted),
-        )
-    } else {
-        Span::styled(query.as_str().to_string(), Style::default().fg(theme.fg))
-    };
+    let result_width = result_label.chars().count().saturating_add(2);
+    let value_width = usize::from(area.width.saturating_sub(2))
+        .saturating_sub(3)
+        .saturating_sub(result_width);
+    let value = input_value_span(
+        query.as_str(),
+        "Type to filter worktrees",
+        value_width,
+        theme,
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_active))
@@ -658,19 +660,12 @@ fn render_text_input(
     placeholder: &str,
     theme: &Theme,
 ) {
-    let content = if value.is_empty() {
-        Line::from(vec![
-            Span::styled("> ", Style::default().fg(theme.accent)),
-            Span::styled(placeholder.to_string(), Style::default().fg(theme.fg_muted)),
-            Span::styled("▌", Style::default().fg(theme.accent)),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("> ", Style::default().fg(theme.accent)),
-            Span::styled(value.to_string(), Style::default().fg(theme.fg)),
-            Span::styled("▌", Style::default().fg(theme.accent)),
-        ])
-    };
+    let value_width = usize::from(area.width.saturating_sub(2)).saturating_sub(3);
+    let content = Line::from(vec![
+        Span::styled("> ", Style::default().fg(theme.accent)),
+        input_value_span(value, placeholder, value_width, theme),
+        Span::styled("▌", Style::default().fg(theme.accent)),
+    ]);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_active))
@@ -687,6 +682,32 @@ fn render_text_input(
             .style(theme.with_bg(Style::default(), theme.control_bg)),
         area,
     );
+}
+
+fn input_value_span(value: &str, placeholder: &str, width: usize, theme: &Theme) -> Span<'static> {
+    let (source, color) = if value.is_empty() {
+        (placeholder, theme.fg_muted)
+    } else {
+        (value, theme.fg)
+    };
+    Span::styled(tail_ellipsize(source, width), Style::default().fg(color))
+}
+
+fn tail_ellipsize(value: &str, width: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    let tail = chars[chars.len() - (width - 1)..]
+        .iter()
+        .collect::<String>();
+    format!("…{tail}")
 }
 
 fn selector_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
@@ -1938,6 +1959,41 @@ mod tests {
             .content()
             .iter()
             .any(|cell| cell.symbol() == "│" && cell.fg == theme.border_active));
+    }
+
+    #[test]
+    fn long_focused_inputs_keep_their_suffix_and_cursor_at_minimum_width() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let long_value = "feature/a-very-long-branch-name-that-keeps-going-past-the-control";
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch(long_value);
+        state.create_dialog = Some(dialog);
+
+        let create = text(&render_buffer(&mut state, 60, 16, "ops"));
+        assert!(create.contains("past-the-control▌"), "{create}");
+        assert!(create.contains("> …"), "{create}");
+
+        state.create_dialog = None;
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('/')));
+        let long_query = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        for character in long_query.chars() {
+            let _ = reduce(
+                &mut state,
+                Event::Input(crate::tui::keymap::Key::Char(character)),
+            );
+        }
+        let search = text(&render_buffer(&mut state, 60, 16, "ops"));
+        assert!(search.contains("xxxxxxxx▌"), "{search}");
+        assert!(search.contains("> …"), "{search}");
     }
 
     #[test]
