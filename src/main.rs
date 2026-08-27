@@ -126,6 +126,7 @@ enum Commands {
     Status {
         /// Branch name or sanitized name for deep status view.
         /// Omit for summary of all worktrees.
+        #[arg(required = true)]
         branch: Option<String>,
     },
     /// Sync a worktree with its base branch
@@ -139,8 +140,12 @@ enum Commands {
         all: bool,
 
         /// Sync strategy: rebase or merge. Prompts interactively if omitted.
-        #[arg(long)]
+        #[arg(long, required = true)]
         strategy: Option<SyncStrategy>,
+
+        /// Base branch or ref to sync onto
+        #[arg(long)]
+        base: Option<String>,
 
         /// Skip all lifecycle hooks (pre_sync, post_sync)
         #[arg(long)]
@@ -286,6 +291,7 @@ fn main() -> anyhow::Result<()> {
             all,
             strategy,
             no_hooks,
+            base: _,
         }) => {
             if all && branch.is_some() {
                 eprintln!("error: <BRANCH> cannot be used with --all");
@@ -2012,18 +2018,10 @@ mod tests {
     }
 
     #[test]
-    fn sync_subcommand_strategy_defaults_to_none() {
-        let cli = Cli::try_parse_from(["trench", "sync", "foo"])
-            .expect("sync without --strategy should parse");
-        match cli.command {
-            Some(Commands::Sync {
-                branch, strategy, ..
-            }) => {
-                assert_eq!(branch, Some("foo".to_string()));
-                assert!(strategy.is_none());
-            }
-            _ => panic!("expected Commands::Sync"),
-        }
+    fn sync_subcommand_requires_strategy() {
+        let error = Cli::try_parse_from(["trench", "sync", "foo"])
+            .expect_err("sync without --strategy must fail");
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
