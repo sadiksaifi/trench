@@ -318,3 +318,36 @@ fn pre_sync_timeout_has_stable_exit_seven_and_structured_truth() {
     assert_eq!(value["failure"]["mutation_state"], "not_started");
     assert_eq!(value["failure"]["class"], "hook_timeout");
 }
+
+#[test]
+fn merge_conflict_reports_no_mutation_and_leaves_no_operation_state() {
+    let (root, worktree) = repository();
+    let repository = root.path().join("repository");
+    commit(&repository, "README.md", "main\n", "main conflict");
+    commit(&worktree, "README.md", "feature\n", "feature conflict");
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+
+    let output = trench(
+        &worktree,
+        root.path(),
+        &[
+            "sync",
+            "feature/topic",
+            "--strategy",
+            "merge",
+            "--no-hooks",
+            "--json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["failure"]["class"], "conflict");
+    assert_eq!(value["failure"]["mutation_state"], "not_started");
+    assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), head);
+    assert!(git(&worktree, &["status", "--porcelain"]).is_empty());
+    let git_dir = PathBuf::from(git(&worktree, &["rev-parse", "--git-dir"]).trim());
+    assert!(!git_dir.join("MERGE_HEAD").exists());
+    assert!(!git_dir.join("rebase-merge").exists());
+    assert!(!git_dir.join("rebase-apply").exists());
+}
