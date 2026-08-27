@@ -764,6 +764,38 @@ mod tests {
         (root, feature)
     }
 
+    fn worktree_with_patch_already_on_base() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        let feature = root.path().join("feature-applied");
+        std::fs::create_dir(&main).unwrap();
+        let repo = git2::Repository::init(&main).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        {
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "Test").unwrap();
+            config.set_str("user.email", "test@example.com").unwrap();
+        }
+        commit_file(&repo, "common", "initial\n", "initial");
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let branch = repo.branch("feature/applied", &head, false).unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(branch.get()));
+        repo.worktree("feature-applied", &feature, Some(&options))
+            .unwrap();
+        drop(branch);
+        drop(head);
+        commit_file(&repo, "shared-change", "same patch\n", "main patch");
+        let feature_repo = git2::Repository::open(&feature).unwrap();
+        commit_file(
+            &feature_repo,
+            "shared-change",
+            "same patch\n",
+            "feature patch",
+        );
+        (root, feature)
+    }
+
     async fn assert_conflict_is_atomic(strategy: SyncStrategy) {
         let (_root, feature) = conflicting_worktree();
         let repo = git2::Repository::open(&feature).unwrap();
@@ -825,6 +857,29 @@ mod tests {
         assert_eq!(outcome.after.behind, 0);
         assert!(feature.join("main-only").is_file());
         assert!(feature.join("feature-only").is_file());
+    }
+
+    #[tokio::test]
+    async fn rebase_skips_a_patch_already_applied_to_the_base() {
+        let (_root, feature) = worktree_with_patch_already_on_base();
+        let plan = SyncPlanner::discover(&feature, None)
+            .unwrap()
+            .plan(
+                "feature/applied",
+                Some("main"),
+                SyncStrategy::Rebase,
+                HookPolicy::Skip,
+            )
+            .unwrap();
+
+        let outcome = execute(plan, None, &NoopSyncEmitter).await.unwrap();
+
+        assert_eq!(outcome.after.behind, 0);
+        let repo = git2::Repository::open(&feature).unwrap();
+        assert_eq!(
+            repo.head().unwrap().target(),
+            repo.find_reference("refs/heads/main").unwrap().target()
+        );
     }
 
     #[tokio::test]

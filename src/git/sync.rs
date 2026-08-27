@@ -121,13 +121,14 @@ fn rebase_in_memory(repo: &Repository, plan: &TransactionPlan) -> Result<Oid, Sy
         if rebase.inmemory_index()?.has_conflicts() {
             return Err(SyncGitError::Conflict);
         }
-        head = Some(rebase.commit(None, &signature, None).map_err(|error| {
-            if error.code() == git2::ErrorCode::Unmerged {
-                SyncGitError::Conflict
-            } else {
-                SyncGitError::Git(error)
+        match rebase.commit(None, &signature, None) {
+            Ok(oid) => head = Some(oid),
+            Err(error) if error.code() == git2::ErrorCode::Applied => continue,
+            Err(error) if error.code() == git2::ErrorCode::Unmerged => {
+                return Err(SyncGitError::Conflict)
             }
-        })?);
+            Err(error) => return Err(SyncGitError::Git(error)),
+        }
     }
     rebase.finish(None)?;
     Ok(head.unwrap_or(plan.base_oid))
