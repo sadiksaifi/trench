@@ -1,3 +1,5 @@
+use crate::tui::line_input::LineEdit;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     Enter,
@@ -5,6 +7,7 @@ pub enum Key {
     Up,
     Down,
     Backspace,
+    Edit(LineEdit),
     Char(char),
 }
 
