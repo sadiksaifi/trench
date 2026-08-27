@@ -263,12 +263,12 @@ fn render_sync_dialog(
                     .iter()
                     .enumerate()
                     .map(|(index, candidate)| {
-                        let marker = if index == dialog.base_selection() {
-                            ">"
-                        } else {
-                            " "
-                        };
-                        Line::from(format!("{marker} {}", candidate.name))
+                        selectable_line(
+                            &candidate.name,
+                            index == dialog.base_selection(),
+                            inner.width,
+                            theme,
+                        )
                     }),
             );
             frame.render_widget(
@@ -480,12 +480,12 @@ fn render_create_dialog(
                         .enumerate()
                         .take(3)
                         .map(|(index, suggestion)| {
-                            let marker = if index == dialog.branch_selection() {
-                                ">"
-                            } else {
-                                " "
-                            };
-                            Line::from(format!("{marker} {}", suggestion.label))
+                            selectable_line(
+                                &suggestion.label,
+                                index == dialog.branch_selection(),
+                                details.width,
+                                theme,
+                            )
                         }),
                 );
             }
@@ -536,12 +536,12 @@ fn render_create_dialog(
                     .iter()
                     .enumerate()
                     .map(|(index, candidate)| {
-                        let marker = if index == dialog.base_selection() {
-                            ">"
-                        } else {
-                            " "
-                        };
-                        Line::from(format!("{marker} {}", candidate.name))
+                        selectable_line(
+                            &candidate.name,
+                            index == dialog.base_selection(),
+                            inner.width,
+                            theme,
+                        )
                     }),
             );
             frame.render_widget(
@@ -597,6 +597,26 @@ fn render_text_input(
             .style(theme.with_bg(Style::default(), theme.bg_elevated)),
         area,
     );
+}
+
+fn selectable_line(label: &str, selected: bool, width: u16, theme: &Theme) -> Line<'static> {
+    let marker = if selected { "›" } else { " " };
+    let content = format!("{marker} {label}");
+    let padding = usize::from(width).saturating_sub(content.chars().count());
+    let style = if selected {
+        theme.with_bg(
+            Style::default()
+                .fg(theme.selection_fg)
+                .add_modifier(Modifier::BOLD),
+            theme.selection_bg,
+        )
+    } else {
+        Style::default().fg(theme.fg)
+    };
+    Line::from(Span::styled(
+        format!("{content}{}", " ".repeat(padding)),
+        style,
+    ))
 }
 
 fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -1304,6 +1324,21 @@ mod tests {
         lines(buffer).join("\n")
     }
 
+    fn find_text(buffer: &Buffer, needle: &str) -> (u16, u16) {
+        let width = u16::try_from(needle.chars().count()).expect("test text fits in u16");
+        for y in buffer.area.y..buffer.area.bottom() {
+            for x in buffer.area.x..buffer.area.right().saturating_sub(width) {
+                let candidate = (x..x + width)
+                    .map(|column| buffer.cell((column, y)).unwrap().symbol())
+                    .collect::<String>();
+                if candidate == needle {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("missing {needle:?}\n{}", text(buffer));
+    }
+
     #[test]
     fn resize_view_uses_strict_60_by_16_boundary() {
         let mut state = sample_state();
@@ -1660,6 +1695,44 @@ mod tests {
                 .any(|cell| cell.symbol() == "│" && cell.fg == theme.border_active),
             "focused input should have an active border\n{output}"
         );
+    }
+
+    #[test]
+    fn selected_create_suggestions_and_base_candidates_have_a_selection_surface() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::create_flow::{CreateDialog, CreateKey},
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main", "release"],
+            ["origin/main", "origin/topic"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/auth");
+        state.create_dialog = Some(dialog);
+        let theme = crate::tui::theme::from_name("ops");
+
+        let suggestions = render_buffer(&mut state, 100, 24, "ops");
+        let suggestion = find_text(&suggestions, "› Create \"feature/auth\" as new branch");
+        assert_eq!(suggestions.cell(suggestion).unwrap().bg, theme.selection_bg);
+        assert_eq!(suggestions.cell(suggestion).unwrap().fg, theme.selection_fg);
+
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(CreateKey::Tab);
+        let candidates = render_buffer(&mut state, 100, 24, "ops");
+        let selected = find_text(&candidates, "› main");
+        let unselected = find_text(&candidates, "release");
+        assert_eq!(candidates.cell(selected).unwrap().bg, theme.selection_bg);
+        assert_eq!(candidates.cell(selected).unwrap().fg, theme.selection_fg);
+        assert_ne!(candidates.cell(unselected).unwrap().bg, theme.selection_bg);
     }
 
     #[test]
