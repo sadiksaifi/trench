@@ -25,8 +25,6 @@ use std::io::{BufRead, IsTerminal, Write};
 
 use exit_code::ExitCode;
 
-use output::OutputConfig;
-
 const TUI_SWITCH_PATH_FILE_ENV: &str = "TRENCH_TUI_SWITCH_PATH_FILE";
 
 #[derive(Parser, Debug)]
@@ -39,30 +37,6 @@ const TUI_SWITCH_PATH_FILE_ENV: &str = "TRENCH_TUI_SWITCH_PATH_FILE";
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
-
-    /// Output as JSON
-    #[arg(long, global = true)]
-    json: bool,
-
-    /// Output in porcelain format
-    #[arg(long, global = true, conflicts_with = "json")]
-    porcelain: bool,
-
-    /// Disable colored output
-    #[arg(long, global = true)]
-    no_color: bool,
-
-    /// Suppress non-essential output
-    #[arg(short, long, global = true)]
-    quiet: bool,
-
-    /// Enable verbose output
-    #[arg(short, long, global = true)]
-    verbose: bool,
-
-    /// Preview without executing
-    #[arg(long, global = true)]
-    dry_run: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -80,6 +54,14 @@ enum Commands {
         /// Skip all lifecycle hooks (pre_create, post_create)
         #[arg(long)]
         no_hooks: bool,
+
+        /// Preview without executing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Remove a worktree
     Remove {
@@ -105,6 +87,14 @@ enum Commands {
         /// Skip all lifecycle hooks (pre_remove, post_remove)
         #[arg(long)]
         no_hooks: bool,
+
+        /// Preview without executing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Switch to a worktree
     Switch {
@@ -121,7 +111,15 @@ enum Commands {
         branch: String,
     },
     /// List all worktrees
-    List,
+    List {
+        /// Output as JSON
+        #[arg(long, conflicts_with = "porcelain")]
+        json: bool,
+
+        /// Output in porcelain format
+        #[arg(long, conflicts_with = "json")]
+        porcelain: bool,
+    },
     /// Sync a worktree with its base branch
     Sync {
         /// Branch name, worktree name, or path of the worktree to sync
@@ -138,6 +136,14 @@ enum Commands {
         /// Skip all lifecycle hooks (pre_sync, post_sync)
         #[arg(long)]
         no_hooks: bool,
+
+        /// Preview without executing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Initialize .trench.toml in current directory
     Init {
@@ -188,11 +194,6 @@ pub(crate) enum SyncStrategy {
 }
 
 impl Cli {
-    fn output_config(&self) -> OutputConfig {
-        let is_tty = std::io::stdout().is_terminal();
-        OutputConfig::from_env(self.no_color, self.quiet, self.verbose, is_tty)
-    }
-
     fn should_launch_tui(&self, stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
         self.command.is_none() && stdin_is_tty && stdout_is_tty
     }
@@ -204,7 +205,6 @@ fn main() -> anyhow::Result<()> {
         logging::init();
     }
     let cli = Cli::parse();
-    let output_config = cli.output_config();
 
     if cli.should_launch_tui(
         std::io::stdin().is_terminal(),
@@ -222,15 +222,13 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let dry_run = cli.dry_run;
-    let json = cli.json;
-    let porcelain = cli.porcelain;
-
     let result = match cli.command {
         Some(Commands::Create {
             branch,
             from,
             no_hooks,
+            dry_run,
+            json,
         }) => run_create(&branch, from.as_deref(), dry_run, json, no_hooks),
         Some(Commands::Remove {
             branch,
@@ -239,6 +237,8 @@ fn main() -> anyhow::Result<()> {
             delete_branch,
             force_branch,
             no_hooks,
+            dry_run,
+            json,
         }) => run_remove(
             &branch,
             yes,
@@ -251,7 +251,7 @@ fn main() -> anyhow::Result<()> {
         ),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Open { branch }) => run_open(&branch),
-        Some(Commands::List) => run_list(json, porcelain),
+        Some(Commands::List { json, porcelain }) => run_list(json, porcelain),
         Some(Commands::Init { force }) => run_init(force),
         Some(Commands::ShellInit { shell }) => {
             print!("{}", cli::commands::shell_init::generate(shell));
@@ -266,6 +266,8 @@ fn main() -> anyhow::Result<()> {
             strategy,
             no_hooks,
             base,
+            dry_run,
+            json,
         }) => run_sync(&branch, strategy, base.as_deref(), json, dry_run, no_hooks),
         None => {
             anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
