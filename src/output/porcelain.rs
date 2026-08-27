@@ -35,7 +35,7 @@ mod tests {
     struct TestRecord {
         name: String,
         branch: String,
-        managed: bool,
+        live: bool,
     }
 
     impl PorcelainRecord for TestRecord {
@@ -43,7 +43,7 @@ mod tests {
             vec![
                 self.name.clone(),
                 self.branch.clone(),
-                self.managed.to_string(),
+                self.live.to_string(),
             ]
         }
     }
@@ -54,12 +54,12 @@ mod tests {
             TestRecord {
                 name: "alpha".into(),
                 branch: "feature/alpha".into(),
-                managed: true,
+                live: true,
             },
             TestRecord {
                 name: "beta".into(),
                 branch: "fix/beta".into(),
-                managed: false,
+                live: false,
             },
         ];
 
@@ -83,7 +83,7 @@ mod tests {
         let items = vec![TestRecord {
             name: "solo".into(),
             branch: "main".into(),
-            managed: true,
+            live: true,
         }];
 
         let output = format_porcelain(&items);
@@ -95,7 +95,7 @@ mod tests {
         let items = vec![TestRecord {
             name: "a".into(),
             branch: "b".into(),
-            managed: true,
+            live: true,
         }];
 
         let output = format_porcelain(&items);
@@ -110,7 +110,7 @@ mod tests {
         let items = vec![TestRecord {
             name: "test".into(),
             branch: "dev".into(),
-            managed: false,
+            live: false,
         }];
 
         let output = format_porcelain(&items);

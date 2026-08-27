@@ -32,9 +32,6 @@ thiserror = "2"
 # Serialization
 serde_json = "1"
 
-# Templates
-minijinja = "2"
-
 # Globs
 globset = "0.4"
 

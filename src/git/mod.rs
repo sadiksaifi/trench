@@ -753,91 +753,6 @@ pub fn upstream_branch_name(
     ))
 }
 
-/// Scan additional directory paths for git worktrees (FR-30).
-///
-/// Each path in `scan_paths` is treated as a directory that may contain
-/// subdirectories that are git worktrees. Non-existent or unreadable paths
-/// are silently skipped with a warning to stderr.
-pub fn scan_directories(scan_paths: &[String]) -> Vec<GitWorktreeEntry> {
-    let mut entries = Vec::new();
-
-    for scan_path in scan_paths {
-        let dir = Path::new(scan_path);
-        if !dir.exists() {
-            eprintln!("warning: scan path does not exist: {scan_path}");
-            continue;
-        }
-        let read_dir = match std::fs::read_dir(dir) {
-            Ok(rd) => rd,
-            Err(e) => {
-                eprintln!("warning: cannot read scan path {scan_path}: {e}");
-                continue;
-            }
-        };
-
-        for entry in read_dir.flatten() {
-            let child = entry.path();
-            if !child.is_dir() {
-                continue;
-            }
-            // Try to open as a git repository
-            if let Ok(repo) = git2::Repository::open(&child) {
-                let canonical = canonical_or_original(&child);
-                let branch = repo
-                    .head()
-                    .ok()
-                    .and_then(|r| r.shorthand().map(String::from));
-                let name = canonical
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "unknown".to_string());
-                entries.push(GitWorktreeEntry {
-                    name,
-                    path: canonical,
-                    branch,
-                    is_main: false,
-                });
-            }
-        }
-    }
-
-    entries
-}
-
-/// Remove a git worktree at the given path.
-///
-/// Removes the worktree directory from disk, then prunes stale worktree
-/// bookkeeping from the repository. The branch itself is preserved.
-pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(), GitError> {
-    if !worktree_path.exists() {
-        return Err(GitError::WorktreeNotFound {
-            name: worktree_path.to_string_lossy().into_owned(),
-        });
-    }
-
-    // Remove the worktree directory
-    std::fs::remove_dir_all(worktree_path)?;
-
-    // Open repo and prune stale worktree references
-    let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
-
-    // Iterate worktrees and prune any that point to missing directories
-    if let Ok(worktrees) = repo.worktrees() {
-        for name in worktrees.iter().flatten() {
-            if let Ok(wt) = repo.find_worktree(name) {
-                let _ = wt.prune(Some(
-                    git2::WorktreePruneOptions::new()
-                        .working_tree(false)
-                        .valid(false)
-                        .locked(false),
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1333,43 +1248,6 @@ mod tests {
     }
 
     #[test]
-    fn remove_worktree_deletes_directory_and_prunes() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let repo = init_repo_with_commit(repo_dir.path());
-        let base = head_branch(&repo);
-        let wt_dir = tempfile::tempdir().unwrap();
-        let target = wt_dir.path().join("to-remove");
-
-        create_worktree(repo_dir.path(), "to-remove", &base, &target)
-            .expect("should create worktree");
-        assert!(target.exists(), "worktree should exist before removal");
-
-        remove_worktree(repo_dir.path(), &target).expect("should remove worktree");
-
-        assert!(!target.exists(), "worktree directory should be deleted");
-
-        // The branch should still exist (we only remove the worktree, not the branch)
-        assert!(
-            repo.find_branch("to-remove", git2::BranchType::Local)
-                .is_ok(),
-            "branch should still exist after worktree removal"
-        );
-    }
-
-    #[test]
-    fn remove_worktree_errors_for_nonexistent_path() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let _repo = init_repo_with_commit(repo_dir.path());
-        let fake_path = repo_dir.path().join("nonexistent-worktree");
-
-        let result = remove_worktree(repo_dir.path(), &fake_path);
-        assert!(
-            result.is_err(),
-            "should error for nonexistent worktree path"
-        );
-    }
-
-    #[test]
     fn ahead_behind_counts_commits_ahead_of_base() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(tmp.path());
@@ -1555,24 +1433,6 @@ mod tests {
     }
 
     #[test]
-    fn list_worktrees_skips_deleted_additional_worktrees() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let repo = init_repo_with_commit(repo_dir.path());
-        let base = head_branch(&repo);
-        let wt_dir = tempfile::tempdir().unwrap();
-        let target = wt_dir.path().join("extra-wt");
-
-        create_worktree(repo_dir.path(), "extra-wt", &base, &target)
-            .expect("should create worktree");
-        std::fs::remove_dir_all(&target).expect("manual delete should succeed");
-
-        let worktrees = list_worktrees(repo_dir.path()).expect("should list worktrees");
-
-        assert_eq!(worktrees.len(), 1, "only main worktree should remain");
-        assert!(worktrees.iter().all(|worktree| worktree.path != target));
-    }
-
-    #[test]
     fn discover_repo_from_linked_worktree_returns_primary_checkout() {
         let repo_dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(repo_dir.path());
@@ -1698,51 +1558,6 @@ mod tests {
     }
 
     #[test]
-    fn scan_directories_skips_nonexistent_paths_without_error() {
-        let scan_paths = vec![
-            "/nonexistent/path/abc123".to_string(),
-            "/also/does/not/exist".to_string(),
-        ];
-        let entries = scan_directories(&scan_paths);
-        assert!(
-            entries.is_empty(),
-            "non-existent scan paths should produce no entries, got: {entries:?}"
-        );
-    }
-
-    #[test]
-    fn scan_directories_mixes_valid_and_invalid_paths() {
-        // Create a main repo with a worktree in a valid scan dir
-        let main_repo_dir = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(main_repo_dir.path()).unwrap();
-        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-        let tree_id = repo.index().unwrap().write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
-        let base = repo.head().unwrap().shorthand().unwrap().to_string();
-
-        let scan_dir = tempfile::tempdir().unwrap();
-        let wt_path = scan_dir.path().join("valid-wt");
-        create_worktree(main_repo_dir.path(), "valid-wt", &base, &wt_path)
-            .expect("should create worktree");
-
-        // Mix valid scan dir with non-existent path
-        let scan_paths = vec![
-            "/nonexistent/path".to_string(),
-            scan_dir.path().to_string_lossy().into_owned(),
-        ];
-        let entries = scan_directories(&scan_paths);
-
-        assert_eq!(
-            entries.len(),
-            1,
-            "should find 1 worktree despite invalid path, got: {entries:?}"
-        );
-        assert_eq!(entries[0].name, "valid-wt");
-    }
-
-    #[test]
     fn sync_merge_rejects_nonexistent_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_repo_with_commit(tmp.path());
@@ -1756,38 +1571,6 @@ mod tests {
             matches!(err, GitError::WorktreeNotFound { ref name } if name == "nonexistent-branch"),
             "expected WorktreeNotFound, got: {err:?}"
         );
-    }
-
-    #[test]
-    fn scan_directories_discovers_worktree_in_scan_path() {
-        // Create a main repo with a commit
-        let main_repo_dir = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(main_repo_dir.path()).unwrap();
-        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-        let tree_id = repo.index().unwrap().write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
-        let base = repo.head().unwrap().shorthand().unwrap().to_string();
-
-        // Create a worktree in a "scan" directory (outside default location)
-        let scan_dir = tempfile::tempdir().unwrap();
-        let wt_path = scan_dir.path().join("my-feature");
-        create_worktree(main_repo_dir.path(), "my-feature", &base, &wt_path)
-            .expect("should create worktree");
-
-        // scan_directories should find it
-        let scan_paths = vec![scan_dir.path().to_string_lossy().into_owned()];
-        let entries = scan_directories(&scan_paths);
-
-        assert!(
-            entries.iter().any(|e| e.name == "my-feature"),
-            "should discover worktree in scan path, got: {entries:?}"
-        );
-        // Should not be marked as main
-        let entry = entries.iter().find(|e| e.name == "my-feature").unwrap();
-        assert!(!entry.is_main);
-        assert_eq!(entry.branch.as_deref(), Some("my-feature"));
     }
 
     #[test]

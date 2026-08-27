@@ -27,6 +27,43 @@ fn product_source_has_no_trench_owned_state() {
     }
 }
 
+#[test]
+fn product_source_has_no_retired_discovery_or_removal_surfaces() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let git = std::fs::read_to_string(root.join("src/git/mod.rs")).unwrap();
+    for retired in [
+        "scan_directories",
+        "pub fn remove_worktree",
+        "remove_dir_all",
+    ] {
+        assert!(
+            !git.contains(retired),
+            "retired git surface remains: {retired}"
+        );
+    }
+
+    let porcelain = std::fs::read_to_string(root.join("src/output/porcelain.rs")).unwrap();
+    for retired in ["managed", "unmanaged"] {
+        assert!(
+            !porcelain.contains(retired),
+            "retired porcelain vocabulary remains: {retired}"
+        );
+    }
+
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    assert!(
+        !manifest.contains("minijinja"),
+        "retired template dependency remains: minijinja"
+    );
+    let paths = std::fs::read_to_string(root.join("src/paths.rs")).unwrap();
+    for retired in ["DEFAULT_WORKTREE_TEMPLATE", "render_worktree_path"] {
+        assert!(
+            !paths.contains(retired),
+            "retired template API remains: {retired}"
+        );
+    }
+}
+
 fn help(command: &str) -> String {
     let output = trench(&[command, "--help"]);
     assert!(output.status.success(), "help failed for {command}");
