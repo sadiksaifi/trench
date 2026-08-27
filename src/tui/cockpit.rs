@@ -1209,6 +1209,26 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
                     ("?", "close help"),
                 ],
             )
+        } else if let Some(dialog) = state.remove_dialog.as_ref() {
+            let items = match dialog.mode() {
+                RemoveMode::Review | RemoveMode::Ready if dialog.can_delete_branch() => &[
+                    ("Space", "toggle local branch deletion"),
+                    ("Enter", "remove worktree"),
+                    ("Esc", "close"),
+                    ("?", "close help"),
+                ][..],
+                RemoveMode::Review | RemoveMode::Ready => &[
+                    ("Enter", "remove worktree"),
+                    ("Esc", "close"),
+                    ("?", "close help"),
+                ][..],
+                RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => &[
+                    ("Enter", "confirm removal"),
+                    ("Esc", "back"),
+                    ("?", "close help"),
+                ][..],
+            };
+            (" Help · Remove worktree ", items)
         } else if state
             .create_dialog
             .as_ref()
@@ -1243,7 +1263,7 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
         area,
     );
     frame.render_widget(Clear, dialog);
-    let block = panel(Some(title.to_string()), theme);
+    let block = active_panel(Some(title.to_string()), theme);
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
     let lines = items.iter().map(|(key, description)| {
@@ -1260,7 +1280,7 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
     frame.render_widget(
         Paragraph::new(lines.collect::<Vec<_>>())
             .wrap(Wrap { trim: true })
-            .style(theme.with_bg(Style::default(), theme.bg_panel)),
+            .style(theme.with_bg(Style::default(), theme.bg_elevated)),
         inner,
     );
 }
@@ -2236,5 +2256,12 @@ mod tests {
             .unwrap()
             .trim_end()
             .ends_with("? help"));
+
+        state.help_open = true;
+        let help = text(&render_buffer(&mut state, 100, 24, "ops"));
+        assert!(help.contains("Help · Remove worktree"), "{help}");
+        assert!(help.contains("toggle local branch deletion"), "{help}");
+        assert!(help.contains("remove worktree"), "{help}");
+        assert!(!help.contains("search branches"), "{help}");
     }
 }
