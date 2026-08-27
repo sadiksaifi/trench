@@ -1,6 +1,7 @@
 mod adopt;
 mod cli;
 mod config;
+mod create_plan;
 mod exit_code;
 mod git;
 mod hooks;
@@ -9,10 +10,12 @@ mod logging;
 mod output;
 mod paths;
 mod process;
+mod ref_catalog;
 mod state;
 mod tmux;
 mod tui;
 mod worktree_catalog;
+mod worktree_policy;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -218,8 +221,10 @@ impl Cli {
 }
 
 fn main() -> anyhow::Result<()> {
-    logging::init();
-
+    let read_only_startup = std::env::args_os().any(|argument| argument == "--dry-run");
+    if !read_only_startup {
+        logging::init();
+    }
     let cli = Cli::parse();
     let output_config = cli.output_config();
 
@@ -398,8 +403,8 @@ fn run_create(
             from,
             &cwd,
             &worktree_root,
-            paths::DEFAULT_WORKTREE_TEMPLATE,
-            resolved.hooks.as_ref(),
+            resolved.git.default_base.as_deref(),
+            no_hooks,
         )?;
 
         if json {
