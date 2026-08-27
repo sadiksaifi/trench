@@ -826,6 +826,29 @@ mod tests {
     }
 
     #[test]
+    fn launcher_no_results_renders_no_actionable_row() {
+        let mut state = sample_state();
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('/')));
+        for character in "xyz".chars() {
+            let _ = reduce(
+                &mut state,
+                Event::Input(crate::tui::keymap::Key::Char(character)),
+            );
+        }
+
+        let buffer = render_buffer(&mut state, 80, 20, "ops");
+        let output = text(&buffer);
+        let footer = lines(&buffer).last().unwrap().trim_end().to_string();
+        assert!(output.contains("No matching worktrees"), "{output}");
+        assert!(!output.contains("feature-auth"), "{output}");
+        assert!(state.selected_visible().is_none());
+        assert!(!footer.contains("Enter switch"), "{footer}");
+        assert!(!footer.contains("o open"), "{footer}");
+        assert!(footer.contains("Esc clear"), "{footer}");
+        assert!(footer.ends_with("? help"), "{footer}");
+    }
+
+    #[test]
     fn completed_rows_stop_spinner_without_blanking_their_values() {
         let mut state = sample_state();
         let output = text(&render_buffer(&mut state, 120, 24, "ops"));
