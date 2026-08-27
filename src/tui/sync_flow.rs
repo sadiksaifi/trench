@@ -3,7 +3,7 @@ use crate::{
     ref_catalog::RefSnapshot,
     tui::{
         app::{WorktreeId, WorktreeIdentity, WorktreeStatus},
-        line_input::LineEdit,
+        line_input::{LineEdit, LineInput},
         ref_picker::{RefPicker, RefPickerEffect, RefPickerKey},
     },
 };
@@ -104,6 +104,10 @@ impl SyncDialog {
 
     pub fn base_query(&self) -> &str {
         self.base_picker.query()
+    }
+
+    pub fn base_input(&self) -> &LineInput {
+        self.base_picker.query_input()
     }
 
     pub fn base_selection(&self) -> usize {

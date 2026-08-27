@@ -13,6 +13,10 @@ impl QueryBuffer {
         self.0.value()
     }
 
+    pub fn input(&self) -> &LineInput {
+        &self.0
+    }
+
     pub fn edit(&mut self, edit: LineEdit) -> bool {
         self.0.edit(edit)
     }

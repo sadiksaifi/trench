@@ -69,6 +69,10 @@ impl RefPicker {
         self.query.value()
     }
 
+    pub fn query_input(&self) -> &LineInput {
+        &self.query
+    }
+
     pub fn selection(&self) -> usize {
         self.selection
     }

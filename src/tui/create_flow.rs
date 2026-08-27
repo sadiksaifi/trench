@@ -223,12 +223,20 @@ impl CreateDialog {
         self.branch.value()
     }
 
+    pub fn branch_input(&self) -> &LineInput {
+        &self.branch
+    }
+
     pub fn branch_selection(&self) -> usize {
         self.branch_selection
     }
 
     pub fn base_query(&self) -> &str {
         self.base_picker.query()
+    }
+
+    pub fn base_input(&self) -> &LineInput {
+        self.base_picker.query_input()
     }
 
     pub fn base_selection(&self) -> usize {

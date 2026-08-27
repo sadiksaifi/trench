@@ -1,4 +1,5 @@
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineEdit {
@@ -17,9 +18,33 @@ pub struct LineInput {
     cursor: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineWindow {
+    pub before_cursor: String,
+    pub after_cursor: String,
+}
+
 impl LineInput {
     pub fn value(&self) -> &str {
         &self.value
+    }
+
+    pub fn window(&self, width: usize) -> LineWindow {
+        let before = &self.value[..self.cursor];
+        let after = &self.value[self.cursor..];
+        if UnicodeWidthStr::width(self.value.as_str()) <= width {
+            return LineWindow {
+                before_cursor: before.to_string(),
+                after_cursor: after.to_string(),
+            };
+        }
+
+        let before_cursor = tail_ellipsize(before, width);
+        let remaining = width.saturating_sub(UnicodeWidthStr::width(before_cursor.as_str()));
+        LineWindow {
+            before_cursor,
+            after_cursor: head_ellipsize(after, remaining),
+        }
     }
 
     pub fn edit(&mut self, edit: LineEdit) -> bool {
@@ -63,6 +88,55 @@ impl LineInput {
         }
         before != (self.value.clone(), self.cursor)
     }
+}
+
+fn tail_ellipsize(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    let budget = width - 1;
+    let mut used = 0;
+    let mut tail = Vec::new();
+    for grapheme in value.graphemes(true).rev() {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used + grapheme_width > budget {
+            break;
+        }
+        tail.push(grapheme);
+        used += grapheme_width;
+    }
+    tail.reverse();
+    format!("…{}", tail.concat())
+}
+
+fn head_ellipsize(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    let budget = width - 1;
+    let mut used = 0;
+    let mut head = Vec::new();
+    for grapheme in value.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used + grapheme_width > budget {
+            break;
+        }
+        head.push(grapheme);
+        used += grapheme_width;
+    }
+    format!("{}…", head.concat())
 }
 
 impl From<&str> for LineInput {
