@@ -500,64 +500,31 @@ fn render_create_dialog(
     area: Rect,
     theme: &Theme,
 ) {
-    let footer = Rect {
-        x: area.x,
-        y: area.bottom().saturating_sub(1),
-        width: area.width,
-        height: 1,
-    };
-    let content_area = Rect {
-        height: area.height.saturating_sub(1),
-        ..area
+    let Some(layout) = create_dialog_layout(dialog, area) else {
+        return;
     };
     let candidates = dialog.base_candidates();
     let suggestions = dialog.branch_suggestions();
-    let desired_height = match dialog.mode() {
-        CreateMode::SelectBase => 9u16.saturating_add(candidates.len().min(4) as u16),
-        CreateMode::Name => {
-            let preview_rows = dialog
-                .preview()
-                .map_or(1, |preview| if preview.base_visible { 4 } else { 3 });
-            let error_rows = usize::from(dialog.validation_error().is_some());
-            8u16.saturating_add((preview_rows + error_rows + suggestions.len().min(3)) as u16)
-        }
-    };
-    let modal = centered_rect(
-        content_area.width.saturating_sub(6).min(78),
-        desired_height
-            .min(content_area.height.saturating_sub(2))
-            .max(9),
-        content_area,
-    );
-    frame.render_widget(Clear, modal);
+    frame.render_widget(Clear, layout.modal);
     let title = match dialog.mode() {
         CreateMode::SelectBase => " Create worktree · 1 of 2 ",
         CreateMode::Name => " Create worktree · 2 of 2 ",
     };
     let block = active_panel(Some(title.to_string()), theme).title_alignment(Alignment::Center);
-    let inner = block.inner(modal);
-    frame.render_widget(block, modal);
+    frame.render_widget(block, layout.modal);
 
     match dialog.mode() {
         CreateMode::SelectBase => {
-            let [intro, label, search_input, options, action] = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .areas(inner);
             render_create_intro(
                 frame,
-                intro,
+                layout.intro,
                 "Choose the branch this worktree starts from.",
                 theme,
             );
-            render_create_label(frame, label, "Base branch", theme);
+            render_create_label(frame, layout.label, "Base branch", theme);
             render_create_input(
                 frame,
-                search_input,
+                layout.input,
                 dialog.base_input(),
                 "Type to filter branches",
                 theme,
@@ -585,7 +552,7 @@ fn render_create_dialog(
                     selectable_line(
                         &candidate.name,
                         index == dialog.base_selection(),
-                        options.width,
+                        layout.options.width,
                         theme,
                     )
                 }));
@@ -594,44 +561,22 @@ fn render_create_dialog(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
                     .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
-                options,
+                layout.options,
             );
-            render_create_action(frame, action, "Next", !candidates.is_empty(), theme);
-            render_dialog_keybar(
-                frame,
-                footer,
-                theme,
-                &[
-                    if candidates.is_empty() {
-                        KeyHint::disabled("Enter", "next unavailable")
-                    } else {
-                        KeyHint::primary("Enter", "next")
-                    },
-                    KeyHint::secondary("Tab", "complete"),
-                    KeyHint::secondary("Esc", "cancel"),
-                    KeyHint::secondary("?", "help"),
-                ],
-            );
+            render_create_action(frame, layout.action, "Next", !candidates.is_empty(), theme);
+            render_dialog_keybar(frame, layout.footer, theme, &create_key_hints(dialog));
         }
         CreateMode::Name => {
-            let [intro, label, branch_input, details, action] = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .areas(inner);
             render_create_intro(
                 frame,
-                intro,
+                layout.intro,
                 "Name the branch and review what will happen.",
                 theme,
             );
-            render_create_label(frame, label, "Worktree branch", theme);
+            render_create_label(frame, layout.label, "Worktree branch", theme);
             render_create_input(
                 frame,
-                branch_input,
+                layout.input,
                 dialog.branch_input(),
                 "Type a branch name",
                 theme,
@@ -669,12 +614,12 @@ fn render_create_dialog(
                 suggestions
                     .iter()
                     .enumerate()
-                    .take(usize::from(details.height).saturating_sub(used))
+                    .take(usize::from(layout.options.height).saturating_sub(used))
                     .map(|(index, suggestion)| {
                         selectable_line(
                             &suggestion.label,
                             index == dialog.branch_selection(),
-                            details.width,
+                            layout.options.width,
                             theme,
                         )
                     }),
@@ -683,34 +628,233 @@ fn render_create_dialog(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
                     .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
-                details,
+                layout.options,
             );
-            let (action_label, footer_action) = match preview.as_ref().map(|value| &value.kind) {
-                Some(BranchKind::New) => ("Create worktree", "create"),
-                Some(BranchKind::Local) | Some(BranchKind::Remote { .. }) => {
-                    ("Add worktree", "add")
-                }
-                Some(BranchKind::CheckedOut { .. }) => ("Open worktree", "open"),
-                None => ("Create unavailable", "create unavailable"),
-            };
-            render_create_action(frame, action, action_label, preview.is_some(), theme);
-            render_dialog_keybar(
-                frame,
-                footer,
-                theme,
-                &[
-                    if preview.is_some() {
-                        KeyHint::primary("Enter", footer_action)
-                    } else {
-                        KeyHint::disabled("Enter", footer_action)
-                    },
-                    KeyHint::secondary("Tab", "complete"),
-                    KeyHint::secondary("Esc", "back"),
-                    KeyHint::secondary("?", "help"),
-                ],
-            );
+            let (action_label, _, enabled) = create_action_details(dialog);
+            render_create_action(frame, layout.action, action_label, enabled, theme);
+            render_dialog_keybar(frame, layout.footer, theme, &create_key_hints(dialog));
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreateHitTarget {
+    Input,
+    Row(usize),
+    Back,
+    Cta,
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct CreateHitMap {
+    pub(crate) input: Rect,
+    pub(crate) rows: Vec<Rect>,
+    pub(crate) back: Rect,
+    pub(crate) cta: Rect,
+    pub(crate) help: Rect,
+    options: Rect,
+}
+
+impl CreateHitMap {
+    pub(crate) fn target_at(&self, point: (u16, u16)) -> Option<CreateHitTarget> {
+        if rect_contains(self.input, point) {
+            return Some(CreateHitTarget::Input);
+        }
+        if let Some((index, _)) = self
+            .rows
+            .iter()
+            .enumerate()
+            .find(|(_, area)| rect_contains(**area, point))
+        {
+            return Some(CreateHitTarget::Row(index));
+        }
+        if rect_contains(self.cta, point) {
+            return Some(CreateHitTarget::Cta);
+        }
+        if rect_contains(self.back, point) {
+            return Some(CreateHitTarget::Back);
+        }
+        rect_contains(self.help, point).then_some(CreateHitTarget::Help)
+    }
+
+    pub(crate) fn options_contain(&self, point: (u16, u16)) -> bool {
+        rect_contains(self.options, point)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CreateDialogLayout {
+    footer: Rect,
+    modal: Rect,
+    intro: Rect,
+    label: Rect,
+    input: Rect,
+    options: Rect,
+    action: Rect,
+}
+
+fn create_dialog_layout(dialog: &CreateDialog, area: Rect) -> Option<CreateDialogLayout> {
+    if area.width < Viewport::MIN_WIDTH || area.height < Viewport::MIN_HEIGHT {
+        return None;
+    }
+    let footer = Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    let content_area = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let desired_height = match dialog.mode() {
+        CreateMode::SelectBase => 9u16.saturating_add(dialog.base_candidates().len().min(4) as u16),
+        CreateMode::Name => {
+            let preview_rows = dialog
+                .preview()
+                .map_or(1, |preview| if preview.base_visible { 4 } else { 3 });
+            let error_rows = usize::from(dialog.validation_error().is_some());
+            8u16.saturating_add(
+                (preview_rows + error_rows + dialog.branch_suggestions().len().min(3)) as u16,
+            )
+        }
+    };
+    let modal = centered_rect(
+        content_area.width.saturating_sub(6).min(78),
+        desired_height
+            .min(content_area.height.saturating_sub(2))
+            .max(9),
+        content_area,
+    );
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+    let [intro, label, input, options, action] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    Some(CreateDialogLayout {
+        footer,
+        modal,
+        intro,
+        label,
+        input,
+        options,
+        action,
+    })
+}
+
+pub(crate) fn create_hit_map(dialog: &CreateDialog, area: Rect) -> CreateHitMap {
+    let Some(layout) = create_dialog_layout(dialog, area) else {
+        return CreateHitMap::default();
+    };
+    let prefix_rows = match dialog.mode() {
+        CreateMode::SelectBase => {
+            usize::from(dialog.origin_spinner_visible()) + usize::from(dialog.warning().is_some())
+        }
+        CreateMode::Name => {
+            let preview_rows = dialog
+                .preview()
+                .map_or(1, |preview| if preview.base_visible { 4 } else { 3 });
+            preview_rows + usize::from(dialog.validation_error().is_some())
+        }
+    };
+    let row_count = match dialog.mode() {
+        CreateMode::SelectBase => dialog.base_candidates().len(),
+        CreateMode::Name => dialog.branch_suggestions().len(),
+    }
+    .min(usize::from(layout.options.height).saturating_sub(prefix_rows));
+    let rows = (0..row_count)
+        .map(|index| Rect {
+            x: layout.options.x,
+            y: layout
+                .options
+                .y
+                .saturating_add(prefix_rows as u16)
+                .saturating_add(index as u16),
+            width: layout.options.width,
+            height: 1,
+        })
+        .collect();
+    let (action_label, _, _) = create_action_details(dialog);
+    let cta_width = UnicodeWidthStr::width(format!("[ Enter  {action_label} ]").as_str())
+        .min(usize::from(layout.action.width)) as u16;
+    let cta = Rect {
+        x: layout.action.right().saturating_sub(cta_width),
+        width: cta_width,
+        ..layout.action
+    };
+    let hints = create_key_hints(dialog);
+    let footer_hits = keybar_hit_areas(layout.footer, &hints);
+    let hit_for_key = |key: &str| {
+        footer_hits
+            .iter()
+            .find_map(|(index, rect)| (hints[*index].key == key).then_some(*rect))
+            .unwrap_or_default()
+    };
+    CreateHitMap {
+        input: layout.input,
+        rows,
+        back: hit_for_key("Esc"),
+        cta,
+        help: hit_for_key("?"),
+        options: layout.options,
+    }
+}
+
+fn create_action_details(dialog: &CreateDialog) -> (&'static str, &'static str, bool) {
+    match dialog.mode() {
+        CreateMode::SelectBase if dialog.base_candidates().is_empty() => {
+            ("Next unavailable", "next unavailable", false)
+        }
+        CreateMode::SelectBase => ("Next", "next", true),
+        CreateMode::Name => match dialog.preview().as_ref().map(|value| &value.kind) {
+            Some(BranchKind::New) => ("Create worktree", "create", true),
+            Some(BranchKind::Local) | Some(BranchKind::Remote { .. }) => {
+                ("Add worktree", "add", true)
+            }
+            Some(BranchKind::CheckedOut { .. }) => ("Open worktree", "open", true),
+            None => ("Create unavailable", "create unavailable", false),
+        },
+    }
+}
+
+fn create_key_hints(dialog: &CreateDialog) -> Vec<KeyHint<'static>> {
+    let (_, footer_action, enabled) = create_action_details(dialog);
+    vec![
+        if enabled {
+            KeyHint::primary("Enter", footer_action)
+        } else {
+            KeyHint::disabled("Enter", footer_action)
+        },
+        KeyHint::secondary("Tab", "complete"),
+        KeyHint::secondary(
+            "Esc",
+            if dialog.mode() == CreateMode::SelectBase {
+                "cancel"
+            } else {
+                "back"
+            },
+        ),
+        KeyHint::secondary("?", "help"),
+    ]
+}
+
+fn rect_contains(area: Rect, (x, y): (u16, u16)) -> bool {
+    area.width > 0
+        && area.height > 0
+        && x >= area.x
+        && x < area.right()
+        && y >= area.y
+        && y < area.bottom()
+}
+
+#[cfg(test)]
+fn center(area: Rect) -> (u16, u16) {
+    (area.x + area.width / 2, area.y + area.height / 2)
 }
 
 fn render_create_intro(frame: &mut Frame, area: Rect, text: &str, theme: &Theme) {
@@ -1159,29 +1303,7 @@ impl<'a> KeyHint<'a> {
 }
 
 fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[KeyHint<'_>]) {
-    let mut visible = items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            (
-                index,
-                format!(
-                    "[{}] {}",
-                    item.key,
-                    compact_key_action(item.action, area.width)
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    while keybar_width(&visible) > usize::from(area.width) {
-        let Some(position) = visible.iter().position(|(index, _)| {
-            let item = &items[*index];
-            matches!(item.tone, KeyTone::Secondary) && !matches!(item.key, "Esc" | "?")
-        }) else {
-            break;
-        };
-        visible.remove(position);
-    }
+    let visible = visible_key_hints(items, area.width);
     let mut spans = Vec::new();
     for (position, (index, label)) in visible.into_iter().enumerate() {
         if position > 0 {
@@ -1217,6 +1339,47 @@ fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[K
             .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
         area,
     );
+}
+
+fn visible_key_hints(items: &[KeyHint<'_>], width: u16) -> Vec<(usize, String)> {
+    let mut visible = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            (
+                index,
+                format!("[{}] {}", item.key, compact_key_action(item.action, width)),
+            )
+        })
+        .collect::<Vec<_>>();
+    while keybar_width(&visible) > usize::from(width) {
+        let Some(position) = visible.iter().position(|(index, _)| {
+            let item = &items[*index];
+            matches!(item.tone, KeyTone::Secondary) && !matches!(item.key, "Esc" | "?")
+        }) else {
+            break;
+        };
+        visible.remove(position);
+    }
+    visible
+}
+
+fn keybar_hit_areas(area: Rect, items: &[KeyHint<'_>]) -> Vec<(usize, Rect)> {
+    let mut x = area.x;
+    visible_key_hints(items, area.width)
+        .into_iter()
+        .map(|(index, label)| {
+            let width = UnicodeWidthStr::width(label.as_str()) as u16;
+            let rect = Rect {
+                x,
+                y: area.y,
+                width,
+                height: area.height,
+            };
+            x = x.saturating_add(width).saturating_add(2);
+            (index, rect)
+        })
+        .collect()
 }
 
 fn compact_key_action(action: &str, width: u16) -> &str {
@@ -2523,6 +2686,47 @@ mod tests {
             assert!(output.contains(outcome), "missing {outcome:?}\n{output}");
             assert!(output.contains(action), "missing {action:?}\n{output}");
         }
+    }
+
+    #[test]
+    fn create_hit_map_tracks_the_rendered_input_rows_actions_and_tiny_boundary() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let dialog = CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            RefSnapshot::from_parts(
+                ["main", "release"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            [],
+        );
+        let hits = create_hit_map(&dialog, Rect::new(0, 0, 80, 24));
+
+        assert_eq!(
+            hits.target_at(center(hits.input)),
+            Some(CreateHitTarget::Input)
+        );
+        assert_eq!(
+            hits.target_at(center(hits.rows[1])),
+            Some(CreateHitTarget::Row(1))
+        );
+        assert_eq!(hits.target_at(center(hits.cta)), Some(CreateHitTarget::Cta));
+        assert_eq!(
+            hits.target_at(center(hits.back)),
+            Some(CreateHitTarget::Back)
+        );
+        assert_eq!(
+            hits.target_at(center(hits.help)),
+            Some(CreateHitTarget::Help)
+        );
+        assert_eq!(hits.target_at((0, 0)), None);
+
+        let tiny = create_hit_map(&dialog, Rect::new(0, 0, 59, 15));
+        assert_eq!(tiny.target_at((30, 8)), None);
     }
 
     #[test]
