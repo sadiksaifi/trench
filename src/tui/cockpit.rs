@@ -609,12 +609,29 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
                 .map(|line| Line::from(format!("  {line}"))),
         );
     }
-    if let ModalStatus::Failed { stage, message } = modal.status() {
+    if let ModalStatus::Failed {
+        stage,
+        mutation_state,
+        message,
+        retained_quarantine,
+    } = modal.status()
+    {
         lines.push(Line::from(""));
         lines.push(Line::from(format!(
             "Failed at {}: {message}",
             operation_stage_label(modal.operation(), *stage)
         )));
+        lines.push(Line::from(format!(
+            "Mutation: {}",
+            mutation_state_label(*mutation_state)
+        )));
+        if let Some(path) = retained_quarantine {
+            lines.push(Line::from(format!(
+                "Retained quarantine: {}",
+                path.display()
+            )));
+            lines.push(Line::from("Recovery is required before retrying."));
+        }
     }
     frame.render_widget(
         Paragraph::new(lines)
@@ -623,9 +640,13 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
         inner,
     );
     let items = match modal.status() {
-        ModalStatus::Failed { .. } => {
-            [("↑/↓", "output"), ("Enter", "back"), ("?", "help")].as_slice()
-        }
+        ModalStatus::Failed {
+            mutation_state:
+                crate::operation::MutationState::NotStarted
+                | crate::operation::MutationState::RolledBack,
+            ..
+        } => [("↑/↓", "output"), ("Enter", "back"), ("?", "help")].as_slice(),
+        ModalStatus::Failed { .. } => [("↑/↓", "output"), ("?", "help")].as_slice(),
         ModalStatus::Running if !modal.mutation_started() => {
             [("↑/↓", "output"), ("Esc", "cancel"), ("?", "help")].as_slice()
         }
@@ -634,6 +655,15 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
         }
     };
     render_dialog_keybar(frame, footer, theme, items);
+}
+
+fn mutation_state_label(state: crate::operation::MutationState) -> &'static str {
+    match state {
+        crate::operation::MutationState::NotStarted => "not started",
+        crate::operation::MutationState::Applied => "applied",
+        crate::operation::MutationState::RolledBack => "rolled back",
+        crate::operation::MutationState::PartiallyApplied => "partially applied",
+    }
 }
 
 fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[(&str, &str)]) {
@@ -948,11 +978,17 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
     let (title, items): (&str, &[(&str, &str)]) =
         if let Some(modal) = state.operation_modal.as_ref() {
             let items = match modal.status() {
-                ModalStatus::Failed { .. } => &[
+                ModalStatus::Failed {
+                    mutation_state:
+                        crate::operation::MutationState::NotStarted
+                        | crate::operation::MutationState::RolledBack,
+                    ..
+                } => &[
                     ("↑/↓", "scroll output"),
                     ("Enter", "return to form"),
                     ("?", "close help"),
                 ][..],
+                ModalStatus::Failed { .. } => &[("↑/↓", "scroll output"), ("?", "close help")][..],
                 ModalStatus::Running if !modal.mutation_started() => &[
                     ("↑/↓", "scroll output"),
                     ("Esc", "cancel"),
