@@ -289,3 +289,32 @@ fn dry_run_does_not_fetch_run_hooks_or_create_runtime_state() {
         assert!(!root.path().join(directory).exists(), "created {directory}");
     }
 }
+
+#[test]
+fn pre_sync_timeout_has_stable_exit_seven_and_structured_truth() {
+    let (root, worktree) = repository();
+    fs::write(
+        root.path().join("repository/.trench.toml"),
+        "[hooks.pre_sync]\nshell = \"sleep 2\"\ntimeout_secs = 1\n",
+    )
+    .unwrap();
+
+    let output = trench(
+        &worktree,
+        root.path(),
+        &[
+            "sync",
+            "feature/topic",
+            "--strategy",
+            "merge",
+            "--json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(7));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["failure"]["stage"], "pre_hook");
+    assert_eq!(value["failure"]["mutation_state"], "not_started");
+    assert_eq!(value["failure"]["class"], "hook_timeout");
+}
