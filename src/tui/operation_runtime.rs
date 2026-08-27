@@ -80,6 +80,7 @@ impl OperationLauncher for ThreadOperationLauncher {
                     mutation_state: operation::MutationState::NotStarted,
                     class: operation::ErrorClass::Internal,
                     message: format!("could not start operation runtime: {error}"),
+                    retained_quarantine: None,
                 })
                 .and_then(|runtime| {
                     runtime.block_on(operation::execute_cancellable(
@@ -134,6 +135,7 @@ where
         while self.receiver.try_recv().is_ok() {}
         let operation = match &request {
             OperationRequest::Create(_) => OperationKind::Create,
+            OperationRequest::Remove(_) => OperationKind::Remove,
         };
         let cancellation = CancellationToken::default();
         self.started_at = self.clock.now();
@@ -192,6 +194,15 @@ where
 
     pub fn modal(&self) -> Option<&OperationModal> {
         self.modal.as_ref()
+    }
+
+    pub fn modal_mut(&mut self) -> Option<&mut OperationModal> {
+        self.modal.as_mut()
+    }
+
+    pub fn dismiss(&mut self) {
+        self.modal = None;
+        self.cancellation = None;
     }
 }
 
@@ -294,6 +305,7 @@ mod tests {
 
         let plan = match request() {
             OperationRequest::Create(request) => request.plan,
+            OperationRequest::Remove(_) => unreachable!("test request is create"),
         };
         sender
             .send(OperationMessage::Completed(Ok(OperationOutcome::Create(

@@ -70,7 +70,11 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
         render_create_dialog(dialog, state.refresh.spinner_tick, frame, area, theme);
     }
     if state.help_open {
-        render_help(&model, frame, theme);
+        if state.operation_modal.is_some() || state.create_dialog.is_some() {
+            render_overlay_help(state, frame, area, theme);
+        } else {
+            render_help(&model, frame, theme);
+        }
     }
 }
 
@@ -247,14 +251,26 @@ fn render_create_dialog(
                     metric_line("Path", &preview.path.to_string_lossy(), theme),
                 ]);
             }
+            if let Some(error) = dialog.validation_error() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(format!("Changed: {error}")));
+            }
             let suggestions = dialog.branch_suggestions();
             if !suggestions.is_empty() {
                 lines.push(Line::from(""));
                 lines.extend(
                     suggestions
                         .iter()
+                        .enumerate()
                         .take(3)
-                        .map(|suggestion| Line::from(format!("  {}", suggestion.label))),
+                        .map(|(index, suggestion)| {
+                            let marker = if index == dialog.branch_selection() {
+                                ">"
+                            } else {
+                                " "
+                            };
+                            Line::from(format!("{marker} {}", suggestion.label))
+                        }),
                 );
             }
             frame.render_widget(
@@ -347,6 +363,7 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
     frame.render_widget(Clear, dialog);
     let title = match modal.operation() {
         OperationKind::Create => " Create worktree ",
+        OperationKind::Remove => " Remove worktree ",
     };
     let block = panel(Some(title.to_string()), theme);
     let inner = block.inner(dialog);
@@ -438,6 +455,9 @@ fn operation_stage_label(stage: OperationStage) -> &'static str {
         OperationStage::Revalidate => "Revalidate",
         OperationStage::PreHook => "Pre-create hook",
         OperationStage::CreateWorktree => "Create worktree",
+        OperationStage::RemoveWorktree => "Remove worktree",
+        OperationStage::Prune => "Prune worktrees",
+        OperationStage::DeleteBranch => "Delete branch",
         OperationStage::PostHook => "Post-create hook",
         OperationStage::Rollback => "Rollback",
     }
@@ -702,6 +722,81 @@ fn render_help(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
     } else {
         render_help_column(model.state, frame, inner, theme, bindings);
     }
+}
+
+fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let (title, items): (&str, &[(&str, &str)]) =
+        if let Some(modal) = state.operation_modal.as_ref() {
+            let items = match modal.status() {
+                ModalStatus::Failed { .. } => &[
+                    ("↑/↓", "scroll output"),
+                    ("Enter", "return to form"),
+                    ("?", "close help"),
+                ][..],
+                ModalStatus::Running if !modal.mutation_started() => &[
+                    ("↑/↓", "scroll output"),
+                    ("Esc", "cancel"),
+                    ("?", "close help"),
+                ][..],
+                ModalStatus::Running | ModalStatus::Succeeded => {
+                    &[("↑/↓", "scroll output"), ("?", "close help")][..]
+                }
+            };
+            (" Help · Operation ", items)
+        } else if state
+            .create_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.mode() == CreateMode::BasePicker)
+        {
+            (
+                " Help · Create worktree ",
+                &[
+                    ("type", "search bases"),
+                    ("↑/↓", "select base"),
+                    ("Enter", "select base"),
+                    ("Esc", "back"),
+                    ("?", "close help"),
+                ],
+            )
+        } else {
+            (
+                " Help · Create worktree ",
+                &[
+                    ("type", "search branches"),
+                    ("↑/↓", "select suggestion"),
+                    ("Tab", "select base"),
+                    ("Enter", "create or navigate"),
+                    ("Esc", "close"),
+                    ("?", "close help"),
+                ],
+            )
+        };
+    let dialog = centered_rect(
+        52.min(area.width.saturating_sub(4)),
+        items.len() as u16 + 4,
+        area,
+    );
+    frame.render_widget(Clear, dialog);
+    let block = panel(Some(title.to_string()), theme);
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+    let lines = items.iter().map(|(key, description)| {
+        Line::from(vec![
+            Span::styled(
+                format!("{key:<10}"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(*description, Style::default().fg(theme.fg)),
+        ])
+    });
+    frame.render_widget(
+        Paragraph::new(lines.collect::<Vec<_>>())
+            .wrap(Wrap { trim: true })
+            .style(theme.with_bg(Style::default(), theme.bg_panel)),
+        inner,
+    );
 }
 
 fn render_help_column(
@@ -1194,6 +1289,12 @@ mod tests {
             .unwrap()
             .trim_end()
             .ends_with("? help"));
+
+        state.help_open = true;
+        let help = text(&render_buffer(&mut state, 100, 24, "ops"));
+        assert!(help.contains("Help · Create worktree"), "{help}");
+        assert!(help.contains("select base"), "{help}");
+        assert!(!help.contains("Help · Worktrees"), "{help}");
     }
 
     #[test]
@@ -1235,5 +1336,10 @@ mod tests {
             .unwrap()
             .trim_end()
             .ends_with("? help"));
+
+        state.help_open = true;
+        let help = text(&render_buffer(&mut state, 100, 24, "ops"));
+        assert!(help.contains("Help · Operation"), "{help}");
+        assert!(help.contains("scroll output"), "{help}");
     }
 }

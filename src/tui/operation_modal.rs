@@ -258,6 +258,7 @@ mod tests {
             mutation_state: MutationState::RolledBack,
             class: ErrorClass::Hook,
             message: "post-create hook failed".to_string(),
+            retained_quarantine: None,
         });
         assert_eq!(
             modal.status(),

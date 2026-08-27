@@ -793,4 +793,70 @@ mod tests {
             }]
         );
     }
+
+    #[test]
+    fn create_success_refreshes_selects_and_keeps_a_five_second_navigation_notice() {
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let beta = identity("/worktrees/beta", "beta");
+        let mut state = AppState::new(vec![alpha.clone()]);
+        let shown_at = Instant::now();
+
+        assert_eq!(
+            reduce(
+                &mut state,
+                Event::OperationSucceeded {
+                    select: Some(beta.id.clone()),
+                    message: "Created feature/beta".to_string(),
+                    shown_at,
+                },
+            ),
+            [Effect::Refresh]
+        );
+        assert_eq!(
+            state
+                .notification
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
+            Some("Created feature/beta")
+        );
+
+        let _ = reduce(
+            &mut state,
+            Event::RefreshPublished(RefreshPublication {
+                identities: vec![alpha, beta.clone()],
+                refs: None,
+                statuses: BTreeMap::new(),
+                waiting_rows: BTreeSet::new(),
+                updating_refs: false,
+                warning: None,
+            }),
+        );
+        assert_eq!(state.selected, Some(beta.id));
+
+        let _ = reduce(&mut state, Event::Input(Key::Up));
+        assert!(state.notification.is_some());
+        let _ = reduce(
+            &mut state,
+            Event::OperationSucceeded {
+                select: None,
+                message: "Created feature/beta".to_string(),
+                shown_at,
+            },
+        );
+        let _ = reduce(&mut state, Event::Input(Key::Char('?')));
+        assert!(state.notification.is_none());
+        let _ = reduce(
+            &mut state,
+            Event::OperationSucceeded {
+                select: None,
+                message: "Created feature/beta".to_string(),
+                shown_at,
+            },
+        );
+        let _ = reduce(
+            &mut state,
+            Event::NotificationTick(shown_at + NOTIFICATION_DURATION),
+        );
+        assert!(state.notification.is_none());
+    }
 }

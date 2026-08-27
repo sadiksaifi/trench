@@ -103,13 +103,16 @@ pub struct CreateDialog {
     repository: String,
     worktree_root: PathBuf,
     refs: RefSnapshot,
+    configured_base: Option<String>,
     checked_out: Vec<CheckedOutBranch>,
     branch: String,
+    branch_selection: usize,
     selected_base: Option<String>,
     base_query: String,
     base_selection: usize,
     mode: CreateMode,
     origin_refresh: OriginRefresh,
+    validation_error: Option<String>,
 }
 
 impl CreateDialog {
@@ -122,23 +125,41 @@ impl CreateDialog {
     where
         I: IntoIterator<Item = CheckedOutBranch>,
     {
-        let selected_base = refs.default_base(None).ok();
+        Self::new_with_configured_base(repository, worktree_root, refs, None, checked_out)
+    }
+
+    pub fn new_with_configured_base<I>(
+        repository: impl Into<String>,
+        worktree_root: &Path,
+        refs: RefSnapshot,
+        configured_base: Option<&str>,
+        checked_out: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = CheckedOutBranch>,
+    {
+        let selected_base = refs.default_base(configured_base).ok();
         Self {
             repository: repository.into(),
             worktree_root: worktree_root.to_path_buf(),
             refs,
+            configured_base: configured_base.map(ToOwned::to_owned),
             checked_out: checked_out.into_iter().collect(),
             branch: String::new(),
+            branch_selection: 0,
             selected_base,
             base_query: String::new(),
             base_selection: 0,
             mode: CreateMode::Form,
             origin_refresh: OriginRefresh::Idle,
+            validation_error: None,
         }
     }
 
     pub fn set_branch(&mut self, branch: impl Into<String>) {
         self.branch = branch.into();
+        self.branch_selection = 0;
+        self.validation_error = None;
     }
 
     pub fn preview(&self) -> Option<CreatePreview> {
@@ -214,6 +235,10 @@ impl CreateDialog {
         &self.branch
     }
 
+    pub fn branch_selection(&self) -> usize {
+        self.branch_selection
+    }
+
     pub fn base_query(&self) -> &str {
         &self.base_query
     }
@@ -226,6 +251,24 @@ impl CreateDialog {
         self.origin_refresh = refresh;
     }
 
+    pub fn update_refs(&mut self, refs: RefSnapshot) {
+        let selected_still_exists = self
+            .selected_base
+            .as_deref()
+            .and_then(|base| refs.resolve(base))
+            .is_some();
+        if !selected_still_exists {
+            self.selected_base = refs.default_base(self.configured_base.as_deref()).ok();
+        }
+        self.refs = refs;
+        self.branch_selection = self
+            .branch_selection
+            .min(self.branch_suggestions().len().saturating_sub(1));
+        self.base_selection = self
+            .base_selection
+            .min(self.base_candidates().len().saturating_sub(1));
+    }
+
     pub fn origin_spinner_visible(&self) -> bool {
         self.origin_refresh == OriginRefresh::Loading
     }
@@ -233,6 +276,29 @@ impl CreateDialog {
     pub fn warning(&self) -> Option<&'static str> {
         (self.origin_refresh == OriginRefresh::Failed)
             .then_some("Could not update origin; showing local and stale refs")
+    }
+
+    pub fn validation_error(&self) -> Option<&str> {
+        self.validation_error.as_deref()
+    }
+
+    pub fn set_validation_error(&mut self, error: Option<String>) {
+        self.validation_error = error;
+    }
+
+    pub fn submission(&self) -> Option<CreateSubmission> {
+        let preview = self.preview()?;
+        match preview.kind {
+            BranchKind::CheckedOut { .. } => None,
+            BranchKind::New => Some(CreateSubmission {
+                branch: preview.branch,
+                from: preview.base,
+            }),
+            BranchKind::Local | BranchKind::Remote { .. } => Some(CreateSubmission {
+                branch: preview.branch,
+                from: None,
+            }),
+        }
     }
 
     pub fn base_candidates(&self) -> Vec<BaseCandidate> {
@@ -255,15 +321,28 @@ impl CreateDialog {
 
     fn handle_form_key(&mut self, key: CreateKey) -> Option<CreateEffect> {
         match key {
-            CreateKey::Character(character) => self.branch.push(character),
+            CreateKey::Character(character) => {
+                self.branch.push(character);
+                self.branch_selection = 0;
+                self.validation_error = None;
+            }
             CreateKey::Backspace => {
                 self.branch.pop();
+                self.branch_selection = 0;
+                self.validation_error = None;
             }
             CreateKey::Tab if self.preview().is_some_and(|preview| preview.base_visible) => {
                 self.open_base_picker();
                 return Some(CreateEffect::RefreshOrigin);
             }
             CreateKey::Enter => {
+                if let Some(selection) = self
+                    .branch_suggestions()
+                    .get(self.branch_selection)
+                    .map(|suggestion| suggestion.selection.clone())
+                {
+                    self.branch = selection;
+                }
                 let preview = self.preview()?;
                 return match preview.kind {
                     BranchKind::CheckedOut { id } => Some(CreateEffect::Navigate(id)),
@@ -280,7 +359,16 @@ impl CreateDialog {
                 };
             }
             CreateKey::Escape => return Some(CreateEffect::Close),
-            CreateKey::Tab | CreateKey::Up | CreateKey::Down => {}
+            CreateKey::Up => {
+                self.branch_selection = self.branch_selection.saturating_sub(1);
+            }
+            CreateKey::Down => {
+                self.branch_selection = self
+                    .branch_selection
+                    .saturating_add(1)
+                    .min(self.branch_suggestions().len().saturating_sub(1));
+            }
+            CreateKey::Tab => {}
         }
         None
     }
@@ -311,6 +399,7 @@ impl CreateDialog {
                     .map(|candidate| candidate.name.clone());
                 if let Some(selected) = selected {
                     self.selected_base = Some(selected);
+                    self.validation_error = None;
                     self.close_base_picker();
                 }
             }
@@ -451,6 +540,47 @@ mod tests {
             suggestions.last().map(|suggestion| &suggestion.kind),
             Some(&BranchSuggestionKind::New)
         );
+    }
+
+    #[test]
+    fn branch_suggestions_are_keyboard_selectable_before_submission() {
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs(), []);
+        dialog.set_branch("ttwo");
+
+        assert_eq!(dialog.branch_selection(), 0);
+        assert_eq!(
+            dialog.handle_key(CreateKey::Enter),
+            Some(CreateEffect::Submit(CreateSubmission {
+                branch: "topic/two".to_string(),
+                from: None,
+            }))
+        );
+
+        dialog.set_branch("ttwo");
+        assert_eq!(dialog.handle_key(CreateKey::Down), None);
+        assert_eq!(dialog.branch_selection(), 1);
+        assert_eq!(
+            dialog.handle_key(CreateKey::Enter),
+            Some(CreateEffect::Submit(CreateSubmission {
+                branch: "ttwo".to_string(),
+                from: Some("origin/main".to_string()),
+            }))
+        );
+    }
+
+    #[test]
+    fn configured_default_base_drives_new_branch_preview() {
+        let mut dialog = CreateDialog::new_with_configured_base(
+            "trench",
+            Path::new("/worktrees"),
+            refs(),
+            Some("release"),
+            [],
+        );
+
+        dialog.set_branch("feature/auth");
+
+        assert_eq!(dialog.preview().unwrap().base.as_deref(), Some("release"));
     }
 
     #[test]
