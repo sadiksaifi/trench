@@ -6,6 +6,8 @@ use ratatui::{
     Frame,
 };
 use tui_spinner::FluxFrames;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::operation::{OperationKind, OperationStage};
 use crate::tui::{
@@ -63,8 +65,15 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
     let model = ViewModel::new(state, area);
     if model.is_tiny() {
         render_resize(&model, frame, theme);
-    } else {
-        render_cockpit(&model, frame, theme);
+        return;
+    }
+    render_cockpit(&model, frame, theme);
+    let has_dialog = state.operation_modal.is_some()
+        || state.create_dialog.is_some()
+        || state.sync_dialog.is_some()
+        || state.remove_dialog.is_some();
+    if has_dialog {
+        dim_background(frame, area, theme);
     }
     if let Some(modal) = state.operation_modal.as_ref() {
         render_operation_modal(modal, frame, area, theme);
@@ -76,14 +85,34 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
         render_remove_dialog(dialog, frame, area, theme);
     }
     if state.help_open {
-        if state.operation_modal.is_some()
-            || state.create_dialog.is_some()
-            || state.sync_dialog.is_some()
-            || state.remove_dialog.is_some()
-        {
+        dim_background(frame, area, theme);
+        if has_dialog {
             render_overlay_help(state, frame, area, theme);
         } else {
             render_help(&model, frame, theme);
+        }
+        let footer = Rect {
+            x: area.x,
+            y: area.bottom().saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
+        render_dialog_keybar(
+            frame,
+            footer,
+            theme,
+            &[KeyHint::secondary("?", "close help")],
+        );
+    }
+}
+
+fn dim_background(frame: &mut Frame, area: Rect, theme: &Theme) {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                cell.set_fg(theme.disabled_fg)
+                    .set_style(Style::default().add_modifier(Modifier::DIM));
+            }
         }
     }
 }
@@ -110,7 +139,7 @@ fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, th
         RemoveMode::ConfirmDirtyWorktree => " Confirm dirty worktree removal ",
         RemoveMode::ConfirmUnmergedBranch => " Confirm unmerged branch deletion ",
     };
-    let block = panel(Some(title.to_string()), theme);
+    let block = active_panel(Some(title.to_string()), theme);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
     let target = dialog.target();
@@ -128,10 +157,14 @@ fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, th
             lines.push(Line::from("The worktree directory will be removed."));
             if dialog.can_delete_branch() {
                 let marker = if dialog.delete_branch() { "[x]" } else { "[ ]" };
-                lines.push(Line::from(format!(
-                    "{marker} Also delete local branch {}",
-                    target.branch.as_deref().unwrap_or_default()
-                )));
+                lines.push(focused_control_line(
+                    &format!(
+                        "{marker} Also delete local branch {}",
+                        target.branch.as_deref().unwrap_or_default()
+                    ),
+                    inner.width,
+                    theme,
+                ));
             }
         }
         RemoveMode::ConfirmDirtyWorktree => {
@@ -145,30 +178,33 @@ fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, th
     }
     if let Some(error) = dialog.validation_error() {
         lines.push(Line::from(""));
-        lines.push(Line::from(format!("Changed: {error}")));
+        lines.push(error_line(error, theme));
     }
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
-            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
         inner,
     );
     let items = match dialog.mode() {
-        RemoveMode::Review | RemoveMode::Ready if dialog.can_delete_branch() => [
-            ("Space", "branch"),
-            ("Enter", "remove"),
-            ("Esc", "close"),
-            ("?", "help"),
-        ]
-        .as_slice(),
-        RemoveMode::Review | RemoveMode::Ready => {
-            [("Enter", "remove"), ("Esc", "close"), ("?", "help")].as_slice()
-        }
-        RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => {
-            [("Enter", "confirm"), ("Esc", "back"), ("?", "help")].as_slice()
-        }
+        RemoveMode::Review | RemoveMode::Ready if dialog.can_delete_branch() => vec![
+            KeyHint::secondary("Space", "branch"),
+            KeyHint::danger("Enter", "remove"),
+            KeyHint::secondary("Esc", "close"),
+            KeyHint::secondary("?", "help"),
+        ],
+        RemoveMode::Review | RemoveMode::Ready => vec![
+            KeyHint::danger("Enter", "remove"),
+            KeyHint::secondary("Esc", "close"),
+            KeyHint::secondary("?", "help"),
+        ],
+        RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => vec![
+            KeyHint::danger("Enter", "confirm"),
+            KeyHint::secondary("Esc", "back"),
+            KeyHint::secondary("?", "help"),
+        ],
     };
-    render_dialog_keybar(frame, footer, theme, items);
+    render_dialog_keybar(frame, footer, theme, &items);
 }
 
 fn render_sync_dialog(
@@ -196,43 +232,47 @@ fn render_sync_dialog(
                 content_area,
             );
             frame.render_widget(Clear, modal);
-            let block = panel(Some(" Sync worktree ".to_string()), theme);
+            let block = active_panel(Some(" Sync worktree ".to_string()), theme);
             let inner = block.inner(modal);
             frame.render_widget(block, modal);
             let mut lines = vec![
                 metric_line("Worktree", dialog.worktree(), theme),
                 metric_line("Branch", dialog.branch().unwrap_or("detached"), theme),
                 Line::from(""),
-                metric_line("Base", dialog.base().unwrap_or("Select a base"), theme),
-                metric_line(
-                    "Strategy",
-                    match dialog.strategy() {
-                        crate::cli::commands::sync::stateless::SyncStrategy::Rebase => "Rebase",
-                        crate::cli::commands::sync::stateless::SyncStrategy::Merge => "Merge",
-                    },
+                selector_line("Base", dialog.base().unwrap_or("Select a base"), theme),
+                strategy_line(
+                    matches!(
+                        dialog.strategy(),
+                        crate::cli::commands::sync::stateless::SyncStrategy::Rebase
+                    ),
                     theme,
                 ),
             ];
             if let Some(error) = dialog.validation_error() {
                 lines.push(Line::from(""));
-                lines.push(Line::from(format!("Changed: {error}")));
+                lines.push(error_line(error, theme));
             }
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
-                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
                 inner,
             );
+            let submit = if dialog.submission().is_some() {
+                KeyHint::primary("Enter", "sync")
+            } else {
+                KeyHint::disabled("Enter", "sync (select a base)")
+            };
             render_dialog_keybar(
                 frame,
                 footer,
                 theme,
                 &[
-                    ("Tab", "base"),
-                    ("←/→", "strategy"),
-                    ("Enter", "sync"),
-                    ("Esc", "close"),
-                    ("?", "help"),
+                    KeyHint::secondary("Tab", "base"),
+                    KeyHint::secondary("←/→", "mode"),
+                    submit,
+                    KeyHint::secondary("Esc", "close"),
+                    KeyHint::secondary("?", "help"),
                 ],
             );
         }
@@ -243,10 +283,20 @@ fn render_sync_dialog(
                 content_area,
             );
             frame.render_widget(Clear, modal);
-            let block = panel(Some(" Sync worktree · Select base ".to_string()), theme);
+            let block = active_panel(Some(" Sync worktree · Select base ".to_string()), theme);
             let inner = block.inner(modal);
             frame.render_widget(block, modal);
-            let mut lines = vec![metric_line("Search", dialog.base_query(), theme)];
+            let [search_input, options] =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
+            render_text_input(
+                frame,
+                search_input,
+                "Search",
+                dialog.base_query(),
+                "Type to filter bases",
+                theme,
+            );
+            let mut lines = Vec::new();
             if dialog.origin_spinner_visible() {
                 lines.push(Line::from(format!(
                     "Updating origin {}",
@@ -263,25 +313,33 @@ fn render_sync_dialog(
                     .iter()
                     .enumerate()
                     .map(|(index, candidate)| {
-                        let marker = if index == dialog.base_selection() {
-                            ">"
-                        } else {
-                            " "
-                        };
-                        Line::from(format!("{marker} {}", candidate.name))
+                        selectable_line(
+                            &candidate.name,
+                            index == dialog.base_selection(),
+                            inner.width,
+                            theme,
+                        )
                     }),
             );
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
-                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
-                inner,
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
+                options,
             );
             render_dialog_keybar(
                 frame,
                 footer,
                 theme,
-                &[("Enter", "select"), ("Esc", "back"), ("?", "help")],
+                &[
+                    if dialog.base_candidates().is_empty() {
+                        KeyHint::disabled("Enter", "select (no matches)")
+                    } else {
+                        KeyHint::primary("Enter", "select")
+                    },
+                    KeyHint::secondary("Esc", "back"),
+                    KeyHint::secondary("?", "help"),
+                ],
             );
         }
     }
@@ -315,7 +373,7 @@ fn render_resize(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
             .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg)),
         body,
     );
-    render_keybar(model.state, frame, keybar, theme, Context::Resize, true);
+    render_dialog_keybar(frame, keybar, theme, &[KeyHint::secondary("q", "quit")]);
 }
 
 fn render_cockpit(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
@@ -395,22 +453,38 @@ fn render_search(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &T
     } else {
         format!("{result_count} results")
     };
+    let result_width = result_label.chars().count().saturating_add(2);
+    let value_width = usize::from(area.width.saturating_sub(2))
+        .saturating_sub(3)
+        .saturating_sub(result_width);
+    let value = input_value_span(
+        query.as_str(),
+        "Type to filter worktrees",
+        value_width,
+        theme,
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_active))
+        .title(" Search · typing ")
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(theme.with_bg(Style::default(), theme.control_bg));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                "/ ",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(query.as_str().to_string(), Style::default().fg(theme.fg)),
+            Span::styled("> ", Style::default().fg(theme.accent)),
+            value,
+            Span::styled("▌", Style::default().fg(theme.accent)),
             Span::styled(
                 format!("  {result_label}"),
                 Style::default().fg(theme.fg_muted),
             ),
         ]))
-        .block(panel(Some(" Search ".to_string()), theme))
-        .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+        .block(block)
+        .style(theme.with_bg(Style::default().fg(theme.fg), theme.control_bg)),
         area,
     );
 }
@@ -440,16 +514,23 @@ fn render_create_dialog(
                 content_area,
             );
             frame.render_widget(Clear, modal);
-            let block = panel(Some(" Create worktree ".to_string()), theme);
+            let block = active_panel(Some(" Create worktree ".to_string()), theme);
             let inner = block.inner(modal);
             frame.render_widget(block, modal);
-            let mut lines = vec![
-                metric_line("Branch", dialog.branch(), theme),
-                Line::from(""),
-            ];
+            let [branch_input, details] =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
+            render_text_input(
+                frame,
+                branch_input,
+                "Branch",
+                dialog.branch(),
+                "Type a branch name",
+                theme,
+            );
+            let mut lines = Vec::new();
             if let Some(preview) = dialog.preview() {
                 if preview.base_visible {
-                    lines.push(metric_line(
+                    lines.push(selector_line(
                         "Create from",
                         preview.base.as_deref().unwrap_or("Select a base"),
                         theme,
@@ -462,7 +543,7 @@ fn render_create_dialog(
             }
             if let Some(error) = dialog.validation_error() {
                 lines.push(Line::from(""));
-                lines.push(Line::from(format!("Changed: {error}")));
+                lines.push(error_line(error, theme));
             }
             let suggestions = dialog.branch_suggestions();
             if !suggestions.is_empty() {
@@ -473,34 +554,36 @@ fn render_create_dialog(
                         .enumerate()
                         .take(3)
                         .map(|(index, suggestion)| {
-                            let marker = if index == dialog.branch_selection() {
-                                ">"
-                            } else {
-                                " "
-                            };
-                            Line::from(format!("{marker} {}", suggestion.label))
+                            selectable_line(
+                                &suggestion.label,
+                                index == dialog.branch_selection(),
+                                details.width,
+                                theme,
+                            )
                         }),
                 );
             }
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
-                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
-                inner,
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
+                details,
             );
             let has_base = dialog.preview().is_some_and(|preview| preview.base_visible);
-            let items = if has_base {
-                [
-                    ("Enter", "create"),
-                    ("Tab", "base"),
-                    ("Esc", "close"),
-                    ("?", "help"),
-                ]
-                .as_slice()
+            let submit = if dialog.submission().is_some() {
+                KeyHint::primary("Enter", "create")
             } else {
-                [("Enter", "create"), ("Esc", "close"), ("?", "help")].as_slice()
+                KeyHint::disabled("Enter", "create (branch required)")
             };
-            render_dialog_keybar(frame, footer, theme, items);
+            let mut items = vec![submit];
+            if has_base {
+                items.push(KeyHint::secondary("Tab", "base"));
+            }
+            items.extend([
+                KeyHint::secondary("Esc", "close"),
+                KeyHint::secondary("?", "help"),
+            ]);
+            render_dialog_keybar(frame, footer, theme, &items);
         }
         CreateMode::BasePicker => {
             let modal = centered_rect(
@@ -509,10 +592,20 @@ fn render_create_dialog(
                 content_area,
             );
             frame.render_widget(Clear, modal);
-            let block = panel(Some(" Create worktree · Select base ".to_string()), theme);
+            let block = active_panel(Some(" Create worktree · Select base ".to_string()), theme);
             let inner = block.inner(modal);
             frame.render_widget(block, modal);
-            let mut lines = vec![metric_line("Search", dialog.base_query(), theme)];
+            let [search_input, options] =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
+            render_text_input(
+                frame,
+                search_input,
+                "Search",
+                dialog.base_query(),
+                "Type to filter bases",
+                theme,
+            );
+            let mut lines = Vec::new();
             if dialog.origin_spinner_visible() {
                 lines.push(Line::from(format!(
                     "Updating origin {}",
@@ -529,28 +622,189 @@ fn render_create_dialog(
                     .iter()
                     .enumerate()
                     .map(|(index, candidate)| {
-                        let marker = if index == dialog.base_selection() {
-                            ">"
-                        } else {
-                            " "
-                        };
-                        Line::from(format!("{marker} {}", candidate.name))
+                        selectable_line(
+                            &candidate.name,
+                            index == dialog.base_selection(),
+                            inner.width,
+                            theme,
+                        )
                     }),
             );
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
-                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
-                inner,
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
+                options,
             );
             render_dialog_keybar(
                 frame,
                 footer,
                 theme,
-                &[("Enter", "select"), ("Esc", "back"), ("?", "help")],
+                &[
+                    if dialog.base_candidates().is_empty() {
+                        KeyHint::disabled("Enter", "select (no matches)")
+                    } else {
+                        KeyHint::primary("Enter", "select")
+                    },
+                    KeyHint::secondary("Esc", "back"),
+                    KeyHint::secondary("?", "help"),
+                ],
             );
         }
     }
+}
+
+fn render_text_input(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+    placeholder: &str,
+    theme: &Theme,
+) {
+    let value_width = usize::from(area.width.saturating_sub(2)).saturating_sub(3);
+    let content = Line::from(vec![
+        Span::styled("> ", Style::default().fg(theme.accent)),
+        input_value_span(value, placeholder, value_width, theme),
+        Span::styled("▌", Style::default().fg(theme.accent)),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_active))
+        .title(format!(" {label} · typing "))
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(theme.with_bg(Style::default(), theme.control_bg));
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(block)
+            .style(theme.with_bg(Style::default(), theme.control_bg)),
+        area,
+    );
+}
+
+fn input_value_span(value: &str, placeholder: &str, width: usize, theme: &Theme) -> Span<'static> {
+    let (source, color) = if value.is_empty() {
+        (placeholder, theme.fg_muted)
+    } else {
+        (value, theme.fg)
+    };
+    Span::styled(tail_ellipsize(source, width), Style::default().fg(color))
+}
+
+fn tail_ellipsize(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    let budget = width - 1;
+    let mut used = 0;
+    let mut tail = Vec::new();
+    for grapheme in value.graphemes(true).rev() {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used + grapheme_width > budget {
+            break;
+        }
+        tail.push(grapheme);
+        used += grapheme_width;
+    }
+    tail.reverse();
+    format!("…{}", tail.concat())
+}
+
+fn selector_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<14}"),
+            Style::default()
+                .fg(theme.fg_muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("[ {value}  ▾ ]"),
+            theme.with_bg(
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                theme.control_bg,
+            ),
+        ),
+    ])
+}
+
+fn strategy_line(rebase_selected: bool, theme: &Theme) -> Line<'static> {
+    let selected = |label: &str| {
+        Span::styled(
+            format!("[● {label}]"),
+            theme.with_bg(
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .add_modifier(Modifier::BOLD),
+                theme.selection_bg,
+            ),
+        )
+    };
+    let idle = |label: &str| {
+        Span::styled(
+            format!("[○ {label}]"),
+            theme.with_bg(Style::default().fg(theme.fg), theme.control_bg),
+        )
+    };
+    let (rebase, merge) = if rebase_selected {
+        (selected("Rebase"), idle("Merge"))
+    } else {
+        (idle("Rebase"), selected("Merge"))
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{:<14}", "Strategy"),
+            Style::default()
+                .fg(theme.fg_muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        rebase,
+        Span::raw("  "),
+        merge,
+        Span::styled("  ←/→", Style::default().fg(theme.fg_muted)),
+    ])
+}
+
+fn focused_control_line(label: &str, width: u16, theme: &Theme) -> Line<'static> {
+    let content = format!("› {label}");
+    let padding = usize::from(width).saturating_sub(content.chars().count());
+    Line::from(Span::styled(
+        format!("{content}{}", " ".repeat(padding)),
+        theme.with_bg(
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            theme.control_bg,
+        ),
+    ))
+}
+
+fn selectable_line(label: &str, selected: bool, width: u16, theme: &Theme) -> Line<'static> {
+    let marker = if selected { "›" } else { " " };
+    let content = format!("{marker} {label}");
+    let padding = usize::from(width).saturating_sub(content.chars().count());
+    let style = if selected {
+        theme.with_bg(
+            Style::default()
+                .fg(theme.selection_fg)
+                .add_modifier(Modifier::BOLD),
+            theme.selection_bg,
+        )
+    } else {
+        Style::default().fg(theme.fg)
+    };
+    Line::from(Span::styled(
+        format!("{content}{}", " ".repeat(padding)),
+        style,
+    ))
 }
 
 fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -575,7 +829,7 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
         OperationKind::Sync => " Sync worktree ",
         OperationKind::Remove => " Remove worktree ",
     };
-    let block = panel(Some(title.to_string()), theme);
+    let block = active_panel(Some(title.to_string()), theme);
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
     let mut lines = vec![metric_line(
@@ -584,18 +838,45 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
         theme,
     )];
     for stage in modal.stages() {
-        let marker = if modal.current_stage() == Some(stage.stage) && modal.spinner_visible() {
-            flux_frame(modal.spinner_tick()).to_string()
-        } else if stage.success == Some(true) {
-            "✓".to_string()
-        } else if stage.success == Some(false) {
-            "×".to_string()
-        } else {
-            "·".to_string()
-        };
-        lines.push(Line::from(format!(
-            "{marker} {}",
-            operation_stage_label(modal.operation(), stage.stage)
+        let (marker, style) =
+            if modal.current_stage() == Some(stage.stage) && modal.spinner_visible() {
+                (
+                    flux_frame(modal.spinner_tick()).to_string(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if stage.success == Some(true) {
+                (
+                    "✓".to_string(),
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if stage.success == Some(false) {
+                (
+                    "×".to_string(),
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("·".to_string(), Style::default().fg(theme.fg_muted))
+            };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{marker} {}",
+                operation_stage_label(modal.operation(), stage.stage)
+            ),
+            style,
+        )));
+    }
+    for warning in modal.warnings() {
+        lines.push(Line::from(Span::styled(
+            format!("Warning: {warning}"),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
         )));
     }
     let hook_height = usize::from(inner.height.saturating_sub(lines.len() as u16 + 3));
@@ -617,9 +898,14 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
     } = modal.status()
     {
         lines.push(Line::from(""));
-        lines.push(Line::from(format!(
-            "Failed at {}: {message}",
-            operation_stage_label(modal.operation(), *stage)
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Error: Failed at {}: {message}",
+                operation_stage_label(modal.operation(), *stage)
+            ),
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(format!(
             "Mutation: {}",
@@ -636,7 +922,7 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
         inner,
     );
     let items = match modal.status() {
@@ -645,16 +931,26 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
                 crate::operation::MutationState::NotStarted
                 | crate::operation::MutationState::RolledBack,
             ..
-        } => [("↑/↓", "output"), ("Enter", "back"), ("?", "help")].as_slice(),
-        ModalStatus::Failed { .. } => [("↑/↓", "output"), ("?", "help")].as_slice(),
-        ModalStatus::Running if !modal.mutation_started() => {
-            [("↑/↓", "output"), ("Esc", "cancel"), ("?", "help")].as_slice()
-        }
-        ModalStatus::Running | ModalStatus::Succeeded => {
-            [("↑/↓", "output"), ("?", "help")].as_slice()
-        }
+        } => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::primary("Enter", "back"),
+            KeyHint::secondary("?", "help"),
+        ],
+        ModalStatus::Failed { .. } => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::secondary("?", "help"),
+        ],
+        ModalStatus::Running if !modal.mutation_started() => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::secondary("Esc", "cancel"),
+            KeyHint::secondary("?", "help"),
+        ],
+        ModalStatus::Running | ModalStatus::Succeeded => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::secondary("?", "help"),
+        ],
     };
-    render_dialog_keybar(frame, footer, theme, items);
+    render_dialog_keybar(frame, footer, theme, &items);
 }
 
 fn mutation_state_label(state: crate::operation::MutationState) -> &'static str {
@@ -666,28 +962,134 @@ fn mutation_state_label(state: crate::operation::MutationState) -> &'static str 
     }
 }
 
-fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[(&str, &str)]) {
+#[derive(Clone, Copy)]
+enum KeyTone {
+    Secondary,
+    Primary,
+    Danger,
+    Disabled,
+}
+
+#[derive(Clone, Copy)]
+struct KeyHint<'a> {
+    key: &'a str,
+    action: &'a str,
+    tone: KeyTone,
+}
+
+impl<'a> KeyHint<'a> {
+    const fn secondary(key: &'a str, action: &'a str) -> Self {
+        Self {
+            key,
+            action,
+            tone: KeyTone::Secondary,
+        }
+    }
+
+    const fn primary(key: &'a str, action: &'a str) -> Self {
+        Self {
+            key,
+            action,
+            tone: KeyTone::Primary,
+        }
+    }
+
+    const fn danger(key: &'a str, action: &'a str) -> Self {
+        Self {
+            key,
+            action,
+            tone: KeyTone::Danger,
+        }
+    }
+
+    const fn disabled(key: &'a str, action: &'a str) -> Self {
+        Self {
+            key,
+            action,
+            tone: KeyTone::Disabled,
+        }
+    }
+}
+
+fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[KeyHint<'_>]) {
+    let mut visible = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            (
+                index,
+                format!(
+                    "[{}] {}",
+                    item.key,
+                    compact_key_action(item.action, area.width)
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    while keybar_width(&visible) > usize::from(area.width) {
+        let Some(position) = visible.iter().position(|(index, _)| {
+            let item = &items[*index];
+            matches!(item.tone, KeyTone::Secondary) && !matches!(item.key, "Esc" | "?")
+        }) else {
+            break;
+        };
+        visible.remove(position);
+    }
     let mut spans = Vec::new();
-    for (index, (key, action)) in items.iter().enumerate() {
-        if index > 0 {
+    for (position, (index, label)) in visible.into_iter().enumerate() {
+        if position > 0 {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled(
-            *key,
-            Style::default()
-                .fg(theme.selection_fg)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!(" {action}"),
-            Style::default().fg(theme.fg_muted),
-        ));
+        let item = &items[index];
+        let style = match item.tone {
+            KeyTone::Secondary => theme.with_bg(
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                theme.control_bg,
+            ),
+            KeyTone::Primary => theme.with_bg(
+                Style::default()
+                    .fg(theme.primary_fg)
+                    .add_modifier(Modifier::BOLD),
+                theme.primary_bg,
+            ),
+            KeyTone::Danger => theme.with_bg(
+                Style::default()
+                    .fg(theme.danger_fg)
+                    .add_modifier(Modifier::BOLD),
+                theme.danger_bg,
+            ),
+            KeyTone::Disabled => Style::default()
+                .fg(theme.disabled_fg)
+                .add_modifier(Modifier::DIM),
+        };
+        spans.push(Span::styled(label, style));
     }
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(Line::from(spans))
             .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
         area,
     );
+}
+
+fn compact_key_action(action: &str, width: u16) -> &str {
+    if width > Viewport::MIN_WIDTH {
+        return action;
+    }
+    match action {
+        "create (branch required)" => "create unavailable",
+        "sync (select a base)" => "sync unavailable",
+        "select (no matches)" => "select unavailable",
+        value => value,
+    }
+}
+
+fn keybar_width(items: &[(usize, String)]) -> usize {
+    items
+        .iter()
+        .map(|(_, label)| UnicodeWidthStr::width(label.as_str()))
+        .sum::<usize>()
+        + items.len().saturating_sub(1) * 2
 }
 
 fn operation_stage_label(operation: OperationKind, stage: OperationStage) -> &'static str {
@@ -768,6 +1170,7 @@ fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &The
             theme.selection_bg,
         ),
     )
+    .highlight_symbol("› ")
     .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel));
     let mut table_state = TableState::default();
     let selected = model
@@ -959,7 +1362,7 @@ fn render_help(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
         Context::Search => " Help · Search ",
         Context::Resize => " Help · Resize ",
     };
-    let block = panel(Some(title.to_string()), theme);
+    let block = active_panel(Some(title.to_string()), theme);
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
     if two_columns {
@@ -1025,6 +1428,26 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
                     ("?", "close help"),
                 ],
             )
+        } else if let Some(dialog) = state.remove_dialog.as_ref() {
+            let items = match dialog.mode() {
+                RemoveMode::Review | RemoveMode::Ready if dialog.can_delete_branch() => &[
+                    ("Space", "toggle local branch deletion"),
+                    ("Enter", "remove worktree"),
+                    ("Esc", "close"),
+                    ("?", "close help"),
+                ][..],
+                RemoveMode::Review | RemoveMode::Ready => &[
+                    ("Enter", "remove worktree"),
+                    ("Esc", "close"),
+                    ("?", "close help"),
+                ][..],
+                RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => &[
+                    ("Enter", "confirm removal"),
+                    ("Esc", "back"),
+                    ("?", "close help"),
+                ][..],
+            };
+            (" Help · Remove worktree ", items)
         } else if state
             .create_dialog
             .as_ref()
@@ -1059,7 +1482,7 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
         area,
     );
     frame.render_widget(Clear, dialog);
-    let block = panel(Some(title.to_string()), theme);
+    let block = active_panel(Some(title.to_string()), theme);
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
     let lines = items.iter().map(|(key, description)| {
@@ -1076,7 +1499,7 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
     frame.render_widget(
         Paragraph::new(lines.collect::<Vec<_>>())
             .wrap(Wrap { trim: true })
-            .style(theme.with_bg(Style::default(), theme.bg_panel)),
+            .style(theme.with_bg(Style::default(), theme.bg_elevated)),
         inner,
     );
 }
@@ -1091,25 +1514,32 @@ fn render_help_column(
     let lines = bindings.iter().map(|binding| {
         let reason = unavailable_reason(state, binding.action);
         let description = reason.unwrap_or(binding.description);
-        let style = if reason.is_some() {
-            Style::default().fg(theme.fg_muted)
+        let unavailable = reason.is_some();
+        let key_style = if unavailable {
+            Style::default()
+                .fg(theme.disabled_fg)
+                .add_modifier(Modifier::DIM)
+        } else {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        };
+        let description_style = if unavailable {
+            Style::default()
+                .fg(theme.disabled_fg)
+                .add_modifier(Modifier::DIM)
         } else {
             Style::default().fg(theme.fg)
         };
         Line::from(vec![
-            Span::styled(
-                format!("{:<8}", binding.label),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(description.to_string(), style),
+            Span::styled(format!("{:<8}", binding.label), key_style),
+            Span::styled(description.to_string(), description_style),
         ])
     });
     frame.render_widget(
         Paragraph::new(lines.collect::<Vec<_>>())
             .wrap(Wrap { trim: true })
-            .style(theme.with_bg(Style::default(), theme.bg_panel)),
+            .style(theme.with_bg(Style::default(), theme.bg_elevated)),
         area,
     );
 }
@@ -1118,7 +1548,28 @@ fn panel(title: Option<String>, theme: &Theme) -> Block<'static> {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
         .style(theme.with_bg(Style::default(), theme.bg_panel));
+    match title {
+        Some(title) => block.title(title),
+        None => block,
+    }
+}
+
+fn active_panel(title: Option<String>, theme: &Theme) -> Block<'static> {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_active))
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(theme.with_bg(Style::default(), theme.bg_elevated));
     match title {
         Some(title) => block.title(title),
         None => block,
@@ -1178,6 +1629,15 @@ fn metric_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
         ),
         Span::styled(value.to_string(), Style::default().fg(theme.fg)),
     ])
+}
+
+fn error_line(message: &str, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("Error: {message}"),
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 #[cfg(test)]
@@ -1258,6 +1718,21 @@ mod tests {
         lines(buffer).join("\n")
     }
 
+    fn find_text(buffer: &Buffer, needle: &str) -> (u16, u16) {
+        let width = u16::try_from(needle.chars().count()).expect("test text fits in u16");
+        for y in buffer.area.y..buffer.area.bottom() {
+            for x in buffer.area.x..buffer.area.right().saturating_sub(width) {
+                let candidate = (x..x + width)
+                    .map(|column| buffer.cell((column, y)).unwrap().symbol())
+                    .collect::<String>();
+                if candidate == needle {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("missing {needle:?}\n{}", text(buffer));
+    }
+
     #[test]
     fn resize_view_uses_strict_60_by_16_boundary() {
         let mut state = sample_state();
@@ -1268,12 +1743,72 @@ mod tests {
         assert!(width_tiny.contains("Resize terminal"), "{width_tiny}");
         assert!(width_tiny.contains("Current       59×16"), "{width_tiny}");
         assert!(width_tiny.contains("Minimum       60×16"), "{width_tiny}");
+        assert!(width_tiny.lines().last().unwrap().contains("[q] quit"));
+        assert!(!width_tiny.lines().last().unwrap().contains("help"));
         assert!(height_tiny.contains("Resize terminal"), "{height_tiny}");
         assert!(exact_minimum.contains("Worktrees · 2"), "{exact_minimum}");
         assert!(
             !exact_minimum.contains("Resize terminal"),
             "{exact_minimum}"
         );
+    }
+
+    #[test]
+    fn tiny_view_suppresses_dialogs_and_help_until_the_terminal_is_usable() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs,
+            [],
+        ));
+        state.help_open = true;
+
+        let output = text(&render_buffer(&mut state, 59, 16, "ops"));
+        assert!(output.contains("Resize terminal"), "{output}");
+        assert!(!output.contains("Create worktree"), "{output}");
+        assert!(!output.contains("Help ·"), "{output}");
+    }
+
+    #[test]
+    fn help_replaces_the_footer_and_dims_the_background() {
+        let mut state = sample_state();
+        state.help_open = true;
+        let theme = crate::tui::theme::from_name("ops");
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let footer = lines(&buffer).last().unwrap().trim_end().to_string();
+
+        assert_eq!(footer, "[?] close help");
+        assert_eq!(buffer.cell((0, 0)).unwrap().fg, theme.disabled_fg);
+    }
+
+    #[test]
+    fn unavailable_help_binding_mutes_both_the_key_and_reason() {
+        let main = identity("/repos/trench", "trench", Some("main"), true, true);
+        let id = main.id.clone();
+        let mut state = AppState::new(vec![main]);
+        state.statuses.insert(id, WorktreeStatus::default());
+        state.help_open = true;
+        let theme = crate::tui::theme::from_name("ops");
+
+        let buffer = render_buffer(&mut state, 120, 20, "ops");
+        let binding = find_text(&buffer, "d       The main worktree cannot be removed");
+        let key = buffer.cell(binding).unwrap();
+        let reason = buffer.cell((binding.0 + 8, binding.1)).unwrap();
+
+        assert_eq!(key.fg, theme.disabled_fg);
+        assert_eq!(reason.fg, theme.disabled_fg);
+        assert!(key.modifier.contains(Modifier::DIM));
     }
 
     #[test]
@@ -1393,6 +1928,7 @@ mod tests {
         let mut state = sample_state();
         let buffer = render_buffer(&mut state, 80, 20, "catppuccin");
         let theme = crate::tui::theme::from_name("catppuccin");
+        let output = text(&buffer);
         let selected_cells = buffer
             .content()
             .iter()
@@ -1401,6 +1937,37 @@ mod tests {
 
         assert!(selected_cells > 0);
         assert_ne!(theme.selection_bg, Color::Reset);
+        assert!(output.contains("› * feature-auth"), "{output}");
+    }
+
+    #[test]
+    fn selected_sync_strategy_has_a_distinct_surface_in_every_theme() {
+        use crate::{ref_catalog::RefSnapshot, tui::sync_flow::SyncDialog};
+
+        for theme_name in ["ops", "catppuccin", "gruvbox", "minimal"] {
+            let mut state = sample_state();
+            let target = state.identities[1].clone();
+            let refs = RefSnapshot::from_parts(
+                ["main", "release"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            );
+            state.sync_dialog = Some(SyncDialog::new(&target, refs, Some("release")));
+            let theme = crate::tui::theme::from_name(theme_name);
+            let buffer = render_buffer(&mut state, 100, 24, theme_name);
+            let selected = find_text(&buffer, "[● Rebase]");
+            let idle = find_text(&buffer, "[○ Merge]");
+
+            assert_eq!(buffer.cell(selected).unwrap().bg, theme.selection_bg);
+            assert_eq!(buffer.cell(idle).unwrap().bg, theme.control_bg);
+            assert_ne!(
+                buffer.cell(selected).unwrap().bg,
+                buffer.cell(idle).unwrap().bg,
+                "{theme_name} rendered selected and idle choices alike"
+            );
+        }
     }
 
     #[test]
@@ -1456,7 +2023,7 @@ mod tests {
         let output = text(&buffer);
         let footer = lines(&buffer).last().unwrap().trim_end().to_string();
         assert!(output.contains("Search"), "{output}");
-        assert!(output.contains("/ mai"), "{output}");
+        assert!(output.contains("> mai▌"), "{output}");
         assert!(output.contains("trench"), "{output}");
         assert!(!output.contains("feature-auth"), "{output}");
         assert!(footer.contains("Esc clear"), "{footer}");
@@ -1468,6 +2035,101 @@ mod tests {
         assert!(help.contains("Help · Search"), "{help}");
         assert!(!help.contains("c       create"), "{help}");
         assert!(!help.contains("r       refresh"), "{help}");
+    }
+
+    #[test]
+    fn empty_launcher_search_is_a_visible_focused_input() {
+        let mut state = sample_state();
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('/')));
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let output = text(&buffer);
+        let theme = crate::tui::theme::from_name("ops");
+        let placeholder = find_text(&buffer, "Type to filter worktrees");
+
+        assert!(output.contains("Search · typing"), "{output}");
+        assert!(output.contains("> Type to filter worktrees▌"), "{output}");
+        assert!(output.contains("2 results"), "{output}");
+        assert_eq!(buffer.cell(placeholder).unwrap().bg, theme.control_bg);
+        assert!(buffer
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "│" && cell.fg == theme.border_active));
+    }
+
+    #[test]
+    fn long_focused_inputs_keep_their_suffix_and_cursor_at_minimum_width() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let long_value = "feature/a-very-long-branch-name-that-keeps-going-past-the-control";
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch(long_value);
+        state.create_dialog = Some(dialog);
+
+        let create = text(&render_buffer(&mut state, 60, 16, "ops"));
+        assert!(create.contains("past-the-control▌"), "{create}");
+        assert!(create.contains("> …"), "{create}");
+
+        state.create_dialog = None;
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('/')));
+        let long_query = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        for character in long_query.chars() {
+            let _ = reduce(
+                &mut state,
+                Event::Input(crate::tui::keymap::Key::Char(character)),
+            );
+        }
+        let search = text(&render_buffer(&mut state, 60, 16, "ops"));
+        assert!(search.contains("xxxxxxxx▌"), "{search}");
+        assert!(search.contains("> …"), "{search}");
+    }
+
+    #[test]
+    fn wide_unicode_inputs_keep_their_cursor_at_minimum_width() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let long_value = "界".repeat(40);
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch(&long_value);
+        state.create_dialog = Some(dialog);
+
+        let create = text(&render_buffer(&mut state, 60, 16, "ops"));
+        let create_input = create
+            .lines()
+            .find(|line| line.contains("> …"))
+            .expect("ellipsized create input");
+        assert!(create_input.contains('▌'), "{create}");
+
+        state.create_dialog = None;
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('/')));
+        for character in long_value.chars() {
+            let _ = reduce(
+                &mut state,
+                Event::Input(crate::tui::keymap::Key::Char(character)),
+            );
+        }
+        let search = text(&render_buffer(&mut state, 60, 16, "ops"));
+        let search_input = search
+            .lines()
+            .find(|line| line.contains("> …"))
+            .expect("ellipsized search input");
+        assert!(search_input.contains('▌'), "{search}");
     }
 
     #[test]
@@ -1555,7 +2217,12 @@ mod tests {
             assert!(form.contains(expected), "missing {expected:?}\n{form}");
         }
         assert!(!form.contains("Hooks"), "{form}");
-        assert!(form.lines().last().unwrap().trim_end().ends_with("? help"));
+        assert!(form
+            .lines()
+            .last()
+            .unwrap()
+            .trim_end()
+            .ends_with("[?] help"));
 
         let dialog = state.create_dialog.as_mut().unwrap();
         dialog.handle_key(CreateKey::Tab);
@@ -1570,13 +2237,351 @@ mod tests {
             .last()
             .unwrap()
             .trim_end()
-            .ends_with("? help"));
+            .ends_with("[?] help"));
 
         state.help_open = true;
         let help = text(&render_buffer(&mut state, 100, 24, "ops"));
         assert!(help.contains("Help · Create worktree"), "{help}");
         assert!(help.contains("select base"), "{help}");
         assert!(!help.contains("Help · Worktrees"), "{help}");
+    }
+
+    #[test]
+    fn focused_create_branch_is_visibly_an_input_in_the_rendered_terminal() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/auth");
+        state.create_dialog = Some(dialog);
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let output = text(&buffer);
+        let theme = crate::tui::theme::from_name("ops");
+        let input_cell = buffer
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "f" && cell.bg == theme.control_bg)
+            .expect("typed branch should sit on a distinct input surface");
+
+        assert!(output.contains("Branch · typing"), "{output}");
+        assert!(output.contains("> feature/auth▌"), "{output}");
+        assert_eq!(input_cell.fg, theme.fg);
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "│" && cell.fg == theme.border_active),
+            "focused input should have an active border\n{output}"
+        );
+    }
+
+    #[test]
+    fn changed_form_errors_are_labeled_and_error_toned() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/auth");
+        dialog.set_validation_error(Some("branch changed while open".to_string()));
+        state.create_dialog = Some(dialog);
+        let theme = crate::tui::theme::from_name("ops");
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let error = find_text(&buffer, "Error: branch changed while open");
+        assert_eq!(buffer.cell(error).unwrap().fg, theme.error);
+    }
+
+    #[test]
+    fn selected_create_suggestions_and_base_candidates_have_a_selection_surface() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::create_flow::{CreateDialog, CreateKey},
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main", "release"],
+            ["origin/main", "origin/topic"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/auth");
+        state.create_dialog = Some(dialog);
+        let theme = crate::tui::theme::from_name("ops");
+
+        let suggestions = render_buffer(&mut state, 100, 24, "ops");
+        let suggestion = find_text(&suggestions, "› Create \"feature/auth\" as new branch");
+        assert_eq!(suggestions.cell(suggestion).unwrap().bg, theme.selection_bg);
+        assert_eq!(suggestions.cell(suggestion).unwrap().fg, theme.selection_fg);
+
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(CreateKey::Tab);
+        let candidates = render_buffer(&mut state, 100, 24, "ops");
+        let selected = find_text(&candidates, "› main");
+        let unselected = find_text(&candidates, "release");
+        assert_eq!(candidates.cell(selected).unwrap().bg, theme.selection_bg);
+        assert_eq!(candidates.cell(selected).unwrap().fg, theme.selection_fg);
+        assert_ne!(candidates.cell(unselected).unwrap().bg, theme.selection_bg);
+    }
+
+    #[test]
+    fn create_base_selector_and_picker_search_look_like_controls() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::create_flow::{CreateDialog, CreateKey},
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main", "release"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/auth");
+        state.create_dialog = Some(dialog);
+        let theme = crate::tui::theme::from_name("ops");
+
+        let form = render_buffer(&mut state, 100, 24, "ops");
+        let selector = find_text(&form, "[ origin/main  ▾ ]");
+        assert_eq!(
+            form.cell(selector).unwrap().bg,
+            theme.control_bg,
+            "base selector needs a distinct control surface\n{}",
+            text(&form)
+        );
+
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(CreateKey::Tab);
+        let picker = render_buffer(&mut state, 100, 24, "ops");
+        let placeholder = find_text(&picker, "Type to filter bases");
+        assert!(
+            text(&picker).contains("Search · typing"),
+            "{}",
+            text(&picker)
+        );
+        assert!(
+            text(&picker).contains("> Type to filter bases▌"),
+            "{}",
+            text(&picker)
+        );
+        assert_eq!(picker.cell(placeholder).unwrap().bg, theme.control_bg);
+    }
+
+    #[test]
+    fn dialog_keybar_replaces_the_cockpit_keybar_instead_of_leaking_through() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/auth");
+        state.create_dialog = Some(dialog);
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let footer = lines(&buffer).last().unwrap().trim_end().to_string();
+
+        assert_eq!(footer.matches("[?] help").count(), 1, "{footer}");
+        for leaked in ["s sync", "/ search", "r refresh", "i inspector", "q quit"] {
+            assert!(!footer.contains(leaked), "leaked {leaked:?}: {footer}");
+        }
+        assert_eq!(footer, "[Enter] create  [Tab] base  [Esc] close  [?] help");
+    }
+
+    #[test]
+    fn create_and_sync_keybars_distinguish_primary_and_disabled_actions() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::{create_flow::CreateDialog, sync_flow::SyncDialog},
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs,
+            [],
+        ));
+        let theme = crate::tui::theme::from_name("ops");
+
+        let disabled_create = render_buffer(&mut state, 100, 24, "ops");
+        let disabled = find_text(&disabled_create, "[Enter] create (branch required)");
+        assert_eq!(
+            disabled_create.cell(disabled).unwrap().fg,
+            theme.disabled_fg
+        );
+
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .set_branch("feature/auth");
+        let enabled_create = render_buffer(&mut state, 100, 24, "ops");
+        let primary = find_text(&enabled_create, "[Enter] create");
+        assert_eq!(
+            enabled_create.cell(primary).unwrap().bg,
+            Color::Rgb(240, 139, 101)
+        );
+        assert_eq!(
+            enabled_create.cell(primary).unwrap().fg,
+            Color::Rgb(20, 20, 19)
+        );
+
+        let target = state.identities[1].clone();
+        state.create_dialog = None;
+        state.sync_dialog = Some(SyncDialog::new(
+            &target,
+            RefSnapshot::from_parts(
+                std::iter::empty::<&str>(),
+                std::iter::empty::<&str>(),
+                None::<&str>,
+                None::<&str>,
+                false,
+            ),
+            None,
+        ));
+        let disabled_sync = render_buffer(&mut state, 100, 24, "ops");
+        let disabled = find_text(&disabled_sync, "[Enter] sync (select a base)");
+        assert_eq!(disabled_sync.cell(disabled).unwrap().fg, theme.disabled_fg);
+
+        state
+            .sync_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(crate::tui::sync_flow::SyncKey::Tab);
+        let empty_picker = render_buffer(&mut state, 100, 24, "ops");
+        let disabled = find_text(&empty_picker, "[Enter] select (no matches)");
+        assert_eq!(empty_picker.cell(disabled).unwrap().fg, theme.disabled_fg);
+    }
+
+    #[test]
+    fn create_sync_and_help_keep_controls_visible_at_exact_minimum_size() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::{
+                create_flow::CreateDialog,
+                sync_flow::{SyncDialog, SyncKey},
+            },
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main", "release"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut create = CreateDialog::new("trench", Path::new("/worktrees"), refs.clone(), []);
+        create.set_branch("feature/auth");
+        state.create_dialog = Some(create);
+
+        let create = text(&render_buffer(&mut state, 60, 16, "ops"));
+        for visible in ["Branch · typing", "[Enter] create", "[Esc] close"] {
+            assert!(create.contains(visible), "missing {visible:?}\n{create}");
+        }
+
+        let target = state.identities[1].clone();
+        let mut sync = SyncDialog::new(&target, refs, Some("main"));
+        state.create_dialog = None;
+        state.sync_dialog = Some(sync);
+        let sync_form = text(&render_buffer(&mut state, 60, 16, "ops"));
+        let sync_footer = sync_form.lines().last().unwrap().trim_end();
+        assert!(sync_footer.contains("[Enter] sync"), "{sync_form}");
+        assert!(
+            sync_footer.ends_with("[Esc] close  [?] help"),
+            "{sync_form}"
+        );
+
+        sync = state.sync_dialog.take().unwrap();
+        sync.handle_key(SyncKey::Tab);
+        state.sync_dialog = Some(sync);
+        let picker = text(&render_buffer(&mut state, 60, 16, "ops"));
+        for visible in ["Search · typing", "[Enter] select", "[Esc] back"] {
+            assert!(picker.contains(visible), "missing {visible:?}\n{picker}");
+        }
+
+        state.sync_dialog = None;
+        state.help_open = true;
+        let help = text(&render_buffer(&mut state, 60, 16, "ops"));
+        assert!(help.contains("Help · Worktrees"), "{help}");
+        assert!(help.lines().last().unwrap().contains("[?] close help"));
+    }
+
+    #[test]
+    fn active_dialog_has_a_high_contrast_border_and_title() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs,
+            [],
+        ));
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let theme = crate::tui::theme::from_name("ops");
+        let (title_x, title_y) = find_text(&buffer, "Create worktree");
+        let title = buffer.cell((title_x, title_y)).unwrap();
+        let border_x = (0..title_x)
+            .rev()
+            .find(|x| buffer.cell((*x, title_y)).unwrap().symbol() == "┌")
+            .expect("dialog top border");
+        let border = buffer.cell((border_x, title_y)).unwrap();
+        let blank_inner = buffer.cell((border_x + 2, title_y + 8)).unwrap();
+
+        assert_eq!(title.fg, theme.accent);
+        assert!(title.modifier.contains(Modifier::BOLD));
+        assert_eq!(border.fg, theme.border_active);
+        assert_ne!(border.bg, theme.bg_panel);
+        assert_eq!(blank_inner.bg, theme.bg_elevated);
+        assert_ne!(blank_inner.bg, theme.bg_panel);
     }
 
     #[test]
@@ -1617,7 +2622,12 @@ mod tests {
         ] {
             assert!(form.contains(expected), "missing {expected:?}\n{form}");
         }
-        assert!(form.lines().last().unwrap().trim_end().ends_with("? help"));
+        assert!(form
+            .lines()
+            .last()
+            .unwrap()
+            .trim_end()
+            .ends_with("[?] help"));
 
         state.sync_dialog.as_mut().unwrap().handle_key(SyncKey::Tab);
         let picker = text(&render_buffer(&mut state, 100, 24, "ops"));
@@ -1628,7 +2638,7 @@ mod tests {
             .last()
             .unwrap()
             .trim_end()
-            .ends_with("? help"));
+            .ends_with("[?] help"));
 
         state.help_open = true;
         let help = text(&render_buffer(&mut state, 100, 24, "ops"));
@@ -1656,7 +2666,45 @@ mod tests {
             .last()
             .unwrap()
             .trim_end()
-            .ends_with("? help"));
+            .ends_with("[?] help"));
+    }
+
+    #[test]
+    fn sync_base_strategy_and_picker_search_render_as_controls() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::sync_flow::{SyncDialog, SyncKey},
+        };
+
+        let mut state = sample_state();
+        let target = state.identities[1].clone();
+        let refs = RefSnapshot::from_parts(
+            ["main", "release"],
+            ["origin/main", "origin/topic"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        state.sync_dialog = Some(SyncDialog::new(&target, refs, Some("release")));
+        let theme = crate::tui::theme::from_name("ops");
+
+        let form = render_buffer(&mut state, 100, 24, "ops");
+        let base = find_text(&form, "[ release  ▾ ]");
+        let selected_strategy = find_text(&form, "[● Rebase]");
+        let other_strategy = find_text(&form, "[○ Merge]");
+        assert_eq!(form.cell(base).unwrap().bg, theme.control_bg);
+        assert_eq!(form.cell(selected_strategy).unwrap().bg, theme.selection_bg);
+        assert_eq!(form.cell(other_strategy).unwrap().bg, theme.control_bg);
+
+        state.sync_dialog.as_mut().unwrap().handle_key(SyncKey::Tab);
+        let picker = render_buffer(&mut state, 100, 24, "ops");
+        let placeholder = find_text(&picker, "Type to filter bases");
+        assert!(
+            text(&picker).contains("Search · typing"),
+            "{}",
+            text(&picker)
+        );
+        assert_eq!(picker.cell(placeholder).unwrap().bg, theme.control_bg);
     }
 
     #[test]
@@ -1686,7 +2734,8 @@ mod tests {
         modal.tick(Duration::from_millis(1_250));
         state.operation_modal = Some(modal);
 
-        let output = text(&render_buffer(&mut state, 100, 24, "ops"));
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let output = text(&buffer);
         assert!(output.contains("Create worktree"), "{output}");
         assert!(output.contains("Pre-create hook"), "{output}");
         assert!(output.contains("1.2s"), "{output}");
@@ -1697,12 +2746,56 @@ mod tests {
             .last()
             .unwrap()
             .trim_end()
-            .ends_with("? help"));
+            .ends_with("[?] help"));
 
         state.help_open = true;
         let help = text(&render_buffer(&mut state, 100, 24, "ops"));
         assert!(help.contains("Help · Operation"), "{help}");
         assert!(help.contains("scroll output"), "{help}");
+    }
+
+    #[test]
+    fn operation_modal_styles_success_failure_and_warning_states_semantically() {
+        use std::time::Duration;
+
+        use crate::{
+            operation::{OperationEvent, OperationKind, OperationStage},
+            tui::operation_modal::OperationModal,
+        };
+
+        let mut modal = OperationModal::new(OperationKind::Create);
+        modal.apply(OperationEvent::StageStarted {
+            stage: OperationStage::Revalidate,
+        });
+        modal.apply(OperationEvent::StageFinished {
+            stage: OperationStage::Revalidate,
+            duration: Duration::from_millis(10),
+            success: true,
+        });
+        modal.apply(OperationEvent::StageStarted {
+            stage: OperationStage::PreHook,
+        });
+        modal.apply(OperationEvent::StageFinished {
+            stage: OperationStage::PreHook,
+            duration: Duration::from_millis(10),
+            success: false,
+        });
+        modal.apply(OperationEvent::Warning {
+            stage: OperationStage::PostHook,
+            message: "cache cleanup failed".to_string(),
+        });
+        let mut state = sample_state();
+        state.operation_modal = Some(modal);
+        let theme = crate::tui::theme::from_name("ops");
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let success = find_text(&buffer, "✓ Revalidate");
+        let failure = find_text(&buffer, "× Pre-create hook");
+        let warning = find_text(&buffer, "Warning: cache cleanup failed");
+
+        assert_eq!(buffer.cell(success).unwrap().fg, theme.success);
+        assert_eq!(buffer.cell(failure).unwrap().fg, theme.error);
+        assert_eq!(buffer.cell(warning).unwrap().fg, theme.warning);
     }
 
     #[test]
@@ -1744,22 +2837,51 @@ mod tests {
         state.remove_dialog = Some(
             crate::tui::remove_flow::RemoveDialog::new(WorktreeId::new(&path), assessment).unwrap(),
         );
+        let theme = crate::tui::theme::from_name("ops");
 
-        let output = text(&render_buffer(&mut state, 100, 24, "ops"));
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let output = text(&buffer);
         assert!(
             output.contains("The worktree directory will be removed."),
             "{output}"
         );
         assert!(
-            output.contains("[ ] Also delete local branch feature"),
+            output.contains("› [ ] Also delete local branch feature"),
             "{output}"
         );
+        let checkbox = find_text(&buffer, "› [ ] Also delete local branch feature");
+        assert_eq!(buffer.cell(checkbox).unwrap().bg, theme.control_bg);
+        let destructive = find_text(&buffer, "[Enter] remove");
+        assert_eq!(buffer.cell(destructive).unwrap().bg, theme.danger_bg);
+        assert_eq!(buffer.cell(destructive).unwrap().fg, theme.danger_fg);
         assert!(!output.to_lowercase().contains("remote branch"), "{output}");
         assert!(output
             .lines()
             .last()
             .unwrap()
             .trim_end()
-            .ends_with("? help"));
+            .ends_with("[?] help"));
+
+        state
+            .remove_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(crate::tui::remove_flow::RemoveKey::Space);
+        let minimum = text(&render_buffer(&mut state, 60, 16, "ops"));
+        for visible in [
+            "Remove worktree",
+            "› [x] Also delete local branch feature",
+            "[Enter] remove",
+            "[Esc] close",
+        ] {
+            assert!(minimum.contains(visible), "missing {visible:?}\n{minimum}");
+        }
+
+        state.help_open = true;
+        let help = text(&render_buffer(&mut state, 100, 24, "ops"));
+        assert!(help.contains("Help · Remove worktree"), "{help}");
+        assert!(help.contains("toggle local branch deletion"), "{help}");
+        assert!(help.contains("remove worktree"), "{help}");
+        assert!(!help.contains("search branches"), "{help}");
     }
 }

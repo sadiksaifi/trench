@@ -695,6 +695,12 @@ pub fn run() -> Result<TuiExit> {
             {
                 break 'event_loop Ok(TuiExit::Quit);
             }
+            let Some(key) = visible_surface_key(&state, key) else {
+                continue;
+            };
+            if state.viewport.is_tiny() && key.code == KeyCode::Char('q') {
+                break 'event_loop Ok(TuiExit::Quit);
+            }
 
             if (state.operation_modal.is_some()
                 || state.create_dialog.is_some()
@@ -1009,6 +1015,10 @@ fn translate_key(key: KeyEvent) -> Option<Key> {
         KeyCode::Char(character) => Some(Key::Char(character)),
         _ => None,
     }
+}
+
+fn visible_surface_key(state: &AppState, key: KeyEvent) -> Option<KeyEvent> {
+    (!state.viewport.is_tiny() || key.code == KeyCode::Char('q')).then_some(key)
 }
 
 fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
@@ -2120,6 +2130,55 @@ mod tests {
         assert_eq!(
             dialog.validation_error(),
             Some("removal facts changed; review and confirm again")
+        );
+    }
+
+    #[test]
+    fn tiny_viewport_does_not_route_hidden_remove_confirmation_keys() {
+        let repository = init_repo();
+        let target_path = repository.path().join("worktrees").join("dirty");
+        add_worktree(repository.path(), "dirty", "dirty", &target_path);
+        std::fs::write(target_path.join("dirty.txt"), "dirty\n").unwrap();
+        let target = WorktreeIdentity {
+            id: WorktreeId::new(&target_path),
+            worktree: "dirty".to_string(),
+            branch: Some("dirty".to_string()),
+            path: target_path,
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+        };
+        let mut state = AppState::new(vec![target.clone()]);
+        open_remove_dialog(&mut state, repository.path(), &target.id, Some("main")).unwrap();
+        assert!(handle_remove_input(
+            &mut state,
+            RemoveKey::Enter,
+            repository.path(),
+            Some("main"),
+            None,
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            state.remove_dialog.as_ref().unwrap().mode(),
+            crate::tui::remove_flow::RemoveMode::ConfirmDirtyWorktree
+        );
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: 59,
+                height: 16,
+            },
+        );
+
+        let enter = KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE);
+        assert_eq!(visible_surface_key(&state, enter), None);
+        let quit = KeyEvent::new(KeyCode::Char('q'), crossterm::event::KeyModifiers::NONE);
+        assert_eq!(visible_surface_key(&state, quit), Some(quit));
+        assert_eq!(
+            state.remove_dialog.as_ref().unwrap().mode(),
+            crate::tui::remove_flow::RemoveMode::ConfirmDirtyWorktree
         );
     }
 

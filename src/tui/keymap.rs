@@ -116,20 +116,12 @@ const COCKPIT_BINDINGS: &[Binding] = &[
     },
 ];
 
-const RESIZE_BINDINGS: &[Binding] = &[
-    Binding {
-        keys: &[Key::Char('q')],
-        label: "q",
-        description: "quit",
-        action: Action::Quit,
-    },
-    Binding {
-        keys: &[Key::Char('?')],
-        label: "?",
-        description: "help",
-        action: Action::Help,
-    },
-];
+const RESIZE_BINDINGS: &[Binding] = &[Binding {
+    keys: &[Key::Char('q')],
+    label: "q",
+    description: "quit",
+    action: Action::Quit,
+}];
 
 const SEARCH_BINDINGS: &[Binding] = &[
     Binding {
@@ -261,7 +253,7 @@ mod tests {
 
     #[test]
     fn every_contextual_keybar_ends_with_help() {
-        for context in [Context::Cockpit, Context::Resize] {
+        for context in [Context::Cockpit, Context::Search] {
             for narrow in [false, true] {
                 let items = keybar_bindings(context, narrow);
                 assert_eq!(
@@ -273,12 +265,12 @@ mod tests {
     }
 
     #[test]
-    fn resize_context_has_only_quit_and_help() {
+    fn resize_context_has_only_quit() {
         let actions = bindings(Context::Resize)
             .iter()
             .map(|binding| binding.action)
             .collect::<Vec<_>>();
-        assert_eq!(actions, [Action::Quit, Action::Help]);
+        assert_eq!(actions, [Action::Quit]);
     }
 
     #[test]

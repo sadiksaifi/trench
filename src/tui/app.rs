@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn tiny_view_routes_only_quit_and_help() {
+    fn tiny_view_routes_only_quit() {
         let row = identity("/worktrees/alpha", "alpha");
         let mut state = AppState::new(vec![row]);
         let _ = reduce(
@@ -585,8 +585,8 @@ mod tests {
             reduce(&mut state, Event::Input(Key::Char('q'))),
             vec![Effect::Quit]
         );
-        let _ = reduce(&mut state, Event::Input(Key::Char('?')));
-        assert!(state.help_open);
+        assert!(reduce(&mut state, Event::Input(Key::Char('?'))).is_empty());
+        assert!(!state.help_open);
     }
 
     #[test]
