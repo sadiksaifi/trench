@@ -2771,6 +2771,30 @@ mod tests {
     }
 
     #[test]
+    fn create_base_step_visibly_highlights_the_exact_remote_default_alias() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            RefSnapshot::from_parts(
+                ["alpha", "main"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            [],
+        ));
+
+        let output = text(&render_buffer(&mut state, 80, 20, "ops"));
+        assert!(output.contains("› origin/main"), "{output}");
+        assert!(!output.contains("› alpha"), "{output}");
+        assert!(!output.contains("› main"), "{output}");
+    }
+
+    #[test]
     fn create_name_step_explains_each_branch_outcome_and_action() {
         use crate::{
             ref_catalog::RefSnapshot,

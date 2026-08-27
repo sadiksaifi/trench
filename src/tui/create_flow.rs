@@ -776,6 +776,32 @@ mod tests {
     }
 
     #[test]
+    fn deduplicated_remote_default_is_the_exact_base_used_by_submission() {
+        let refs = RefSnapshot::from_parts(
+            ["alpha", "main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+
+        assert_eq!(
+            dialog.base_candidates()[dialog.base_selection()].name,
+            "origin/main"
+        );
+        assert_eq!(dialog.handle_key(CreateKey::Enter), None);
+        dialog.set_branch("feature/auth");
+        assert_eq!(
+            dialog.handle_key(CreateKey::Enter),
+            Some(CreateEffect::Submit(CreateSubmission {
+                branch: "feature/auth".to_string(),
+                from: Some("origin/main".to_string()),
+            }))
+        );
+    }
+
+    #[test]
     fn base_picker_transforms_in_place_and_keeps_stale_refs_on_fetch_failure() {
         let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs(), []);
         dialog.set_branch("feature/auth");

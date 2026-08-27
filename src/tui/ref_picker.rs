@@ -41,7 +41,7 @@ impl RefPicker {
         let selection = selected
             .as_deref()
             .and_then(|selected| {
-                refs.candidates()
+                picker_candidates(&refs, Some(selected))
                     .iter()
                     .position(|candidate| candidate.name == selected)
             })
@@ -61,8 +61,7 @@ impl RefPicker {
     }
 
     pub fn candidates(&self) -> Vec<RefCandidate> {
-        self.refs
-            .candidates()
+        picker_candidates(&self.refs, self.selected.as_deref())
             .into_iter()
             .filter(|candidate| fuzzy_matches(&candidate.name, self.query.value()))
             .collect()
@@ -188,6 +187,20 @@ impl RefPicker {
     }
 }
 
+fn picker_candidates(refs: &RefSnapshot, preferred: Option<&str>) -> Vec<RefCandidate> {
+    let mut candidates = refs.candidates();
+    if let Some(preferred) = preferred.filter(|preferred| preferred.starts_with("origin/")) {
+        if refs.resolve(preferred).is_some()
+            && !candidates
+                .iter()
+                .any(|candidate| candidate.name == preferred)
+        {
+            candidates.push(RefCandidate::remote(preferred));
+        }
+    }
+    candidates
+}
+
 fn fuzzy_matches(candidate: &str, query: &str) -> bool {
     if query.is_empty() {
         return true;
@@ -283,6 +296,44 @@ mod tests {
                 .map(|candidate| candidate.name.as_str())
                 .collect::<Vec<_>>(),
             ["release"]
+        );
+    }
+
+    #[test]
+    fn origin_head_alias_remains_visible_and_submits_the_exact_remote_base() {
+        let refs = RefSnapshot::from_parts(
+            ["alpha", "main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut picker = RefPicker::new(refs, None);
+
+        let selected = &picker.candidates()[picker.selection()];
+        assert_eq!(selected.name, "origin/main");
+        assert_eq!(
+            picker.handle_key(RefPickerKey::Enter),
+            Some(RefPickerEffect::Selected("origin/main".to_string()))
+        );
+    }
+
+    #[test]
+    fn explicit_remote_alias_remains_visible_when_the_local_name_exists() {
+        let refs = RefSnapshot::from_parts(
+            ["alpha", "release"],
+            ["origin/release"],
+            Some("origin/release"),
+            Some("release"),
+            true,
+        );
+        let mut picker = RefPicker::new(refs, Some("origin/release"));
+
+        let selected = &picker.candidates()[picker.selection()];
+        assert_eq!(selected.name, "origin/release");
+        assert_eq!(
+            picker.handle_key(RefPickerKey::Enter),
+            Some(RefPickerEffect::Selected("origin/release".to_string()))
         );
     }
 }
