@@ -456,7 +456,7 @@ fn render_create_dialog(
             let mut lines = Vec::new();
             if let Some(preview) = dialog.preview() {
                 if preview.base_visible {
-                    lines.push(metric_line(
+                    lines.push(selector_line(
                         "Create from",
                         preview.base.as_deref().unwrap_or("Select a base"),
                         theme,
@@ -519,7 +519,17 @@ fn render_create_dialog(
             let block = active_panel(Some(" Create worktree · Select base ".to_string()), theme);
             let inner = block.inner(modal);
             frame.render_widget(block, modal);
-            let mut lines = vec![metric_line("Search", dialog.base_query(), theme)];
+            let [search_input, options] =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
+            render_text_input(
+                frame,
+                search_input,
+                "Search",
+                dialog.base_query(),
+                "Type to filter bases",
+                theme,
+            );
+            let mut lines = Vec::new();
             if dialog.origin_spinner_visible() {
                 lines.push(Line::from(format!(
                     "Updating origin {}",
@@ -548,7 +558,7 @@ fn render_create_dialog(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
                     .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
-                inner,
+                options,
             );
             render_dialog_keybar(
                 frame,
@@ -590,13 +600,31 @@ fn render_text_input(
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )
-        .style(theme.with_bg(Style::default(), theme.bg_elevated));
+        .style(theme.with_bg(Style::default(), theme.control_bg));
     frame.render_widget(
         Paragraph::new(content)
             .block(block)
-            .style(theme.with_bg(Style::default(), theme.bg_elevated)),
+            .style(theme.with_bg(Style::default(), theme.control_bg)),
         area,
     );
+}
+
+fn selector_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<14}"),
+            Style::default()
+                .fg(theme.fg_muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("[ {value}  ▾ ]"),
+            theme.with_bg(
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                theme.control_bg,
+            ),
+        ),
+    ])
 }
 
 fn selectable_line(label: &str, selected: bool, width: u16, theme: &Theme) -> Line<'static> {
@@ -1755,6 +1783,54 @@ mod tests {
         assert_eq!(candidates.cell(selected).unwrap().bg, theme.selection_bg);
         assert_eq!(candidates.cell(selected).unwrap().fg, theme.selection_fg);
         assert_ne!(candidates.cell(unselected).unwrap().bg, theme.selection_bg);
+    }
+
+    #[test]
+    fn create_base_selector_and_picker_search_look_like_controls() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::create_flow::{CreateDialog, CreateKey},
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main", "release"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/auth");
+        state.create_dialog = Some(dialog);
+
+        let form = render_buffer(&mut state, 100, 24, "ops");
+        let selector = find_text(&form, "[ origin/main  ▾ ]");
+        assert_eq!(
+            form.cell(selector).unwrap().bg,
+            Color::Rgb(50, 46, 41),
+            "base selector needs a distinct control surface\n{}",
+            text(&form)
+        );
+
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(CreateKey::Tab);
+        let picker = render_buffer(&mut state, 100, 24, "ops");
+        let placeholder = find_text(&picker, "Type to filter bases");
+        assert!(
+            text(&picker).contains("Search · typing"),
+            "{}",
+            text(&picker)
+        );
+        assert!(
+            text(&picker).contains("> Type to filter bases▌"),
+            "{}",
+            text(&picker)
+        );
+        assert_eq!(picker.cell(placeholder).unwrap().bg, Color::Rgb(50, 46, 41));
     }
 
     #[test]
