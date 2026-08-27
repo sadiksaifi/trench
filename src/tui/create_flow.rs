@@ -51,6 +51,7 @@ pub struct CreatePreview {
 pub enum BranchSuggestionKind {
     Local,
     Remote,
+    CheckedOut,
     New,
 }
 
@@ -188,16 +189,65 @@ impl CreateDialog {
             .candidates()
             .into_iter()
             .filter(|candidate| fuzzy_matches(&candidate.name, query))
-            .map(|candidate| BranchSuggestion {
-                label: candidate.name.clone(),
-                selection: candidate.name,
-                kind: match candidate.kind {
-                    RefKind::Local => BranchSuggestionKind::Local,
-                    RefKind::Remote => BranchSuggestionKind::Remote,
-                },
+            .map(|candidate| {
+                let branch = candidate
+                    .name
+                    .strip_prefix("origin/")
+                    .unwrap_or(&candidate.name);
+                let kind = if self
+                    .checked_out
+                    .iter()
+                    .any(|checked_out| checked_out.branch == branch)
+                {
+                    BranchSuggestionKind::CheckedOut
+                } else {
+                    match candidate.kind {
+                        RefKind::Local => BranchSuggestionKind::Local,
+                        RefKind::Remote => BranchSuggestionKind::Remote,
+                    }
+                };
+                BranchSuggestion {
+                    label: format!("{}  · {}", candidate.name, suggestion_outcome(kind)),
+                    selection: candidate.name,
+                    kind,
+                }
             })
             .collect::<Vec<_>>();
-        if !query.is_empty() {
+        let suggested_branches = suggestions
+            .iter()
+            .map(|suggestion| {
+                suggestion
+                    .selection
+                    .strip_prefix("origin/")
+                    .unwrap_or(&suggestion.selection)
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        suggestions.extend(
+            self.checked_out
+                .iter()
+                .filter(|checked_out| fuzzy_matches(&checked_out.branch, query))
+                .filter(|checked_out| {
+                    !suggested_branches
+                        .iter()
+                        .any(|branch| branch == &checked_out.branch)
+                })
+                .map(|checked_out| BranchSuggestion {
+                    label: format!(
+                        "{}  · {}",
+                        checked_out.branch,
+                        suggestion_outcome(BranchSuggestionKind::CheckedOut)
+                    ),
+                    selection: checked_out.branch.clone(),
+                    kind: BranchSuggestionKind::CheckedOut,
+                }),
+        );
+        if !query.is_empty()
+            && matches!(
+                self.preview().map(|preview| preview.kind),
+                Some(BranchKind::New)
+            )
+        {
             suggestions.push(BranchSuggestion {
                 label: format!("Create \"{query}\" as new branch"),
                 selection: query.to_string(),
@@ -254,6 +304,13 @@ impl CreateDialog {
         }
     }
 
+    pub fn activate_visible_row(&mut self, index: usize) {
+        self.select_visible_row(index);
+        if self.mode == CreateMode::Name {
+            self.apply_branch_suggestion();
+        }
+    }
+
     pub fn set_origin_refresh(&mut self, refresh: OriginRefresh) {
         self.base_picker.set_origin_refresh(refresh);
     }
@@ -261,6 +318,16 @@ impl CreateDialog {
     pub fn update_refs(&mut self, refs: RefSnapshot) {
         self.base_picker.update_refs(refs.clone());
         self.refs = refs;
+        self.branch_selection = self
+            .branch_selection
+            .min(self.branch_suggestions().len().saturating_sub(1));
+    }
+
+    pub fn update_checked_out<I>(&mut self, checked_out: I)
+    where
+        I: IntoIterator<Item = CheckedOutBranch>,
+    {
+        self.checked_out = checked_out.into_iter().collect();
         self.branch_selection = self
             .branch_selection
             .min(self.branch_suggestions().len().saturating_sub(1));
@@ -329,14 +396,7 @@ impl CreateDialog {
                 self.validation_error = None;
             }
             CreateKey::Tab => {
-                if let Some(selection) = self
-                    .branch_suggestions()
-                    .get(self.branch_selection)
-                    .map(|suggestion| suggestion.selection.clone())
-                {
-                    self.branch = LineInput::from(selection.as_str());
-                    self.validation_error = None;
-                }
+                self.apply_branch_suggestion();
             }
             CreateKey::Enter => {
                 let preview = self.preview()?;
@@ -366,6 +426,18 @@ impl CreateDialog {
             }
         }
         None
+    }
+
+    fn apply_branch_suggestion(&mut self) {
+        if let Some(selection) = self
+            .branch_suggestions()
+            .get(self.branch_selection)
+            .map(|suggestion| suggestion.selection.clone())
+        {
+            self.branch = LineInput::from(selection.as_str());
+            self.branch_selection = 0;
+            self.validation_error = None;
+        }
     }
 
     fn handle_base_picker_key(&mut self, key: CreateKey) -> Option<CreateEffect> {
@@ -423,6 +495,15 @@ impl CreateDialog {
             return (selection.to_string(), BranchKind::Remote { upstream });
         }
         (selection.to_string(), BranchKind::New)
+    }
+}
+
+fn suggestion_outcome(kind: BranchSuggestionKind) -> &'static str {
+    match kind {
+        BranchSuggestionKind::Local => "use local branch",
+        BranchSuggestionKind::Remote => "track remote branch",
+        BranchSuggestionKind::CheckedOut => "already checked out",
+        BranchSuggestionKind::New => "create new branch",
     }
 }
 
@@ -564,12 +645,74 @@ mod tests {
                 .iter()
                 .map(|suggestion| suggestion.label.as_str())
                 .collect::<Vec<_>>(),
-            ["origin/topic/two", "Create \"ttwo\" as new branch"]
+            [
+                "origin/topic/two  · track remote branch",
+                "Create \"ttwo\" as new branch"
+            ]
         );
         assert_eq!(
             suggestions.last().map(|suggestion| &suggestion.kind),
             Some(&BranchSuggestionKind::New)
         );
+    }
+
+    #[test]
+    fn exact_branch_matches_show_one_truthful_outcome_without_create_new() {
+        let checked_out = CheckedOutBranch::new(
+            "release",
+            WorktreeId::new("/worktrees/trench/release"),
+            "/worktrees/trench/release",
+        );
+        let mut dialog =
+            CreateDialog::new("trench", Path::new("/worktrees"), refs(), [checked_out]);
+
+        for (query, expected_kind, outcome) in [
+            ("main", BranchSuggestionKind::Local, "use local branch"),
+            (
+                "origin/topic/two",
+                BranchSuggestionKind::Remote,
+                "track remote branch",
+            ),
+            (
+                "topic/two",
+                BranchSuggestionKind::Remote,
+                "track remote branch",
+            ),
+            (
+                "release",
+                BranchSuggestionKind::CheckedOut,
+                "already checked out",
+            ),
+        ] {
+            dialog.set_branch(query);
+            let suggestions = dialog.branch_suggestions();
+            assert_eq!(suggestions.len(), 1, "{query}: {suggestions:?}");
+            assert_eq!(suggestions[0].kind, expected_kind);
+            assert!(suggestions[0].label.contains(outcome));
+            assert!(!suggestions[0].label.contains("Create"));
+        }
+    }
+
+    #[test]
+    fn live_checked_out_snapshot_changes_preview_truth_without_reopening() {
+        let mut dialog = CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs(),
+            [] as [CheckedOutBranch; 0],
+        );
+        dialog.set_branch("release");
+        assert_eq!(dialog.preview().unwrap().kind, BranchKind::Local);
+
+        let checked_out =
+            CheckedOutBranch::new("release", WorktreeId::new("/live/release"), "/live/release");
+        dialog.update_checked_out([checked_out.clone()]);
+        let preview = dialog.preview().unwrap();
+        assert_eq!(preview.kind, BranchKind::CheckedOut { id: checked_out.id });
+        assert_eq!(preview.path, checked_out.path);
+
+        dialog.update_checked_out([] as [CheckedOutBranch; 0]);
+        assert_eq!(dialog.preview().unwrap().kind, BranchKind::Local);
     }
 
     #[test]

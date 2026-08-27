@@ -1093,10 +1093,20 @@ fn apply_refresh_publication(state: &mut AppState, publication: RefreshPublicati
         OriginRefresh::Idle
     };
     let _ = app::reduce(state, Event::RefreshPublished(publication));
+    let checked_out = state
+        .identities
+        .iter()
+        .filter_map(|identity| {
+            identity.branch.as_ref().map(|branch| {
+                CheckedOutBranch::new(branch, identity.id.clone(), identity.path.clone())
+            })
+        })
+        .collect::<Vec<_>>();
     if let Some(dialog) = state.create_dialog.as_mut() {
         if let Some(refs) = refs.clone() {
             dialog.update_refs(refs);
         }
+        dialog.update_checked_out(checked_out);
         dialog.set_origin_refresh(origin_refresh);
     }
     if let Some(dialog) = state.sync_dialog.as_mut() {
@@ -1199,7 +1209,7 @@ fn route_create_mouse(
         MouseEventKind::Down(MouseButton::Left) => match hits.target_at(point) {
             Some(cockpit::CreateHitTarget::Input) => CreateMouseEffect::Handled,
             Some(cockpit::CreateHitTarget::Row(index)) => {
-                dialog.select_visible_row(index);
+                dialog.activate_visible_row(index);
                 CreateMouseEffect::Handled
             }
             Some(cockpit::CreateHitTarget::Back) => CreateMouseEffect::Key(CreateKey::Escape),
@@ -1610,6 +1620,68 @@ mod tests {
             ),
             CreateMouseEffect::Ignored
         );
+    }
+
+    #[test]
+    fn clicking_a_name_match_applies_that_outcome_before_cta_activation() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let checked_out = CheckedOutBranch::new(
+            "release",
+            WorktreeId::new("/worktrees/trench/release"),
+            "/worktrees/trench/release",
+        );
+        let mut dialog = CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            RefSnapshot::from_parts(
+                ["main", "release"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            [checked_out],
+        );
+        dialog.set_branch("re");
+        let area = Rect::new(0, 0, 80, 20);
+        let row = cockpit::create_hit_map(&dialog, area).rows[0];
+        assert_eq!(
+            route_create_mouse(
+                &mut dialog,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: row.x,
+                    row: row.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                area,
+            ),
+            CreateMouseEffect::Handled
+        );
+        assert_eq!(dialog.branch(), "release");
+        assert!(matches!(
+            dialog.preview().map(|preview| preview.kind),
+            Some(crate::tui::create_flow::BranchKind::CheckedOut { .. })
+        ));
+
+        let cta = cockpit::create_hit_map(&dialog, area).cta;
+        let routed = route_create_mouse(
+            &mut dialog,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: cta.x,
+                row: cta.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        );
+        assert_eq!(routed, CreateMouseEffect::Key(CreateKey::Enter));
+        assert!(matches!(
+            dialog.handle_key(CreateKey::Enter),
+            Some(CreateEffect::Navigate(_))
+        ));
     }
 
     #[test]
