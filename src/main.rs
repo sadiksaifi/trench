@@ -1011,7 +1011,8 @@ fn run_sync(
         cli::commands::sync::stateless::HookPolicy::Run
     };
     let emitter = CliSyncEmitter::default();
-    let plan = cli::commands::sync::stateless::plan_after_best_effort_origin_fetch(
+    let planning_started = std::time::Instant::now();
+    let plan = match cli::commands::sync::stateless::plan_after_best_effort_origin_fetch(
         &cwd,
         resolved.git.default_base.as_deref(),
         identifier,
@@ -1019,7 +1020,16 @@ fn run_sync(
         stateless_strategy,
         hook_policy,
         &emitter,
-    )?;
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return report_sync_failure(
+                &error.into_failure(planning_started.elapsed()),
+                emitter.stages(),
+                json,
+            )
+        }
+    };
     let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
     match rt.block_on(cli::commands::sync::stateless::execute(
         plan,
@@ -1062,6 +1072,21 @@ struct SyncSuccessOutput<'a> {
     after: &'a cli::commands::sync::stateless::AheadBehind,
     mutation_state: cli::commands::sync::stateless::MutationState,
     stages: Vec<SyncStageOutput>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SyncFailureOutput<'a> {
+    ok: bool,
+    failure: SyncFailureDetail<'a>,
+    stages: Vec<SyncStageOutput>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SyncFailureDetail<'a> {
+    stage: cli::commands::sync::stateless::SyncStage,
+    mutation_state: cli::commands::sync::stateless::MutationState,
+    class: cli::commands::sync::stateless::SyncErrorClass,
+    message: &'a str,
 }
 
 impl<'a> SyncSuccessOutput<'a> {
@@ -1122,10 +1147,70 @@ impl cli::commands::sync::stateless::SyncEmitter for CliSyncEmitter {
 
 fn report_sync_failure(
     failure: &cli::commands::sync::stateless::SyncFailure,
-    _stages: Vec<SyncStageOutput>,
-    _json: bool,
+    stages: Vec<SyncStageOutput>,
+    json: bool,
 ) -> anyhow::Result<()> {
-    Err(anyhow::anyhow!(failure.to_string()))
+    use cli::commands::sync::stateless::SyncErrorClass;
+
+    logging::record(logging::DiagnosticEvent::error(
+        logging::Operation::Sync,
+        sync_diagnostic_stage(failure.stage),
+        failure.elapsed,
+        match failure.class {
+            SyncErrorClass::InvalidTarget => logging::DiagnosticError::NotFound,
+            SyncErrorClass::InvalidBase
+            | SyncErrorClass::Dirty
+            | SyncErrorClass::Detached
+            | SyncErrorClass::OperationInProgress
+            | SyncErrorClass::PreconditionsChanged
+            | SyncErrorClass::Conflict => logging::DiagnosticError::InvalidInput,
+            SyncErrorClass::Git | SyncErrorClass::Rollback => logging::DiagnosticError::Git,
+            SyncErrorClass::Hook | SyncErrorClass::HookTimeout => logging::DiagnosticError::Hook,
+        },
+    ));
+    if json {
+        println!(
+            "{}",
+            output::json::format_json_value(&SyncFailureOutput {
+                ok: false,
+                failure: SyncFailureDetail {
+                    stage: failure.stage,
+                    mutation_state: failure.mutation_state,
+                    class: failure.class,
+                    message: &failure.message,
+                },
+                stages,
+            })?
+        );
+    } else {
+        eprintln!("error: {}", failure.message);
+    }
+    match failure.class {
+        SyncErrorClass::InvalidTarget => ExitCode::NotFound,
+        SyncErrorClass::Git | SyncErrorClass::Rollback => ExitCode::GitError,
+        SyncErrorClass::Hook => ExitCode::HookFailed,
+        SyncErrorClass::HookTimeout => ExitCode::HookTimeout,
+        SyncErrorClass::InvalidBase
+        | SyncErrorClass::Dirty
+        | SyncErrorClass::Detached
+        | SyncErrorClass::OperationInProgress
+        | SyncErrorClass::PreconditionsChanged
+        | SyncErrorClass::Conflict => ExitCode::GeneralError,
+    }
+    .exit()
+}
+
+fn sync_diagnostic_stage(
+    stage: cli::commands::sync::stateless::SyncStage,
+) -> logging::Stage {
+    match stage {
+        cli::commands::sync::stateless::SyncStage::Fetch => logging::Stage::Resolve,
+        cli::commands::sync::stateless::SyncStage::Validate => logging::Stage::Validate,
+        cli::commands::sync::stateless::SyncStage::PreHook
+        | cli::commands::sync::stateless::SyncStage::PostHook => logging::Stage::Hook,
+        cli::commands::sync::stateless::SyncStage::Sync
+        | cli::commands::sync::stateless::SyncStage::Rollback => logging::Stage::Git,
+    }
 }
 
 fn run_sync_all(

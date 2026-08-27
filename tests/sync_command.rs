@@ -172,3 +172,38 @@ fn real_rebase_json_reports_the_atomic_outcome_and_stages() {
         })
     );
 }
+
+#[test]
+fn dirty_target_json_is_structured_and_reports_no_mutation() {
+    let (root, worktree) = repository();
+    fs::write(worktree.join("dirty"), "local\n").unwrap();
+
+    let output = trench(
+        &worktree,
+        root.path(),
+        &[
+            "sync",
+            "feature/topic",
+            "--strategy",
+            "merge",
+            "--no-hooks",
+            "--json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        serde_json::json!({
+            "ok": false,
+            "failure": {
+                "stage": "validate",
+                "mutation_state": "not_started",
+                "class": "dirty",
+                "message": "worktree 'feature-topic' has uncommitted changes; commit or stash them before syncing"
+            },
+            "stages": []
+        })
+    );
+}
