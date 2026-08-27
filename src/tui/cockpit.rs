@@ -373,7 +373,7 @@ fn render_resize(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
             .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg)),
         body,
     );
-    render_keybar(model.state, frame, keybar, theme, Context::Resize, true);
+    render_dialog_keybar(frame, keybar, theme, &[KeyHint::secondary("q", "quit")]);
 }
 
 fn render_cockpit(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
@@ -1743,6 +1743,8 @@ mod tests {
         assert!(width_tiny.contains("Resize terminal"), "{width_tiny}");
         assert!(width_tiny.contains("Current       59×16"), "{width_tiny}");
         assert!(width_tiny.contains("Minimum       60×16"), "{width_tiny}");
+        assert!(width_tiny.lines().last().unwrap().contains("[q] quit"));
+        assert!(!width_tiny.lines().last().unwrap().contains("help"));
         assert!(height_tiny.contains("Resize terminal"), "{height_tiny}");
         assert!(exact_minimum.contains("Worktrees · 2"), "{exact_minimum}");
         assert!(

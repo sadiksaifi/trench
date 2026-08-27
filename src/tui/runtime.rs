@@ -695,12 +695,12 @@ pub fn run() -> Result<TuiExit> {
             {
                 break 'event_loop Ok(TuiExit::Quit);
             }
-            if state.viewport.is_tiny() && key.code == KeyCode::Char('q') {
-                break 'event_loop Ok(TuiExit::Quit);
-            }
             let Some(key) = visible_surface_key(&state, key) else {
                 continue;
             };
+            if state.viewport.is_tiny() && key.code == KeyCode::Char('q') {
+                break 'event_loop Ok(TuiExit::Quit);
+            }
 
             if (state.operation_modal.is_some()
                 || state.create_dialog.is_some()
@@ -1018,7 +1018,7 @@ fn translate_key(key: KeyEvent) -> Option<Key> {
 }
 
 fn visible_surface_key(state: &AppState, key: KeyEvent) -> Option<KeyEvent> {
-    (!state.viewport.is_tiny()).then_some(key)
+    (!state.viewport.is_tiny() || key.code == KeyCode::Char('q')).then_some(key)
 }
 
 fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
@@ -2174,6 +2174,8 @@ mod tests {
 
         let enter = KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE);
         assert_eq!(visible_surface_key(&state, enter), None);
+        let quit = KeyEvent::new(KeyCode::Char('q'), crossterm::event::KeyModifiers::NONE);
+        assert_eq!(visible_surface_key(&state, quit), Some(quit));
         assert_eq!(
             state.remove_dialog.as_ref().unwrap().mode(),
             crate::tui::remove_flow::RemoveMode::ConfirmDirtyWorktree
