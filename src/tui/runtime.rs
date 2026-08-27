@@ -255,6 +255,7 @@ fn translate_key(key: KeyEvent) -> Option<Key> {
         KeyCode::Esc => Some(Key::Escape),
         KeyCode::Up => Some(Key::Up),
         KeyCode::Down => Some(Key::Down),
+        KeyCode::Backspace => Some(Key::Backspace),
         KeyCode::Char(character) => Some(Key::Char(character)),
         _ => None,
     }
@@ -370,6 +371,13 @@ mod tests {
                 crossterm::event::KeyModifiers::NONE,
             )),
             Some(Key::Char('?'))
+        );
+        assert_eq!(
+            translate_key(KeyEvent::new(
+                KeyCode::Backspace,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            Some(Key::Backspace)
         );
         assert_eq!(
             translate_key(KeyEvent::new(
