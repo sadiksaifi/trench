@@ -354,6 +354,23 @@ impl RemovalAssessment {
         self.authorize_inner(options, Some(receipt))
     }
 
+    /// Authorize an accepted in-process cockpit confirmation.
+    ///
+    /// This is crate-private so external and headless callers still cannot
+    /// forge an interactive receipt. The cockpit owns the terminal event loop
+    /// and separately confirms each elevated risk before calling this method.
+    pub(crate) fn authorize_cockpit(
+        self,
+        mut options: RemoveOptions,
+    ) -> Result<RemovalPlan, RemovalAuthorizationError> {
+        options.yes = false;
+        let expected = self.clone();
+        self.authorize_inner(
+            options,
+            Some(InteractiveConfirmationReceipt { expected }),
+        )
+    }
+
     fn authorize_inner(
         self,
         options: RemoveOptions,

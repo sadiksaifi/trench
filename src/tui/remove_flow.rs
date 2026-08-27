@@ -17,6 +17,19 @@ pub enum RemoveMode {
     Ready,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveKey {
+    Enter,
+    Escape,
+    Space,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveEffect {
+    Close,
+    Submit,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RemoveFlowError {
     #[error("no worktree is selected")]
@@ -41,7 +54,7 @@ pub struct RemoveTarget {
     pub merged: Option<bool>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveDialog {
     target: RemoveTarget,
     assessment: RemovalAssessment,
@@ -49,6 +62,7 @@ pub struct RemoveDialog {
     dirty_confirmed: bool,
     unmerged_confirmed: bool,
     mode: RemoveMode,
+    validation_error: Option<String>,
 }
 
 impl RemoveDialog {
@@ -84,6 +98,7 @@ impl RemoveDialog {
             dirty_confirmed: false,
             unmerged_confirmed: false,
             mode: RemoveMode::Review,
+            validation_error: None,
         })
     }
 
@@ -97,6 +112,14 @@ impl RemoveDialog {
 
     pub fn delete_branch(&self) -> bool {
         self.delete_branch
+    }
+
+    pub fn validation_error(&self) -> Option<&str> {
+        self.validation_error.as_deref()
+    }
+
+    pub fn set_validation_error(&mut self, error: Option<String>) {
+        self.validation_error = error;
     }
 
     pub fn can_delete_branch(&self) -> bool {
@@ -139,15 +162,59 @@ impl RemoveDialog {
         self.mode = RemoveMode::Review;
     }
 
-    pub fn into_request(
-        mut self,
+    pub fn handle_key(&mut self, key: RemoveKey) -> Option<RemoveEffect> {
+        match (self.mode, key) {
+            (RemoveMode::Review, RemoveKey::Escape) => Some(RemoveEffect::Close),
+            (RemoveMode::Review, RemoveKey::Space) => {
+                self.toggle_delete_branch();
+                None
+            }
+            (RemoveMode::Review, RemoveKey::Enter) => {
+                (self.begin_submit() == RemoveMode::Ready).then_some(RemoveEffect::Submit)
+            }
+            (
+                RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch,
+                RemoveKey::Escape,
+            ) => {
+                self.cancel_confirmation();
+                None
+            }
+            (
+                RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch,
+                RemoveKey::Enter,
+            ) => (self.confirm_current_risk() == RemoveMode::Ready)
+                .then_some(RemoveEffect::Submit),
+            (RemoveMode::Ready, RemoveKey::Enter) => Some(RemoveEffect::Submit),
+            (RemoveMode::Ready, RemoveKey::Escape) => {
+                self.mode = RemoveMode::Review;
+                None
+            }
+            (_, RemoveKey::Space) => None,
+        }
+    }
+
+    pub fn revalidate_request(
+        &mut self,
+        cwd: &Path,
+        configured_base: Option<&str>,
         hooks: Option<HooksConfig>,
     ) -> Result<OperationRequest, RemoveFlowError> {
+        let assessment = RemovalAssessment::discover(
+            cwd,
+            &self.target.id.as_path().to_string_lossy(),
+            configured_base,
+        )?;
+        self.target.worktree = assessment.worktree().to_string();
+        self.target.branch = assessment.branch().map(ToOwned::to_owned);
+        self.target.detached = assessment.detached();
+        self.target.dirty = assessment.dirty();
+        self.target.merged = assessment.merged();
+        self.assessment = assessment;
         if self.begin_submit() != RemoveMode::Ready {
             return Err(RemoveFlowError::ConfirmationRequired);
         }
         let options = RemoveOptions {
-            yes: true,
+            yes: false,
             force_worktree: self.target.dirty && self.dirty_confirmed,
             delete_branch: self.delete_branch,
             force_branch: self.delete_branch
@@ -156,7 +223,7 @@ impl RemoveDialog {
             no_hooks: false,
             dry_run: false,
         };
-        let plan = self.assessment.authorize(options)?;
+        let plan = self.assessment.clone().authorize_cockpit(options)?;
         Ok(OperationRequest::Remove(RemoveRequest { plan, hooks }))
     }
 }
@@ -329,7 +396,7 @@ mod tests {
             RemoveMode::ConfirmUnmergedBranch
         );
         assert!(matches!(
-            dialog.into_request(None),
+            dialog.revalidate_request(fixture.root.path(), Some("main"), None),
             Err(RemoveFlowError::ConfirmationRequired)
         ));
 
@@ -342,7 +409,9 @@ mod tests {
         dialog.begin_submit();
         dialog.confirm_current_risk();
         assert_eq!(dialog.confirm_current_risk(), RemoveMode::Ready);
-        let request = dialog.into_request(None).unwrap();
+        let request = dialog
+            .revalidate_request(fixture.root.path(), Some("main"), None)
+            .unwrap();
         assert!(matches!(request, OperationRequest::Remove(_)));
     }
 
@@ -358,7 +427,9 @@ mod tests {
         dialog.toggle_delete_branch();
         assert_eq!(dialog.begin_submit(), RemoveMode::Ready);
 
-        let request = dialog.into_request(None).unwrap();
+        let request = dialog
+            .revalidate_request(fixture.root.path(), Some("main"), None)
+            .unwrap();
         let OperationRequest::Remove(request) = request else {
             panic!("remove flow must construct the shared remove request")
         };
@@ -367,5 +438,55 @@ mod tests {
         assert_eq!(value["force_worktree"], false);
         assert_eq!(value["force_branch"], false);
         assert_eq!(value["hook_policy"], "run");
+        assert_eq!(value["confirmation"], "interactive");
+    }
+
+    #[test]
+    fn final_revalidation_requires_a_new_dirty_confirmation_before_request_construction() {
+        let fixture = Fixture::new("changes-late");
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        assert_eq!(dialog.handle_key(RemoveKey::Enter), Some(RemoveEffect::Submit));
+        std::fs::write(fixture.worktree_path.join("late.txt"), "late\n").unwrap();
+
+        assert!(matches!(
+            dialog.revalidate_request(fixture.root.path(), Some("main"), None),
+            Err(RemoveFlowError::ConfirmationRequired)
+        ));
+        assert_eq!(dialog.mode(), RemoveMode::ConfirmDirtyWorktree);
+        assert_eq!(dialog.handle_key(RemoveKey::Enter), Some(RemoveEffect::Submit));
+        let OperationRequest::Remove(request) = dialog
+            .revalidate_request(fixture.root.path(), Some("main"), None)
+            .unwrap()
+        else {
+            panic!("expected remove request")
+        };
+        let value = serde_json::to_value(request.plan).unwrap();
+        assert_eq!(value["force_worktree"], true);
+        assert_eq!(value["force_branch"], false);
+        assert_eq!(value["confirmation"], "interactive");
+    }
+
+    #[test]
+    fn escape_cancels_only_the_current_risk_and_space_controls_only_local_branch_deletion() {
+        let fixture = Fixture::new("keys");
+        std::fs::write(fixture.worktree_path.join("dirty.txt"), "dirty\n").unwrap();
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+
+        assert!(!dialog.delete_branch());
+        assert_eq!(dialog.handle_key(RemoveKey::Space), None);
+        assert!(dialog.delete_branch());
+        assert_eq!(dialog.handle_key(RemoveKey::Enter), None);
+        assert_eq!(dialog.mode(), RemoveMode::ConfirmDirtyWorktree);
+        assert_eq!(dialog.handle_key(RemoveKey::Escape), None);
+        assert_eq!(dialog.mode(), RemoveMode::Review);
+        assert!(dialog.delete_branch());
     }
 }
