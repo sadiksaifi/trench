@@ -5,6 +5,7 @@ pub mod create_flow;
 pub mod keymap;
 pub mod operation_modal;
 pub mod operation_runtime;
+pub mod ref_picker;
 pub mod refresh;
 pub mod refresh_runtime;
 pub mod runtime;

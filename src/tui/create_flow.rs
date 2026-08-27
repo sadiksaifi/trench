@@ -3,8 +3,13 @@ use std::path::{Path, PathBuf};
 use crate::{
     paths,
     ref_catalog::{RefKind, RefSnapshot},
-    tui::app::WorktreeId,
+    tui::{
+        app::WorktreeId,
+        ref_picker::{RefPicker, RefPickerEffect, RefPickerKey},
+    },
 };
+
+pub use crate::tui::ref_picker::OriginRefresh;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedOutBranch {
@@ -55,22 +60,10 @@ pub struct BranchSuggestion {
     pub kind: BranchSuggestionKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BaseCandidate {
-    pub name: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateMode {
     Form,
     BasePicker,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OriginRefresh {
-    Idle,
-    Loading,
-    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,15 +96,11 @@ pub struct CreateDialog {
     repository: String,
     worktree_root: PathBuf,
     refs: RefSnapshot,
-    configured_base: Option<String>,
     checked_out: Vec<CheckedOutBranch>,
     branch: String,
     branch_selection: usize,
-    selected_base: Option<String>,
-    base_query: String,
-    base_selection: usize,
+    base_picker: RefPicker,
     mode: CreateMode,
-    origin_refresh: OriginRefresh,
     validation_error: Option<String>,
 }
 
@@ -138,20 +127,15 @@ impl CreateDialog {
     where
         I: IntoIterator<Item = CheckedOutBranch>,
     {
-        let selected_base = refs.default_base(configured_base).ok();
         Self {
             repository: repository.into(),
             worktree_root: worktree_root.to_path_buf(),
+            base_picker: RefPicker::new(refs.clone(), configured_base),
             refs,
-            configured_base: configured_base.map(ToOwned::to_owned),
             checked_out: checked_out.into_iter().collect(),
             branch: String::new(),
             branch_selection: 0,
-            selected_base,
-            base_query: String::new(),
-            base_selection: 0,
             mode: CreateMode::Form,
-            origin_refresh: OriginRefresh::Idle,
             validation_error: None,
         }
     }
@@ -186,7 +170,9 @@ impl CreateDialog {
             worktree,
             path,
             kind,
-            base: base_visible.then(|| self.selected_base.clone()).flatten(),
+            base: base_visible
+                .then(|| self.base_picker.selected().map(ToOwned::to_owned))
+                .flatten(),
             base_visible,
         })
     }
@@ -218,8 +204,7 @@ impl CreateDialog {
     }
 
     pub fn open_base_picker(&mut self) {
-        self.base_query.clear();
-        self.base_selection = 0;
+        self.base_picker.open();
         self.mode = CreateMode::BasePicker;
     }
 
@@ -240,42 +225,31 @@ impl CreateDialog {
     }
 
     pub fn base_query(&self) -> &str {
-        &self.base_query
+        self.base_picker.query()
     }
 
     pub fn base_selection(&self) -> usize {
-        self.base_selection
+        self.base_picker.selection()
     }
 
     pub fn set_origin_refresh(&mut self, refresh: OriginRefresh) {
-        self.origin_refresh = refresh;
+        self.base_picker.set_origin_refresh(refresh);
     }
 
     pub fn update_refs(&mut self, refs: RefSnapshot) {
-        let selected_still_exists = self
-            .selected_base
-            .as_deref()
-            .and_then(|base| refs.resolve(base))
-            .is_some();
-        if !selected_still_exists {
-            self.selected_base = refs.default_base(self.configured_base.as_deref()).ok();
-        }
+        self.base_picker.update_refs(refs.clone());
         self.refs = refs;
         self.branch_selection = self
             .branch_selection
             .min(self.branch_suggestions().len().saturating_sub(1));
-        self.base_selection = self
-            .base_selection
-            .min(self.base_candidates().len().saturating_sub(1));
     }
 
     pub fn origin_spinner_visible(&self) -> bool {
-        self.origin_refresh == OriginRefresh::Loading
+        self.base_picker.origin_spinner_visible()
     }
 
     pub fn warning(&self) -> Option<&'static str> {
-        (self.origin_refresh == OriginRefresh::Failed)
-            .then_some("Could not update origin; showing local and stale refs")
+        self.base_picker.warning()
     }
 
     pub fn validation_error(&self) -> Option<&str> {
@@ -304,15 +278,8 @@ impl CreateDialog {
         }
     }
 
-    pub fn base_candidates(&self) -> Vec<BaseCandidate> {
-        self.refs
-            .candidates()
-            .into_iter()
-            .filter(|candidate| fuzzy_matches(&candidate.name, &self.base_query))
-            .map(|candidate| BaseCandidate {
-                name: candidate.name,
-            })
-            .collect()
+    pub fn base_candidates(&self) -> Vec<crate::ref_catalog::RefCandidate> {
+        self.base_picker.candidates()
     }
 
     pub fn handle_key(&mut self, key: CreateKey) -> Option<CreateEffect> {
@@ -379,29 +346,23 @@ impl CreateDialog {
     fn handle_base_picker_key(&mut self, key: CreateKey) -> Option<CreateEffect> {
         match key {
             CreateKey::Character(character) => {
-                self.base_query.push(character);
-                self.base_selection = 0;
+                self.base_picker
+                    .handle_key(RefPickerKey::Character(character));
             }
             CreateKey::Backspace => {
-                self.base_query.pop();
-                self.base_selection = 0;
+                self.base_picker.handle_key(RefPickerKey::Backspace);
             }
             CreateKey::Up => {
-                self.base_selection = self.base_selection.saturating_sub(1);
+                self.base_picker.handle_key(RefPickerKey::Up);
             }
             CreateKey::Down => {
-                self.base_selection = self
-                    .base_selection
-                    .saturating_add(1)
-                    .min(self.base_candidates().len().saturating_sub(1));
+                self.base_picker.handle_key(RefPickerKey::Down);
             }
             CreateKey::Enter => {
-                let selected = self
-                    .base_candidates()
-                    .get(self.base_selection)
-                    .map(|candidate| candidate.name.clone());
-                if let Some(selected) = selected {
-                    self.selected_base = Some(selected);
+                if matches!(
+                    self.base_picker.handle_key(RefPickerKey::Enter),
+                    Some(RefPickerEffect::Selected(_))
+                ) {
                     self.validation_error = None;
                     self.close_base_picker();
                 }
