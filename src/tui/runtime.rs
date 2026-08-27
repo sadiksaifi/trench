@@ -416,6 +416,39 @@ fn finish_create_success(
     }
 }
 
+fn finish_sync_success(
+    state: &mut AppState,
+    refresh: &mut impl PostOperationRefresh,
+    outcome: crate::cli::commands::sync::stateless::SyncOutcome,
+    shown_at: Instant,
+) {
+    let refresh_result = refresh.request_post_operation();
+    let summary = format!(
+        "Synced {} via {} onto {}",
+        outcome.target, outcome.strategy, outcome.base
+    );
+    let (message, warning) = match refresh_result.as_ref() {
+        Ok(()) => (summary, None),
+        Err(error) => {
+            let warning = format!("{summary}, but refresh failed; press r to refresh: {error}");
+            (warning.clone(), Some(warning))
+        }
+    };
+    let _ = app::reduce(
+        state,
+        Event::OperationSucceeded {
+            select: Some(WorktreeId::new(outcome.path)),
+            message,
+            shown_at,
+        },
+    );
+    if refresh_result.is_ok() {
+        refresh.apply_publications(state);
+    } else {
+        state.refresh.warning = warning;
+    }
+}
+
 fn return_to_create_form(
     state: &mut AppState,
     cwd: &Path,
@@ -441,6 +474,25 @@ fn return_to_create_form(
             Err(error) => Some(error.to_string()),
         };
     if let Some(dialog) = state.create_dialog.as_mut() {
+        dialog.set_validation_error(validation_error);
+    }
+}
+
+fn return_to_sync_form(
+    state: &mut AppState,
+    cwd: &Path,
+    configured_base: Option<&str>,
+    hooks: Option<HooksConfig>,
+) {
+    state.operation_modal = None;
+    state.help_open = false;
+    let Some(submission) = state.sync_dialog.as_ref().and_then(SyncDialog::submission) else {
+        return;
+    };
+    let validation_error = build_sync_request(&submission, cwd, configured_base, hooks)
+        .err()
+        .map(|error| error.to_string());
+    if let Some(dialog) = state.sync_dialog.as_mut() {
         dialog.set_validation_error(validation_error);
     }
 }
@@ -474,8 +526,9 @@ pub fn run() -> Result<TuiExit> {
                         operation.dismiss();
                         finish_create_success(&mut state, &mut refresh, outcome, Instant::now());
                     }
-                    OperationRuntimeEffect::Succeeded(OperationOutcome::Sync(_)) => {
+                    OperationRuntimeEffect::Succeeded(OperationOutcome::Sync(outcome)) => {
                         operation.dismiss();
+                        finish_sync_success(&mut state, &mut refresh, outcome, Instant::now());
                     }
                     OperationRuntimeEffect::Succeeded(OperationOutcome::Remove(_)) => {
                         operation.dismiss();
@@ -548,16 +601,25 @@ pub fn run() -> Result<TuiExit> {
                     Some(ModalEffect::ReturnToForm) => {
                         operation.dismiss();
                         if let Err(error) = refresh.post_operation() {
-                            tracing::warn!(%error, "failed to refresh before create revalidation");
+                            tracing::warn!(%error, "failed to refresh before operation revalidation");
                         }
                         apply_refresh_publications(&mut refresh, &mut state);
-                        return_to_create_form(
-                            &mut state,
-                            &cwd,
-                            &resolved.worktrees.root,
-                            resolved.git.default_base.as_deref(),
-                            resolved.hooks.clone(),
-                        );
+                        if state.sync_dialog.is_some() {
+                            return_to_sync_form(
+                                &mut state,
+                                &cwd,
+                                resolved.git.default_base.as_deref(),
+                                resolved.hooks.clone(),
+                            );
+                        } else {
+                            return_to_create_form(
+                                &mut state,
+                                &cwd,
+                                &resolved.worktrees.root,
+                                resolved.git.default_base.as_deref(),
+                                resolved.hooks.clone(),
+                            );
+                        }
                     }
                     None => {}
                 }
@@ -1573,6 +1635,181 @@ mod tests {
     }
 
     #[test]
+    fn sync_success_refreshes_comparisons_keeps_filtered_selection_and_notifies() {
+        let target = WorktreeIdentity {
+            id: WorktreeId::new("/worktrees/feature-auth"),
+            worktree: "feature-auth".to_string(),
+            branch: Some("feature/auth".to_string()),
+            path: PathBuf::from("/worktrees/feature-auth"),
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+        };
+        let refs = RefSnapshot::from_parts(
+            ["main", "feature/auth"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        );
+        let mut state = AppState::new(vec![target.clone()]);
+        state.statuses.insert(target.id.clone(), Default::default());
+        state.refs = Some(refs.clone());
+        let _ = app::reduce(&mut state, Event::Input(Key::Char('/')));
+        for character in "auth".chars() {
+            let _ = app::reduce(&mut state, Event::Input(Key::Char(character)));
+        }
+        state.sync_dialog = Some(SyncDialog::new(&target, refs.clone(), Some("main")));
+        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
+            crate::operation::OperationKind::Sync,
+        ));
+        let refreshed_status = crate::tui::app::WorktreeStatus {
+            ahead: Some(0),
+            behind: Some(0),
+            ..Default::default()
+        };
+        let publication = RefreshPublication {
+            identities: vec![target.clone()],
+            refs: Some(refs),
+            statuses: BTreeMap::from([(target.id.clone(), refreshed_status.clone())]),
+            waiting_rows: BTreeSet::new(),
+            updating_refs: false,
+            warning: None,
+        };
+        let mut refresh = SuccessfulPostOperationRefresh::new(publication);
+        let shown_at = Instant::now();
+
+        finish_sync_success(
+            &mut state,
+            &mut refresh,
+            crate::cli::commands::sync::stateless::SyncOutcome {
+                target: target.worktree.clone(),
+                branch: "feature/auth".to_string(),
+                path: target.path.clone(),
+                base: "main".to_string(),
+                strategy: crate::cli::commands::sync::stateless::SyncStrategy::Rebase,
+                before: crate::cli::commands::sync::stateless::AheadBehind {
+                    ahead: 1,
+                    behind: 2,
+                },
+                after: crate::cli::commands::sync::stateless::AheadBehind {
+                    ahead: 0,
+                    behind: 0,
+                },
+                mutation_state: crate::cli::commands::sync::stateless::MutationState::Applied,
+                elapsed: std::time::Duration::from_millis(12),
+            },
+            shown_at,
+        );
+
+        assert!(refresh.requested);
+        assert_eq!(state.statuses.get(&target.id), Some(&refreshed_status));
+        assert_eq!(
+            state.selected_visible().map(|row| &row.id),
+            Some(&target.id)
+        );
+        assert_eq!(
+            state.search.as_ref().map(|query| query.as_str()),
+            Some("auth")
+        );
+        assert!(state.sync_dialog.is_none());
+        assert!(state.operation_modal.is_none());
+        assert!(state
+            .notification
+            .as_ref()
+            .is_some_and(|notice| { notice.text == "Synced feature-auth via rebase onto main" }));
+    }
+
+    #[test]
+    fn failed_sync_enter_returns_to_form_and_revalidates_live_dirty_state() {
+        let repository = init_repo();
+        let worktree_path = repository.path().join("worktrees/feature-auth");
+        add_worktree(
+            repository.path(),
+            "feature/auth",
+            "feature-auth",
+            &worktree_path,
+        );
+        let target_path = worktree_path.canonicalize().unwrap();
+        let target = WorktreeIdentity {
+            id: WorktreeId::new(target_path.clone()),
+            worktree: "feature-auth".to_string(),
+            branch: Some("feature/auth".to_string()),
+            path: target_path,
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+        };
+        let mut state = AppState::new(vec![target.clone()]);
+        state.statuses.insert(target.id.clone(), Default::default());
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main", "feature/auth"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        ));
+        open_sync_dialog(&mut state, &target.id, Some("main")).unwrap();
+        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
+            crate::operation::OperationKind::Sync,
+        ));
+        std::fs::write(worktree_path.join("dirty.txt"), "dirty").unwrap();
+
+        return_to_sync_form(&mut state, repository.path(), Some("main"), None);
+
+        assert!(state.operation_modal.is_none());
+        let error = state
+            .sync_dialog
+            .as_ref()
+            .and_then(SyncDialog::validation_error)
+            .expect("live dirty target should fail revalidation");
+        assert!(error.to_lowercase().contains("uncommitted"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn temp_repo_sync_request_executes_through_the_shared_operation_adapter() {
+        let repository = init_repo();
+        let worktree_path = repository.path().join("worktrees/feature-auth");
+        add_worktree(
+            repository.path(),
+            "feature/auth",
+            "feature-auth",
+            &worktree_path,
+        );
+        let target_path = worktree_path.canonicalize().unwrap();
+        let request = build_sync_request(
+            &SyncSubmission {
+                target: WorktreeId::new(target_path.clone()),
+                base: "main".to_string(),
+                strategy: crate::cli::commands::sync::stateless::SyncStrategy::Rebase,
+            },
+            repository.path(),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        let emitter = crate::operation::RecordingEmitter::default();
+
+        let outcome = crate::operation::execute(request, &emitter).await.unwrap();
+
+        assert!(matches!(
+            outcome,
+            OperationOutcome::Sync(ref outcome) if outcome.path == target_path
+        ));
+        assert!(emitter
+            .events()
+            .contains(&crate::operation::OperationEvent::MutationStarted));
+        assert!(emitter.events().iter().any(|event| matches!(
+            event,
+            crate::operation::OperationEvent::StageStarted {
+                stage: crate::operation::OperationStage::Sync
+            }
+        )));
+    }
+
+    #[test]
     fn dialog_registry_is_a_replaceable_operation_seam() {
         let mut dialogs = DialogRegistry::default();
         dialogs.register(DialogRequest::Create);
@@ -1624,6 +1861,31 @@ mod tests {
     #[derive(Default)]
     struct FailingPostOperationRefresh {
         requested: bool,
+    }
+
+    struct SuccessfulPostOperationRefresh {
+        requested: bool,
+        publication: Option<RefreshPublication>,
+    }
+
+    impl SuccessfulPostOperationRefresh {
+        fn new(publication: RefreshPublication) -> Self {
+            Self {
+                requested: false,
+                publication: Some(publication),
+            }
+        }
+    }
+
+    impl PostOperationRefresh for SuccessfulPostOperationRefresh {
+        fn request_post_operation(&mut self) -> Result<()> {
+            self.requested = true;
+            Ok(())
+        }
+
+        fn apply_publications(&mut self, state: &mut AppState) {
+            apply_refresh_publication(state, self.publication.take().unwrap());
+        }
     }
 
     impl PostOperationRefresh for FailingPostOperationRefresh {
