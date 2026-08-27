@@ -69,7 +69,6 @@ pub enum Effect {
     OpenCreate,
     OpenSync(WorktreeId),
     OpenRemove(WorktreeId),
-    OpenSearch,
     Refresh,
     Quit,
     Unavailable { action: Action, reason: String },
