@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::{Command, Output};
 
 fn trench(args: &[&str]) -> Output {
@@ -5,6 +6,25 @@ fn trench(args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("trench should run")
+}
+
+#[test]
+fn product_source_has_no_trench_owned_state() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for retired in ["src/state/mod.rs", "src/adopt.rs", "src/live_worktree.rs"] {
+        assert!(
+            !root.join(retired).exists(),
+            "retired source remains: {retired}"
+        );
+    }
+
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    for retired in ["rusqlite", "rusqlite_migration"] {
+        assert!(
+            !manifest.contains(retired),
+            "retired dependency remains: {retired}"
+        );
+    }
 }
 
 fn help(command: &str) -> String {

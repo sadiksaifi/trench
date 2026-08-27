@@ -1,20 +1,15 @@
-mod adopt;
 mod cli;
 mod config;
 mod create_plan;
 mod exit_code;
 mod git;
 mod hooks;
-mod live_worktree;
 mod logging;
 mod navigation;
 mod operation;
 mod output;
 mod paths;
-mod process;
 mod ref_catalog;
-mod state;
-mod tmux;
 mod tui;
 mod worktree_catalog;
 mod worktree_policy;
@@ -323,23 +318,6 @@ fn format_switch_hint() -> &'static str {
     "hint: a child process cannot change its parent shell; use `tn switch <worktree>` to cd"
 }
 
-fn existing_db_path() -> anyhow::Result<Option<std::path::PathBuf>> {
-    let path = paths::runtime_database_file_path()?;
-    if path.exists() {
-        Ok(Some(path))
-    } else {
-        Ok(None)
-    }
-}
-
-fn runtime_db_path() -> anyhow::Result<std::path::PathBuf> {
-    if let Some(existing) = existing_db_path()? {
-        Ok(existing)
-    } else {
-        paths::runtime_database_file_path()
-    }
-}
-
 fn run_create(
     branch: &str,
     from: Option<&str>,
@@ -458,9 +436,6 @@ fn run_remove(
             ExitCode::GeneralError.exit();
         }
     };
-    if let Some(warning) = process::format_process_warning(&assessment.path().to_string_lossy()) {
-        eprintln!("{warning}");
-    }
     let options = RemoveOptions {
         yes,
         force_worktree,
@@ -603,6 +578,7 @@ fn run_open(identifier: &str) -> anyhow::Result<()> {
     cli::commands::open::execute(identifier, &cwd, editor_command.as_deref())
 }
 
+#[cfg(any())]
 fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = runtime_db_path()?;
@@ -613,6 +589,7 @@ fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(any())]
 fn run_log(
     branch: Option<&str>,
     tail: Option<usize>,
@@ -757,6 +734,7 @@ fn run_list(json: bool, porcelain: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(any())]
 fn run_status(
     branch: Option<&str>,
     json: bool,
@@ -1085,6 +1063,7 @@ fn sync_diagnostic_stage(stage: cli::commands::sync::stateless::SyncStage) -> lo
     }
 }
 
+#[cfg(any())]
 fn run_sync_all(
     strategy: SyncStrategy,
     json: bool,
