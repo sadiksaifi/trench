@@ -538,7 +538,7 @@ fn render_create_dialog(
             }
             if let Some(warning) = dialog.warning() {
                 lines.push(Line::from(Span::styled(
-                    warning.to_string(),
+                    head_ellipsize(warning, usize::from(layout.options.width)),
                     Style::default().fg(theme.warning),
                 )));
             }
@@ -584,20 +584,32 @@ fn render_create_dialog(
             let preview = dialog.preview();
             let mut lines = Vec::new();
             if let Some(preview) = preview.as_ref() {
-                lines.push(metric_line(
+                lines.push(create_metric_line(
                     "Outcome",
                     create_outcome_label(&preview.kind),
+                    layout.options.width,
                     theme,
                 ));
                 if preview.base_visible {
-                    lines.push(metric_line(
+                    lines.push(create_metric_line(
                         "Base",
                         preview.base.as_deref().unwrap_or("Unavailable"),
+                        layout.options.width,
                         theme,
                     ));
                 }
-                lines.push(metric_line("Worktree", &preview.worktree, theme));
-                lines.push(metric_line("Path", &preview.path.to_string_lossy(), theme));
+                lines.push(create_metric_line(
+                    "Worktree",
+                    &preview.worktree,
+                    layout.options.width,
+                    theme,
+                ));
+                lines.push(create_metric_line(
+                    "Path",
+                    &preview.path.to_string_lossy(),
+                    layout.options.width,
+                    theme,
+                ));
             } else {
                 lines.push(Line::from(Span::styled(
                     "Enter a branch name to continue",
@@ -607,7 +619,7 @@ fn render_create_dialog(
                 )));
             }
             if let Some(error) = dialog.validation_error() {
-                lines.push(error_line(error, theme));
+                lines.push(create_error_line(error, layout.options.width, theme));
             }
             lines.extend(create_row_window(dialog, layout.options).map(|index| {
                 selectable_line(
@@ -1058,6 +1070,31 @@ fn tail_ellipsize(value: &str, width: usize) -> String {
     format!("…{}", tail.concat())
 }
 
+fn head_ellipsize(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    let budget = width - 1;
+    let mut used = 0;
+    let mut head = String::new();
+    for grapheme in value.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used + grapheme_width > budget {
+            break;
+        }
+        head.push_str(grapheme);
+        used += grapheme_width;
+    }
+    head.push('…');
+    head
+}
+
 fn selector_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -1127,8 +1164,8 @@ fn focused_control_line(label: &str, width: u16, theme: &Theme) -> Line<'static>
 
 fn selectable_line(label: &str, selected: bool, width: u16, theme: &Theme) -> Line<'static> {
     let marker = if selected { "›" } else { " " };
-    let content = format!("{marker} {label}");
-    let padding = usize::from(width).saturating_sub(content.chars().count());
+    let content = head_ellipsize(&format!("{marker} {label}"), usize::from(width));
+    let padding = usize::from(width).saturating_sub(UnicodeWidthStr::width(content.as_str()));
     let style = if selected {
         theme.with_bg(
             Style::default()
@@ -1989,6 +2026,32 @@ fn metric_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
     ])
 }
 
+fn create_metric_line(label: &str, value: &str, width: u16, theme: &Theme) -> Line<'static> {
+    let label_width = usize::from(width).min(14);
+    let value_width = usize::from(width).saturating_sub(label_width);
+    Line::from(vec![
+        Span::styled(
+            head_ellipsize(&format!("{label:<14}"), label_width),
+            Style::default()
+                .fg(theme.fg_muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            head_ellipsize(value, value_width),
+            Style::default().fg(theme.fg),
+        ),
+    ])
+}
+
+fn create_error_line(message: &str, width: u16, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        head_ellipsize(&format!("Error: {message}"), usize::from(width)),
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
 fn error_line(message: &str, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(
         format!("Error: {message}"),
@@ -2840,6 +2903,41 @@ mod tests {
             let output = text(&render_buffer(&mut state, width, height, "ops"));
             assert!(output.contains("› branch-12"), "{width}x{height}\n{output}");
         }
+    }
+
+    #[test]
+    fn long_preview_and_error_keep_name_row_render_and_hit_geometry_aligned_at_minimum_width() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new(
+            "trench",
+            Path::new("/a/very/long/worktree/root/whose/path/would/otherwise/wrap"),
+            RefSnapshot::from_parts(
+                ["branch-one"],
+                [] as [&str; 0],
+                None,
+                Some("branch-one"),
+                false,
+            ),
+            [],
+        );
+        dialog.set_branch("branch-one");
+        dialog.set_validation_error(Some(
+            "This deliberately long validation explanation must remain one deterministic row"
+                .to_string(),
+        ));
+        let hits = create_hit_map(&dialog, Rect::new(0, 0, 60, 16));
+        assert_eq!(hits.rows.len(), 1);
+        state.create_dialog = Some(dialog);
+
+        let buffer = render_buffer(&mut state, 60, 16, "ops");
+        let (_, rendered_y) = find_text(&buffer, "› branch-one");
+        assert_eq!(rendered_y, hits.rows[0].y, "{}", text(&buffer));
+        assert_eq!(
+            hits.target_at((hits.rows[0].x, rendered_y)),
+            Some(CreateHitTarget::Row(0))
+        );
     }
 
     #[test]
