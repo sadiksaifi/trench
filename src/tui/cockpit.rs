@@ -207,13 +207,12 @@ fn render_sync_dialog(
                 metric_line("Worktree", dialog.worktree(), theme),
                 metric_line("Branch", dialog.branch().unwrap_or("detached"), theme),
                 Line::from(""),
-                metric_line("Base", dialog.base().unwrap_or("Select a base"), theme),
-                metric_line(
-                    "Strategy",
-                    match dialog.strategy() {
-                        crate::cli::commands::sync::stateless::SyncStrategy::Rebase => "Rebase",
-                        crate::cli::commands::sync::stateless::SyncStrategy::Merge => "Merge",
-                    },
+                selector_line("Base", dialog.base().unwrap_or("Select a base"), theme),
+                strategy_line(
+                    matches!(
+                        dialog.strategy(),
+                        crate::cli::commands::sync::stateless::SyncStrategy::Rebase
+                    ),
                     theme,
                 ),
             ];
@@ -250,7 +249,17 @@ fn render_sync_dialog(
             let block = active_panel(Some(" Sync worktree · Select base ".to_string()), theme);
             let inner = block.inner(modal);
             frame.render_widget(block, modal);
-            let mut lines = vec![metric_line("Search", dialog.base_query(), theme)];
+            let [search_input, options] =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
+            render_text_input(
+                frame,
+                search_input,
+                "Search",
+                dialog.base_query(),
+                "Type to filter bases",
+                theme,
+            );
+            let mut lines = Vec::new();
             if dialog.origin_spinner_visible() {
                 lines.push(Line::from(format!(
                     "Updating origin {}",
@@ -279,7 +288,7 @@ fn render_sync_dialog(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
                     .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
-                inner,
+                options,
             );
             render_dialog_keybar(
                 frame,
@@ -628,6 +637,43 @@ fn selector_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
                 theme.control_bg,
             ),
         ),
+    ])
+}
+
+fn strategy_line(rebase_selected: bool, theme: &Theme) -> Line<'static> {
+    let selected = |label: &str| {
+        Span::styled(
+            format!("[● {label}]"),
+            theme.with_bg(
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .add_modifier(Modifier::BOLD),
+                theme.selection_bg,
+            ),
+        )
+    };
+    let idle = |label: &str| {
+        Span::styled(
+            format!("[○ {label}]"),
+            theme.with_bg(Style::default().fg(theme.fg), theme.control_bg),
+        )
+    };
+    let (rebase, merge) = if rebase_selected {
+        (selected("Rebase"), idle("Merge"))
+    } else {
+        (idle("Rebase"), selected("Merge"))
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{:<14}", "Strategy"),
+            Style::default()
+                .fg(theme.fg_muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        rebase,
+        Span::raw("  "),
+        merge,
+        Span::styled("  ←/→", Style::default().fg(theme.fg_muted)),
     ])
 }
 
@@ -2001,6 +2047,44 @@ mod tests {
             .unwrap()
             .trim_end()
             .ends_with("? help"));
+    }
+
+    #[test]
+    fn sync_base_strategy_and_picker_search_render_as_controls() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::sync_flow::{SyncDialog, SyncKey},
+        };
+
+        let mut state = sample_state();
+        let target = state.identities[1].clone();
+        let refs = RefSnapshot::from_parts(
+            ["main", "release"],
+            ["origin/main", "origin/topic"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        state.sync_dialog = Some(SyncDialog::new(&target, refs, Some("release")));
+        let theme = crate::tui::theme::from_name("ops");
+
+        let form = render_buffer(&mut state, 100, 24, "ops");
+        let base = find_text(&form, "[ release  ▾ ]");
+        let selected_strategy = find_text(&form, "[● Rebase]");
+        let other_strategy = find_text(&form, "[○ Merge]");
+        assert_eq!(form.cell(base).unwrap().bg, theme.control_bg);
+        assert_eq!(form.cell(selected_strategy).unwrap().bg, theme.selection_bg);
+        assert_eq!(form.cell(other_strategy).unwrap().bg, theme.control_bg);
+
+        state.sync_dialog.as_mut().unwrap().handle_key(SyncKey::Tab);
+        let picker = render_buffer(&mut state, 100, 24, "ops");
+        let placeholder = find_text(&picker, "Type to filter bases");
+        assert!(
+            text(&picker).contains("Search · typing"),
+            "{}",
+            text(&picker)
+        );
+        assert_eq!(picker.cell(placeholder).unwrap().bg, theme.control_bg);
     }
 
     #[test]
