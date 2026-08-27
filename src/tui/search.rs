@@ -2,6 +2,23 @@ use std::cmp::Reverse;
 
 use crate::tui::app::{WorktreeId, WorktreeIdentity};
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueryBuffer(String);
+
+impl QueryBuffer {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn insert(&mut self, character: char) {
+        self.0.push(character);
+    }
+
+    pub fn backspace(&mut self) -> bool {
+        self.0.pop().is_some()
+    }
+}
+
 /// Rank the live catalog by a case-insensitive fuzzy subsequence match.
 ///
 /// A row uses its strongest Worktree or Branch score. Equal scores preserve
@@ -145,5 +162,19 @@ mod tests {
             Some(rows[0].id.clone())
         );
         assert_eq!(reconcile_selection(&rows, "missing", None), None);
+    }
+
+    #[test]
+    fn query_buffer_edits_unicode_text_without_splitting_characters() {
+        let mut buffer = QueryBuffer::default();
+
+        buffer.insert('a');
+        buffer.insert('界');
+        assert_eq!(buffer.as_str(), "a界");
+
+        assert!(buffer.backspace());
+        assert_eq!(buffer.as_str(), "a");
+        assert!(buffer.backspace());
+        assert!(!buffer.backspace());
     }
 }
