@@ -165,7 +165,24 @@ enum CreateDispatch {
 #[derive(Debug)]
 enum CreateInputEffect {
     RefreshOrigin,
+    Navigate(WorktreeId),
     Start(Box<OperationRequest>),
+}
+
+trait PostOperationRefresh {
+    fn request_post_operation(&mut self) -> Result<()>;
+    fn apply_publications(&mut self, state: &mut AppState);
+}
+
+impl PostOperationRefresh for RefreshRuntime {
+    fn request_post_operation(&mut self) -> Result<()> {
+        self.post_operation()?;
+        Ok(())
+    }
+
+    fn apply_publications(&mut self, state: &mut AppState) {
+        apply_refresh_publications(self, state);
+    }
 }
 
 fn open_create_dialog(
@@ -241,12 +258,16 @@ fn handle_create_input(
             }
             return Ok(Some(CreateInputEffect::RefreshOrigin));
         }
-        Some(CreateEffect::Navigate(id)) => {
-            let _ = app::reduce(state, Event::Select(id));
-            state.create_dialog = None;
-            state.help_open = false;
-        }
-        Some(CreateEffect::Submit(submission)) => {
+        Some(CreateEffect::Navigate(_)) | Some(CreateEffect::Submit(_)) => {
+            let submission = match effect {
+                Some(CreateEffect::Submit(submission)) => submission,
+                Some(CreateEffect::Navigate(_)) => state
+                    .create_dialog
+                    .as_ref()
+                    .and_then(CreateDialog::submission)
+                    .context("selected branch is no longer available")?,
+                _ => unreachable!("matched create submission effects"),
+            };
             let dispatch = match build_create_dispatch(
                 &submission,
                 cwd,
@@ -264,9 +285,8 @@ fn handle_create_input(
             };
             match dispatch {
                 CreateDispatch::Navigate(id) => {
-                    let _ = app::reduce(state, Event::Select(id));
-                    state.create_dialog = None;
                     state.help_open = false;
+                    return Ok(Some(CreateInputEffect::Navigate(id)));
                 }
                 CreateDispatch::Run(request) => {
                     state.help_open = false;
@@ -277,6 +297,38 @@ fn handle_create_input(
         None => {}
     }
     Ok(None)
+}
+
+fn finish_create_success(
+    state: &mut AppState,
+    refresh: &mut impl PostOperationRefresh,
+    outcome: crate::operation::CreateOutcome,
+    shown_at: Instant,
+) {
+    let refresh_result = refresh.request_post_operation();
+    let (message, warning) = match refresh_result.as_ref() {
+        Ok(()) => (format!("Created {}", outcome.plan.branch), None),
+        Err(error) => {
+            let warning = format!(
+                "Created {}, but refresh failed; press r to refresh: {error}",
+                outcome.plan.branch
+            );
+            (warning.clone(), Some(warning))
+        }
+    };
+    let _ = app::reduce(
+        state,
+        Event::OperationSucceeded {
+            select: Some(WorktreeId::new(outcome.plan.path)),
+            message,
+            shown_at,
+        },
+    );
+    if refresh_result.is_ok() {
+        refresh.apply_publications(state);
+    } else {
+        state.refresh.warning = warning;
+    }
 }
 
 fn return_to_create_form(
@@ -334,19 +386,8 @@ pub fn run() -> Result<TuiExit> {
             for effect in operation.tick() {
                 match effect {
                     OperationRuntimeEffect::Succeeded(OperationOutcome::Create(outcome)) => {
-                        let selected = WorktreeId::new(outcome.plan.path.clone());
-                        let message = format!("Created {}", outcome.plan.branch);
                         operation.dismiss();
-                        let _ = app::reduce(
-                            &mut state,
-                            Event::OperationSucceeded {
-                                select: Some(selected),
-                                message,
-                                shown_at: Instant::now(),
-                            },
-                        );
-                        refresh.post_operation()?;
-                        apply_refresh_publications(&mut refresh, &mut state);
+                        finish_create_success(&mut state, &mut refresh, outcome, Instant::now());
                     }
                     OperationRuntimeEffect::Succeeded(OperationOutcome::Remove(_)) => {
                         operation.dismiss();
@@ -458,6 +499,28 @@ pub fn run() -> Result<TuiExit> {
                         }
                         apply_refresh_publications(&mut refresh, &mut state);
                     }
+                    Some(CreateInputEffect::Navigate(id)) => match refresh.post_operation() {
+                        Ok(()) => {
+                            apply_refresh_publications(&mut refresh, &mut state);
+                            if state.identities.iter().any(|row| row.id == id) {
+                                let _ = app::reduce(&mut state, Event::Select(id));
+                                state.create_dialog = None;
+                                state.help_open = false;
+                            } else if let Some(dialog) = state.create_dialog.as_mut() {
+                                dialog.set_validation_error(Some(
+                                    "Checked-out worktree changed; press Enter to revalidate"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(dialog) = state.create_dialog.as_mut() {
+                                dialog.set_validation_error(Some(format!(
+                                    "Could not refresh checked-out worktree: {error}"
+                                )));
+                            }
+                        }
+                    },
                     Some(CreateInputEffect::Start(request)) => {
                         operation.start(*request);
                         state.operation_modal = operation.modal().cloned();
@@ -1037,6 +1100,154 @@ mod tests {
     }
 
     #[test]
+    fn checked_out_enter_replans_when_the_worktree_disappears_while_form_is_open() {
+        let repository = init_repo();
+        let root = repository.path().join("worktrees");
+        let repo_info = crate::git::discover_repo(repository.path()).unwrap();
+        let old_path = root.join(&repo_info.name).join("release-old");
+        add_worktree(repository.path(), "release", "release-old", &old_path);
+        let old = WorktreeIdentity {
+            id: WorktreeId::new(old_path.clone()),
+            worktree: "release-old".to_string(),
+            branch: Some("release".to_string()),
+            path: old_path.clone(),
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+        };
+        let mut state = AppState::new(vec![old]);
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main", "release"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        ));
+        open_create_dialog(&mut state, &repo_info.name, &root, Some("main")).unwrap();
+        state.create_dialog.as_mut().unwrap().set_branch("release");
+        prune_worktree(repository.path(), "release-old", &old_path);
+
+        let effect = handle_create_input(
+            &mut state,
+            CreateKey::Enter,
+            repository.path(),
+            &root,
+            Some("main"),
+            None,
+        )
+        .unwrap();
+
+        let Some(CreateInputEffect::Start(request)) = effect else {
+            panic!("disappeared checkout should be replanned")
+        };
+        let OperationRequest::Create(request) = *request else {
+            panic!("expected create request")
+        };
+        assert_eq!(request.plan.action, CreateAction::ExistingLocal);
+        assert_ne!(request.plan.path, old_path);
+    }
+
+    #[test]
+    fn checked_out_enter_uses_the_live_path_when_identity_changes_while_form_is_open() {
+        let repository = init_repo();
+        let root = repository.path().join("worktrees");
+        let repo_info = crate::git::discover_repo(repository.path()).unwrap();
+        let old_path = root.join(&repo_info.name).join("release-old");
+        let new_path = root.join(&repo_info.name).join("release-new");
+        add_worktree(repository.path(), "release", "release-old", &old_path);
+        let old = WorktreeIdentity {
+            id: WorktreeId::new(old_path.clone()),
+            worktree: "release-old".to_string(),
+            branch: Some("release".to_string()),
+            path: old_path.clone(),
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+        };
+        let mut state = AppState::new(vec![old]);
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main", "release"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        ));
+        open_create_dialog(&mut state, &repo_info.name, &root, Some("main")).unwrap();
+        state.create_dialog.as_mut().unwrap().set_branch("release");
+        prune_worktree(repository.path(), "release-old", &old_path);
+        add_worktree(repository.path(), "release", "release-new", &new_path);
+
+        let effect = handle_create_input(
+            &mut state,
+            CreateKey::Enter,
+            repository.path(),
+            &root,
+            Some("main"),
+            None,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            effect,
+            Some(CreateInputEffect::Navigate(id))
+                if id == WorktreeId::new(new_path.canonicalize().unwrap())
+        ));
+    }
+
+    #[test]
+    fn applied_create_success_survives_post_operation_refresh_failure() {
+        let repository = init_repo();
+        let root = repository.path().join("worktrees");
+        let dispatch = build_create_dispatch(
+            &CreateSubmission {
+                branch: "feature/auth".to_string(),
+                from: None,
+            },
+            repository.path(),
+            &root,
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        let CreateDispatch::Run(request) = dispatch else {
+            panic!("expected create request")
+        };
+        let OperationRequest::Create(request) = *request else {
+            panic!("expected create request")
+        };
+        let mut state = AppState::new(Vec::new());
+        let mut refresh = FailingPostOperationRefresh::default();
+
+        finish_create_success(
+            &mut state,
+            &mut refresh,
+            crate::operation::CreateOutcome {
+                plan: request.plan,
+                mutation_state: crate::operation::MutationState::Applied,
+            },
+            Instant::now(),
+        );
+
+        assert!(refresh.requested);
+        assert!(state.operation_modal.is_none());
+        assert!(state
+            .notification
+            .as_ref()
+            .is_some_and(|notice| notice.text.contains("Created feature/auth")));
+        assert!(state
+            .notification
+            .as_ref()
+            .is_some_and(|notice| notice.text.contains("refresh failed")));
+        assert!(state
+            .refresh
+            .warning
+            .as_ref()
+            .is_some_and(|warning| warning.contains("press r to refresh")));
+    }
+
+    #[test]
     fn dialog_registry_is_a_replaceable_operation_seam() {
         let mut dialogs = DialogRegistry::default();
         dialogs.register(DialogRequest::Create);
@@ -1058,6 +1269,45 @@ mod tests {
         drop(tree);
         drop(repository);
         directory
+    }
+
+    fn add_worktree(repo_path: &Path, branch: &str, name: &str, path: &Path) {
+        let repository = git2::Repository::open(repo_path).unwrap();
+        if repository
+            .find_branch(branch, git2::BranchType::Local)
+            .is_err()
+        {
+            let commit = repository.head().unwrap().peel_to_commit().unwrap();
+            repository.branch(branch, &commit, false).unwrap();
+        }
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let reference = repository
+            .find_reference(&format!("refs/heads/{branch}"))
+            .unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(&reference));
+        repository.worktree(name, path, Some(&options)).unwrap();
+    }
+
+    fn prune_worktree(repo_path: &Path, name: &str, path: &Path) {
+        let repository = git2::Repository::open(repo_path).unwrap();
+        let worktree = repository.find_worktree(name).unwrap();
+        std::fs::remove_dir_all(path).unwrap();
+        worktree.prune(None).unwrap();
+    }
+
+    #[derive(Default)]
+    struct FailingPostOperationRefresh {
+        requested: bool,
+    }
+
+    impl PostOperationRefresh for FailingPostOperationRefresh {
+        fn request_post_operation(&mut self) -> Result<()> {
+            self.requested = true;
+            anyhow::bail!("injected refresh failure")
+        }
+
+        fn apply_publications(&mut self, _state: &mut AppState) {}
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -163,6 +163,10 @@ impl Emitter for ChannelEmitter {
 
 pub trait CancellationCheck: Send + Sync {
     fn is_cancelled(&self) -> bool;
+
+    fn try_begin_mutation(&self) -> bool {
+        !self.is_cancelled()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -174,18 +178,40 @@ impl CancellationCheck for NeverCancelled {
     }
 }
 
+const CANCELLATION_OPEN: u8 = 0;
+const CANCELLATION_REQUESTED: u8 = 1;
+const MUTATION_STARTED: u8 = 2;
+
 #[derive(Debug, Clone, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
+pub struct CancellationToken(Arc<AtomicU8>);
 
 impl CancellationToken {
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+    pub fn cancel(&self) -> bool {
+        self.0
+            .compare_exchange(
+                CANCELLATION_OPEN,
+                CANCELLATION_REQUESTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 }
 
 impl CancellationCheck for CancellationToken {
     fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.load(Ordering::Acquire) == CANCELLATION_REQUESTED
+    }
+
+    fn try_begin_mutation(&self) -> bool {
+        self.0
+            .compare_exchange(
+                CANCELLATION_OPEN,
+                MUTATION_STARTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 }
 
@@ -437,8 +463,6 @@ async fn execute_create_with_boundary(
             "operation cancelled before mutation".to_string(),
         ));
     }
-    emitter.emit(OperationEvent::MutationStarted);
-
     let hook_context = create_hook_context(&request);
     if request.plan.hook_policy == HookPolicy::Run {
         if let Some(pre_create) = request
@@ -589,6 +613,28 @@ async fn execute_create_with_boundary(
         ));
     }
     boundary.after_final_verify();
+
+    if !cancellation.try_begin_mutation() {
+        finish_stage(
+            emitter,
+            OperationStage::CreateWorktree,
+            stage_started,
+            false,
+        );
+        return Err(rollback_failure(
+            &request.repo_path,
+            emitter,
+            operation_started,
+            &prepared_parent.created,
+            None,
+            FailureCause {
+                stage: OperationStage::CreateWorktree,
+                class: ErrorClass::Cancelled,
+                message: "operation cancelled before Git mutation".to_string(),
+            },
+        ));
+    }
+    emitter.emit(OperationEvent::MutationStarted);
 
     let target = git::create::CreateTarget {
         planned_path: &request.plan.path,
@@ -1387,6 +1433,7 @@ fn diagnostic_error(class: ErrorClass) -> logging::DiagnosticError {
 mod tests {
     use super::*;
     use crate::create_plan::HookPolicy;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
 
     struct CreateCollisionAtMutation {
@@ -1433,6 +1480,16 @@ mod tests {
         worktree: String,
         fired: AtomicBool,
         events: RecordingEmitter,
+    }
+
+    struct CancelAtFinalMutationBoundary {
+        cancellation: CancellationToken,
+    }
+
+    impl CreateBoundary for CancelAtFinalMutationBoundary {
+        fn after_final_verify(&self) {
+            assert!(self.cancellation.cancel());
+        }
     }
 
     #[cfg(unix)]
@@ -1671,6 +1728,46 @@ mod tests {
                 stage: OperationStage::PreHook
             }
         )));
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins_atomically_at_the_final_git_mutation_boundary() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        let repo = init_repo(repo_dir.path());
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("feature/final-cancel", None)
+            .unwrap();
+        let cancellation = CancellationToken::default();
+        let boundary = CancelAtFinalMutationBoundary {
+            cancellation: cancellation.clone(),
+        };
+        let emitter = RecordingEmitter::default();
+
+        let error = execute_create_with_boundary(
+            CreateRequest {
+                plan: plan.clone(),
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root,
+                hooks: None,
+            },
+            &emitter,
+            &cancellation,
+            &boundary,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.class, ErrorClass::Cancelled);
+        assert_eq!(error.mutation_state, MutationState::RolledBack);
+        assert!(!emitter.events().contains(&OperationEvent::MutationStarted));
+        assert!(repo
+            .find_branch(&plan.branch, git2::BranchType::Local)
+            .is_err());
+        assert!(repo.find_worktree(&plan.worktree).is_err());
+        assert!(!plan.path.exists());
     }
 
     #[tokio::test]

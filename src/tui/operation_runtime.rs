@@ -180,16 +180,16 @@ where
     }
 
     pub fn cancel(&mut self) -> bool {
-        let accepted = self
+        let modal_accepts = self
             .modal
             .as_mut()
             .is_some_and(|modal| modal.handle_key(ModalKey::Escape) == Some(ModalEffect::Cancel));
-        if accepted {
-            if let Some(cancellation) = self.cancellation.as_ref() {
-                cancellation.cancel();
-            }
+        if !modal_accepts {
+            return false;
         }
-        accepted
+        self.cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::cancel)
     }
 
     pub fn modal(&self) -> Option<&OperationModal> {
@@ -354,5 +354,28 @@ mod tests {
             .unwrap();
         runtime.tick();
         assert!(!runtime.cancel());
+    }
+
+    #[test]
+    fn queued_mutation_boundary_prevents_escape_from_dismissing_the_operation() {
+        let clock = FakeClock::default();
+        let launcher = FakeLauncher::default();
+        let cancellation = launcher.cancellation.clone();
+        let channel = launcher.sender.clone();
+        let mut runtime = OperationRuntime::new(launcher, clock);
+        runtime.start(request());
+
+        let token = cancellation.borrow().as_ref().unwrap().clone();
+        assert!(token.try_begin_mutation());
+        channel
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .send(OperationMessage::Event(OperationEvent::MutationStarted))
+            .unwrap();
+
+        assert!(!runtime.cancel());
+        assert!(!token.is_cancelled());
+        assert!(runtime.modal().is_some());
     }
 }

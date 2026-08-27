@@ -289,7 +289,10 @@ impl CreateDialog {
     pub fn submission(&self) -> Option<CreateSubmission> {
         let preview = self.preview()?;
         match preview.kind {
-            BranchKind::CheckedOut { .. } => None,
+            BranchKind::CheckedOut { .. } => Some(CreateSubmission {
+                branch: preview.branch,
+                from: None,
+            }),
             BranchKind::New => Some(CreateSubmission {
                 branch: preview.branch,
                 from: preview.base,
