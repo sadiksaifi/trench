@@ -280,4 +280,32 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(actions, [Action::Quit, Action::Help]);
     }
+
+    #[test]
+    fn search_context_reserves_launcher_actions_before_query_editing() {
+        let reserved = [
+            (Key::Enter, Action::Switch),
+            (Key::Escape, Action::CloseSearch),
+            (Key::Char('o'), Action::Open),
+            (Key::Char('s'), Action::Sync),
+            (Key::Char('d'), Action::Remove),
+            (Key::Down, Action::SelectNext),
+            (Key::Char('j'), Action::SelectNext),
+            (Key::Up, Action::SelectPrevious),
+            (Key::Char('k'), Action::SelectPrevious),
+            (Key::Char('?'), Action::Help),
+        ];
+        for (key, action) in reserved {
+            assert_eq!(action_for(Context::Search, key), Some(action));
+        }
+        for editable in [
+            Key::Char('/'),
+            Key::Char('c'),
+            Key::Char('q'),
+            Key::Char('r'),
+            Key::Backspace,
+        ] {
+            assert_eq!(action_for(Context::Search, editable), None);
+        }
+    }
 }
