@@ -360,7 +360,9 @@ impl CreateDialog {
             CreateKey::Backspace => {
                 self.base_picker.handle_key(RefPickerKey::Backspace);
             }
-            CreateKey::Edit(_) => {}
+            CreateKey::Edit(edit) => {
+                self.base_picker.handle_key(RefPickerKey::Edit(edit));
+            }
             CreateKey::Up => {
                 self.base_picker.handle_key(RefPickerKey::Up);
             }
