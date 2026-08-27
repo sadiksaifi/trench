@@ -1183,6 +1183,39 @@ mod tests {
     }
 
     #[test]
+    fn sync_submission_preserves_a_remote_only_base() {
+        let repository = init_repo();
+        let git = git2::Repository::open(repository.path()).unwrap();
+        let head = git.head().unwrap().target().unwrap();
+        git.reference(
+            "refs/remotes/origin/release",
+            head,
+            true,
+            "test remote base",
+        )
+        .unwrap();
+        drop(git);
+        let target = repository.path().canonicalize().unwrap();
+
+        let request = build_sync_request(
+            &SyncSubmission {
+                target: WorktreeId::new(target),
+                base: "origin/release".to_string(),
+                strategy: crate::cli::commands::sync::stateless::SyncStrategy::Rebase,
+            },
+            repository.path(),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+
+        let OperationRequest::Sync(request) = request else {
+            panic!("sync submission should start a sync operation")
+        };
+        assert_eq!(request.plan.base, "origin/release");
+    }
+
+    #[test]
     fn sync_dialog_opens_the_exact_visible_target_and_routes_picker_and_submit() {
         let repository = init_repo();
         let target = repository.path().canonicalize().unwrap();
