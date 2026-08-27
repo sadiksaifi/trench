@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -452,7 +453,12 @@ pub async fn execute(
     };
     let sync_started = Instant::now();
     emitter.emit(SyncEvent::StageStarted(SyncStage::Sync));
-    let new_head = match git::sync::execute(&transaction) {
+    let transaction_emitter = TransactionEmitterAdapter {
+        emitter,
+        sync_started,
+        sync_finished: Cell::new(false),
+    };
+    let new_head = match git::sync::execute_with_emitter(&transaction, &transaction_emitter) {
         Ok(head) => {
             emitter.emit(SyncEvent::StageFinished {
                 stage: SyncStage::Sync,
@@ -462,27 +468,43 @@ pub async fn execute(
             head
         }
         Err(error) => {
-            emitter.emit(SyncEvent::StageFinished {
-                stage: SyncStage::Sync,
-                success: false,
-                elapsed: sync_started.elapsed(),
-            });
-            let (class, mutation_state) = match error {
-                git::sync::SyncGitError::Conflict => {
-                    (SyncErrorClass::Conflict, MutationState::NotStarted)
-                }
-                git::sync::SyncGitError::Rollback(_) => {
-                    (SyncErrorClass::Rollback, MutationState::PartiallyApplied)
-                }
+            if !transaction_emitter.sync_finished.get() {
+                emitter.emit(SyncEvent::StageFinished {
+                    stage: SyncStage::Sync,
+                    success: false,
+                    elapsed: sync_started.elapsed(),
+                });
+            }
+            let (failure_stage, class, mutation_state) = match error {
+                git::sync::SyncGitError::Conflict => (
+                    SyncStage::Sync,
+                    SyncErrorClass::Conflict,
+                    MutationState::NotStarted,
+                ),
+                git::sync::SyncGitError::RolledBack(_) => (
+                    SyncStage::Sync,
+                    SyncErrorClass::Git,
+                    MutationState::RolledBack,
+                ),
+                git::sync::SyncGitError::RollbackFailed(_) => (
+                    SyncStage::Rollback,
+                    SyncErrorClass::Rollback,
+                    MutationState::PartiallyApplied,
+                ),
                 git::sync::SyncGitError::PreconditionsChanged => (
+                    SyncStage::Sync,
                     SyncErrorClass::PreconditionsChanged,
                     MutationState::NotStarted,
                 ),
-                git::sync::SyncGitError::Git(_) => (SyncErrorClass::Git, MutationState::NotStarted),
+                git::sync::SyncGitError::Git(_) => (
+                    SyncStage::Sync,
+                    SyncErrorClass::Git,
+                    MutationState::NotStarted,
+                ),
             };
             return Err(failure(
                 started,
-                SyncStage::Sync,
+                failure_stage,
                 mutation_state,
                 class,
                 error.to_string(),
@@ -665,6 +687,36 @@ impl crate::hooks::types::HookEmitter for HookEmitterAdapter<'_> {
                 stream,
                 line,
             });
+        }
+    }
+}
+
+struct TransactionEmitterAdapter<'a> {
+    emitter: &'a dyn SyncEmitter,
+    sync_started: Instant,
+    sync_finished: Cell<bool>,
+}
+
+impl git::sync::TransactionEmitter for TransactionEmitterAdapter<'_> {
+    fn emit(&self, event: git::sync::TransactionEvent) {
+        match event {
+            git::sync::TransactionEvent::RollbackStarted => {
+                self.emitter.emit(SyncEvent::StageFinished {
+                    stage: SyncStage::Sync,
+                    success: false,
+                    elapsed: self.sync_started.elapsed(),
+                });
+                self.sync_finished.set(true);
+                self.emitter
+                    .emit(SyncEvent::StageStarted(SyncStage::Rollback));
+            }
+            git::sync::TransactionEvent::RollbackFinished { success, elapsed } => {
+                self.emitter.emit(SyncEvent::StageFinished {
+                    stage: SyncStage::Rollback,
+                    success,
+                    elapsed,
+                });
+            }
         }
     }
 }
@@ -957,8 +1009,9 @@ mod tests {
                 HookPolicy::Skip,
             )
             .unwrap();
+        let emitter = RecordingSyncEmitter::default();
 
-        let failure = execute(plan, None, &NoopSyncEmitter).await.unwrap_err();
+        let failure = execute(plan, None, &emitter).await.unwrap_err();
 
         let repo = git2::Repository::open(&feature).unwrap();
         assert_eq!(failure.mutation_state, MutationState::RolledBack);
@@ -966,6 +1019,24 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(feature.join("ignored-state")).unwrap(),
             "preserve-user-state\n"
+        );
+        let stages = emitter
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                SyncEvent::StageStarted(stage) => Some((stage, None)),
+                SyncEvent::StageFinished { stage, success, .. } => Some((stage, Some(success))),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &stages[stages.len() - 4..],
+            [
+                (SyncStage::Sync, None),
+                (SyncStage::Sync, Some(false)),
+                (SyncStage::Rollback, None),
+                (SyncStage::Rollback, Some(true)),
+            ]
         );
     }
 

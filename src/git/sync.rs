@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use git2::{Oid, Repository};
 
@@ -17,19 +18,45 @@ pub struct TransactionPlan {
     pub strategy: Strategy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionEvent {
+    RollbackStarted,
+    RollbackFinished { success: bool, elapsed: Duration },
+}
+
+pub trait TransactionEmitter {
+    fn emit(&self, event: TransactionEvent);
+}
+
+#[derive(Debug)]
+pub struct NoopTransactionEmitter;
+
+impl TransactionEmitter for NoopTransactionEmitter {
+    fn emit(&self, _event: TransactionEvent) {}
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SyncGitError {
     #[error("sync preconditions changed before mutation")]
     PreconditionsChanged,
     #[error("sync conflict")]
     Conflict,
+    #[error("sync failed and pre-operation state was restored: {0}")]
+    RolledBack(String),
     #[error("rollback failed: {0}")]
-    Rollback(String),
+    RollbackFailed(String),
     #[error(transparent)]
     Git(#[from] git2::Error),
 }
 
 pub fn execute(plan: &TransactionPlan) -> Result<Oid, SyncGitError> {
+    execute_with_emitter(plan, &NoopTransactionEmitter)
+}
+
+pub fn execute_with_emitter(
+    plan: &TransactionPlan,
+    emitter: &dyn TransactionEmitter,
+) -> Result<Oid, SyncGitError> {
     let repo = Repository::open(&plan.worktree_path)?;
     validate_clean_attached(&repo, &plan.branch_ref, plan.expected_head)?;
     if repo
@@ -62,6 +89,7 @@ pub fn execute(plan: &TransactionPlan) -> Result<Oid, SyncGitError> {
             new_head,
             plan.expected_head,
             format!("checkout failed: {error}"),
+            emitter,
         );
     }
     if let Err(error) = transaction
@@ -74,6 +102,7 @@ pub fn execute(plan: &TransactionPlan) -> Result<Oid, SyncGitError> {
             new_head,
             plan.expected_head,
             format!("reference update failed: {error}"),
+            emitter,
         );
     }
     Ok(new_head)
@@ -169,7 +198,10 @@ fn restore_prestate(
     applied: Oid,
     original: Oid,
     cause: String,
+    emitter: &dyn TransactionEmitter,
 ) -> Result<Oid, SyncGitError> {
+    let rollback_started = Instant::now();
+    emitter.emit(TransactionEvent::RollbackStarted);
     let cleanup = (|| {
         let live = repo
             .find_reference(branch_ref)?
@@ -189,8 +221,20 @@ fn restore_prestate(
         Ok::<(), git2::Error>(())
     })();
     match cleanup {
-        Ok(()) => Err(SyncGitError::Git(git2::Error::from_str(&cause))),
-        Err(error) => Err(SyncGitError::Rollback(format!("{cause}; {error}"))),
+        Ok(()) => {
+            emitter.emit(TransactionEvent::RollbackFinished {
+                success: true,
+                elapsed: rollback_started.elapsed(),
+            });
+            Err(SyncGitError::RolledBack(cause))
+        }
+        Err(error) => {
+            emitter.emit(TransactionEvent::RollbackFinished {
+                success: false,
+                elapsed: rollback_started.elapsed(),
+            });
+            Err(SyncGitError::RollbackFailed(format!("{cause}; {error}")))
+        }
     }
 }
 
