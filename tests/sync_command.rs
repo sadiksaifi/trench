@@ -96,3 +96,31 @@ fn dry_run_json_uses_the_stateless_single_target_contract() {
     );
     assert!(!root.path().join("data/trench/trench.db").exists());
 }
+
+#[test]
+fn dry_run_human_output_is_stdout_only_and_never_prompts() {
+    let (root, worktree) = repository();
+    let output = trench(
+        &worktree,
+        root.path(),
+        &[
+            "sync",
+            "feature/topic",
+            "--strategy",
+            "merge",
+            "--base",
+            "main",
+            "--dry-run",
+        ],
+    );
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "Dry run - no changes will be made\n  Worktree: feature-topic\n  Branch:   feature/topic\n  Path:     {}\n  Base:     main\n  Strategy: merge\n  Hooks:    enabled\n",
+            worktree.display()
+        )
+    );
+}

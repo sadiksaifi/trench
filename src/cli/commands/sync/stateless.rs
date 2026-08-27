@@ -85,7 +85,7 @@ pub struct SyncPreview {
 
 impl std::fmt::Display for SyncPreview {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(formatter, "Dry run — no changes will be made")?;
+        writeln!(formatter, "Dry run - no changes will be made")?;
         writeln!(formatter, "  Worktree: {}", self.plan.target)?;
         writeln!(formatter, "  Branch:   {}", self.plan.branch)?;
         writeln!(formatter, "  Path:     {}", self.plan.path.display())?;
