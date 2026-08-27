@@ -724,12 +724,34 @@ impl git::sync::TransactionEmitter for TransactionEmitterAdapter<'_> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::Mutex;
 
     use super::{
         execute, plan_after_best_effort_origin_fetch, preview, HookPolicy, MutationState,
         NoopSyncEmitter, RecordingSyncEmitter, SyncErrorClass, SyncEvent, SyncPlanner, SyncStage,
         SyncStrategy,
     };
+
+    struct RollbackSaboteurEmitter {
+        worktree_path: std::path::PathBuf,
+        events: Mutex<Vec<SyncEvent>>,
+    }
+
+    impl RollbackSaboteurEmitter {
+        fn events(&self) -> Vec<SyncEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl super::SyncEmitter for RollbackSaboteurEmitter {
+        fn emit(&self, event: SyncEvent) {
+            self.events.lock().unwrap().push(event.clone());
+            if event == SyncEvent::StageStarted(SyncStage::Rollback) {
+                let repo = git2::Repository::open(&self.worktree_path).unwrap();
+                std::fs::write(repo.path().join("index.lock"), "prevent rollback\n").unwrap();
+            }
+        }
+    }
 
     fn commit_file(repo: &git2::Repository, path: &str, contents: &str, message: &str) {
         std::fs::write(repo.workdir().unwrap().join(path), contents).unwrap();
@@ -1036,6 +1058,51 @@ mod tests {
                 (SyncStage::Sync, Some(false)),
                 (SyncStage::Rollback, None),
                 (SyncStage::Rollback, Some(true)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_restore_reports_the_rollback_stage_and_partial_state() {
+        let (root, feature) = divergent_worktree();
+        let main = git2::Repository::open(root.path().join("main")).unwrap();
+        commit_file(&main, "ignored-state", "from-main\n", "track ignored path");
+        std::fs::write(feature.join("ignored-state"), "preserve-user-state\n").unwrap();
+        let plan = SyncPlanner::discover(&feature, None)
+            .unwrap()
+            .plan(
+                "feature/topic",
+                Some("main"),
+                SyncStrategy::Merge,
+                HookPolicy::Skip,
+            )
+            .unwrap();
+        let emitter = RollbackSaboteurEmitter {
+            worktree_path: feature.clone(),
+            events: Mutex::new(Vec::new()),
+        };
+
+        let failure = execute(plan, None, &emitter).await.unwrap_err();
+
+        assert_eq!(failure.stage, SyncStage::Rollback);
+        assert_eq!(failure.class, SyncErrorClass::Rollback);
+        assert_eq!(failure.mutation_state, MutationState::PartiallyApplied);
+        let stages = emitter
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                SyncEvent::StageStarted(stage) => Some((stage, None)),
+                SyncEvent::StageFinished { stage, success, .. } => Some((stage, Some(success))),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &stages[stages.len() - 4..],
+            [
+                (SyncStage::Sync, None),
+                (SyncStage::Sync, Some(false)),
+                (SyncStage::Rollback, None),
+                (SyncStage::Rollback, Some(false)),
             ]
         );
     }
