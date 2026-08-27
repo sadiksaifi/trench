@@ -690,11 +690,11 @@ fn input_value_spans(
 ) -> Vec<Span<'static>> {
     if input.value().is_empty() {
         return vec![
+            Span::styled("▌", Style::default().fg(theme.accent)),
             Span::styled(
                 tail_ellipsize(placeholder, width),
                 Style::default().fg(theme.fg_muted),
             ),
-            Span::styled("▌", Style::default().fg(theme.accent)),
         ];
     }
     let window = input.window(width);
@@ -2052,7 +2052,7 @@ mod tests {
         let placeholder = find_text(&buffer, "Type to filter worktrees");
 
         assert!(output.contains("Search · typing"), "{output}");
-        assert!(output.contains("> Type to filter worktrees▌"), "{output}");
+        assert!(output.contains("> ▌Type to filter worktrees"), "{output}");
         assert!(output.contains("2 results"), "{output}");
         assert_eq!(buffer.cell(placeholder).unwrap().bg, theme.control_bg);
         assert!(buffer
@@ -2419,7 +2419,7 @@ mod tests {
             text(&picker)
         );
         assert!(
-            text(&picker).contains("> Type to filter bases▌"),
+            text(&picker).contains("> ▌Type to filter bases"),
             "{}",
             text(&picker)
         );

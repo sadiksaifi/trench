@@ -192,4 +192,18 @@ mod tests {
 
         assert_eq!(input.value(), "x");
     }
+
+    #[test]
+    fn long_window_keeps_a_mid_line_cursor_between_visible_text() {
+        let mut input = LineInput::from("abcdefghijklmnop");
+        input.edit(LineEdit::Start);
+        for _ in 0..4 {
+            input.edit(LineEdit::NextCharacter);
+        }
+
+        let window = input.window(8);
+
+        assert_eq!(window.before_cursor, "abcd");
+        assert_eq!(window.after_cursor, "efg…");
+    }
 }
