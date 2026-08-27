@@ -102,9 +102,17 @@ fn fuzzy_score(candidate: &str, query: &str) -> Option<u32> {
     let exact = u32::from(query.len() == candidate.len()) * 10_000;
     let prefix = u32::from(first == 0) * 2_000;
     let compact = 1_000_u32.saturating_sub(u32::try_from(span).unwrap_or(u32::MAX));
-    let adjacent = u32::try_from(contiguous_pairs).unwrap_or(u32::MAX) * 100;
+    let adjacent = u32::try_from(contiguous_pairs)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(100);
     let shorter = 500_u32.saturating_sub(u32::try_from(candidate.len()).unwrap_or(u32::MAX));
-    Some(exact + prefix + compact + adjacent + shorter)
+    Some(
+        exact
+            .saturating_add(prefix)
+            .saturating_add(compact)
+            .saturating_add(adjacent)
+            .saturating_add(shorter),
+    )
 }
 
 #[cfg(test)]
