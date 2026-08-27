@@ -1062,15 +1062,21 @@ fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
 }
 
 fn translate_sync_key(key: KeyEvent) -> Option<SyncKey> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Left, KeyModifiers::NONE) => return Some(SyncKey::Left),
+        (KeyCode::Right, KeyModifiers::NONE) => return Some(SyncKey::Right),
+        _ => {}
+    }
+    if let Some(edit) = translate_line_edit(key) {
+        return Some(SyncKey::Edit(edit));
+    }
+
     match key.code {
         KeyCode::Enter => Some(SyncKey::Enter),
         KeyCode::Esc => Some(SyncKey::Escape),
         KeyCode::Up => Some(SyncKey::Up),
         KeyCode::Down => Some(SyncKey::Down),
-        KeyCode::Left => Some(SyncKey::Left),
-        KeyCode::Right => Some(SyncKey::Right),
         KeyCode::Tab => Some(SyncKey::Tab),
-        KeyCode::Backspace => Some(SyncKey::Backspace),
         KeyCode::Char(character) => Some(SyncKey::Character(character)),
         _ => None,
     }
