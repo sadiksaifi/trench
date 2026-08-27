@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -30,6 +31,56 @@ pub struct RemoveOptions {
 pub enum RemovalHookPolicy {
     Run,
     Skip,
+}
+
+/// Proof that confirmation can be collected from an interactive terminal.
+///
+/// The private field prevents non-interactive callers from claiming terminal
+/// access. Callers should detect this before prompting, then pass the token to
+/// [`RemovalAssessment::confirm_interactively`].
+#[derive(Debug)]
+pub struct InteractiveTerminal {
+    _private: (),
+}
+
+impl InteractiveTerminal {
+    pub fn detect() -> Option<Self> {
+        (std::io::stdin().is_terminal() && std::io::stderr().is_terminal())
+            .then_some(Self { _private: () })
+    }
+
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// A non-cloneable receipt for a successful interactive prompt.
+///
+/// The receipt captures the complete assessment, so it cannot authorize a
+/// different target or stale safety facts.
+#[derive(Debug)]
+pub struct InteractiveConfirmationReceipt {
+    expected: RemovalAssessment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemovalConfirmation {
+    Flag,
+    Interactive,
+    DryRun,
+}
+
+impl fmt::Display for RemovalConfirmation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Flag => "flag",
+            Self::Interactive => "interactive",
+            Self::DryRun => "dry_run",
+        };
+        formatter.write_str(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,10 +285,45 @@ impl RemovalAssessment {
         })
     }
 
+    /// Run an interactive prompt and issue a receipt only when it is accepted.
+    pub fn confirm_interactively<F>(
+        &self,
+        _terminal: InteractiveTerminal,
+        prompt: F,
+    ) -> std::io::Result<Option<InteractiveConfirmationReceipt>>
+    where
+        F: FnOnce() -> std::io::Result<bool>,
+    {
+        prompt().map(|confirmed| {
+            confirmed.then(|| InteractiveConfirmationReceipt {
+                expected: self.clone(),
+            })
+        })
+    }
+
     /// Convert live facts and explicit user choices into an immutable plan.
+    ///
+    /// This entry point authorizes live removal only through `--yes`. Use
+    /// [`Self::authorize_confirmed`] after an accepted interactive prompt.
     pub fn authorize(
         &self,
         options: RemoveOptions,
+    ) -> Result<RemovalPlan, RemovalAuthorizationError> {
+        self.authorize_inner(options, None)
+    }
+
+    pub fn authorize_confirmed(
+        &self,
+        options: RemoveOptions,
+        receipt: InteractiveConfirmationReceipt,
+    ) -> Result<RemovalPlan, RemovalAuthorizationError> {
+        self.authorize_inner(options, Some(receipt))
+    }
+
+    fn authorize_inner(
+        &self,
+        options: RemoveOptions,
+        receipt: Option<InteractiveConfirmationReceipt>,
     ) -> Result<RemovalPlan, RemovalAuthorizationError> {
         if self.is_main {
             return Err(RemovalAuthorizationError::MainWorktree);
@@ -248,9 +334,22 @@ impl RemovalAssessment {
         if options.delete_branch && self.detached {
             return Err(RemovalAuthorizationError::DetachedHasNoLocalBranch);
         }
-        if !options.yes && !options.dry_run {
-            return Err(RemovalAuthorizationError::ConfirmationRequired);
-        }
+        let confirmation = match (options.dry_run, options.yes, receipt) {
+            (true, _, None) => RemovalConfirmation::DryRun,
+            (false, true, None) => RemovalConfirmation::Flag,
+            (false, false, Some(receipt)) if receipt.expected == *self => {
+                RemovalConfirmation::Interactive
+            }
+            (false, false, Some(_)) => {
+                return Err(RemovalAuthorizationError::ConfirmationReceiptMismatch);
+            }
+            (_, _, Some(_)) => {
+                return Err(RemovalAuthorizationError::ConfirmationReceiptUnexpected);
+            }
+            (false, false, None) => {
+                return Err(RemovalAuthorizationError::ConfirmationRequired);
+            }
+        };
         if self.dirty && !options.force_worktree {
             return Err(RemovalAuthorizationError::DirtyWorktree);
         }
@@ -275,6 +374,7 @@ impl RemovalAssessment {
             dirty: self.dirty,
             merged: self.merged,
             yes: options.yes,
+            confirmation,
             force_worktree: options.force_worktree,
             force_worktree_applied: self.dirty && options.force_worktree,
             delete_branch: options.delete_branch,
@@ -299,6 +399,10 @@ pub enum RemovalAuthorizationError {
     MainWorktree,
     #[error("removal requires confirmation; pass --yes in non-interactive use")]
     ConfirmationRequired,
+    #[error("interactive confirmation was recorded for different removal facts")]
+    ConfirmationReceiptMismatch,
+    #[error("interactive confirmation is not applicable with --yes or --dry-run")]
+    ConfirmationReceiptUnexpected,
     #[error("worktree is dirty; pass --force-worktree to remove it")]
     DirtyWorktree,
     #[error("--force-branch requires --delete-branch")]
@@ -312,23 +416,24 @@ pub enum RemovalAuthorizationError {
 }
 
 /// A complete, stable preview of the exact removal that was authorized.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct RemovalPlan {
-    pub dry_run: bool,
-    pub worktree: String,
-    pub branch: Option<String>,
-    pub path: PathBuf,
-    pub detached: bool,
-    pub dirty: bool,
-    pub merged: Option<bool>,
-    pub yes: bool,
-    pub force_worktree: bool,
-    pub force_worktree_applied: bool,
-    pub delete_branch: bool,
-    pub force_branch: bool,
-    pub force_branch_applied: bool,
-    pub no_hooks: bool,
-    pub hook_policy: RemovalHookPolicy,
+    dry_run: bool,
+    worktree: String,
+    branch: Option<String>,
+    path: PathBuf,
+    detached: bool,
+    dirty: bool,
+    merged: Option<bool>,
+    yes: bool,
+    confirmation: RemovalConfirmation,
+    force_worktree: bool,
+    force_worktree_applied: bool,
+    delete_branch: bool,
+    force_branch: bool,
+    force_branch_applied: bool,
+    no_hooks: bool,
+    hook_policy: RemovalHookPolicy,
     #[serde(skip)]
     expected: RemovalAssessment,
 }
@@ -441,6 +546,7 @@ pub struct RemovalOutcome {
     pub dirty: bool,
     pub merged: Option<bool>,
     pub yes: bool,
+    pub confirmation: RemovalConfirmation,
     pub force_worktree: bool,
     pub force_worktree_applied: bool,
     pub delete_branch: bool,
@@ -470,6 +576,7 @@ impl RemovalOutcome {
             dirty: plan.dirty,
             merged: plan.merged,
             yes: plan.yes,
+            confirmation: plan.confirmation,
             force_worktree: plan.force_worktree,
             force_worktree_applied: plan.force_worktree_applied,
             delete_branch: plan.delete_branch,
@@ -513,8 +620,9 @@ impl fmt::Display for RemovalOutcome {
         }
         write!(
             formatter,
-            "; --yes={}; --force-worktree={} (applied={}); --delete-branch={}; --force-branch={} (applied={}); --no-hooks={}",
+            "; --yes={}; confirmation={}; --force-worktree={} (applied={}); --delete-branch={}; --force-branch={} (applied={}); --no-hooks={}",
             self.yes,
+            self.confirmation,
             self.force_worktree,
             self.force_worktree_applied,
             self.delete_branch,
@@ -550,8 +658,9 @@ fn write_human_outcome(
     }
     write!(
         formatter,
-        "; --yes={}; --force-worktree={} (applied={}); --delete-branch={}; --force-branch={} (applied={}); --no-hooks={}",
+        "; --yes={}; confirmation={}; --force-worktree={} (applied={}); --delete-branch={}; --force-branch={} (applied={}); --no-hooks={}",
         plan.yes,
+        plan.confirmation,
         plan.force_worktree,
         plan.force_worktree_applied,
         plan.delete_branch,
@@ -958,7 +1067,10 @@ fn common_git_dir(repo_path: &Path) -> Result<PathBuf, git::GitError> {
 
 #[cfg(unix)]
 struct ExactTarget {
+    parent: std::fs::File,
     directory: std::fs::File,
+    parent_path: PathBuf,
+    leaf: std::ffi::CString,
 }
 
 #[cfg(unix)]
@@ -968,11 +1080,11 @@ impl ExactTarget {
         use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::ffi::OsStrExt;
 
-        let parent = assessment
+        let parent_path = assessment
             .path
             .parent()
             .ok_or(git::GitError::PreconditionsChanged)?;
-        let parent_c = CString::new(parent.as_os_str().as_bytes()).map_err(|_| {
+        let parent_c = CString::new(parent_path.as_os_str().as_bytes()).map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "worktree parent contains a NUL byte",
@@ -1012,7 +1124,10 @@ impl ExactTarget {
             return Err(std::io::Error::last_os_error().into());
         }
         let target = Self {
+            parent,
             directory: unsafe { std::fs::File::from_raw_fd(target_fd) },
+            parent_path: parent_path.to_path_buf(),
+            leaf,
         };
         target.verify(assessment)?;
         Ok(target)
@@ -1041,6 +1156,145 @@ impl ExactTarget {
         }
         Ok(())
     }
+
+    fn quarantine(&self, assessment: &RemovalAssessment) -> Result<PathBuf, git::GitError> {
+        use std::ffi::{CString, OsStr};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+        for _ in 0..32 {
+            let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let name = CString::new(format!(".trench-remove-{}-{sequence}", std::process::id()))
+                .expect("generated quarantine names contain no NUL bytes");
+            match renameat_noreplace(
+                self.parent.as_raw_fd(),
+                &self.leaf,
+                self.parent.as_raw_fd(),
+                &name,
+            ) {
+                Ok(()) => {
+                    let path = self.parent_path.join(OsStr::from_bytes(name.as_bytes()));
+                    if self.verify_named(assessment, &name, &path).is_err() {
+                        // The source changed after the final path verification.
+                        // Restore the untrusted replacement when the original
+                        // name is still free, but never pass it to Git.
+                        let _ = renameat_noreplace(
+                            self.parent.as_raw_fd(),
+                            &name,
+                            self.parent.as_raw_fd(),
+                            &self.leaf,
+                        );
+                        return Err(git::GitError::PreconditionsChanged);
+                    }
+                    return Ok(path);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not reserve a worktree quarantine name",
+        )
+        .into())
+    }
+
+    fn verify_named(
+        &self,
+        assessment: &RemovalAssessment,
+        name: &std::ffi::CStr,
+        path: &Path,
+    ) -> Result<(), git::GitError> {
+        use std::mem::MaybeUninit;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+
+        let mut named = MaybeUninit::<libc::stat>::uninit();
+        let status = unsafe {
+            libc::fstatat(
+                self.parent.as_raw_fd(),
+                name.as_ptr(),
+                named.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if status != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let named = unsafe { named.assume_init() };
+        let held = self.directory.metadata()?;
+        if (held.dev(), held.ino()) != (named.st_dev as u64, named.st_ino as u64) {
+            return Err(git::GitError::PreconditionsChanged);
+        }
+        let live_repo = git2::Repository::open(path)?;
+        let live_admin = live_repo.path().canonicalize().map_err(git::GitError::Io)?;
+        if live_admin != assessment.admin_dir {
+            return Err(git::GitError::PreconditionsChanged);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+fn renameat_noreplace(
+    old_dir: std::os::fd::RawFd,
+    old_name: &std::ffi::CStr,
+    new_dir: std::os::fd::RawFd,
+    new_name: &std::ffi::CStr,
+) -> std::io::Result<()> {
+    let status = unsafe {
+        libc::renameatx_np(
+            old_dir,
+            old_name.as_ptr(),
+            new_dir,
+            new_name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn renameat_noreplace(
+    old_dir: std::os::fd::RawFd,
+    old_name: &std::ffi::CStr,
+    new_dir: std::os::fd::RawFd,
+    new_name: &std::ffi::CStr,
+) -> std::io::Result<()> {
+    let status = unsafe {
+        libc::renameat2(
+            old_dir,
+            old_name.as_ptr(),
+            new_dir,
+            new_name.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(any(target_vendor = "apple", target_os = "linux"))))]
+fn renameat_noreplace(
+    _old_dir: std::os::fd::RawFd,
+    _old_name: &std::ffi::CStr,
+    _new_dir: std::os::fd::RawFd,
+    _new_name: &std::ffi::CStr,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "exclusive descriptor-relative rename is unavailable",
+    ))
 }
 
 #[cfg(unix)]
@@ -1068,14 +1322,36 @@ fn remove_exact_worktree_with_boundary(
     allow_dirty: bool,
     boundary: &dyn RemovalMutationBoundary,
 ) -> Result<(), git::GitError> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::process::CommandExt;
-
     let target = ExactTarget::open(assessment)?;
     target.verify(assessment)?;
     boundary.after_target_open();
     let common = common_git_dir(&assessment.repo_path)?;
-    let target_fd = target.directory.as_raw_fd();
+    let quarantined = target.quarantine(assessment)?;
+
+    // Tell Git the exact validated quarantine path before removal. The
+    // original user-facing pathname is absent at this point, so a replacement
+    // there can never become Git's recursive deletion target.
+    let repair = Command::new("git")
+        .arg(format!("--git-dir={}", common.display()))
+        .args(["-c", "core.hooksPath=/dev/null"])
+        .args(["worktree", "repair"])
+        .arg(&quarantined)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()
+        .map_err(|error| git::GitError::CommandFailed {
+            operation: "repairing quarantined worktree metadata",
+            message: error.to_string(),
+        })?;
+    if !repair.status.success() {
+        return Err(git::GitError::CommandFailed {
+            operation: "repairing quarantined worktree metadata",
+            message: String::from_utf8_lossy(&repair.stderr).trim().to_string(),
+        });
+    }
+
     let mut command = Command::new("git");
     command
         .arg(format!("--git-dir={}", common.display()))
@@ -1085,21 +1361,17 @@ fn remove_exact_worktree_with_boundary(
         command.arg("--force");
     }
     command
-        .arg(".")
+        .arg(&quarantined)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR");
-    unsafe {
-        command.pre_exec(move || {
-            if libc::fchdir(target_fd) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
-    }
-    let output = command.output()?;
+    let output = command
+        .output()
+        .map_err(|error| git::GitError::CommandFailed {
+            operation: "removing the exact worktree",
+            message: error.to_string(),
+        })?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1154,6 +1426,19 @@ fn delete_exact_branch(assessment: &RemovalAssessment) -> Result<(), git::GitErr
     let branch_ref = format!("refs/heads/{branch}");
     let common = common_git_dir(&assessment.repo_path)?;
 
+    // Re-read checkout ownership at the final branch-mutation boundary. The
+    // target worktree has already been removed, but another worktree may have
+    // checked out the branch while hooks or pruning were running.
+    let live_catalog = WorktreeCatalog::discover(&assessment.repo_path)
+        .map_err(|_| git::GitError::PreconditionsChanged)?;
+    if live_catalog
+        .identities()
+        .iter()
+        .any(|identity| identity.branch.as_deref() == Some(branch))
+    {
+        return Err(git::GitError::PreconditionsChanged);
+    }
+
     // `update-ref` compares the old branch OID atomically with deletion, so a
     // branch moved or replaced after authorization can never be deleted.
     let mut child = Command::new("git")
@@ -1172,7 +1457,13 @@ fn delete_exact_branch(assessment: &RemovalAssessment) -> Result<(), git::GitErr
         if let (Some(base_ref), Some(base_oid)) =
             (assessment.base_ref.as_deref(), assessment.base_oid)
         {
-            writeln!(stdin, "verify {base_ref} {base_oid}")?;
+            // The delete command already verifies this ref's exact old OID.
+            // update-ref rejects two commands for the same ref in one
+            // transaction, so do not add a duplicate verify when the selected
+            // base is the branch being deleted.
+            if base_ref != branch_ref {
+                writeln!(stdin, "verify {base_ref} {base_oid}")?;
+            }
         }
         writeln!(stdin, "delete {branch_ref} {branch_oid}")?;
         writeln!(stdin, "prepare")?;
@@ -1328,6 +1619,50 @@ mod tests {
     }
 
     #[test]
+    fn interactive_confirmation_is_typed_truthful_and_bound_to_the_assessment() {
+        let fixture = Fixture::new("feature/interactive-confirmation");
+        let assessment = fixture.assess();
+        let terminal = InteractiveTerminal::for_test();
+        let declined = assessment
+            .confirm_interactively(terminal, || Ok(false))
+            .unwrap();
+        assert!(declined.is_none());
+
+        let terminal = InteractiveTerminal::for_test();
+        let receipt = assessment
+            .confirm_interactively(terminal, || Ok(true))
+            .unwrap()
+            .expect("confirmed prompt should issue a receipt");
+        let plan = assessment
+            .authorize_confirmed(RemoveOptions::default(), receipt)
+            .unwrap();
+        let value = serde_json::to_value(&plan).unwrap();
+        assert_eq!(value["yes"], false);
+        assert_eq!(value["confirmation"], "interactive");
+
+        let other = Fixture::new("feature/other-confirmation").assess();
+        let terminal = InteractiveTerminal::for_test();
+        let wrong_receipt = assessment
+            .confirm_interactively(terminal, || Ok(true))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            other
+                .authorize_confirmed(RemoveOptions::default(), wrong_receipt)
+                .unwrap_err(),
+            RemovalAuthorizationError::ConfirmationReceiptMismatch
+        );
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let outcome = runtime
+            .block_on(execute(plan, None, &NoopRemovalEventSink))
+            .unwrap();
+        let value = serde_json::to_value(outcome).unwrap();
+        assert_eq!(value["yes"], false);
+        assert_eq!(value["confirmation"], "interactive");
+    }
+
+    #[test]
     fn force_branch_requires_opt_in_deletion_and_only_applies_when_unmerged() {
         let fixture = Fixture::new("feature/branch-flags");
         let merged = fixture.assess();
@@ -1430,6 +1765,7 @@ mod tests {
         assert!(!marker.exists());
         assert_eq!(outcome.mutation_state, RemovalMutationState::NotStarted);
         assert_eq!(outcome.hooks, RemovalHooksStatus::Planned);
+        assert_eq!(outcome.confirmation, RemovalConfirmation::DryRun);
         assert!(events.events().is_empty());
     }
 
@@ -1454,6 +1790,7 @@ mod tests {
             .find_branch(&fixture.branch, git2::BranchType::Local)
             .is_ok());
         assert_eq!(outcome.mutation_state, RemovalMutationState::Applied);
+        assert_eq!(outcome.confirmation, RemovalConfirmation::Flag);
         let stages = events
             .events()
             .into_iter()
@@ -1499,6 +1836,31 @@ mod tests {
         let fixture = Fixture::new("feature/delete-branch");
         let plan = fixture
             .assess()
+            .authorize(RemoveOptions {
+                delete_branch: true,
+                ..Fixture::options()
+            })
+            .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let outcome = runtime
+            .block_on(execute(plan, None, &NoopRemovalEventSink))
+            .unwrap();
+
+        assert!(outcome.branch_deleted);
+        assert!(git2::Repository::open(&fixture.main)
+            .unwrap()
+            .find_branch(&fixture.branch, git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[test]
+    fn branch_deletion_uses_one_transaction_when_base_is_the_target_branch() {
+        let fixture = Fixture::new("feature/base-is-target");
+        let assessment =
+            RemovalAssessment::discover(&fixture.main, &fixture.branch, Some(&fixture.branch))
+                .unwrap();
+        assert_eq!(assessment.merged, Some(true));
+        let plan = assessment
             .authorize(RemoveOptions {
                 delete_branch: true,
                 ..Fixture::options()
@@ -1657,13 +2019,13 @@ mod tests {
     impl RemovalMutationBoundary for SwapAfterTargetOpen {
         fn after_target_open(&self) {
             std::fs::rename(&self.source, &self.moved).unwrap();
-            std::os::unix::fs::symlink(&self.foreign, &self.source).unwrap();
+            std::fs::rename(&self.foreign, &self.source).unwrap();
         }
     }
 
     #[cfg(unix)]
     #[test]
-    fn target_descriptor_never_removes_a_replacement_after_final_open() {
+    fn quarantine_never_removes_a_directory_replacement_after_final_verify() {
         let fixture = Fixture::new("feature/late-path-race");
         let assessment = fixture.assess();
         let moved = fixture.root.path().join("moved-authorized-worktree");
@@ -1676,16 +2038,14 @@ mod tests {
             foreign: foreign.clone(),
         };
 
-        let _ = remove_exact_worktree_with_boundary(&assessment, false, &boundary);
+        let error = remove_exact_worktree_with_boundary(&assessment, false, &boundary).unwrap_err();
 
+        assert!(matches!(error, git::GitError::PreconditionsChanged));
         assert_eq!(
-            std::fs::read_to_string(foreign.join("keep")).unwrap(),
+            std::fs::read_to_string(fixture.linked.join("keep")).unwrap(),
             "safe"
         );
-        assert!(std::fs::symlink_metadata(&fixture.linked)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(boundary.moved.exists());
     }
 
     #[test]
@@ -1725,6 +2085,34 @@ mod tests {
                 .target(),
             Some(replacement)
         );
+    }
+
+    #[test]
+    fn branch_receipt_refuses_to_delete_a_branch_rechecked_out_elsewhere() {
+        let fixture = Fixture::new("feature/rechecked-out-branch");
+        let assessment = fixture.assess();
+        remove_exact_worktree(&assessment, false).unwrap();
+        prune_worktrees(&fixture.main).unwrap();
+
+        let replacement_checkout = fixture.root.path().join("replacement-checkout");
+        let repo = git2::Repository::open(&fixture.main).unwrap();
+        let branch = repo
+            .find_branch(&fixture.branch, git2::BranchType::Local)
+            .unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(branch.get()));
+        repo.worktree(
+            "replacement-checkout",
+            &replacement_checkout,
+            Some(&options),
+        )
+        .unwrap();
+
+        assert!(delete_exact_branch(&assessment).is_err());
+        assert!(replacement_checkout.exists());
+        assert!(repo
+            .find_branch(&fixture.branch, git2::BranchType::Local)
+            .is_ok());
     }
 
     #[test]
@@ -1777,6 +2165,7 @@ mod tests {
         let value = serde_json::to_value(&plan).unwrap();
         assert_eq!(value["dry_run"], true);
         assert_eq!(value["yes"], true);
+        assert_eq!(value["confirmation"], "dry_run");
         assert_eq!(value["force_worktree"], true);
         assert_eq!(value["force_worktree_applied"], false);
         assert_eq!(value["delete_branch"], true);
@@ -1789,6 +2178,7 @@ mod tests {
 
         let human = plan.to_string();
         assert!(human.contains("--yes=true"));
+        assert!(human.contains("confirmation=dry_run"));
         assert!(human.contains("--force-worktree=true (applied=false)"));
         assert!(human.contains("--delete-branch=true"));
         assert!(human.contains("--force-branch=true (applied=false)"));
