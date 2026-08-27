@@ -43,9 +43,12 @@ pub struct SyncSubmission {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncDialog {
     target: WorktreeId,
+    worktree: String,
+    branch: Option<String>,
     base_picker: RefPicker,
     strategy: SyncStrategy,
     mode: SyncMode,
+    validation_error: Option<String>,
 }
 
 impl SyncDialog {
@@ -56,10 +59,25 @@ impl SyncDialog {
     ) -> Self {
         Self {
             target: target.id.clone(),
+            worktree: target.worktree.clone(),
+            branch: target.branch.clone(),
             base_picker: RefPicker::new(refs, configured_base),
             strategy: SyncStrategy::Rebase,
             mode: SyncMode::Form,
+            validation_error: None,
         }
+    }
+
+    pub fn target(&self) -> &WorktreeId {
+        &self.target
+    }
+
+    pub fn worktree(&self) -> &str {
+        &self.worktree
+    }
+
+    pub fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
     }
 
     pub fn base(&self) -> Option<&str> {
@@ -80,6 +98,38 @@ impl SyncDialog {
 
     pub fn base_candidates(&self) -> Vec<crate::ref_catalog::RefCandidate> {
         self.base_picker.candidates()
+    }
+
+    pub fn base_query(&self) -> &str {
+        self.base_picker.query()
+    }
+
+    pub fn base_selection(&self) -> usize {
+        self.base_picker.selection()
+    }
+
+    pub fn set_origin_refresh(&mut self, refresh: crate::tui::ref_picker::OriginRefresh) {
+        self.base_picker.set_origin_refresh(refresh);
+    }
+
+    pub fn update_refs(&mut self, refs: RefSnapshot) {
+        self.base_picker.update_refs(refs);
+    }
+
+    pub fn origin_spinner_visible(&self) -> bool {
+        self.base_picker.origin_spinner_visible()
+    }
+
+    pub fn warning(&self) -> Option<&'static str> {
+        self.base_picker.warning()
+    }
+
+    pub fn validation_error(&self) -> Option<&str> {
+        self.validation_error.as_deref()
+    }
+
+    pub fn set_validation_error(&mut self, error: Option<String>) {
+        self.validation_error = error;
     }
 
     pub fn submission(&self) -> Option<SyncSubmission> {
@@ -106,10 +156,12 @@ impl SyncDialog {
             }
             SyncKey::Left => {
                 self.strategy = SyncStrategy::Rebase;
+                self.validation_error = None;
                 None
             }
             SyncKey::Right => {
                 self.strategy = SyncStrategy::Merge;
+                self.validation_error = None;
                 None
             }
             SyncKey::Enter => self.submission().map(SyncEffect::Submit),
@@ -138,6 +190,7 @@ impl SyncDialog {
                     self.base_picker.handle_key(RefPickerKey::Enter),
                     Some(RefPickerEffect::Selected(_))
                 ) {
+                    self.validation_error = None;
                     self.mode = SyncMode::Form;
                 }
             }

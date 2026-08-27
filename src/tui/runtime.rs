@@ -26,7 +26,7 @@ use crate::{
         },
         refresh::RefreshPublication,
         refresh_runtime::RefreshRuntime,
-        sync_flow::SyncSubmission,
+        sync_flow::{SyncDialog, SyncEffect, SyncKey, SyncSubmission},
         theme,
     },
 };
@@ -171,6 +171,12 @@ enum CreateInputEffect {
     Start(Box<OperationRequest>),
 }
 
+#[derive(Debug)]
+enum SyncInputEffect {
+    RefreshOrigin,
+    Start(Box<OperationRequest>),
+}
+
 trait PostOperationRefresh {
     fn request_post_operation(&mut self) -> Result<()>;
     fn apply_publications(&mut self, state: &mut AppState);
@@ -211,6 +217,27 @@ fn open_create_dialog(
         configured_base,
         checked_out,
     ));
+    Ok(())
+}
+
+fn open_sync_dialog(
+    state: &mut AppState,
+    target: &WorktreeId,
+    configured_base: Option<&str>,
+) -> Result<()> {
+    let identity = state
+        .selected_visible()
+        .filter(|identity| &identity.id == target)
+        .cloned()
+        .context("selected worktree is no longer visible")?;
+    if let Some(reason) =
+        crate::tui::sync_flow::unavailable_reason(&identity, state.statuses.get(&identity.id))
+    {
+        anyhow::bail!(reason);
+    }
+    let refs = state.refs.clone().context("references are still loading")?;
+    state.help_open = false;
+    state.sync_dialog = Some(SyncDialog::new(&identity, refs, configured_base));
     Ok(())
 }
 
@@ -309,6 +336,46 @@ fn handle_create_input(
                 CreateDispatch::Run(request) => {
                     state.help_open = false;
                     return Ok(Some(CreateInputEffect::Start(request)));
+                }
+            }
+        }
+        None => {}
+    }
+    Ok(None)
+}
+
+fn handle_sync_input(
+    state: &mut AppState,
+    key: SyncKey,
+    cwd: &Path,
+    configured_base: Option<&str>,
+    hooks: Option<HooksConfig>,
+) -> Result<Option<SyncInputEffect>> {
+    match state
+        .sync_dialog
+        .as_mut()
+        .and_then(|dialog| dialog.handle_key(key))
+    {
+        Some(SyncEffect::Close) => {
+            state.sync_dialog = None;
+            state.help_open = false;
+        }
+        Some(SyncEffect::RefreshOrigin) => {
+            if let Some(dialog) = state.sync_dialog.as_mut() {
+                dialog.set_origin_refresh(OriginRefresh::Loading);
+            }
+            return Ok(Some(SyncInputEffect::RefreshOrigin));
+        }
+        Some(SyncEffect::Submit(submission)) => {
+            match build_sync_request(&submission, cwd, configured_base, hooks) {
+                Ok(request) => {
+                    state.help_open = false;
+                    return Ok(Some(SyncInputEffect::Start(Box::new(request))));
+                }
+                Err(error) => {
+                    if let Some(dialog) = state.sync_dialog.as_mut() {
+                        dialog.set_validation_error(Some(error.to_string()));
+                    }
                 }
             }
         }
@@ -447,7 +514,10 @@ pub fn run() -> Result<TuiExit> {
                 break 'event_loop Ok(TuiExit::Quit);
             }
 
-            if (state.operation_modal.is_some() || state.create_dialog.is_some()) && state.help_open
+            if (state.operation_modal.is_some()
+                || state.create_dialog.is_some()
+                || state.sync_dialog.is_some())
+                && state.help_open
             {
                 if matches!(key.code, KeyCode::Char('?') | KeyCode::Esc) {
                     state.help_open = false;
@@ -551,6 +621,39 @@ pub fn run() -> Result<TuiExit> {
                 continue;
             }
 
+            if state.sync_dialog.is_some() {
+                if key.code == KeyCode::Char('?') {
+                    state.help_open = true;
+                    continue;
+                }
+                let Some(sync_key) = translate_sync_key(key) else {
+                    continue;
+                };
+                match handle_sync_input(
+                    &mut state,
+                    sync_key,
+                    &cwd,
+                    resolved.git.default_base.as_deref(),
+                    resolved.hooks.clone(),
+                )? {
+                    Some(SyncInputEffect::RefreshOrigin) => {
+                        if let Err(error) = refresh.ref_picker() {
+                            tracing::warn!(%error, "base picker origin refresh failed");
+                            if let Some(dialog) = state.sync_dialog.as_mut() {
+                                dialog.set_origin_refresh(OriginRefresh::Failed);
+                            }
+                        }
+                        apply_refresh_publications(&mut refresh, &mut state);
+                    }
+                    Some(SyncInputEffect::Start(request)) => {
+                        operation.start(*request);
+                        state.operation_modal = operation.modal().cloned();
+                    }
+                    None => {}
+                }
+                continue;
+            }
+
             let Some(key) = translate_key(key) else {
                 continue;
             };
@@ -590,14 +693,34 @@ pub fn run() -> Result<TuiExit> {
                             tracing::warn!(%error, "create dialog unavailable");
                         }
                     }
-                    Effect::OpenSync(id) => dialogs.register(DialogRequest::Sync(id)),
+                    Effect::OpenSync(id) => {
+                        if let Err(error) =
+                            open_sync_dialog(&mut state, &id, resolved.git.default_base.as_deref())
+                        {
+                            let _ = app::reduce(
+                                &mut state,
+                                Event::NotificationShown {
+                                    message: error.to_string(),
+                                    shown_at: Instant::now(),
+                                },
+                            );
+                        }
+                    }
                     Effect::OpenRemove(id) => dialogs.register(DialogRequest::Remove(id)),
                     Effect::Refresh => {
                         refresh.manual()?;
                         apply_refresh_publications(&mut refresh, &mut state);
                     }
                     Effect::Quit => break 'event_loop Ok(TuiExit::Quit),
-                    Effect::Unavailable { .. } => {}
+                    Effect::Unavailable { reason, .. } => {
+                        let _ = app::reduce(
+                            &mut state,
+                            Event::NotificationShown {
+                                message: reason,
+                                shown_at: Instant::now(),
+                            },
+                        );
+                    }
                 }
             }
 
@@ -628,6 +751,12 @@ fn apply_refresh_publication(state: &mut AppState, publication: RefreshPublicati
     };
     let _ = app::reduce(state, Event::RefreshPublished(publication));
     if let Some(dialog) = state.create_dialog.as_mut() {
+        if let Some(refs) = refs.clone() {
+            dialog.update_refs(refs);
+        }
+        dialog.set_origin_refresh(origin_refresh);
+    }
+    if let Some(dialog) = state.sync_dialog.as_mut() {
         if let Some(refs) = refs {
             dialog.update_refs(refs);
         }
@@ -656,6 +785,21 @@ fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
         KeyCode::Tab => Some(CreateKey::Tab),
         KeyCode::Backspace => Some(CreateKey::Backspace),
         KeyCode::Char(character) => Some(CreateKey::Character(character)),
+        _ => None,
+    }
+}
+
+fn translate_sync_key(key: KeyEvent) -> Option<SyncKey> {
+    match key.code {
+        KeyCode::Enter => Some(SyncKey::Enter),
+        KeyCode::Esc => Some(SyncKey::Escape),
+        KeyCode::Up => Some(SyncKey::Up),
+        KeyCode::Down => Some(SyncKey::Down),
+        KeyCode::Left => Some(SyncKey::Left),
+        KeyCode::Right => Some(SyncKey::Right),
+        KeyCode::Tab => Some(SyncKey::Tab),
+        KeyCode::Backspace => Some(SyncKey::Backspace),
+        KeyCode::Char(character) => Some(SyncKey::Character(character)),
         _ => None,
     }
 }
@@ -689,6 +833,7 @@ mod tests {
         tui::{
             app::WorktreeIdentity,
             create_flow::{CreateKey, CreateSubmission},
+            sync_flow::{SyncKey, SyncMode},
         },
     };
 
@@ -832,6 +977,27 @@ mod tests {
     }
 
     #[test]
+    fn terminal_keys_translate_to_sync_form_vocabulary() {
+        let modifiers = crossterm::event::KeyModifiers::NONE;
+        assert_eq!(
+            translate_sync_key(KeyEvent::new(KeyCode::Left, modifiers)),
+            Some(SyncKey::Left)
+        );
+        assert_eq!(
+            translate_sync_key(KeyEvent::new(KeyCode::Right, modifiers)),
+            Some(SyncKey::Right)
+        );
+        assert_eq!(
+            translate_sync_key(KeyEvent::new(KeyCode::Tab, modifiers)),
+            Some(SyncKey::Tab)
+        );
+        assert_eq!(
+            translate_sync_key(KeyEvent::new(KeyCode::Char('x'), modifiers)),
+            Some(SyncKey::Character('x'))
+        );
+    }
+
+    #[test]
     fn open_create_request_builds_a_live_form_from_cockpit_state_and_config() {
         let checked_out = WorktreeIdentity {
             id: WorktreeId::new("/worktrees/trench/release"),
@@ -952,6 +1118,104 @@ mod tests {
             crate::cli::commands::sync::stateless::HookPolicy::Run
         );
         assert_eq!(request.hooks, Some(hooks));
+    }
+
+    #[test]
+    fn sync_dialog_opens_the_exact_visible_target_and_routes_picker_and_submit() {
+        let repository = init_repo();
+        let target = repository.path().canonicalize().unwrap();
+        let identity = WorktreeIdentity {
+            id: WorktreeId::new(target.clone()),
+            worktree: "main".to_string(),
+            branch: Some("main".to_string()),
+            path: target,
+            head: None,
+            is_main: true,
+            is_current: true,
+            detached: false,
+        };
+        let mut state = AppState::new(vec![identity.clone()]);
+        state
+            .statuses
+            .insert(identity.id.clone(), Default::default());
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        ));
+
+        open_sync_dialog(&mut state, &identity.id, Some("main")).unwrap();
+        let dialog = state.sync_dialog.as_ref().expect("sync form opened");
+        assert_eq!(dialog.target(), &identity.id);
+        assert_eq!(dialog.base(), Some("main"));
+
+        assert!(matches!(
+            handle_sync_input(
+                &mut state,
+                SyncKey::Tab,
+                repository.path(),
+                Some("main"),
+                None,
+            )
+            .unwrap(),
+            Some(SyncInputEffect::RefreshOrigin)
+        ));
+        assert_eq!(
+            state.sync_dialog.as_ref().unwrap().mode(),
+            SyncMode::BasePicker
+        );
+
+        apply_refresh_publication(
+            &mut state,
+            RefreshPublication {
+                identities: vec![identity],
+                refs: Some(RefSnapshot::from_parts(
+                    ["main"],
+                    ["origin/main", "origin/release"],
+                    Some("origin/main"),
+                    Some("main"),
+                    true,
+                )),
+                statuses: BTreeMap::from([(
+                    WorktreeId::new(repository.path()),
+                    Default::default(),
+                )]),
+                waiting_rows: BTreeSet::new(),
+                updating_refs: false,
+                warning: None,
+            },
+        );
+        assert!(state
+            .sync_dialog
+            .as_ref()
+            .unwrap()
+            .base_candidates()
+            .iter()
+            .any(|candidate| candidate.name == "origin/release"));
+
+        handle_sync_input(
+            &mut state,
+            SyncKey::Escape,
+            repository.path(),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        let effect = handle_sync_input(
+            &mut state,
+            SyncKey::Enter,
+            repository.path(),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            effect,
+            Some(SyncInputEffect::Start(request))
+                if matches!(*request, OperationRequest::Sync(_))
+        ));
     }
 
     #[test]
