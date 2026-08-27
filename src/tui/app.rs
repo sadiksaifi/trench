@@ -616,4 +616,26 @@ mod tests {
         assert!(state.search.is_none());
         assert_eq!(state.selected, Some(beta.id));
     }
+
+    #[test]
+    fn launcher_actions_dispatch_only_the_visible_filtered_worktree() {
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let beta = identity("/worktrees/beta", "beta");
+        let mut state = AppState::new(vec![alpha, beta.clone()]);
+        state
+            .statuses
+            .insert(beta.id.clone(), WorktreeStatus::default());
+        let _ = reduce(&mut state, Event::Input(Key::Char('/')));
+        let _ = reduce(&mut state, Event::Input(Key::Char('b')));
+
+        for (key, expected) in [
+            (Key::Enter, Effect::Switch(beta.id.clone())),
+            (Key::Char('o'), Effect::Open(beta.id.clone())),
+            (Key::Char('s'), Effect::OpenSync(beta.id.clone())),
+            (Key::Char('d'), Effect::OpenRemove(beta.id.clone())),
+        ] {
+            assert_eq!(reduce(&mut state, Event::Input(key)), vec![expected]);
+            assert_eq!(state.search.as_ref().unwrap().as_str(), "b");
+        }
+    }
 }
