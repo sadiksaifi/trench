@@ -2360,6 +2360,7 @@ mod tests {
         launcher.add("alpha");
         let beta = launcher.add("beta");
         launcher.search("bet");
+        let _ = app::reduce(&mut launcher.state, Event::Input(Key::Escape));
         for (key, expected) in [
             (Key::Enter, app::Effect::Switch(beta.id.clone())),
             (Key::Char('o'), app::Effect::Open(beta.id.clone())),

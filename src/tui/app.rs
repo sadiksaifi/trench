@@ -793,6 +793,7 @@ mod tests {
             let _ = reduce(&mut state, Event::Input(Key::Char(character)));
         }
         assert_eq!(state.selected, Some(detached.id.clone()));
+        let _ = reduce(&mut state, Event::Input(Key::Escape));
         assert_eq!(
             reduce(&mut state, Event::Input(Key::Char('s'))),
             vec![Effect::Unavailable {
@@ -805,12 +806,12 @@ mod tests {
             vec![Effect::OpenRemove(detached.id)]
         );
 
-        let _ = reduce(&mut state, Event::Input(Key::Escape));
         let _ = reduce(&mut state, Event::Input(Key::Char('/')));
         for character in "mai".chars() {
             let _ = reduce(&mut state, Event::Input(Key::Char(character)));
         }
         assert_eq!(state.selected, Some(main.id));
+        let _ = reduce(&mut state, Event::Input(Key::Escape));
         assert_eq!(
             reduce(&mut state, Event::Input(Key::Char('d'))),
             vec![Effect::Unavailable {
