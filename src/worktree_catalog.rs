@@ -22,6 +22,7 @@ pub struct WorktreeStatus {
     pub staged: u32,
     pub modified: u32,
     pub untracked: u32,
+    pub conflicted: u32,
     pub ahead: Option<usize>,
     pub behind: Option<usize>,
 }
@@ -161,6 +162,7 @@ impl WorktreeCatalog {
             staged: counts.staged,
             modified: counts.modified,
             untracked: counts.untracked,
+            conflicted: counts.conflicted,
             ahead: comparison.map(|(ahead, _)| ahead),
             behind: comparison.map(|(_, behind)| behind),
         })
