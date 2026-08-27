@@ -290,10 +290,8 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 if let Some(query) = state.search.as_mut() {
                     let changed = match key {
                         Key::Backspace => query.backspace(),
-                        Key::Char(character) => {
-                            query.insert(character);
-                            true
-                        }
+                        Key::Edit(edit) => query.edit(edit),
+                        Key::Char(character) => query.insert(character),
                         _ => false,
                     };
                     if changed {
@@ -681,6 +679,30 @@ mod tests {
         assert!(reduce(&mut state, Event::Input(Key::Escape)).is_empty());
         assert!(state.search.is_none());
         assert_eq!(state.selected, Some(beta.id));
+    }
+
+    #[test]
+    fn launcher_search_supports_mid_line_unicode_edits() {
+        use crate::tui::line_input::LineEdit;
+
+        let mut state = AppState::new(vec![identity("/worktrees/alpha", "alpha")]);
+        let _ = reduce(&mut state, Event::Input(Key::Char('/')));
+
+        for character in "a👨‍👩‍👧‍👦界".chars() {
+            let _ = reduce(&mut state, Event::Input(Key::Char(character)));
+        }
+        let _ = reduce(&mut state, Event::Input(Key::Edit(LineEdit::Start)));
+        let _ = reduce(
+            &mut state,
+            Event::Input(Key::Edit(LineEdit::NextCharacter)),
+        );
+        let _ = reduce(
+            &mut state,
+            Event::Input(Key::Edit(LineEdit::DeleteNextCharacter)),
+        );
+        let _ = reduce(&mut state, Event::Input(Key::Char('b')));
+
+        assert_eq!(state.search.as_ref().unwrap().as_str(), "ab界");
     }
 
     #[test]

@@ -1,21 +1,28 @@
 use std::cmp::Reverse;
 
-use crate::tui::app::{WorktreeId, WorktreeIdentity};
+use crate::tui::{
+    app::{WorktreeId, WorktreeIdentity},
+    line_input::{LineEdit, LineInput},
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct QueryBuffer(String);
+pub struct QueryBuffer(LineInput);
 
 impl QueryBuffer {
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.value()
     }
 
-    pub fn insert(&mut self, character: char) {
-        self.0.push(character);
+    pub fn edit(&mut self, edit: LineEdit) -> bool {
+        self.0.edit(edit)
+    }
+
+    pub fn insert(&mut self, character: char) -> bool {
+        self.edit(LineEdit::Insert(character))
     }
 
     pub fn backspace(&mut self) -> bool {
-        self.0.pop().is_some()
+        self.edit(LineEdit::DeletePreviousCharacter)
     }
 }
 
