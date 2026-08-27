@@ -100,16 +100,29 @@ fn open_editor(
 
 struct MouseCapture<W: Write> {
     writer: W,
+    requested: bool,
     enabled: bool,
 }
 
 impl<W: Write> MouseCapture<W> {
-    fn enable(mut writer: W) -> io::Result<Self> {
-        execute!(writer, EnableMouseCapture)?;
-        Ok(Self {
+    fn new(writer: W) -> Self {
+        Self {
             writer,
-            enabled: true,
-        })
+            requested: false,
+            enabled: false,
+        }
+    }
+
+    fn set_active(&mut self, active: bool) -> io::Result<()> {
+        self.requested = active;
+        if active && !self.enabled {
+            execute!(self.writer, EnableMouseCapture)?;
+            self.enabled = true;
+        } else if !active && self.enabled {
+            execute!(self.writer, DisableMouseCapture)?;
+            self.enabled = false;
+        }
+        Ok(())
     }
 
     fn suspend(&mut self) -> io::Result<()> {
@@ -121,7 +134,7 @@ impl<W: Write> MouseCapture<W> {
     }
 
     fn resume(&mut self) -> io::Result<()> {
-        if !self.enabled {
+        if self.requested && !self.enabled {
             execute!(self.writer, EnableMouseCapture)?;
             self.enabled = true;
         }
@@ -739,14 +752,7 @@ pub fn run() -> Result<TuiExit> {
 
     super::install_panic_hook();
     let mut terminal = ratatui::init();
-    let mut mouse_capture = match MouseCapture::enable(std::io::stdout()) {
-        Ok(capture) => capture,
-        Err(error) => {
-            ratatui::restore();
-            super::restore_panic_hook();
-            return Err(error.into());
-        }
-    };
+    let mut mouse_capture = MouseCapture::new(std::io::stdout());
     let result = (|| -> Result<TuiExit> {
         'event_loop: loop {
             for effect in operation.tick() {
@@ -769,6 +775,9 @@ pub fn run() -> Result<TuiExit> {
                 }
             }
             state.operation_modal = operation.modal().cloned();
+            mouse_capture
+                .set_active(state.create_dialog.is_some() || state.help_open)
+                .context("failed to update mouse capture")?;
             let _ = app::reduce(&mut state, Event::NotificationTick(Instant::now()));
             let (width, height) = crossterm::terminal::size()?;
             let _ = app::reduce(&mut state, Event::ViewportChanged { width, height });
@@ -1685,7 +1694,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_capture_balances_start_suspend_resume_and_drop() {
+    fn mouse_capture_is_idle_until_an_interactive_overlay_opens() {
         use std::io::{self, Write};
 
         #[derive(Clone, Default)]
@@ -1703,9 +1712,36 @@ mod tests {
         }
 
         let output = SharedWriter::default();
-        let mut capture = MouseCapture::enable(output.clone()).unwrap();
+        let capture = MouseCapture::new(output.clone());
+        drop(capture);
+
+        assert!(output.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn mouse_capture_balances_overlay_suspend_resume_close_and_drop() {
+        use std::io::{self, Write};
+
+        #[derive(Clone, Default)]
+        struct SharedWriter(Rc<RefCell<Vec<u8>>>);
+
+        impl Write for SharedWriter {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let output = SharedWriter::default();
+        let mut capture = MouseCapture::new(output.clone());
+        capture.set_active(true).unwrap();
         capture.suspend().unwrap();
         capture.resume().unwrap();
+        capture.set_active(false).unwrap();
         drop(capture);
 
         let bytes = output.0.borrow();
