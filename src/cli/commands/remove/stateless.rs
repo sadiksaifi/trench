@@ -365,10 +365,7 @@ impl RemovalAssessment {
     ) -> Result<RemovalPlan, RemovalAuthorizationError> {
         options.yes = false;
         let expected = self.clone();
-        self.authorize_inner(
-            options,
-            Some(InteractiveConfirmationReceipt { expected }),
-        )
+        self.authorize_inner(options, Some(InteractiveConfirmationReceipt { expected }))
     }
 
     fn authorize_inner(

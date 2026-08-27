@@ -182,8 +182,7 @@ impl RemoveDialog {
             (
                 RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch,
                 RemoveKey::Enter,
-            ) => (self.confirm_current_risk() == RemoveMode::Ready)
-                .then_some(RemoveEffect::Submit),
+            ) => (self.confirm_current_risk() == RemoveMode::Ready).then_some(RemoveEffect::Submit),
             (RemoveMode::Ready, RemoveKey::Enter) => Some(RemoveEffect::Submit),
             (RemoveMode::Ready, RemoveKey::Escape) => {
                 self.mode = RemoveMode::Review;
@@ -449,7 +448,10 @@ mod tests {
             fixture.assessment(),
         )
         .unwrap();
-        assert_eq!(dialog.handle_key(RemoveKey::Enter), Some(RemoveEffect::Submit));
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Enter),
+            Some(RemoveEffect::Submit)
+        );
         std::fs::write(fixture.worktree_path.join("late.txt"), "late\n").unwrap();
 
         assert!(matches!(
@@ -457,7 +459,10 @@ mod tests {
             Err(RemoveFlowError::ConfirmationRequired)
         ));
         assert_eq!(dialog.mode(), RemoveMode::ConfirmDirtyWorktree);
-        assert_eq!(dialog.handle_key(RemoveKey::Enter), Some(RemoveEffect::Submit));
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Enter),
+            Some(RemoveEffect::Submit)
+        );
         let OperationRequest::Remove(request) = dialog
             .revalidate_request(fixture.root.path(), Some("main"), None)
             .unwrap()
