@@ -2000,6 +2000,8 @@ fn prune_worktrees(repo_path: &Path) -> Result<(), git::GitError> {
 
 trait BranchDeletionBoundary {
     fn before_git_delete(&self) {}
+    fn before_compare_delete(&self) {}
+    fn after_compare_delete(&self) {}
 }
 
 struct ProductionBranchDeletionBoundary;
@@ -2038,24 +2040,99 @@ fn delete_exact_branch_with_boundary(
             return Err(git::GitError::PreconditionsChanged);
         }
     }
+    if branch_is_checked_out(&assessment.repo_path, branch)? {
+        return Err(git::GitError::PreconditionsChanged);
+    }
 
-    // Git owns the final checkout-safety decision. If another worktree checks
-    // out the branch after the OID receipt is checked, `git branch` refuses the
-    // deletion instead of leaving that worktree with a broken symbolic HEAD.
+    if !force && assessment.merged != Some(true) {
+        return Err(git::GitError::PreconditionsChanged);
+    }
+
+    boundary.before_compare_delete();
+    update_branch_ref(
+        &assessment.repo_path,
+        branch,
+        None,
+        Some(branch_oid),
+        "deleting the exact local branch",
+    )?;
+    boundary.after_compare_delete();
+
+    if branch_is_checked_out(&assessment.repo_path, branch)? {
+        let restoration = update_branch_ref(
+            &assessment.repo_path,
+            branch,
+            Some(branch_oid),
+            None,
+            "restoring a branch checked out during deletion",
+        );
+        return Err(match restoration {
+            Ok(()) => git::GitError::CommandFailed {
+                operation: "deleting the exact local branch",
+                message: "a checkout raced with deletion; the authorized ref was restored"
+                    .to_string(),
+            },
+            Err(error) => git::GitError::CommandFailed {
+                operation: "deleting the exact local branch",
+                message: format!(
+                    "a checkout raced with deletion and ref restoration did not overwrite concurrent state: {error}"
+                ),
+            },
+        });
+    }
+    Ok(())
+}
+
+fn branch_is_checked_out(repo_path: &Path, branch: &str) -> Result<bool, git::GitError> {
+    let expected = format!("branch refs/heads/{branch}");
     let output = Command::new("git")
         .arg("-C")
-        .arg(&assessment.repo_path)
-        .args(["branch", if force { "-D" } else { "-d" }, "--", branch])
+        .arg(repo_path)
+        .args(["worktree", "list", "--porcelain"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR")
         .output()?;
     if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == expected))
+    } else {
+        Err(git::GitError::CommandFailed {
+            operation: "checking live branch ownership",
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    }
+}
+
+fn update_branch_ref(
+    repo_path: &Path,
+    branch: &str,
+    new_oid: Option<git2::Oid>,
+    expected_old_oid: Option<git2::Oid>,
+    operation: &'static str,
+) -> Result<(), git::GitError> {
+    const ZERO_OID: &str = "0000000000000000000000000000000000000000";
+
+    let reference = format!("refs/heads/{branch}");
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(repo_path)
+        .args(["update-ref", &reference])
+        .arg(new_oid.map_or_else(|| ZERO_OID.to_string(), |oid| oid.to_string()))
+        .arg(expected_old_oid.map_or_else(|| ZERO_OID.to_string(), |oid| oid.to_string()))
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR");
+    let output = command.output()?;
+    if output.status.success() {
         Ok(())
     } else {
         Err(git::GitError::CommandFailed {
-            operation: "deleting the exact local branch",
+            operation,
             message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         })
     }
@@ -2905,7 +2982,7 @@ mod tests {
     }
 
     impl BranchDeletionBoundary for ReplaceBranchAtDelete {
-        fn before_git_delete(&self) {
+        fn before_compare_delete(&self) {
             let repo = git2::Repository::open(&self.repo_path).unwrap();
             repo.reference(
                 &format!("refs/heads/{}", self.branch),
@@ -2914,6 +2991,45 @@ mod tests {
                 "replace branch at deletion boundary",
             )
             .unwrap();
+        }
+    }
+
+    struct CheckoutAcrossDelete {
+        repo_path: PathBuf,
+        checkout_path: PathBuf,
+        branch: String,
+        replacement: Option<git2::Oid>,
+    }
+
+    impl BranchDeletionBoundary for CheckoutAcrossDelete {
+        fn after_compare_delete(&self) {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&self.repo_path)
+                .args(["worktree", "add", "--detach"])
+                .arg(&self.checkout_path)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let checkout = git2::Repository::open(&self.checkout_path).unwrap();
+            checkout
+                .reference_symbolic(
+                    "HEAD",
+                    &format!("refs/heads/{}", self.branch),
+                    true,
+                    "materialize checkout race",
+                )
+                .unwrap();
+            if let Some(replacement) = self.replacement {
+                let repo = git2::Repository::open(&self.repo_path).unwrap();
+                repo.reference(
+                    &format!("refs/heads/{}", self.branch),
+                    replacement,
+                    true,
+                    "race restoration with foreign ref",
+                )
+                .unwrap();
+            }
         }
     }
 
@@ -2986,6 +3102,49 @@ mod tests {
                 .target(),
             Some(replacement)
         );
+    }
+
+    #[test]
+    fn checkout_materializing_across_delete_restores_the_authorized_ref() {
+        let fixture = Fixture::new("feature/checkout-across-delete");
+        let assessment = fixture.assess();
+        let expected = assessment.branch_oid.unwrap();
+        remove_exact_worktree(&assessment, false).unwrap();
+        let checkout_path = fixture.root.path().join("checkout-across-delete");
+        let boundary = CheckoutAcrossDelete {
+            repo_path: fixture.main.clone(),
+            checkout_path: checkout_path.clone(),
+            branch: fixture.branch.clone(),
+            replacement: None,
+        };
+
+        assert!(delete_exact_branch_with_boundary(&assessment, true, &boundary).is_err());
+        let repo = git2::Repository::open(&fixture.main).unwrap();
+        assert_eq!(local_branch_oid(&repo, &fixture.branch).unwrap(), expected);
+        assert!(checkout_path.exists());
+    }
+
+    #[test]
+    fn restoration_collision_never_overwrites_a_foreign_ref() {
+        let fixture = Fixture::new("feature/restore-collision");
+        let assessment = fixture.assess();
+        remove_exact_worktree(&assessment, false).unwrap();
+        let repo = git2::Repository::open(&fixture.main).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = parent.tree().unwrap();
+        let foreign = repo
+            .commit(None, &signature, &signature, "foreign", &tree, &[&parent])
+            .unwrap();
+        let boundary = CheckoutAcrossDelete {
+            repo_path: fixture.main.clone(),
+            checkout_path: fixture.root.path().join("collision-checkout"),
+            branch: fixture.branch.clone(),
+            replacement: Some(foreign),
+        };
+
+        assert!(delete_exact_branch_with_boundary(&assessment, true, &boundary).is_err());
+        assert_eq!(local_branch_oid(&repo, &fixture.branch).unwrap(), foreign);
     }
 
     #[test]
