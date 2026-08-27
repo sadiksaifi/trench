@@ -749,6 +749,7 @@ fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[(
             Style::default().fg(theme.fg_muted),
         ));
     }
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(Line::from(spans))
             .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
@@ -1733,6 +1734,32 @@ mod tests {
         assert_eq!(candidates.cell(selected).unwrap().bg, theme.selection_bg);
         assert_eq!(candidates.cell(selected).unwrap().fg, theme.selection_fg);
         assert_ne!(candidates.cell(unselected).unwrap().bg, theme.selection_bg);
+    }
+
+    #[test]
+    fn dialog_keybar_replaces_the_cockpit_keybar_instead_of_leaking_through() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/auth");
+        state.create_dialog = Some(dialog);
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let footer = lines(&buffer).last().unwrap().trim_end().to_string();
+
+        assert_eq!(footer.matches("? help").count(), 1, "{footer}");
+        for leaked in ["s sync", "/ search", "r refresh", "i inspector", "q quit"] {
+            assert!(!footer.contains(leaked), "leaked {leaked:?}: {footer}");
+        }
+        assert_eq!(footer, "Enter create  Tab base  Esc close  ? help");
     }
 
     #[test]
