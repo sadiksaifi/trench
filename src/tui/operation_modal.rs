@@ -1,6 +1,8 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
-use crate::operation::{OperationEvent, OperationFailure, OperationKind, OperationStage};
+use crate::operation::{
+    MutationState, OperationEvent, OperationFailure, OperationKind, OperationStage,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageView {
@@ -15,7 +17,9 @@ pub enum ModalStatus {
     Succeeded,
     Failed {
         stage: OperationStage,
+        mutation_state: MutationState,
         message: String,
+        retained_quarantine: Option<PathBuf>,
     },
 }
 
@@ -125,7 +129,9 @@ impl OperationModal {
         self.current_stage = Some(failure.stage);
         self.status = ModalStatus::Failed {
             stage: failure.stage,
+            mutation_state: failure.mutation_state,
             message: failure.message.clone(),
+            retained_quarantine: failure.retained_quarantine.clone(),
         };
     }
 
@@ -134,7 +140,15 @@ impl OperationModal {
             ModalKey::Escape if self.status == ModalStatus::Running && !self.mutation_started => {
                 Some(ModalEffect::Cancel)
             }
-            ModalKey::Enter if matches!(self.status, ModalStatus::Failed { .. }) => {
+            ModalKey::Enter
+                if matches!(
+                    self.status,
+                    ModalStatus::Failed {
+                        mutation_state: MutationState::NotStarted | MutationState::RolledBack,
+                        ..
+                    }
+                ) =>
+            {
                 Some(ModalEffect::ReturnToForm)
             }
             ModalKey::Up => {
@@ -264,13 +278,68 @@ mod tests {
             modal.status(),
             &ModalStatus::Failed {
                 stage: OperationStage::PostHook,
+                mutation_state: MutationState::RolledBack,
                 message: "post-create hook failed".to_string(),
+                retained_quarantine: None,
             }
         );
         assert_eq!(
             modal.handle_key(ModalKey::Enter),
             Some(ModalEffect::ReturnToForm)
         );
+    }
+
+    #[test]
+    fn partially_applied_failure_keeps_recovery_truth_and_cannot_return_to_form() {
+        let quarantine = PathBuf::from("/tmp/retained-quarantine");
+        let mut modal = OperationModal::new(OperationKind::Remove);
+        modal.fail(&OperationFailure {
+            stage: OperationStage::RemoveWorktree,
+            mutation_state: MutationState::PartiallyApplied,
+            class: ErrorClass::Git,
+            message: "restoration failed".to_string(),
+            retained_quarantine: Some(quarantine.clone()),
+        });
+
+        assert_eq!(
+            modal.status(),
+            &ModalStatus::Failed {
+                stage: OperationStage::RemoveWorktree,
+                mutation_state: MutationState::PartiallyApplied,
+                message: "restoration failed".to_string(),
+                retained_quarantine: Some(quarantine),
+            }
+        );
+        assert_eq!(modal.handle_key(ModalKey::Enter), None);
+    }
+
+    #[test]
+    fn remove_modal_tracks_all_shared_stages_and_locks_cancellation_at_mutation() {
+        let mut modal = OperationModal::new(OperationKind::Remove);
+        for stage in [
+            OperationStage::Revalidate,
+            OperationStage::PreHook,
+            OperationStage::RemoveWorktree,
+            OperationStage::Prune,
+            OperationStage::DeleteBranch,
+            OperationStage::PostHook,
+        ] {
+            modal.apply(OperationEvent::StageStarted { stage });
+            modal.apply(OperationEvent::StageFinished {
+                stage,
+                duration: Duration::from_millis(10),
+                success: true,
+            });
+        }
+        modal.tick(Duration::from_millis(750));
+        assert_eq!(modal.elapsed(), Duration::from_millis(750));
+        assert_eq!(modal.stages().len(), 6);
+        assert_eq!(
+            modal.handle_key(ModalKey::Escape),
+            Some(ModalEffect::Cancel)
+        );
+        modal.apply(OperationEvent::MutationStarted);
+        assert_eq!(modal.handle_key(ModalKey::Escape), None);
     }
 
     #[test]

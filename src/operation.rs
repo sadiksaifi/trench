@@ -429,13 +429,18 @@ async fn execute_remove(
         });
     }
     let adapter = RemoveEmitterAdapter { emitter };
-    remove::execute(request.plan, request.hooks.as_ref(), &adapter)
+    let guard = RemoveMutationGuard {
+        cancellation,
+        emitter,
+    };
+    remove::execute_with_guard(request.plan, request.hooks.as_ref(), &adapter, &guard)
         .await
         .map(OperationOutcome::Remove)
         .map_err(|failure| OperationFailure {
             stage: map_remove_stage(failure.stage),
             mutation_state: map_remove_mutation(failure.mutation_state),
             class: match failure.class {
+                remove::RemovalErrorClass::Cancelled => ErrorClass::Cancelled,
                 remove::RemovalErrorClass::PreconditionsChanged => ErrorClass::PreconditionsChanged,
                 remove::RemovalErrorClass::Git => ErrorClass::Git,
                 remove::RemovalErrorClass::Hook => ErrorClass::Hook,
@@ -445,6 +450,21 @@ async fn execute_remove(
             message: failure.message,
             retained_quarantine: failure.retained_quarantine,
         })
+}
+
+struct RemoveMutationGuard<'a> {
+    cancellation: &'a dyn CancellationCheck,
+    emitter: &'a dyn Emitter,
+}
+
+impl crate::cli::commands::remove::stateless::RemovalMutationGuard for RemoveMutationGuard<'_> {
+    fn try_begin_mutation(&self) -> bool {
+        let accepted = self.cancellation.try_begin_mutation();
+        if accepted {
+            self.emitter.emit(OperationEvent::MutationStarted);
+        }
+        accepted
+    }
 }
 
 struct RemoveEmitterAdapter<'a> {

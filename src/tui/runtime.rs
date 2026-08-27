@@ -26,6 +26,7 @@ use crate::{
         },
         refresh::RefreshPublication,
         refresh_runtime::RefreshRuntime,
+        remove_flow::{RemoveDialog, RemoveEffect, RemoveKey},
         sync_flow::{SyncDialog, SyncEffect, SyncKey, SyncSubmission},
         theme,
     },
@@ -177,6 +178,11 @@ enum SyncInputEffect {
     Start(Box<OperationRequest>),
 }
 
+#[derive(Debug)]
+enum RemoveInputEffect {
+    Start(Box<OperationRequest>),
+}
+
 trait PostOperationRefresh {
     fn request_post_operation(&mut self) -> Result<()>;
     fn apply_publications(&mut self, state: &mut AppState);
@@ -238,6 +244,28 @@ fn open_sync_dialog(
     let refs = state.refs.clone().context("references are still loading")?;
     state.help_open = false;
     state.sync_dialog = Some(SyncDialog::new(&identity, refs, configured_base));
+    Ok(())
+}
+
+fn open_remove_dialog(
+    state: &mut AppState,
+    cwd: &Path,
+    target: &WorktreeId,
+    configured_base: Option<&str>,
+) -> Result<()> {
+    let selected = state
+        .selected_visible()
+        .filter(|identity| &identity.id == target)
+        .context("selected worktree is no longer visible")?;
+    if selected.is_main {
+        anyhow::bail!("the main worktree cannot be removed");
+    }
+    state.help_open = false;
+    state.remove_dialog = Some(RemoveDialog::discover_selected(
+        state,
+        cwd,
+        configured_base,
+    )?);
     Ok(())
 }
 
@@ -384,6 +412,46 @@ fn handle_sync_input(
     Ok(None)
 }
 
+fn handle_remove_input(
+    state: &mut AppState,
+    key: RemoveKey,
+    cwd: &Path,
+    configured_base: Option<&str>,
+    hooks: Option<HooksConfig>,
+) -> Result<Option<RemoveInputEffect>> {
+    match state
+        .remove_dialog
+        .as_mut()
+        .and_then(|dialog| dialog.handle_key(key))
+    {
+        Some(RemoveEffect::Close) => {
+            state.remove_dialog = None;
+            state.help_open = false;
+        }
+        Some(RemoveEffect::Submit) => {
+            let result = state
+                .remove_dialog
+                .as_mut()
+                .expect("remove effect requires dialog")
+                .revalidate_request(cwd, configured_base, hooks);
+            match result {
+                Ok(request) => {
+                    state.help_open = false;
+                    return Ok(Some(RemoveInputEffect::Start(Box::new(request))));
+                }
+                Err(crate::tui::remove_flow::RemoveFlowError::ConfirmationRequired) => {}
+                Err(error) => {
+                    if let Some(dialog) = state.remove_dialog.as_mut() {
+                        dialog.set_validation_error(Some(error.to_string()));
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+    Ok(None)
+}
+
 fn finish_create_success(
     state: &mut AppState,
     refresh: &mut impl PostOperationRefresh,
@@ -449,6 +517,42 @@ fn finish_sync_success(
     }
 }
 
+fn finish_remove_success(
+    state: &mut AppState,
+    refresh: &mut impl PostOperationRefresh,
+    outcome: crate::cli::commands::remove::stateless::RemovalOutcome,
+    shown_at: Instant,
+) {
+    let refresh_result = refresh.request_post_operation();
+    let summary = if outcome.branch_deleted {
+        format!("Removed {} and its local branch", outcome.worktree)
+    } else {
+        format!("Removed {}", outcome.worktree)
+    };
+    let (message, warning) = match refresh_result.as_ref() {
+        Ok(()) => (summary, outcome.warning.clone()),
+        Err(error) => {
+            let warning = format!("{summary}, but refresh failed; press r to refresh: {error}");
+            (warning.clone(), Some(warning))
+        }
+    };
+    state.remove_dialog = None;
+    let _ = app::reduce(
+        state,
+        Event::OperationSucceeded {
+            select: None,
+            message,
+            shown_at,
+        },
+    );
+    if refresh_result.is_ok() {
+        refresh.apply_publications(state);
+    }
+    if warning.is_some() {
+        state.refresh.warning = warning;
+    }
+}
+
 fn return_to_create_form(
     state: &mut AppState,
     cwd: &Path,
@@ -497,6 +601,30 @@ fn return_to_sync_form(
     }
 }
 
+fn return_to_remove_form(
+    state: &mut AppState,
+    cwd: &Path,
+    configured_base: Option<&str>,
+    hooks: Option<HooksConfig>,
+) {
+    state.operation_modal = None;
+    state.help_open = false;
+    let Some(dialog) = state.remove_dialog.as_mut() else {
+        return;
+    };
+    let validation_error = dialog
+        .revalidate_request(cwd, configured_base, hooks)
+        .err()
+        .and_then(|error| {
+            (!matches!(
+                error,
+                crate::tui::remove_flow::RemoveFlowError::ConfirmationRequired
+            ))
+            .then(|| error.to_string())
+        });
+    dialog.set_validation_error(validation_error);
+}
+
 pub fn run() -> Result<TuiExit> {
     let cwd = std::env::current_dir()?;
     let repo = crate::git::discover_repo(&cwd)?;
@@ -512,7 +640,7 @@ pub fn run() -> Result<TuiExit> {
     let mut state = AppState::new(Vec::new());
     apply_refresh_publications(&mut refresh, &mut state);
     let selected_theme = theme::from_name(&resolved.ui.theme);
-    let mut dialogs = DialogRegistry::default();
+    let dialogs = DialogRegistry::default();
     let mut operation =
         OperationRuntime::new(ThreadOperationLauncher, SystemRuntimeClock::default());
 
@@ -530,8 +658,9 @@ pub fn run() -> Result<TuiExit> {
                         operation.dismiss();
                         finish_sync_success(&mut state, &mut refresh, outcome, Instant::now());
                     }
-                    OperationRuntimeEffect::Succeeded(OperationOutcome::Remove(_)) => {
+                    OperationRuntimeEffect::Succeeded(OperationOutcome::Remove(outcome)) => {
                         operation.dismiss();
+                        finish_remove_success(&mut state, &mut refresh, outcome, Instant::now());
                     }
                     OperationRuntimeEffect::Failed { stage, message } => {
                         tracing::warn!(?stage, %message, "cockpit operation failed");
@@ -569,7 +698,8 @@ pub fn run() -> Result<TuiExit> {
 
             if (state.operation_modal.is_some()
                 || state.create_dialog.is_some()
-                || state.sync_dialog.is_some())
+                || state.sync_dialog.is_some()
+                || state.remove_dialog.is_some())
                 && state.help_open
             {
                 if matches!(key.code, KeyCode::Char('?') | KeyCode::Esc) {
@@ -604,7 +734,14 @@ pub fn run() -> Result<TuiExit> {
                             tracing::warn!(%error, "failed to refresh before operation revalidation");
                         }
                         apply_refresh_publications(&mut refresh, &mut state);
-                        if state.sync_dialog.is_some() {
+                        if state.remove_dialog.is_some() {
+                            return_to_remove_form(
+                                &mut state,
+                                &cwd,
+                                resolved.git.default_base.as_deref(),
+                                resolved.hooks.clone(),
+                            );
+                        } else if state.sync_dialog.is_some() {
                             return_to_sync_form(
                                 &mut state,
                                 &cwd,
@@ -716,6 +853,27 @@ pub fn run() -> Result<TuiExit> {
                 continue;
             }
 
+            if state.remove_dialog.is_some() {
+                if key.code == KeyCode::Char('?') {
+                    state.help_open = true;
+                    continue;
+                }
+                let Some(remove_key) = translate_remove_key(key) else {
+                    continue;
+                };
+                if let Some(RemoveInputEffect::Start(request)) = handle_remove_input(
+                    &mut state,
+                    remove_key,
+                    &cwd,
+                    resolved.git.default_base.as_deref(),
+                    resolved.hooks.clone(),
+                )? {
+                    operation.start(*request);
+                    state.operation_modal = operation.modal().cloned();
+                }
+                continue;
+            }
+
             let Some(key) = translate_key(key) else {
                 continue;
             };
@@ -768,7 +926,22 @@ pub fn run() -> Result<TuiExit> {
                             );
                         }
                     }
-                    Effect::OpenRemove(id) => dialogs.register(DialogRequest::Remove(id)),
+                    Effect::OpenRemove(id) => {
+                        if let Err(error) = open_remove_dialog(
+                            &mut state,
+                            &cwd,
+                            &id,
+                            resolved.git.default_base.as_deref(),
+                        ) {
+                            let _ = app::reduce(
+                                &mut state,
+                                Event::NotificationShown {
+                                    message: error.to_string(),
+                                    shown_at: Instant::now(),
+                                },
+                            );
+                        }
+                    }
                     Effect::Refresh => {
                         refresh.manual()?;
                         apply_refresh_publications(&mut refresh, &mut state);
@@ -862,6 +1035,15 @@ fn translate_sync_key(key: KeyEvent) -> Option<SyncKey> {
         KeyCode::Tab => Some(SyncKey::Tab),
         KeyCode::Backspace => Some(SyncKey::Backspace),
         KeyCode::Char(character) => Some(SyncKey::Character(character)),
+        _ => None,
+    }
+}
+
+fn translate_remove_key(key: KeyEvent) -> Option<RemoveKey> {
+    match key.code {
+        KeyCode::Enter => Some(RemoveKey::Enter),
+        KeyCode::Esc => Some(RemoveKey::Escape),
+        KeyCode::Char(' ') => Some(RemoveKey::Space),
         _ => None,
     }
 }
@@ -1849,6 +2031,271 @@ mod tests {
         assert_eq!(dialogs.pending(), Some(&DialogRequest::Create));
         assert_eq!(dialogs.take(), Some(DialogRequest::Create));
         assert_eq!(dialogs.pending(), None);
+    }
+
+    #[tokio::test]
+    async fn remove_controller_opens_selected_executes_shared_request_and_refreshes_notice() {
+        let repository = init_repo();
+        let target_path = repository.path().join("worktrees").join("feature");
+        add_worktree(repository.path(), "feature", "feature", &target_path);
+        let target = WorktreeIdentity {
+            id: WorktreeId::new(&target_path),
+            worktree: "feature".to_string(),
+            branch: Some("feature".to_string()),
+            path: target_path.clone(),
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+        };
+        let mut state = AppState::new(vec![target.clone()]);
+        open_remove_dialog(&mut state, repository.path(), &target.id, Some("main")).unwrap();
+
+        let Some(RemoveInputEffect::Start(request)) = handle_remove_input(
+            &mut state,
+            RemoveKey::Enter,
+            repository.path(),
+            Some("main"),
+            None,
+        )
+        .unwrap() else {
+            panic!("clean removal should start")
+        };
+        let outcome = crate::operation::execute(*request, &crate::operation::NoopEmitter)
+            .await
+            .unwrap();
+        let OperationOutcome::Remove(outcome) = outcome else {
+            panic!("expected removal outcome")
+        };
+        assert_eq!(outcome.confirmation.to_string(), "interactive");
+        let publication = RefreshPublication {
+            identities: Vec::new(),
+            refs: None,
+            statuses: BTreeMap::new(),
+            waiting_rows: BTreeSet::new(),
+            updating_refs: false,
+            warning: None,
+        };
+        let mut refresh = SuccessfulPostOperationRefresh::new(publication);
+        let shown_at = Instant::now();
+        finish_remove_success(&mut state, &mut refresh, outcome, shown_at);
+
+        assert!(refresh.requested);
+        assert!(state.identities.is_empty());
+        assert!(state.remove_dialog.is_none());
+        assert!(state
+            .notification
+            .as_ref()
+            .is_some_and(|notice| notice.text == "Removed feature"));
+        let _ = app::reduce(
+            &mut state,
+            Event::NotificationTick(shown_at + std::time::Duration::from_secs(5)),
+        );
+        assert!(state.notification.is_none());
+    }
+
+    #[test]
+    fn failed_remove_enter_returns_to_a_live_revalidated_confirmation() {
+        let repository = init_repo();
+        let target_path = repository.path().join("worktrees").join("late-dirty");
+        add_worktree(repository.path(), "late-dirty", "late-dirty", &target_path);
+        let target = WorktreeIdentity {
+            id: WorktreeId::new(&target_path),
+            worktree: "late-dirty".to_string(),
+            branch: Some("late-dirty".to_string()),
+            path: target_path.clone(),
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+        };
+        let mut state = AppState::new(vec![target.clone()]);
+        open_remove_dialog(&mut state, repository.path(), &target.id, Some("main")).unwrap();
+        std::fs::write(target_path.join("late.txt"), "late\n").unwrap();
+
+        return_to_remove_form(&mut state, repository.path(), Some("main"), None);
+
+        let dialog = state.remove_dialog.as_ref().unwrap();
+        assert_eq!(dialog.mode(), crate::tui::remove_flow::RemoveMode::Review);
+        assert_eq!(
+            dialog.validation_error(),
+            Some("removal facts changed; review and confirm again")
+        );
+    }
+
+    struct ControllerHarness {
+        repository: TempDir,
+        state: AppState,
+    }
+
+    impl ControllerHarness {
+        fn new() -> Self {
+            Self {
+                repository: init_repo(),
+                state: AppState::new(Vec::new()),
+            }
+        }
+
+        fn root(&self) -> &Path {
+            self.repository.path()
+        }
+
+        fn add(&mut self, branch: &str) -> WorktreeIdentity {
+            let name = branch.replace('/', "-");
+            let path = self.root().join("worktrees").join(&name);
+            add_worktree(self.root(), branch, &name, &path);
+            let path = path.canonicalize().unwrap();
+            let identity = WorktreeIdentity {
+                id: WorktreeId::new(&path),
+                worktree: name,
+                branch: Some(branch.to_string()),
+                path,
+                head: None,
+                is_main: false,
+                is_current: false,
+                detached: false,
+            };
+            self.state.identities.push(identity.clone());
+            self.state.selected = Some(identity.id.clone());
+            self.state
+                .statuses
+                .insert(identity.id.clone(), Default::default());
+            identity
+        }
+
+        fn refs(&mut self, branches: &[&str]) {
+            self.state.refs = Some(RefSnapshot::from_parts(
+                branches.iter().copied(),
+                [] as [&str; 0],
+                None,
+                Some("main"),
+                false,
+            ));
+        }
+
+        fn search(&mut self, query: &str) {
+            let _ = app::reduce(&mut self.state, Event::Input(Key::Char('/')));
+            for character in query.chars() {
+                let _ = app::reduce(&mut self.state, Event::Input(Key::Char(character)));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn controller_harness_covers_cross_boundary_workflow_matrix() {
+        // Launcher and search route every action to the filtered identity.
+        let mut launcher = ControllerHarness::new();
+        launcher.add("alpha");
+        let beta = launcher.add("beta");
+        launcher.search("bet");
+        for (key, expected) in [
+            (Key::Enter, app::Effect::Switch(beta.id.clone())),
+            (Key::Char('o'), app::Effect::Open(beta.id.clone())),
+            (Key::Char('s'), app::Effect::OpenSync(beta.id.clone())),
+            (Key::Char('d'), app::Effect::OpenRemove(beta.id.clone())),
+        ] {
+            assert_eq!(
+                app::reduce(&mut launcher.state, Event::Input(key)),
+                vec![expected]
+            );
+        }
+
+        // Create uses the live planner and preserves refresh failure truth.
+        let mut create = ControllerHarness::new();
+        create.refs(&["main"]);
+        let worktree_root = create.root().join("worktrees");
+        let request = build_create_dispatch(
+            &CreateSubmission {
+                branch: "feature/new".to_string(),
+                from: None,
+            },
+            create.root(),
+            &worktree_root,
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            matches!(request, CreateDispatch::Run(ref request) if matches!(**request, OperationRequest::Create(_)))
+        );
+        let CreateDispatch::Run(request) = request else {
+            unreachable!()
+        };
+        let outcome = crate::operation::execute(*request, &crate::operation::NoopEmitter)
+            .await
+            .unwrap();
+        let OperationOutcome::Create(outcome) = outcome else {
+            unreachable!()
+        };
+        let mut failed_refresh = FailingPostOperationRefresh::default();
+        finish_create_success(
+            &mut create.state,
+            &mut failed_refresh,
+            outcome,
+            Instant::now(),
+        );
+        assert!(failed_refresh.requested);
+        assert!(create.state.refresh.warning.is_some());
+
+        // Sync uses the planner and operation adapter, then refreshes comparisons.
+        let mut sync = ControllerHarness::new();
+        let target = sync.add("feature/sync");
+        sync.refs(&["main", "feature/sync"]);
+        let request = build_sync_request(
+            &SyncSubmission {
+                target: target.id.clone(),
+                base: "main".to_string(),
+                strategy: crate::cli::commands::sync::stateless::SyncStrategy::Rebase,
+            },
+            sync.root(),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        let events = crate::operation::RecordingEmitter::default();
+        assert!(matches!(
+            crate::operation::execute(request, &events).await.unwrap(),
+            OperationOutcome::Sync(_)
+        ));
+        assert!(events
+            .events()
+            .contains(&crate::operation::OperationEvent::MutationStarted));
+
+        // Remove exercises clean execution, stale-risk review, and retained recovery truth.
+        let mut remove = ControllerHarness::new();
+        let clean = remove.add("feature/remove");
+        let remove_root = remove.root().to_path_buf();
+        open_remove_dialog(&mut remove.state, &remove_root, &clean.id, Some("main")).unwrap();
+        let Some(RemoveInputEffect::Start(request)) = handle_remove_input(
+            &mut remove.state,
+            RemoveKey::Enter,
+            &remove_root,
+            Some("main"),
+            None,
+        )
+        .unwrap() else {
+            panic!("clean remove should start")
+        };
+        assert!(matches!(
+            crate::operation::execute(*request, &crate::operation::NoopEmitter)
+                .await
+                .unwrap(),
+            OperationOutcome::Remove(_)
+        ));
+        let mut modal = crate::tui::operation_modal::OperationModal::new(
+            crate::operation::OperationKind::Remove,
+        );
+        modal.fail(&crate::operation::OperationFailure {
+            stage: crate::operation::OperationStage::RemoveWorktree,
+            mutation_state: crate::operation::MutationState::PartiallyApplied,
+            class: crate::operation::ErrorClass::Git,
+            message: "restore manually".to_string(),
+            retained_quarantine: Some(remove_root.join("retained")),
+        });
+        assert_eq!(
+            modal.handle_key(crate::tui::operation_modal::ModalKey::Enter),
+            None
+        );
     }
 
     fn init_repo() -> TempDir {
