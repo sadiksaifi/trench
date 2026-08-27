@@ -73,6 +73,31 @@ pub enum OriginRefresh {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateKey {
+    Character(char),
+    Backspace,
+    Tab,
+    Enter,
+    Escape,
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSubmission {
+    pub branch: String,
+    pub from: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateEffect {
+    Close,
+    RefreshOrigin,
+    Navigate(WorktreeId),
+    Submit(CreateSubmission),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateDialog {
     repository: String,
@@ -81,6 +106,8 @@ pub struct CreateDialog {
     checked_out: Vec<CheckedOutBranch>,
     branch: String,
     selected_base: Option<String>,
+    base_query: String,
+    base_selection: usize,
     mode: CreateMode,
     origin_refresh: OriginRefresh,
 }
@@ -103,6 +130,8 @@ impl CreateDialog {
             checked_out: checked_out.into_iter().collect(),
             branch: String::new(),
             selected_base,
+            base_query: String::new(),
+            base_selection: 0,
             mode: CreateMode::Form,
             origin_refresh: OriginRefresh::Idle,
         }
@@ -168,6 +197,8 @@ impl CreateDialog {
     }
 
     pub fn open_base_picker(&mut self) {
+        self.base_query.clear();
+        self.base_selection = 0;
         self.mode = CreateMode::BasePicker;
     }
 
@@ -196,10 +227,85 @@ impl CreateDialog {
         self.refs
             .candidates()
             .into_iter()
+            .filter(|candidate| fuzzy_matches(&candidate.name, &self.base_query))
             .map(|candidate| BaseCandidate {
                 name: candidate.name,
             })
             .collect()
+    }
+
+    pub fn handle_key(&mut self, key: CreateKey) -> Option<CreateEffect> {
+        match self.mode {
+            CreateMode::Form => self.handle_form_key(key),
+            CreateMode::BasePicker => self.handle_base_picker_key(key),
+        }
+    }
+
+    fn handle_form_key(&mut self, key: CreateKey) -> Option<CreateEffect> {
+        match key {
+            CreateKey::Character(character) => self.branch.push(character),
+            CreateKey::Backspace => {
+                self.branch.pop();
+            }
+            CreateKey::Tab if self.preview().is_some_and(|preview| preview.base_visible) => {
+                self.open_base_picker();
+                return Some(CreateEffect::RefreshOrigin);
+            }
+            CreateKey::Enter => {
+                let preview = self.preview()?;
+                return match preview.kind {
+                    BranchKind::CheckedOut { id } => Some(CreateEffect::Navigate(id)),
+                    BranchKind::New => Some(CreateEffect::Submit(CreateSubmission {
+                        branch: preview.branch,
+                        from: preview.base,
+                    })),
+                    BranchKind::Local | BranchKind::Remote { .. } => {
+                        Some(CreateEffect::Submit(CreateSubmission {
+                            branch: preview.branch,
+                            from: None,
+                        }))
+                    }
+                };
+            }
+            CreateKey::Escape => return Some(CreateEffect::Close),
+            CreateKey::Tab | CreateKey::Up | CreateKey::Down => {}
+        }
+        None
+    }
+
+    fn handle_base_picker_key(&mut self, key: CreateKey) -> Option<CreateEffect> {
+        match key {
+            CreateKey::Character(character) => {
+                self.base_query.push(character);
+                self.base_selection = 0;
+            }
+            CreateKey::Backspace => {
+                self.base_query.pop();
+                self.base_selection = 0;
+            }
+            CreateKey::Up => {
+                self.base_selection = self.base_selection.saturating_sub(1);
+            }
+            CreateKey::Down => {
+                self.base_selection = self
+                    .base_selection
+                    .saturating_add(1)
+                    .min(self.base_candidates().len().saturating_sub(1));
+            }
+            CreateKey::Enter => {
+                let selected = self
+                    .base_candidates()
+                    .get(self.base_selection)
+                    .map(|candidate| candidate.name.clone());
+                if let Some(selected) = selected {
+                    self.selected_base = Some(selected);
+                    self.close_base_picker();
+                }
+            }
+            CreateKey::Escape => self.close_base_picker(),
+            CreateKey::Tab => {}
+        }
+        None
     }
 
     fn classify(&self, selection: &str) -> (String, BranchKind) {
@@ -373,6 +479,66 @@ mod tests {
         assert_eq!(
             dialog.preview().unwrap().base.as_deref(),
             Some("origin/main")
+        );
+    }
+
+    #[test]
+    fn keys_transform_the_form_select_a_base_and_emit_a_typed_submission() {
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs(), []);
+        dialog.set_branch("feature/auth");
+
+        assert_eq!(
+            dialog.handle_key(CreateKey::Tab),
+            Some(CreateEffect::RefreshOrigin)
+        );
+        assert_eq!(dialog.mode(), CreateMode::BasePicker);
+
+        dialog.handle_key(CreateKey::Character('r'));
+        dialog.handle_key(CreateKey::Character('e'));
+        assert_eq!(
+            dialog
+                .base_candidates()
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            ["release"]
+        );
+        assert_eq!(dialog.handle_key(CreateKey::Enter), None);
+        assert_eq!(dialog.mode(), CreateMode::Form);
+
+        assert_eq!(
+            dialog.handle_key(CreateKey::Enter),
+            Some(CreateEffect::Submit(CreateSubmission {
+                branch: "feature/auth".to_string(),
+                from: Some("release".to_string()),
+            }))
+        );
+        assert_eq!(
+            dialog.handle_key(CreateKey::Escape),
+            Some(CreateEffect::Close)
+        );
+    }
+
+    #[test]
+    fn checked_out_branch_enter_navigates_and_local_branch_never_opens_base_picker() {
+        let checked_out = CheckedOutBranch::new(
+            "release",
+            WorktreeId::new("/worktrees/trench/release"),
+            "/worktrees/trench/release",
+        );
+        let mut dialog = CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs(),
+            [checked_out.clone()],
+        );
+        dialog.set_branch("release");
+
+        assert_eq!(dialog.handle_key(CreateKey::Tab), None);
+        assert_eq!(dialog.mode(), CreateMode::Form);
+        assert_eq!(
+            dialog.handle_key(CreateKey::Enter),
+            Some(CreateEffect::Navigate(checked_out.id))
         );
     }
 }
