@@ -638,4 +638,48 @@ mod tests {
             assert_eq!(state.search.as_ref().unwrap().as_str(), "b");
         }
     }
+
+    #[test]
+    fn active_search_refresh_reconciles_selection_without_stale_dispatch() {
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let beta = identity("/worktrees/beta", "beta");
+        let mut state = AppState::new(vec![alpha.clone(), beta.clone()]);
+        let _ = reduce(&mut state, Event::Input(Key::Char('/')));
+        let _ = reduce(&mut state, Event::Input(Key::Char('b')));
+        assert_eq!(state.selected, Some(beta.id));
+
+        let bravo = identity("/worktrees/bravo", "bravo");
+        let _ = reduce(
+            &mut state,
+            Event::RefreshPublished(RefreshPublication {
+                identities: vec![bravo.clone()],
+                refs: None,
+                statuses: BTreeMap::from([(bravo.id.clone(), WorktreeStatus::default())]),
+                waiting_rows: BTreeSet::new(),
+                updating_refs: false,
+                warning: None,
+            }),
+        );
+        assert_eq!(state.selected, Some(bravo.id));
+
+        let _ = reduce(
+            &mut state,
+            Event::RefreshPublished(RefreshPublication {
+                identities: vec![alpha],
+                refs: None,
+                statuses: BTreeMap::new(),
+                waiting_rows: BTreeSet::new(),
+                updating_refs: false,
+                warning: None,
+            }),
+        );
+        assert!(state.selected_visible().is_none());
+
+        for key in [Key::Enter, Key::Char('o'), Key::Char('s'), Key::Char('d')] {
+            assert!(matches!(
+                reduce(&mut state, Event::Input(key)).as_slice(),
+                [Effect::Unavailable { reason, .. }] if reason == "No worktree selected"
+            ));
+        }
+    }
 }
