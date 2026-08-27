@@ -4,7 +4,10 @@ use unicode_segmentation::UnicodeSegmentation;
 pub enum LineEdit {
     Insert(char),
     Start,
+    End,
+    PreviousCharacter,
     NextCharacter,
+    DeletePreviousCharacter,
     DeleteNextCharacter,
 }
 
@@ -27,12 +30,29 @@ impl LineInput {
                 self.cursor += character.len_utf8();
             }
             LineEdit::Start => self.cursor = 0,
+            LineEdit::End => self.cursor = self.value.len(),
+            LineEdit::PreviousCharacter => {
+                self.cursor = self.value[..self.cursor]
+                    .grapheme_indices(true)
+                    .next_back()
+                    .map(|(index, _)| index)
+                    .unwrap_or_default();
+            }
             LineEdit::NextCharacter => {
                 self.cursor += self.value[self.cursor..]
                     .graphemes(true)
                     .next()
                     .map(str::len)
                     .unwrap_or_default();
+            }
+            LineEdit::DeletePreviousCharacter => {
+                let previous = self.value[..self.cursor]
+                    .grapheme_indices(true)
+                    .next_back()
+                    .map(|(index, _)| index)
+                    .unwrap_or(self.cursor);
+                self.value.drain(previous..self.cursor);
+                self.cursor = previous;
             }
             LineEdit::DeleteNextCharacter => {
                 if let Some(grapheme) = self.value[self.cursor..].graphemes(true).next() {
@@ -68,5 +88,16 @@ mod tests {
         input.edit(LineEdit::Insert('b'));
 
         assert_eq!(input.value(), "ab界");
+    }
+
+    #[test]
+    fn user_can_move_backward_and_delete_the_previous_unicode_grapheme() {
+        let mut input = LineInput::from("a👨‍👩‍👧‍👦界");
+
+        input.edit(LineEdit::End);
+        input.edit(LineEdit::PreviousCharacter);
+        input.edit(LineEdit::DeletePreviousCharacter);
+
+        assert_eq!(input.value(), "a界");
     }
 }
