@@ -452,9 +452,9 @@ fn remove_live_json_with_delete_branch_outputs_json() {
 
     let output = trench_cmd(tmp.path())
         .args([
-            "--json",
             "remove",
             "json-delete-branch",
+            "--json",
             "--yes",
             "--delete-branch",
             "--no-hooks",
