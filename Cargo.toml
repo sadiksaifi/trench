@@ -14,6 +14,8 @@ clap_complete = "4"
 ratatui = "0.29"
 crossterm = "0.28"
 tui-spinner = "0.4.5"
+unicode-segmentation = "1.12"
+unicode-width = "0.2"
 
 # Async
 tokio = { version = "1", features = ["full"] }

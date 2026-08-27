@@ -120,8 +120,8 @@ fn gruvbox() -> Theme {
         disabled_fg: Color::Rgb(146, 131, 116),
         border: Color::Rgb(80, 73, 69),
         border_active: Color::Rgb(131, 165, 152),
-        selection_bg: Color::Rgb(69, 133, 136),
-        selection_fg: Color::Rgb(251, 241, 199),
+        selection_bg: Color::Rgb(87, 145, 148),
+        selection_fg: Color::Rgb(29, 32, 33),
     }
 }
 
@@ -184,6 +184,37 @@ mod tests {
                 "{name} must distinguish idle and selected controls"
             );
         }
+    }
+
+    #[test]
+    fn rgb_themes_keep_selected_text_at_accessible_contrast() {
+        for name in ["ops", "catppuccin", "gruvbox"] {
+            let theme = from_name(name);
+            assert!(
+                contrast(theme.selection_fg, theme.selection_bg) >= 4.5,
+                "{name} selected text must meet 4.5:1 contrast"
+            );
+        }
+    }
+
+    fn contrast(foreground: Color, background: Color) -> f64 {
+        let luminance = |color| {
+            let Color::Rgb(red, green, blue) = color else {
+                panic!("contrast helper expects RGB colors")
+            };
+            let channel = |value: u8| {
+                let value = f64::from(value) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+        };
+        let lighter = luminance(foreground).max(luminance(background));
+        let darker = luminance(foreground).min(luminance(background));
+        (lighter + 0.05) / (darker + 0.05)
     }
 
     #[test]

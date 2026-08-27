@@ -6,6 +6,8 @@ use ratatui::{
     Frame,
 };
 use tui_spinner::FluxFrames;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::operation::{OperationKind, OperationStage};
 use crate::tui::{
@@ -267,7 +269,7 @@ fn render_sync_dialog(
                 theme,
                 &[
                     KeyHint::secondary("Tab", "base"),
-                    KeyHint::secondary("←/→", "strategy"),
+                    KeyHint::secondary("←/→", "mode"),
                     submit,
                     KeyHint::secondary("Esc", "close"),
                     KeyHint::secondary("?", "help"),
@@ -694,8 +696,7 @@ fn input_value_span(value: &str, placeholder: &str, width: usize, theme: &Theme)
 }
 
 fn tail_ellipsize(value: &str, width: usize) -> String {
-    let chars = value.chars().collect::<Vec<_>>();
-    if chars.len() <= width {
+    if UnicodeWidthStr::width(value) <= width {
         return value.to_string();
     }
     if width == 0 {
@@ -704,10 +705,19 @@ fn tail_ellipsize(value: &str, width: usize) -> String {
     if width == 1 {
         return "…".to_string();
     }
-    let tail = chars[chars.len() - (width - 1)..]
-        .iter()
-        .collect::<String>();
-    format!("…{tail}")
+    let budget = width - 1;
+    let mut used = 0;
+    let mut tail = Vec::new();
+    for grapheme in value.graphemes(true).rev() {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used + grapheme_width > budget {
+            break;
+        }
+        tail.push(grapheme);
+        used += grapheme_width;
+    }
+    tail.reverse();
+    format!("…{}", tail.concat())
 }
 
 fn selector_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
@@ -1002,12 +1012,35 @@ impl<'a> KeyHint<'a> {
 }
 
 fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[KeyHint<'_>]) {
+    let mut visible = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            (
+                index,
+                format!(
+                    "[{}] {}",
+                    item.key,
+                    compact_key_action(item.action, area.width)
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    while keybar_width(&visible) > usize::from(area.width) {
+        let Some(position) = visible.iter().position(|(index, _)| {
+            let item = &items[*index];
+            matches!(item.tone, KeyTone::Secondary) && !matches!(item.key, "Esc" | "?")
+        }) else {
+            break;
+        };
+        visible.remove(position);
+    }
     let mut spans = Vec::new();
-    for (index, item) in items.iter().enumerate() {
-        if index > 0 {
+    for (position, (index, label)) in visible.into_iter().enumerate() {
+        if position > 0 {
             spans.push(Span::raw("  "));
         }
-        let label = format!("[{}] {}", item.key, item.action);
+        let item = &items[index];
         let style = match item.tone {
             KeyTone::Secondary => theme.with_bg(
                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
@@ -1037,6 +1070,26 @@ fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[K
             .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
         area,
     );
+}
+
+fn compact_key_action(action: &str, width: u16) -> &str {
+    if width > Viewport::MIN_WIDTH {
+        return action;
+    }
+    match action {
+        "create (branch required)" => "create unavailable",
+        "sync (select a base)" => "sync unavailable",
+        "select (no matches)" => "select unavailable",
+        value => value,
+    }
+}
+
+fn keybar_width(items: &[(usize, String)]) -> usize {
+    items
+        .iter()
+        .map(|(_, label)| UnicodeWidthStr::width(label.as_str()))
+        .sum::<usize>()
+        + items.len().saturating_sub(1) * 2
 }
 
 fn operation_stage_label(operation: OperationKind, stage: OperationStage) -> &'static str {
@@ -2038,6 +2091,46 @@ mod tests {
     }
 
     #[test]
+    fn wide_unicode_inputs_keep_their_cursor_at_minimum_width() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let long_value = "界".repeat(40);
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch(&long_value);
+        state.create_dialog = Some(dialog);
+
+        let create = text(&render_buffer(&mut state, 60, 16, "ops"));
+        let create_input = create
+            .lines()
+            .find(|line| line.contains("> …"))
+            .expect("ellipsized create input");
+        assert!(create_input.contains('▌'), "{create}");
+
+        state.create_dialog = None;
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('/')));
+        for character in long_value.chars() {
+            let _ = reduce(
+                &mut state,
+                Event::Input(crate::tui::keymap::Key::Char(character)),
+            );
+        }
+        let search = text(&render_buffer(&mut state, 60, 16, "ops"));
+        let search_input = search
+            .lines()
+            .find(|line| line.contains("> …"))
+            .expect("ellipsized search input");
+        assert!(search_input.contains('▌'), "{search}");
+    }
+
+    #[test]
     fn launcher_no_results_renders_no_actionable_row() {
         let mut state = sample_state();
         let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('/')));
@@ -2426,8 +2519,18 @@ mod tests {
 
         let target = state.identities[1].clone();
         let mut sync = SyncDialog::new(&target, refs, Some("main"));
-        sync.handle_key(SyncKey::Tab);
         state.create_dialog = None;
+        state.sync_dialog = Some(sync);
+        let sync_form = text(&render_buffer(&mut state, 60, 16, "ops"));
+        let sync_footer = sync_form.lines().last().unwrap().trim_end();
+        assert!(sync_footer.contains("[Enter] sync"), "{sync_form}");
+        assert!(
+            sync_footer.ends_with("[Esc] close  [?] help"),
+            "{sync_form}"
+        );
+
+        sync = state.sync_dialog.take().unwrap();
+        sync.handle_key(SyncKey::Tab);
         state.sync_dialog = Some(sync);
         let picker = text(&render_buffer(&mut state, 60, 16, "ops"));
         for visible in ["Search · typing", "[Enter] select", "[Esc] back"] {
