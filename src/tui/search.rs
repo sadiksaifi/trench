@@ -177,4 +177,21 @@ mod tests {
         assert!(buffer.backspace());
         assert!(!buffer.backspace());
     }
+
+    #[test]
+    fn rank_empty_and_missing_queries_have_safe_catalog_semantics() {
+        let rows = vec![
+            identity("/worktrees/zeta", "zeta", Some("feature/zeta")),
+            identity("/worktrees/alpha", "alpha", Some("feature/alpha")),
+        ];
+
+        assert_eq!(
+            rank(&rows, "")
+                .into_iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>(),
+            [rows[0].id.clone(), rows[1].id.clone()]
+        );
+        assert!(rank(&rows, "missing").is_empty());
+    }
 }
