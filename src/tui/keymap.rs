@@ -4,6 +4,7 @@ pub enum Key {
     Escape,
     Up,
     Down,
+    Backspace,
     Char(char),
 }
 
@@ -16,6 +17,7 @@ pub enum Action {
     Remove,
     DeleteBranch,
     Search,
+    CloseSearch,
     Refresh,
     ToggleInspector,
     SelectNext,
@@ -27,6 +29,7 @@ pub enum Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Context {
     Cockpit,
+    Search,
     Resize,
 }
 
@@ -128,9 +131,61 @@ const RESIZE_BINDINGS: &[Binding] = &[
     },
 ];
 
+const SEARCH_BINDINGS: &[Binding] = &[
+    Binding {
+        keys: &[Key::Enter],
+        label: "Enter",
+        description: "switch",
+        action: Action::Switch,
+    },
+    Binding {
+        keys: &[Key::Escape],
+        label: "Esc",
+        description: "clear",
+        action: Action::CloseSearch,
+    },
+    Binding {
+        keys: &[Key::Char('o')],
+        label: "o",
+        description: "open",
+        action: Action::Open,
+    },
+    Binding {
+        keys: &[Key::Char('s')],
+        label: "s",
+        description: "sync",
+        action: Action::Sync,
+    },
+    Binding {
+        keys: &[Key::Char('d')],
+        label: "d",
+        description: "remove",
+        action: Action::Remove,
+    },
+    Binding {
+        keys: &[Key::Down, Key::Char('j')],
+        label: "j/↓",
+        description: "next",
+        action: Action::SelectNext,
+    },
+    Binding {
+        keys: &[Key::Up, Key::Char('k')],
+        label: "k/↑",
+        description: "previous",
+        action: Action::SelectPrevious,
+    },
+    Binding {
+        keys: &[Key::Char('?')],
+        label: "?",
+        description: "help",
+        action: Action::Help,
+    },
+];
+
 pub fn bindings(context: Context) -> &'static [Binding] {
     match context {
         Context::Cockpit => COCKPIT_BINDINGS,
+        Context::Search => SEARCH_BINDINGS,
         Context::Resize => RESIZE_BINDINGS,
     }
 }
@@ -151,10 +206,17 @@ pub fn keybar_bindings(context: Context, narrow: bool) -> Vec<&'static Binding> 
             !is_navigation
                 && (!narrow
                     || context == Context::Resize
-                    || matches!(
-                        binding.action,
-                        Action::Switch | Action::Create | Action::Search | Action::Help
-                    ))
+                    || match context {
+                        Context::Cockpit => matches!(
+                            binding.action,
+                            Action::Switch | Action::Create | Action::Search | Action::Help
+                        ),
+                        Context::Search => matches!(
+                            binding.action,
+                            Action::Switch | Action::CloseSearch | Action::Help
+                        ),
+                        Context::Resize => true,
+                    })
         })
         .collect();
     if let Some(help) = visible
@@ -217,5 +279,33 @@ mod tests {
             .map(|binding| binding.action)
             .collect::<Vec<_>>();
         assert_eq!(actions, [Action::Quit, Action::Help]);
+    }
+
+    #[test]
+    fn search_context_reserves_launcher_actions_before_query_editing() {
+        let reserved = [
+            (Key::Enter, Action::Switch),
+            (Key::Escape, Action::CloseSearch),
+            (Key::Char('o'), Action::Open),
+            (Key::Char('s'), Action::Sync),
+            (Key::Char('d'), Action::Remove),
+            (Key::Down, Action::SelectNext),
+            (Key::Char('j'), Action::SelectNext),
+            (Key::Up, Action::SelectPrevious),
+            (Key::Char('k'), Action::SelectPrevious),
+            (Key::Char('?'), Action::Help),
+        ];
+        for (key, action) in reserved {
+            assert_eq!(action_for(Context::Search, key), Some(action));
+        }
+        for editable in [
+            Key::Char('/'),
+            Key::Char('c'),
+            Key::Char('q'),
+            Key::Char('r'),
+            Key::Backspace,
+        ] {
+            assert_eq!(action_for(Context::Search, editable), None);
+        }
     }
 }

@@ -107,7 +107,6 @@ pub enum DialogRequest {
     Create,
     Sync(WorktreeId),
     Remove(WorktreeId),
-    Search,
 }
 
 #[derive(Debug, Default)]
@@ -222,7 +221,6 @@ pub fn run() -> Result<TuiExit> {
                     Effect::OpenCreate => dialogs.register(DialogRequest::Create),
                     Effect::OpenSync(id) => dialogs.register(DialogRequest::Sync(id)),
                     Effect::OpenRemove(id) => dialogs.register(DialogRequest::Remove(id)),
-                    Effect::OpenSearch => dialogs.register(DialogRequest::Search),
                     Effect::Refresh => {
                         refresh.manual()?;
                         apply_refresh_publications(&mut refresh, &mut state);
@@ -255,6 +253,7 @@ fn translate_key(key: KeyEvent) -> Option<Key> {
         KeyCode::Esc => Some(Key::Escape),
         KeyCode::Up => Some(Key::Up),
         KeyCode::Down => Some(Key::Down),
+        KeyCode::Backspace => Some(Key::Backspace),
         KeyCode::Char(character) => Some(Key::Char(character)),
         _ => None,
     }
@@ -373,6 +372,13 @@ mod tests {
         );
         assert_eq!(
             translate_key(KeyEvent::new(
+                KeyCode::Backspace,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            Some(Key::Backspace)
+        );
+        assert_eq!(
+            translate_key(KeyEvent::new(
                 KeyCode::PageDown,
                 crossterm::event::KeyModifiers::NONE,
             )),
@@ -383,9 +389,9 @@ mod tests {
     #[test]
     fn dialog_registry_is_a_replaceable_operation_seam() {
         let mut dialogs = DialogRegistry::default();
-        dialogs.register(DialogRequest::Search);
-        assert_eq!(dialogs.pending(), Some(&DialogRequest::Search));
-        assert_eq!(dialogs.take(), Some(DialogRequest::Search));
+        dialogs.register(DialogRequest::Create);
+        assert_eq!(dialogs.pending(), Some(&DialogRequest::Create));
+        assert_eq!(dialogs.take(), Some(DialogRequest::Create));
         assert_eq!(dialogs.pending(), None);
     }
 

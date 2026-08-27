@@ -6,6 +6,7 @@ use crate::{
     tui::{
         keymap::{self, Action, Context, Key},
         refresh::RefreshPublication,
+        search::{self, QueryBuffer},
     },
 };
 
@@ -68,7 +69,6 @@ pub enum Effect {
     OpenCreate,
     OpenSync(WorktreeId),
     OpenRemove(WorktreeId),
-    OpenSearch,
     Refresh,
     Quit,
     Unavailable { action: Action, reason: String },
@@ -81,6 +81,7 @@ pub struct AppState {
     pub refs: Option<RefSnapshot>,
     pub refresh: RefreshActivity,
     pub selected: Option<WorktreeId>,
+    pub search: Option<QueryBuffer>,
     pub viewport: Viewport,
     pub inspector_override: Option<bool>,
     pub help_open: bool,
@@ -123,6 +124,7 @@ impl AppState {
             refs: None,
             refresh: RefreshActivity::default(),
             selected,
+            search: None,
             viewport: Viewport {
                 width: Viewport::MIN_WIDTH,
                 height: Viewport::MIN_HEIGHT,
@@ -135,14 +137,29 @@ impl AppState {
     pub fn context(&self) -> Context {
         if self.viewport.is_tiny() {
             Context::Resize
+        } else if self.search.is_some() {
+            Context::Search
         } else {
             Context::Cockpit
         }
     }
 
     pub fn selected_identity(&self) -> Option<&WorktreeIdentity> {
+        self.selected_visible()
+    }
+
+    pub fn visible_identities(&self) -> Vec<&WorktreeIdentity> {
+        match self.search.as_ref() {
+            Some(query) => search::rank(&self.identities, query.as_str()),
+            None => self.identities.iter().collect(),
+        }
+    }
+
+    pub fn selected_visible(&self) -> Option<&WorktreeIdentity> {
         let selected = self.selected.as_ref()?;
-        self.identities.iter().find(|row| &row.id == selected)
+        self.visible_identities()
+            .into_iter()
+            .find(|row| &row.id == selected)
     }
 
     pub fn inspector_visible(&self) -> bool {
@@ -158,15 +175,11 @@ impl AppState {
 pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
     match event {
         Event::IdentitiesLoaded(identities) => {
-            state.selected = state
-                .selected
-                .take()
-                .filter(|selected| identities.iter().any(|row| &row.id == selected))
-                .or_else(|| identities.first().map(|identity| identity.id.clone()));
             state
                 .statuses
                 .retain(|id, _| identities.iter().any(|row| &row.id == id));
             state.identities = identities;
+            reconcile_visible_selection(state);
         }
         Event::StatusLoaded { id, status } => {
             if state.identities.iter().any(|row| row.id == id) {
@@ -174,34 +187,38 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             }
         }
         Event::RefreshPublished(publication) => {
-            state.selected = state
-                .selected
-                .take()
-                .filter(|selected| publication.identities.iter().any(|row| &row.id == selected))
-                .or_else(|| {
-                    publication
-                        .identities
-                        .first()
-                        .map(|identity| identity.id.clone())
-                });
             state.identities = publication.identities;
             state.statuses = publication.statuses;
             state.refs = publication.refs;
             state.refresh.waiting_rows = publication.waiting_rows;
             state.refresh.updating_refs = publication.updating_refs;
             state.refresh.warning = publication.warning;
+            reconcile_visible_selection(state);
         }
         Event::RefreshTick => {
             if state.refresh.updating_refs || !state.refresh.waiting_rows.is_empty() {
                 state.refresh.spinner_tick = state.refresh.spinner_tick.wrapping_add(1);
             }
         }
-        Event::Select(id) if state.identities.iter().any(|row| row.id == id) => {
+        Event::Select(id) if state.visible_identities().iter().any(|row| row.id == id) => {
             state.selected = Some(id);
         }
         Event::Select(_) => {}
         Event::Input(key) => {
             let Some(action) = keymap::action_for(state.context(), key) else {
+                if let Some(query) = state.search.as_mut() {
+                    let changed = match key {
+                        Key::Backspace => query.backspace(),
+                        Key::Char(character) => {
+                            query.insert(character);
+                            true
+                        }
+                        _ => false,
+                    };
+                    if changed {
+                        reconcile_visible_selection(state);
+                    }
+                }
                 return Vec::new();
             };
             if let Some(reason) = unavailable_reason(state, action) {
@@ -220,7 +237,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
 }
 
 pub fn unavailable_reason(state: &AppState, action: Action) -> Option<&'static str> {
-    let selected = state.selected_identity();
+    let selected = state.selected_visible();
     match (action, selected) {
         (Action::Switch | Action::Open | Action::Sync | Action::Remove, None) => {
             Some("No worktree selected")
@@ -252,9 +269,10 @@ pub fn unavailable_reason(state: &AppState, action: Action) -> Option<&'static s
 fn reduce_action(state: &mut AppState, action: Action) -> Vec<Effect> {
     let selected = || {
         state
-            .selected
+            .selected_visible()
+            .expect("eligibility checked visible selection")
+            .id
             .clone()
-            .expect("eligibility checked selection")
     };
     match action {
         Action::Switch => vec![Effect::Switch(selected())],
@@ -263,7 +281,17 @@ fn reduce_action(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::Sync => vec![Effect::OpenSync(selected())],
         Action::Remove => vec![Effect::OpenRemove(selected())],
         Action::DeleteBranch => Vec::new(),
-        Action::Search => vec![Effect::OpenSearch],
+        Action::Search => {
+            state.search = Some(QueryBuffer::default());
+            reconcile_visible_selection(state);
+            Vec::new()
+        }
+        Action::CloseSearch => {
+            state.search = None;
+            state.help_open = false;
+            reconcile_visible_selection(state);
+            Vec::new()
+        }
         Action::Refresh => vec![Effect::Refresh],
         Action::Quit => vec![Effect::Quit],
         Action::ToggleInspector => {
@@ -286,19 +314,28 @@ fn reduce_action(state: &mut AppState, action: Action) -> Vec<Effect> {
 }
 
 fn select_relative(state: &mut AppState, delta: isize) {
-    if state.identities.is_empty() {
+    let visible = state
+        .visible_identities()
+        .into_iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    if visible.is_empty() {
         state.selected = None;
         return;
     }
     let selected = state
         .selected
         .as_ref()
-        .and_then(|id| state.identities.iter().position(|row| &row.id == id))
+        .and_then(|id| visible.iter().position(|row| row == id))
         .unwrap_or(0);
-    let next = selected
-        .saturating_add_signed(delta)
-        .min(state.identities.len() - 1);
-    state.selected = Some(state.identities[next].id.clone());
+    let next = selected.saturating_add_signed(delta).min(visible.len() - 1);
+    state.selected = Some(visible[next].clone());
+}
+
+fn reconcile_visible_selection(state: &mut AppState) {
+    let selected = state.selected.take();
+    let query = state.search.as_ref().map(QueryBuffer::as_str).unwrap_or("");
+    state.selected = search::reconcile_selection(&state.identities, query, selected.as_ref());
 }
 
 #[cfg(test)]
@@ -549,5 +586,144 @@ mod tests {
         );
         let _ = reduce(&mut state, Event::RefreshTick);
         assert_eq!(state.refresh.spinner_tick, 1);
+    }
+
+    #[test]
+    fn search_mode_edits_query_and_reserves_actions_before_text_input() {
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let beta = identity("/worktrees/beta", "beta");
+        let mut state = AppState::new(vec![alpha, beta.clone()]);
+
+        assert!(reduce(&mut state, Event::Input(Key::Char('/'))).is_empty());
+        assert_eq!(state.search.as_ref().unwrap().as_str(), "");
+
+        assert!(reduce(&mut state, Event::Input(Key::Char('b'))).is_empty());
+        assert_eq!(state.search.as_ref().unwrap().as_str(), "b");
+        assert_eq!(state.selected_visible().unwrap().id, beta.id);
+
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('o'))),
+            vec![Effect::Open(beta.id.clone())]
+        );
+        assert_eq!(state.search.as_ref().unwrap().as_str(), "b");
+
+        assert!(reduce(&mut state, Event::Input(Key::Backspace)).is_empty());
+        assert_eq!(state.search.as_ref().unwrap().as_str(), "");
+        assert_eq!(state.selected_visible().unwrap().id, beta.id);
+
+        assert!(reduce(&mut state, Event::Input(Key::Escape)).is_empty());
+        assert!(state.search.is_none());
+        assert_eq!(state.selected, Some(beta.id));
+    }
+
+    #[test]
+    fn launcher_actions_dispatch_only_the_visible_filtered_worktree() {
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let beta = identity("/worktrees/beta", "beta");
+        let mut state = AppState::new(vec![alpha, beta.clone()]);
+        state
+            .statuses
+            .insert(beta.id.clone(), WorktreeStatus::default());
+        let _ = reduce(&mut state, Event::Input(Key::Char('/')));
+        let _ = reduce(&mut state, Event::Input(Key::Char('b')));
+
+        for (key, expected) in [
+            (Key::Enter, Effect::Switch(beta.id.clone())),
+            (Key::Char('o'), Effect::Open(beta.id.clone())),
+            (Key::Char('s'), Effect::OpenSync(beta.id.clone())),
+            (Key::Char('d'), Effect::OpenRemove(beta.id.clone())),
+        ] {
+            assert_eq!(reduce(&mut state, Event::Input(key)), vec![expected]);
+            assert_eq!(state.search.as_ref().unwrap().as_str(), "b");
+        }
+    }
+
+    #[test]
+    fn active_search_refresh_reconciles_selection_without_stale_dispatch() {
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let beta = identity("/worktrees/beta", "beta");
+        let mut state = AppState::new(vec![alpha.clone(), beta.clone()]);
+        let _ = reduce(&mut state, Event::Input(Key::Char('/')));
+        let _ = reduce(&mut state, Event::Input(Key::Char('b')));
+        assert_eq!(state.selected, Some(beta.id));
+
+        let bravo = identity("/worktrees/bravo", "bravo");
+        let _ = reduce(
+            &mut state,
+            Event::RefreshPublished(RefreshPublication {
+                identities: vec![bravo.clone()],
+                refs: None,
+                statuses: BTreeMap::from([(bravo.id.clone(), WorktreeStatus::default())]),
+                waiting_rows: BTreeSet::new(),
+                updating_refs: false,
+                warning: None,
+            }),
+        );
+        assert_eq!(state.selected, Some(bravo.id));
+
+        let _ = reduce(
+            &mut state,
+            Event::RefreshPublished(RefreshPublication {
+                identities: vec![alpha],
+                refs: None,
+                statuses: BTreeMap::new(),
+                waiting_rows: BTreeSet::new(),
+                updating_refs: false,
+                warning: None,
+            }),
+        );
+        assert!(state.selected_visible().is_none());
+
+        for key in [Key::Enter, Key::Char('o'), Key::Char('s'), Key::Char('d')] {
+            assert!(matches!(
+                reduce(&mut state, Event::Input(key)).as_slice(),
+                [Effect::Unavailable { reason, .. }] if reason == "No worktree selected"
+            ));
+        }
+    }
+
+    #[test]
+    fn filtered_main_and_detached_rows_keep_their_action_eligibility() {
+        let mut detached = identity("/worktrees/review", "review");
+        detached.branch = None;
+        detached.detached = true;
+        let mut main = identity("/repos/trench", "trench");
+        main.branch = Some("main".to_string());
+        main.is_main = true;
+        let mut state = AppState::new(vec![main.clone(), detached.clone()]);
+        state
+            .statuses
+            .insert(main.id.clone(), WorktreeStatus::default());
+
+        let _ = reduce(&mut state, Event::Input(Key::Char('/')));
+        for character in "rev".chars() {
+            let _ = reduce(&mut state, Event::Input(Key::Char(character)));
+        }
+        assert_eq!(state.selected, Some(detached.id.clone()));
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('s'))),
+            vec![Effect::Unavailable {
+                action: Action::Sync,
+                reason: "Detached worktrees cannot be synced".to_string(),
+            }]
+        );
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('d'))),
+            vec![Effect::OpenRemove(detached.id)]
+        );
+
+        let _ = reduce(&mut state, Event::Input(Key::Escape));
+        let _ = reduce(&mut state, Event::Input(Key::Char('/')));
+        for character in "mai".chars() {
+            let _ = reduce(&mut state, Event::Input(Key::Char(character)));
+        }
+        assert_eq!(state.selected, Some(main.id));
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('d'))),
+            vec![Effect::Unavailable {
+                action: Action::Remove,
+                reason: "The main worktree cannot be removed".to_string(),
+            }]
+        );
     }
 }

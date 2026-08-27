@@ -38,7 +38,11 @@ impl<'a> ViewModel<'a> {
     }
 
     pub fn selected(&self) -> Option<&'a WorktreeIdentity> {
-        self.state.selected_identity()
+        self.state.selected_visible()
+    }
+
+    pub fn visible(&self) -> Vec<&'a WorktreeIdentity> {
+        self.state.visible_identities()
     }
 
     pub fn status_for(&self, identity: &WorktreeIdentity) -> Option<&'a WorktreeStatus> {
@@ -101,6 +105,14 @@ fn render_cockpit(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
         Constraint::Length(1),
     ])
     .areas(model.area);
+    let body = if model.state.search.is_some() {
+        let [search, body] =
+            Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(body);
+        render_search(model, frame, search, theme);
+        body
+    } else {
+        body
+    };
     if model.inspector_visible() && model.is_wide() {
         let [list, inspector] =
             Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
@@ -130,20 +142,54 @@ fn render_cockpit(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
         frame,
         keybar,
         theme,
-        Context::Cockpit,
+        model.state.context(),
         !model.is_wide(),
     );
 }
 
+fn render_search(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let query = model
+        .state
+        .search
+        .as_ref()
+        .expect("search surface requires active search");
+    let result_count = model.visible().len();
+    let result_label = if result_count == 1 {
+        "1 result".to_string()
+    } else {
+        format!("{result_count} results")
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "/ ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(query.as_str().to_string(), Style::default().fg(theme.fg)),
+            Span::styled(
+                format!("  {result_label}"),
+                Style::default().fg(theme.fg_muted),
+            ),
+        ]))
+        .block(panel(Some(" Search ".to_string()), theme))
+        .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+        area,
+    );
+}
+
 fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let visible = model.visible();
+    let result_count = visible.len();
     let title = if model.state.refresh.updating_refs {
         format!(
             " Worktrees · {} · Updating refs {} ",
-            model.state.identities.len(),
+            result_count,
             flux_frame(model.state.refresh.spinner_tick)
         )
     } else {
-        format!(" Worktrees · {} ", model.state.identities.len())
+        format!(" Worktrees · {result_count} ")
     };
     let header = Row::new(["Worktree", "Branch", "Git"])
         .style(
@@ -152,7 +198,7 @@ fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &The
                 .add_modifier(Modifier::BOLD),
         )
         .height(1);
-    let rows = model.state.identities.iter().map(|identity| {
+    let rows = visible.iter().map(|identity| {
         let current = if identity.is_current { "* " } else { "" };
         Row::new([
             Cell::from(format!("{current}{}", identity.worktree)),
@@ -190,9 +236,23 @@ fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &The
         .state
         .selected
         .as_ref()
-        .and_then(|id| model.state.identities.iter().position(|row| &row.id == id));
+        .and_then(|id| visible.iter().position(|row| &row.id == id));
     table_state.select(selected);
     frame.render_stateful_widget(table, area, &mut table_state);
+    if visible.is_empty() {
+        let empty = Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_add(2),
+            width: area.width.saturating_sub(2),
+            height: area.height.saturating_sub(3),
+        };
+        frame.render_widget(
+            Paragraph::new("No matching worktrees")
+                .alignment(Alignment::Center)
+                .style(theme.with_bg(Style::default().fg(theme.fg_muted), theme.bg_panel)),
+            empty,
+        );
+    }
 }
 
 fn row_git(model: &ViewModel<'_>, identity: &WorktreeIdentity) -> String {
@@ -340,11 +400,7 @@ fn render_keybar(
 }
 
 fn render_help(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
-    let context = if model.is_tiny() {
-        Context::Resize
-    } else {
-        Context::Cockpit
-    };
+    let context = model.state.context();
     let bindings = keymap::bindings(context);
     let two_columns = model.is_wide();
     let width = if two_columns {
@@ -360,7 +416,12 @@ fn render_help(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
     let height = (rows as u16 + 4).min(model.area.height.saturating_sub(2));
     let dialog = centered_rect(width, height, model.area);
     frame.render_widget(Clear, dialog);
-    let block = panel(Some(" Help · Worktrees ".to_string()), theme);
+    let title = match context {
+        Context::Cockpit => " Help · Worktrees ",
+        Context::Search => " Help · Search ",
+        Context::Resize => " Help · Resize ",
+    };
+    let block = panel(Some(title.to_string()), theme);
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
     if two_columns {
@@ -731,6 +792,60 @@ mod tests {
         assert!(output.contains("feature-auth"), "{output}");
         assert!(output.contains("Updating"), "{output}");
         assert!(output.contains(flux_frame(1)), "{output}");
+    }
+
+    #[test]
+    fn launcher_search_keeps_the_filtered_cockpit_and_contextual_help_visible() {
+        let mut state = sample_state();
+        let main_id = state.identities[1].id.clone();
+        state.statuses.insert(main_id, WorktreeStatus::default());
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('/')));
+        for character in "mai".chars() {
+            let _ = reduce(
+                &mut state,
+                Event::Input(crate::tui::keymap::Key::Char(character)),
+            );
+        }
+
+        let buffer = render_buffer(&mut state, 120, 24, "ops");
+        let output = text(&buffer);
+        let footer = lines(&buffer).last().unwrap().trim_end().to_string();
+        assert!(output.contains("Search"), "{output}");
+        assert!(output.contains("/ mai"), "{output}");
+        assert!(output.contains("trench"), "{output}");
+        assert!(!output.contains("feature-auth"), "{output}");
+        assert!(footer.contains("Esc clear"), "{footer}");
+        assert!(!footer.contains("c create"), "{footer}");
+        assert!(footer.ends_with("? help"), "{footer}");
+
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('?')));
+        let help = text(&render_buffer(&mut state, 120, 24, "ops"));
+        assert!(help.contains("Help · Search"), "{help}");
+        assert!(!help.contains("c       create"), "{help}");
+        assert!(!help.contains("r       refresh"), "{help}");
+    }
+
+    #[test]
+    fn launcher_no_results_renders_no_actionable_row() {
+        let mut state = sample_state();
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('/')));
+        for character in "xyz".chars() {
+            let _ = reduce(
+                &mut state,
+                Event::Input(crate::tui::keymap::Key::Char(character)),
+            );
+        }
+
+        let buffer = render_buffer(&mut state, 80, 20, "ops");
+        let output = text(&buffer);
+        let footer = lines(&buffer).last().unwrap().trim_end().to_string();
+        assert!(output.contains("No matching worktrees"), "{output}");
+        assert!(!output.contains("feature-auth"), "{output}");
+        assert!(state.selected_visible().is_none());
+        assert!(!footer.contains("Enter switch"), "{footer}");
+        assert!(!footer.contains("o open"), "{footer}");
+        assert!(footer.contains("Esc clear"), "{footer}");
+        assert!(footer.ends_with("? help"), "{footer}");
     }
 
     #[test]
