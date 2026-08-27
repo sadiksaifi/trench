@@ -816,7 +816,13 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.name.as_str())
                 .collect::<Vec<_>>(),
-            ["main", "release", "topic/one", "origin/topic/two"]
+            [
+                "main",
+                "release",
+                "topic/one",
+                "origin/topic/two",
+                "origin/main"
+            ]
         );
 
         dialog.set_origin_refresh(OriginRefresh::Failed);
@@ -827,7 +833,13 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.name.as_str())
                 .collect::<Vec<_>>(),
-            ["main", "release", "topic/one", "origin/topic/two"]
+            [
+                "main",
+                "release",
+                "topic/one",
+                "origin/topic/two",
+                "origin/main"
+            ]
         );
         assert_eq!(
             dialog.warning(),

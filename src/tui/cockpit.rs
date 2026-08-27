@@ -3056,7 +3056,7 @@ mod tests {
             .unwrap()
             .handle_key(CreateKey::Escape);
         let candidates = render_buffer(&mut state, 100, 24, "ops");
-        let selected = find_text(&candidates, "› main");
+        let selected = find_text(&candidates, "› origin/main");
         let unselected = find_text(&candidates, "release");
         assert_eq!(candidates.cell(selected).unwrap().bg, theme.selection_bg);
         assert_eq!(candidates.cell(selected).unwrap().fg, theme.selection_fg);
