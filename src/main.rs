@@ -966,11 +966,6 @@ fn run_sync(
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
 
-    let sync_strategy = match strategy {
-        SyncStrategy::Rebase => cli::commands::sync::Strategy::Rebase,
-        SyncStrategy::Merge => cli::commands::sync::Strategy::Merge,
-    };
-
     let repo_info = git::discover_repo(&cwd)?;
     let project_config = config::load_project_config(&repo_info.path)?;
     let global_config = config::load_global_config()?;
@@ -1006,85 +1001,131 @@ fn run_sync(
         return Ok(());
     }
 
-    // Real execution path — open DB here (after dry-run early-return)
-    let db_path = runtime_db_path()?;
-    let db = state::Database::open(&db_path)?;
-
-    let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
-
-    match rt.block_on(cli::commands::sync::execute_with_hooks(
-        identifier,
+    let stateless_strategy = match strategy {
+        SyncStrategy::Rebase => cli::commands::sync::stateless::SyncStrategy::Rebase,
+        SyncStrategy::Merge => cli::commands::sync::stateless::SyncStrategy::Merge,
+    };
+    let hook_policy = if no_hooks {
+        cli::commands::sync::stateless::HookPolicy::Skip
+    } else {
+        cli::commands::sync::stateless::HookPolicy::Run
+    };
+    let emitter = CliSyncEmitter::default();
+    let plan = cli::commands::sync::stateless::plan_after_best_effort_origin_fetch(
         &cwd,
-        &db,
-        sync_strategy,
+        resolved.git.default_base.as_deref(),
+        identifier,
+        explicit_base,
+        stateless_strategy,
+        hook_policy,
+        &emitter,
+    )?;
+    let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
+    match rt.block_on(cli::commands::sync::stateless::execute(
+        plan,
         hooks_config.as_ref(),
-        no_hooks,
-        None,
+        &emitter,
     )) {
         Ok(outcome) => {
-            // Report post_sync hook failure to stderr (FR-24: Report)
-            if let Some(ref hook_err) = outcome.post_sync_error {
-                eprintln!("error: post_sync hook failed: {hook_err:#}");
-            }
-
             if json {
                 println!(
                     "{}",
-                    output::json::format_json_value(&outcome.result.to_json())?
+                    output::json::format_json_value(&SyncSuccessOutput::new(
+                        &outcome,
+                        emitter.stages()
+                    ))?
                 );
             } else {
-                eprintln!(
-                    "Synced '{}' via {}",
-                    outcome.result.name, outcome.result.strategy
-                );
-                eprintln!(
-                    "  before: ahead={}, behind={}",
-                    outcome.result.before_ahead, outcome.result.before_behind
-                );
-                eprintln!(
-                    "  after:  ahead={}, behind={}",
-                    outcome.result.after_ahead, outcome.result.after_behind
-                );
-            }
-
-            // Exit 4 if post_sync hook failed (FR-24: Report — non-zero exit but sync completed)
-            if let Some(ref hook_err) = outcome.post_sync_error {
-                if hook_err.chain().any(|c| {
-                    c.downcast_ref::<hooks::runner::HookTimeoutError>()
-                        .is_some()
-                }) {
-                    ExitCode::HookTimeout.exit();
-                }
-                ExitCode::HookFailed.exit();
+                println!("{outcome}");
             }
             Ok(())
         }
-        Err(e) => {
-            // Check for hook timeout first (more specific than hook failure)
-            if e.chain().any(|c| {
-                c.downcast_ref::<hooks::runner::HookTimeoutError>()
-                    .is_some()
-            }) {
-                eprintln!("error: {e:#}");
-                ExitCode::HookTimeout.exit();
-            }
-            // Check for hook failure (pre_sync) via typed error
-            if e.downcast_ref::<cli::commands::sync::SyncError>().is_some() {
-                eprintln!("error: {e:#}");
-                ExitCode::HookFailed.exit();
-            }
-            if let Some(git::GitError::MergeConflict { .. }) = e.downcast_ref::<git::GitError>() {
-                eprintln!("error: {e}");
-                ExitCode::GitError.exit();
-            }
-            let msg = e.to_string();
-            if msg.contains("not found") || msg.contains("not tracked") {
-                eprintln!("error: {e}");
-                ExitCode::NotFound.exit();
-            }
-            Err(e)
+        Err(failure) => report_sync_failure(&failure, emitter.stages(), json),
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SyncStageOutput {
+    stage: cli::commands::sync::stateless::SyncStage,
+    success: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SyncSuccessOutput<'a> {
+    ok: bool,
+    target: &'a str,
+    branch: &'a str,
+    path: &'a std::path::Path,
+    base: &'a str,
+    strategy: cli::commands::sync::stateless::SyncStrategy,
+    before: &'a cli::commands::sync::stateless::AheadBehind,
+    after: &'a cli::commands::sync::stateless::AheadBehind,
+    mutation_state: cli::commands::sync::stateless::MutationState,
+    stages: Vec<SyncStageOutput>,
+}
+
+impl<'a> SyncSuccessOutput<'a> {
+    fn new(
+        outcome: &'a cli::commands::sync::stateless::SyncOutcome,
+        stages: Vec<SyncStageOutput>,
+    ) -> Self {
+        Self {
+            ok: true,
+            target: &outcome.target,
+            branch: &outcome.branch,
+            path: &outcome.path,
+            base: &outcome.base,
+            strategy: outcome.strategy,
+            before: &outcome.before,
+            after: &outcome.after,
+            mutation_state: outcome.mutation_state,
+            stages,
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct CliSyncEmitter(std::sync::Mutex<Vec<cli::commands::sync::stateless::SyncEvent>>);
+
+impl CliSyncEmitter {
+    fn stages(&self) -> Vec<SyncStageOutput> {
+        self.0
+            .lock()
+            .map(|events| {
+                events
+                    .iter()
+                    .filter_map(|event| match event {
+                        cli::commands::sync::stateless::SyncEvent::StageFinished {
+                            stage, success, ..
+                        } => Some(SyncStageOutput {
+                            stage: *stage,
+                            success: *success,
+                        }),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl cli::commands::sync::stateless::SyncEmitter for CliSyncEmitter {
+    fn emit(&self, event: cli::commands::sync::stateless::SyncEvent) {
+        if let cli::commands::sync::stateless::SyncEvent::HookOutput { line, .. } = &event {
+            eprintln!("{line}");
+        }
+        if let Ok(mut events) = self.0.lock() {
+            events.push(event);
+        }
+    }
+}
+
+fn report_sync_failure(
+    failure: &cli::commands::sync::stateless::SyncFailure,
+    _stages: Vec<SyncStageOutput>,
+    _json: bool,
+) -> anyhow::Result<()> {
+    Err(anyhow::anyhow!(failure.to_string()))
 }
 
 fn run_sync_all(

@@ -124,3 +124,51 @@ fn dry_run_human_output_is_stdout_only_and_never_prompts() {
         )
     );
 }
+
+#[test]
+fn real_rebase_json_reports_the_atomic_outcome_and_stages() {
+    let (root, worktree) = repository();
+    let repository = root.path().join("repository");
+    commit(&repository, "main-only", "main\n", "advance main");
+    commit(&worktree, "feature-only", "feature\n", "advance feature");
+
+    let output = trench(
+        &worktree,
+        root.path(),
+        &[
+            "sync",
+            "feature/topic",
+            "--strategy",
+            "rebase",
+            "--no-hooks",
+            "--json",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "ok": true,
+            "target": "feature-topic",
+            "branch": "feature/topic",
+            "path": worktree,
+            "base": "main",
+            "strategy": "rebase",
+            "before": { "ahead": 1, "behind": 1 },
+            "after": { "ahead": 1, "behind": 0 },
+            "mutation_state": "applied",
+            "stages": [
+                { "stage": "validate", "success": true },
+                { "stage": "validate", "success": true },
+                { "stage": "sync", "success": true }
+            ]
+        })
+    );
+}
