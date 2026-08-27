@@ -126,22 +126,16 @@ enum Commands {
     Status {
         /// Branch name or sanitized name for deep status view.
         /// Omit for summary of all worktrees.
-        #[arg(required = true)]
         branch: Option<String>,
     },
     /// Sync a worktree with its base branch
     Sync {
-        /// Branch name or sanitized name of the worktree to sync.
-        /// Omit when using --all.
-        branch: Option<String>,
+        /// Branch name, worktree name, or path of the worktree to sync
+        branch: String,
 
-        /// Sync all active worktrees. Requires --strategy.
+        /// Sync strategy: rebase or merge
         #[arg(long)]
-        all: bool,
-
-        /// Sync strategy: rebase or merge. Prompts interactively if omitted.
-        #[arg(long, required = true)]
-        strategy: Option<SyncStrategy>,
+        strategy: SyncStrategy,
 
         /// Base branch or ref to sync onto
         #[arg(long)]
@@ -288,29 +282,17 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Sync {
             branch,
-            all,
             strategy,
             no_hooks,
-            base: _,
-        }) => {
-            if all && branch.is_some() {
-                eprintln!("error: <BRANCH> cannot be used with --all");
-                ExitCode::GeneralError.exit();
-            }
-            if all {
-                if strategy.is_none() {
-                    eprintln!("error: {}", cli::commands::sync::BatchSyncMissingStrategy);
-                    ExitCode::MissingRequiredFlag.exit();
-                }
-                run_sync_all(strategy.unwrap(), json, dry_run, no_hooks)
-            } else {
-                let branch = branch.unwrap_or_else(|| {
-                    eprintln!("error: <BRANCH> is required when --all is not set");
-                    ExitCode::GeneralError.exit();
-                });
-                run_sync(&branch, strategy, json, dry_run, no_hooks)
-            }
-        }
+            base,
+        }) => run_sync(
+            &branch,
+            strategy,
+            base.as_deref(),
+            json,
+            dry_run,
+            no_hooks,
+        ),
         Some(Commands::Log {
             branch,
             tail,
@@ -976,46 +958,19 @@ fn run_status(
 
 fn run_sync(
     identifier: &str,
-    strategy: Option<SyncStrategy>,
+    strategy: SyncStrategy,
+    explicit_base: Option<&str>,
     json: bool,
     dry_run: bool,
     no_hooks: bool,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
 
-    // Determine strategy: use CLI flag, or prompt interactively
-    // This runs BEFORE any DB work so dry-run can fail fast.
-    let resolved_strategy = match strategy {
-        Some(s) => s,
-        None => {
-            if dry_run {
-                eprintln!("error: --strategy is required with --dry-run (use --strategy rebase or --strategy merge)");
-                ExitCode::MissingRequiredFlag.exit();
-            }
-            if !std::io::stdin().is_terminal() {
-                eprintln!("error: --strategy is required in non-interactive mode (use --strategy rebase or --strategy merge)");
-                ExitCode::MissingRequiredFlag.exit();
-            }
-            eprint!("Sync strategy — (r)ebase or (m)erge? ");
-            let mut input = String::new();
-            std::io::stdin()
-                .read_line(&mut input)
-                .context("failed to read strategy input")?;
-            match input.trim().to_lowercase().as_str() {
-                "r" | "rebase" => SyncStrategy::Rebase,
-                "m" | "merge" => SyncStrategy::Merge,
-                other => {
-                    eprintln!("error: unknown strategy '{other}'. Use 'rebase' or 'merge'.");
-                    ExitCode::GeneralError.exit();
-                }
-            }
-        }
-    };
-
-    let sync_strategy = match resolved_strategy {
+    let sync_strategy = match strategy {
         SyncStrategy::Rebase => cli::commands::sync::Strategy::Rebase,
         SyncStrategy::Merge => cli::commands::sync::Strategy::Merge,
     };
+    let _ = explicit_base;
 
     // Load hooks config (needed for both dry-run preview and actual execution)
     let hooks_config = if no_hooks {
@@ -1995,8 +1950,8 @@ mod tests {
             Some(Commands::Sync {
                 branch, strategy, ..
             }) => {
-                assert_eq!(branch, Some("foo".to_string()));
-                assert_eq!(strategy, Some(SyncStrategy::Rebase));
+                assert_eq!(branch, "foo");
+                assert_eq!(strategy, SyncStrategy::Rebase);
             }
             _ => panic!("expected Commands::Sync"),
         }
@@ -2010,8 +1965,8 @@ mod tests {
             Some(Commands::Sync {
                 branch, strategy, ..
             }) => {
-                assert_eq!(branch, Some("foo".to_string()));
-                assert_eq!(strategy, Some(SyncStrategy::Merge));
+                assert_eq!(branch, "foo");
+                assert_eq!(strategy, SyncStrategy::Merge);
             }
             _ => panic!("expected Commands::Sync"),
         }
@@ -2045,7 +2000,7 @@ mod tests {
             Some(Commands::Sync {
                 branch, no_hooks, ..
             }) => {
-                assert_eq!(branch, Some("foo".to_string()));
+                assert_eq!(branch, "foo");
                 assert!(no_hooks, "--no-hooks should be true");
             }
             _ => panic!("expected Commands::Sync"),
@@ -2054,7 +2009,7 @@ mod tests {
 
     #[test]
     fn sync_subcommand_no_hooks_defaults_to_false() {
-        let cli = Cli::try_parse_from(["trench", "sync", "foo"])
+        let cli = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "rebase"])
             .expect("sync without --no-hooks should parse");
         match cli.command {
             Some(Commands::Sync { no_hooks, .. }) => {
@@ -2065,65 +2020,34 @@ mod tests {
     }
 
     #[test]
-    fn sync_all_flag_parses_with_strategy() {
-        let cli = Cli::try_parse_from(["trench", "sync", "--all", "--strategy", "rebase"])
-            .expect("sync --all --strategy rebase should parse");
-        match cli.command {
-            Some(Commands::Sync {
-                branch,
-                all,
-                strategy,
-                ..
-            }) => {
-                assert!(branch.is_none(), "branch should be None when --all is used");
-                assert!(all, "--all should be true");
-                assert_eq!(strategy, Some(SyncStrategy::Rebase));
-            }
-            _ => panic!("expected Commands::Sync"),
-        }
+    fn sync_subcommand_rejects_all() {
+        let error = Cli::try_parse_from([
+            "trench",
+            "sync",
+            "topic",
+            "--all",
+            "--strategy",
+            "rebase",
+        ])
+        .expect_err("sync --all must be rejected");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn sync_all_flag_parses_without_branch() {
-        let cli = Cli::try_parse_from(["trench", "sync", "--all", "--strategy", "merge"])
-            .expect("sync --all --strategy merge should parse");
+    fn sync_subcommand_accepts_explicit_base() {
+        let cli = Cli::try_parse_from([
+            "trench",
+            "sync",
+            "feature/topic",
+            "--strategy",
+            "merge",
+            "--base",
+            "release",
+        ])
+        .expect("sync --base should parse");
         match cli.command {
-            Some(Commands::Sync {
-                branch,
-                all,
-                strategy,
-                ..
-            }) => {
-                assert!(branch.is_none());
-                assert!(all);
-                assert_eq!(strategy, Some(SyncStrategy::Merge));
-            }
-            _ => panic!("expected Commands::Sync"),
-        }
-    }
-
-    #[test]
-    fn sync_branch_still_works_without_all() {
-        let cli = Cli::try_parse_from(["trench", "sync", "my-feature", "--strategy", "rebase"])
-            .expect("sync with branch should still parse");
-        match cli.command {
-            Some(Commands::Sync { branch, all, .. }) => {
-                assert_eq!(branch, Some("my-feature".to_string()));
-                assert!(!all, "--all should default to false");
-            }
-            _ => panic!("expected Commands::Sync"),
-        }
-    }
-
-    #[test]
-    fn sync_all_without_strategy_parses_but_strategy_is_none() {
-        // CLI parsing succeeds — the exit-code-8 validation happens at runtime
-        let cli = Cli::try_parse_from(["trench", "sync", "--all"])
-            .expect("sync --all without --strategy should still parse");
-        match cli.command {
-            Some(Commands::Sync { all, strategy, .. }) => {
-                assert!(all);
-                assert!(strategy.is_none(), "--strategy should be None");
+            Some(Commands::Sync { base, .. }) => {
+                assert_eq!(base.as_deref(), Some("release"));
             }
             _ => panic!("expected Commands::Sync"),
         }
