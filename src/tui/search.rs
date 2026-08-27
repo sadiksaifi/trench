@@ -194,4 +194,20 @@ mod tests {
         );
         assert!(rank(&rows, "missing").is_empty());
     }
+
+    #[test]
+    fn rank_uses_the_stronger_identity_field_then_catalog_order_for_ties() {
+        let rows = vec![
+            identity("/worktrees/zeta", "needle", Some("feature/zeta")),
+            identity("/worktrees/alpha", "alpha", Some("needle")),
+        ];
+
+        assert_eq!(
+            rank(&rows, "needle")
+                .into_iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>(),
+            [rows[0].id.clone(), rows[1].id.clone()]
+        );
+    }
 }
