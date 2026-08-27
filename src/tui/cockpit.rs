@@ -128,10 +128,14 @@ fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, th
             lines.push(Line::from("The worktree directory will be removed."));
             if dialog.can_delete_branch() {
                 let marker = if dialog.delete_branch() { "[x]" } else { "[ ]" };
-                lines.push(Line::from(format!(
-                    "{marker} Also delete local branch {}",
-                    target.branch.as_deref().unwrap_or_default()
-                )));
+                lines.push(focused_control_line(
+                    &format!(
+                        "{marker} Also delete local branch {}",
+                        target.branch.as_deref().unwrap_or_default()
+                    ),
+                    inner.width,
+                    theme,
+                ));
             }
         }
         RemoveMode::ConfirmDirtyWorktree => {
@@ -627,6 +631,18 @@ fn selector_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
     ])
 }
 
+fn focused_control_line(label: &str, width: u16, theme: &Theme) -> Line<'static> {
+    let content = format!("› {label}");
+    let padding = usize::from(width).saturating_sub(content.chars().count());
+    Line::from(Span::styled(
+        format!("{content}{}", " ".repeat(padding)),
+        theme.with_bg(
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            theme.control_bg,
+        ),
+    ))
+}
+
 fn selectable_line(label: &str, selected: bool, width: u16, theme: &Theme) -> Line<'static> {
     let marker = if selected { "›" } else { " " };
     let content = format!("{marker} {label}");
@@ -766,12 +782,25 @@ fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[(
         if index > 0 {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled(
-            *key,
+        let destructive = matches!(*action, "remove" | "confirm");
+        let key = if destructive {
+            format!("[{key}]")
+        } else {
+            (*key).to_string()
+        };
+        let key_style = if destructive {
+            theme.with_bg(
+                Style::default()
+                    .fg(theme.danger_fg)
+                    .add_modifier(Modifier::BOLD),
+                theme.danger_bg,
+            )
+        } else {
             Style::default()
                 .fg(theme.selection_fg)
-                .add_modifier(Modifier::BOLD),
-        ));
+                .add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(key, key_style));
         spans.push(Span::styled(
             format!(" {action}"),
             Style::default().fg(theme.fg_muted),
@@ -1732,7 +1761,7 @@ mod tests {
         let input_cell = buffer
             .content()
             .iter()
-            .find(|cell| cell.symbol() == "f" && cell.bg == theme.bg_elevated)
+            .find(|cell| cell.symbol() == "f" && cell.bg == theme.control_bg)
             .expect("typed branch should sit on a distinct input surface");
 
         assert!(output.contains("Branch · typing"), "{output}");
@@ -2001,7 +2030,8 @@ mod tests {
         modal.tick(Duration::from_millis(1_250));
         state.operation_modal = Some(modal);
 
-        let output = text(&render_buffer(&mut state, 100, 24, "ops"));
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let output = text(&buffer);
         assert!(output.contains("Create worktree"), "{output}");
         assert!(output.contains("Pre-create hook"), "{output}");
         assert!(output.contains("1.2s"), "{output}");
@@ -2060,14 +2090,26 @@ mod tests {
             crate::tui::remove_flow::RemoveDialog::new(WorktreeId::new(&path), assessment).unwrap(),
         );
 
-        let output = text(&render_buffer(&mut state, 100, 24, "ops"));
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let output = text(&buffer);
         assert!(
             output.contains("The worktree directory will be removed."),
             "{output}"
         );
         assert!(
-            output.contains("[ ] Also delete local branch feature"),
+            output.contains("› [ ] Also delete local branch feature"),
             "{output}"
+        );
+        let checkbox = find_text(&buffer, "› [ ] Also delete local branch feature");
+        assert_eq!(buffer.cell(checkbox).unwrap().bg, Color::Rgb(50, 46, 41));
+        let destructive = find_text(&buffer, "[Enter] remove");
+        assert_eq!(
+            buffer.cell(destructive).unwrap().bg,
+            Color::Rgb(162, 59, 56)
+        );
+        assert_eq!(
+            buffer.cell(destructive).unwrap().fg,
+            Color::Rgb(250, 249, 245)
         );
         assert!(!output.to_lowercase().contains("remote branch"), "{output}");
         assert!(output
