@@ -7,10 +7,11 @@ use anyhow::{Context, Result};
 use crossterm::event::{self, Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind};
 
 use crate::{
+    cli::commands::sync::stateless::{HookPolicy as SyncHookPolicy, SyncPlanner},
     config::{self, HooksConfig},
     create_plan::{CreateAction, CreatePlanner, HookPolicy},
     navigation::EditorCommand,
-    operation::{CreateRequest, OperationOutcome, OperationRequest},
+    operation::{CreateRequest, OperationOutcome, OperationRequest, SyncRequest},
     tui::{
         app::{self, AppState, Effect, Event, WorktreeId},
         cockpit,
@@ -25,6 +26,7 @@ use crate::{
         },
         refresh::RefreshPublication,
         refresh_runtime::RefreshRuntime,
+        sync_flow::SyncSubmission,
         theme,
     },
 };
@@ -235,6 +237,22 @@ fn build_create_dispatch(
     ))))
 }
 
+fn build_sync_request(
+    submission: &SyncSubmission,
+    cwd: &Path,
+    configured_base: Option<&str>,
+    hooks: Option<HooksConfig>,
+) -> Result<OperationRequest> {
+    let target = submission.target.as_path().to_string_lossy();
+    let plan = SyncPlanner::discover(cwd, configured_base)?.plan(
+        &target,
+        Some(&submission.base),
+        submission.strategy,
+        SyncHookPolicy::Run,
+    )?;
+    Ok(OperationRequest::Sync(SyncRequest { plan, hooks }))
+}
+
 fn handle_create_input(
     state: &mut AppState,
     key: CreateKey,
@@ -388,6 +406,9 @@ pub fn run() -> Result<TuiExit> {
                     OperationRuntimeEffect::Succeeded(OperationOutcome::Create(outcome)) => {
                         operation.dismiss();
                         finish_create_success(&mut state, &mut refresh, outcome, Instant::now());
+                    }
+                    OperationRuntimeEffect::Succeeded(OperationOutcome::Sync(_)) => {
+                        operation.dismiss();
                     }
                     OperationRuntimeEffect::Succeeded(OperationOutcome::Remove(_)) => {
                         operation.dismiss();
@@ -890,6 +911,46 @@ mod tests {
             crate::git::discover_repo(repository.path()).unwrap().path
         );
         assert_eq!(request.worktree_root, root);
+        assert_eq!(request.hooks, Some(hooks));
+    }
+
+    #[test]
+    fn sync_submission_replans_the_exact_path_with_explicit_strategy_and_hooks() {
+        let repository = init_repo();
+        let target = repository.path().canonicalize().unwrap();
+        let hooks = HooksConfig {
+            pre_sync: Some(HookDef {
+                shell: Some("true".to_string()),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+        let submission = crate::tui::sync_flow::SyncSubmission {
+            target: WorktreeId::new(target.clone()),
+            base: "main".to_string(),
+            strategy: crate::cli::commands::sync::stateless::SyncStrategy::Merge,
+        };
+
+        let request = build_sync_request(
+            &submission,
+            repository.path(),
+            Some("main"),
+            Some(hooks.clone()),
+        )
+        .unwrap();
+
+        let OperationRequest::Sync(request) = request else {
+            panic!("sync submission should start a sync operation")
+        };
+        assert_eq!(request.plan.path, target);
+        assert_eq!(
+            request.plan.strategy,
+            crate::cli::commands::sync::stateless::SyncStrategy::Merge
+        );
+        assert_eq!(
+            request.plan.hook_policy,
+            crate::cli::commands::sync::stateless::HookPolicy::Run
+        );
         assert_eq!(request.hooks, Some(hooks));
     }
 

@@ -10,6 +10,7 @@ use crate::{
         operation_modal::OperationModal,
         refresh::RefreshPublication,
         search::{self, QueryBuffer},
+        sync_flow,
     },
 };
 
@@ -309,19 +310,8 @@ pub fn unavailable_reason(state: &AppState, action: Action) -> Option<&'static s
         (Action::Switch | Action::Open | Action::Sync | Action::Remove, None) => {
             Some("No worktree selected")
         }
-        (Action::Sync, Some(identity)) if identity.detached => {
-            Some("Detached worktrees cannot be synced")
-        }
-        (Action::Sync, Some(identity)) if !state.statuses.contains_key(&identity.id) => {
-            Some("Git status is still loading")
-        }
-        (Action::Sync, Some(identity))
-            if state
-                .statuses
-                .get(&identity.id)
-                .is_some_and(|status| status.staged + status.modified + status.untracked > 0) =>
-        {
-            Some("Dirty worktrees cannot be synced")
+        (Action::Sync, Some(identity)) => {
+            sync_flow::unavailable_reason(identity, state.statuses.get(&identity.id))
         }
         (Action::DeleteBranch, Some(identity)) if identity.detached => {
             Some("Detached worktrees have no local branch to delete")

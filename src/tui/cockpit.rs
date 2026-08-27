@@ -363,6 +363,7 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
     frame.render_widget(Clear, dialog);
     let title = match modal.operation() {
         OperationKind::Create => " Create worktree ",
+        OperationKind::Sync => " Sync worktree ",
         OperationKind::Remove => " Remove worktree ",
     };
     let block = panel(Some(title.to_string()), theme);
@@ -452,9 +453,11 @@ fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[(
 
 fn operation_stage_label(stage: OperationStage) -> &'static str {
     match stage {
+        OperationStage::Fetch => "Fetch origin",
         OperationStage::Revalidate => "Revalidate",
         OperationStage::PreHook => "Pre-create hook",
         OperationStage::CreateWorktree => "Create worktree",
+        OperationStage::Sync => "Sync worktree",
         OperationStage::RemoveWorktree => "Remove worktree",
         OperationStage::Prune => "Prune worktrees",
         OperationStage::DeleteBranch => "Delete branch",

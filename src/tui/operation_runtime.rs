@@ -135,6 +135,7 @@ where
         while self.receiver.try_recv().is_ok() {}
         let operation = match &request {
             OperationRequest::Create(_) => OperationKind::Create,
+            OperationRequest::Sync(_) => OperationKind::Sync,
             OperationRequest::Remove(_) => OperationKind::Remove,
         };
         let cancellation = CancellationToken::default();
@@ -305,6 +306,7 @@ mod tests {
 
         let plan = match request() {
             OperationRequest::Create(request) => request.plan,
+            OperationRequest::Sync(_) => unreachable!("test request is create"),
             OperationRequest::Remove(_) => unreachable!("test request is create"),
         };
         sender

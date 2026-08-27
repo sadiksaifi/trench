@@ -12,12 +12,19 @@ use crate::{git, logging};
 #[derive(Debug)]
 pub enum OperationRequest {
     Create(CreateRequest),
+    Sync(SyncRequest),
     Remove(RemoveRequest),
 }
 
 #[derive(Debug)]
 pub struct RemoveRequest {
     pub plan: crate::cli::commands::remove::stateless::RemovalPlan,
+    pub hooks: Option<HooksConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncRequest {
+    pub plan: crate::cli::commands::sync::stateless::SyncPlan,
     pub hooks: Option<HooksConfig>,
 }
 
@@ -32,15 +39,18 @@ pub struct CreateRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationKind {
     Create,
+    Sync,
     Remove,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationStage {
+    Fetch,
     Revalidate,
     PreHook,
     CreateWorktree,
+    Sync,
     RemoveWorktree,
     Prune,
     DeleteBranch,
@@ -218,6 +228,7 @@ impl CancellationCheck for CancellationToken {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationOutcome {
     Create(CreateOutcome),
+    Sync(crate::cli::commands::sync::stateless::SyncOutcome),
     Remove(crate::cli::commands::remove::stateless::RemovalOutcome),
 }
 
@@ -271,7 +282,133 @@ pub async fn execute_cancellable(
 ) -> Result<OperationOutcome, OperationFailure> {
     match request {
         OperationRequest::Create(request) => execute_create(request, emitter, cancellation).await,
+        OperationRequest::Sync(request) => execute_sync(request, emitter, cancellation).await,
         OperationRequest::Remove(request) => execute_remove(request, emitter, cancellation).await,
+    }
+}
+
+async fn execute_sync(
+    request: SyncRequest,
+    emitter: &dyn Emitter,
+    cancellation: &dyn CancellationCheck,
+) -> Result<OperationOutcome, OperationFailure> {
+    use crate::cli::commands::sync::stateless as sync;
+
+    emitter.emit(OperationEvent::Started {
+        operation: OperationKind::Sync,
+    });
+    if !cancellation.try_begin_mutation() {
+        return Err(OperationFailure {
+            stage: OperationStage::Revalidate,
+            mutation_state: MutationState::NotStarted,
+            class: ErrorClass::Cancelled,
+            message: "operation cancelled before sync started".to_string(),
+            retained_quarantine: None,
+        });
+    }
+    emitter.emit(OperationEvent::MutationStarted);
+    let adapter = SyncEmitterAdapter { emitter };
+    match sync::execute(request.plan, request.hooks.as_ref(), &adapter).await {
+        Ok(outcome) => {
+            emitter.emit(OperationEvent::Finished {
+                mutation_state: map_sync_mutation(outcome.mutation_state),
+                duration: outcome.elapsed,
+            });
+            Ok(OperationOutcome::Sync(outcome))
+        }
+        Err(failure) => {
+            emitter.emit(OperationEvent::Finished {
+                mutation_state: map_sync_mutation(failure.mutation_state),
+                duration: failure.elapsed,
+            });
+            Err(OperationFailure {
+                stage: map_sync_stage(failure.stage),
+                mutation_state: map_sync_mutation(failure.mutation_state),
+                class: map_sync_error(failure.class),
+                message: failure.message,
+                retained_quarantine: None,
+            })
+        }
+    }
+}
+
+struct SyncEmitterAdapter<'a> {
+    emitter: &'a dyn Emitter,
+}
+
+impl crate::cli::commands::sync::stateless::SyncEmitter for SyncEmitterAdapter<'_> {
+    fn emit(&self, event: crate::cli::commands::sync::stateless::SyncEvent) {
+        use crate::cli::commands::sync::stateless::SyncEvent;
+
+        let event = match event {
+            SyncEvent::StageStarted(stage) => OperationEvent::StageStarted {
+                stage: map_sync_stage(stage),
+            },
+            SyncEvent::HookOutput {
+                hook,
+                step,
+                stream,
+                line,
+            } => OperationEvent::Output {
+                hook,
+                step,
+                stream,
+                line,
+            },
+            SyncEvent::StageFinished {
+                stage,
+                success,
+                elapsed,
+            } => OperationEvent::StageFinished {
+                stage: map_sync_stage(stage),
+                duration: elapsed,
+                success,
+            },
+            SyncEvent::Warning { stage, message } => OperationEvent::Warning {
+                stage: map_sync_stage(stage),
+                message,
+            },
+        };
+        self.emitter.emit(event);
+    }
+}
+
+fn map_sync_stage(stage: crate::cli::commands::sync::stateless::SyncStage) -> OperationStage {
+    use crate::cli::commands::sync::stateless::SyncStage;
+    match stage {
+        SyncStage::Fetch => OperationStage::Fetch,
+        SyncStage::Validate => OperationStage::Revalidate,
+        SyncStage::PreHook => OperationStage::PreHook,
+        SyncStage::Sync => OperationStage::Sync,
+        SyncStage::Rollback => OperationStage::Rollback,
+        SyncStage::PostHook => OperationStage::PostHook,
+    }
+}
+
+fn map_sync_mutation(state: crate::cli::commands::sync::stateless::MutationState) -> MutationState {
+    use crate::cli::commands::sync::stateless::MutationState as SyncMutationState;
+    match state {
+        SyncMutationState::NotStarted => MutationState::NotStarted,
+        SyncMutationState::RolledBack => MutationState::RolledBack,
+        SyncMutationState::Applied => MutationState::Applied,
+        SyncMutationState::PartiallyApplied => MutationState::PartiallyApplied,
+    }
+}
+
+fn map_sync_error(class: crate::cli::commands::sync::stateless::SyncErrorClass) -> ErrorClass {
+    use crate::cli::commands::sync::stateless::SyncErrorClass;
+    match class {
+        SyncErrorClass::InvalidTarget
+        | SyncErrorClass::InvalidBase
+        | SyncErrorClass::Dirty
+        | SyncErrorClass::Detached
+        | SyncErrorClass::OperationInProgress
+        | SyncErrorClass::PreconditionsChanged => ErrorClass::PreconditionsChanged,
+        SyncErrorClass::Conflict => ErrorClass::Git,
+        SyncErrorClass::Git => ErrorClass::Git,
+        SyncErrorClass::Hook => ErrorClass::Hook,
+        SyncErrorClass::HookTimeout => ErrorClass::HookTimeout,
+        SyncErrorClass::Rollback => ErrorClass::Cleanup,
     }
 }
 
@@ -1409,7 +1546,9 @@ fn diagnostic_stage(stage: OperationStage) -> logging::Stage {
     match stage {
         OperationStage::Revalidate => logging::Stage::Validate,
         OperationStage::PreHook | OperationStage::PostHook => logging::Stage::Hook,
-        OperationStage::CreateWorktree
+        OperationStage::Fetch
+        | OperationStage::CreateWorktree
+        | OperationStage::Sync
         | OperationStage::RemoveWorktree
         | OperationStage::Prune
         | OperationStage::DeleteBranch
@@ -1435,6 +1574,50 @@ mod tests {
     use crate::create_plan::HookPolicy;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn sync_adapter_preserves_stage_and_hook_output_events() {
+        use crate::cli::commands::sync::stateless::{SyncEmitter, SyncEvent, SyncStage};
+        use crate::hooks::{
+            types::{HookStep, OutputStream},
+            HookEvent,
+        };
+
+        let emitter = RecordingEmitter::default();
+        let adapter = SyncEmitterAdapter { emitter: &emitter };
+        adapter.emit(SyncEvent::StageStarted(SyncStage::Sync));
+        adapter.emit(SyncEvent::HookOutput {
+            hook: HookEvent::PreSync,
+            step: HookStep::Run,
+            stream: OutputStream::Stdout,
+            line: "preparing".to_string(),
+        });
+        adapter.emit(SyncEvent::StageFinished {
+            stage: SyncStage::Sync,
+            success: true,
+            elapsed: Duration::from_millis(25),
+        });
+
+        assert_eq!(
+            emitter.events(),
+            [
+                OperationEvent::StageStarted {
+                    stage: OperationStage::Sync,
+                },
+                OperationEvent::Output {
+                    hook: HookEvent::PreSync,
+                    step: HookStep::Run,
+                    stream: OutputStream::Stdout,
+                    line: "preparing".to_string(),
+                },
+                OperationEvent::StageFinished {
+                    stage: OperationStage::Sync,
+                    duration: Duration::from_millis(25),
+                    success: true,
+                },
+            ]
+        );
+    }
 
     struct CreateCollisionAtMutation {
         path: PathBuf,
