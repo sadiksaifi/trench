@@ -1,77 +1,766 @@
-use std::fs::File;
+use std::ffi::OsString;
+use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::Mutex;
-
-use anyhow::{Context, Result};
-use tracing_subscriber::EnvFilter;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use crate::paths;
 
-const DEFAULT_FILTER: &str = "warn";
-
+const MAX_FILE_BYTES: u64 = 1024 * 1024;
+const ROTATED_FILE_COUNT: usize = 4;
 const ENV_FILTER_VAR: &str = "TRENCH_LOG";
 
-/// Build a tracing subscriber with a specific filter, writing to the given writer.
-fn build_subscriber_with_filter<W: Write + Send + 'static>(
-    writer: W,
-    filter: EnvFilter,
-) -> impl tracing::Subscriber + Send + Sync {
-    tracing_subscriber::fmt()
-        .with_writer(Mutex::new(writer))
-        .with_ansi(false)
-        .with_env_filter(filter)
-        .finish()
+static DIAGNOSTICS: OnceLock<Diagnostics> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DiagnosticFilter {
+    Debug,
+    #[default]
+    Warn,
 }
 
-/// Build a tracing subscriber that writes to the given writer.
-///
-/// Uses `TRENCH_LOG` env var for the filter if set, otherwise defaults to `warn`.
-fn build_subscriber<W: Write + Send + 'static>(
-    writer: W,
-) -> impl tracing::Subscriber + Send + Sync {
-    let filter =
-        EnvFilter::try_from_env(ENV_FILTER_VAR).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
-    build_subscriber_with_filter(writer, filter)
-}
-
-/// Initialize the tracing subscriber with file-based logging.
-///
-/// Writes logs to trench's state directory as resolved by [`crate::paths`].
-/// Linux and macOS default to XDG-style state paths; Windows defaults to the
-/// native state directory unless `XDG_STATE_HOME` is set.
-pub fn init() -> Result<()> {
-    match paths::state_dir()
-        .and_then(|_| paths::log_file_path())
-        .and_then(|path| init_with_log_path(&path))
-    {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            let subscriber = build_subscriber(std::io::sink());
-            let _ = tracing::subscriber::set_global_default(subscriber);
-            Ok(())
+impl DiagnosticFilter {
+    fn from_env_value(value: Option<&str>) -> Self {
+        match value {
+            Some(value) if value.eq_ignore_ascii_case("debug") => Self::Debug,
+            _ => Self::Warn,
         }
     }
 }
 
-fn init_with_log_path(log_path: &std::path::Path) -> Result<()> {
-    let file = File::options()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .with_context(|| format!("failed to open log file: {}", log_path.display()))?;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Operation {
+    List,
+    Create,
+    Switch,
+    Open,
+    Sync,
+    Remove,
+    Tui,
+    Watch,
+}
 
-    let subscriber = build_subscriber(file);
+impl Operation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Create => "create",
+            Self::Switch => "switch",
+            Self::Open => "open",
+            Self::Sync => "sync",
+            Self::Remove => "remove",
+            Self::Tui => "tui",
+            Self::Watch => "watch",
+        }
+    }
+}
 
-    // May fail if a global subscriber is already set — that's OK, first one wins.
-    let _ = tracing::subscriber::set_global_default(subscriber);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stage {
+    Resolve,
+    Validate,
+    Hook,
+    Git,
+    Render,
+    Complete,
+    Initialize,
+    Register,
+    Observe,
+}
 
-    Ok(())
+impl Stage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolve => "resolve",
+            Self::Validate => "validate",
+            Self::Hook => "hook",
+            Self::Git => "git",
+            Self::Render => "render",
+            Self::Complete => "complete",
+            Self::Initialize => "initialize",
+            Self::Register => "register",
+            Self::Observe => "observe",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticError {
+    Io,
+    PermissionDenied,
+    NotFound,
+    InvalidInput,
+    Git,
+    Hook,
+    Config,
+    Internal,
+}
+
+impl DiagnosticError {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Io => "io",
+            Self::PermissionDenied => "permission_denied",
+            Self::NotFound => "not_found",
+            Self::InvalidInput => "invalid_input",
+            Self::Git => "git",
+            Self::Hook => "hook",
+            Self::Config => "config",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticLevel {
+    Debug,
+    Warn,
+    Error,
+}
+
+impl DiagnosticLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiagnosticEvent {
+    level: DiagnosticLevel,
+    operation: Operation,
+    stage: Stage,
+    duration: Duration,
+    error: Option<DiagnosticError>,
+}
+
+impl DiagnosticEvent {
+    pub fn debug(operation: Operation, stage: Stage, duration: Duration) -> Self {
+        Self {
+            level: DiagnosticLevel::Debug,
+            operation,
+            stage,
+            duration,
+            error: None,
+        }
+    }
+
+    pub fn warning(
+        operation: Operation,
+        stage: Stage,
+        duration: Duration,
+        error: DiagnosticError,
+    ) -> Self {
+        Self {
+            level: DiagnosticLevel::Warn,
+            operation,
+            stage,
+            duration,
+            error: Some(error),
+        }
+    }
+
+    pub fn error(
+        operation: Operation,
+        stage: Stage,
+        duration: Duration,
+        error: DiagnosticError,
+    ) -> Self {
+        Self {
+            level: DiagnosticLevel::Error,
+            operation,
+            stage,
+            duration,
+            error: Some(error),
+        }
+    }
+}
+
+fn write_event_best_effort(writer: &mut impl Write, event: DiagnosticEvent) {
+    let error = event.error.map(|error| error.as_str()).unwrap_or("none");
+    let line = format!(
+        "level={} operation={} stage={} duration_ms={} error={}\n",
+        event.level.as_str(),
+        event.operation.as_str(),
+        event.stage.as_str(),
+        event.duration.as_millis(),
+        error
+    );
+    let _ = writer.write_all(line.as_bytes());
+}
+
+pub struct Diagnostics {
+    path: PathBuf,
+    filter: DiagnosticFilter,
+    write_lock: Mutex<()>,
+}
+
+impl Diagnostics {
+    pub fn at_path(path: &Path, filter: DiagnosticFilter) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            filter,
+            write_lock: Mutex::new(()),
+        }
+    }
+
+    fn prepare(&self) {
+        let Some(parent) = self.path.parent() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let _ = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path);
+    }
+
+    fn with_process_lock(&self, action: impl FnOnce()) {
+        let Some(parent) = self.path.parent() else {
+            return;
+        };
+        let Some(file_name) = self.path.file_name() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+
+        let mut lock_name = OsString::from(".");
+        lock_name.push(file_name);
+        lock_name.push(".lock");
+        let Ok(lock_file) = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(parent.join(lock_name))
+        else {
+            return;
+        };
+        if lock_file.try_lock().is_err() {
+            return;
+        }
+
+        action();
+        let _ = lock_file.unlock();
+    }
+
+    pub fn record(&self, event: DiagnosticEvent) {
+        if self.filter == DiagnosticFilter::Warn && event.level == DiagnosticLevel::Debug {
+            return;
+        }
+
+        let Ok(_guard) = self.write_lock.lock() else {
+            return;
+        };
+        self.with_process_lock(|| {
+            self.prepare();
+            self.normalize_retention();
+            self.rotate_if_full();
+            let Ok(mut file) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+            else {
+                return;
+            };
+            write_event_best_effort(&mut file, event);
+        });
+    }
+
+    fn maintain(&self) {
+        let Ok(_guard) = self.write_lock.lock() else {
+            return;
+        };
+        self.with_process_lock(|| {
+            self.prepare();
+            self.normalize_retention();
+            self.rotate_if_full();
+            self.prepare();
+        });
+    }
+
+    fn rotate_if_full(&self) {
+        let Ok(metadata) = std::fs::metadata(&self.path) else {
+            return;
+        };
+        if metadata.len() < MAX_FILE_BYTES {
+            return;
+        }
+
+        let _ = std::fs::remove_file(self.rotated_path(ROTATED_FILE_COUNT));
+        for index in (1..ROTATED_FILE_COUNT).rev() {
+            let source = self.rotated_path(index);
+            let destination = self.rotated_path(index + 1);
+            let _ = std::fs::remove_file(&destination);
+            let _ = std::fs::rename(source, destination);
+        }
+        let _ = std::fs::rename(&self.path, self.rotated_path(1));
+    }
+
+    fn normalize_retention(&self) {
+        let Some(parent) = self.path.parent() else {
+            return;
+        };
+        let Some(file_name) = self.path.file_name().and_then(|name| name.to_str()) else {
+            return;
+        };
+        let prefix = format!("{file_name}.");
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(index) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix(&prefix))
+                .and_then(|suffix| suffix.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            if index > ROTATED_FILE_COUNT {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    fn rotated_path(&self, index: usize) -> PathBuf {
+        let mut path = self.path.as_os_str().to_os_string();
+        path.push(format!(".{index}"));
+        PathBuf::from(path)
+    }
+}
+
+/// Initialize bounded file diagnostics without exposing a general-purpose log sink.
+///
+/// Path resolution, directory creation, file opening, and installation are all
+/// best effort: diagnostics can never change product behavior or exit status.
+pub fn init() {
+    let Ok(path) = paths::log_file_path() else {
+        return;
+    };
+    let env_filter = std::env::var(ENV_FILTER_VAR).ok();
+    let diagnostics = Diagnostics::at_path(
+        &path,
+        DiagnosticFilter::from_env_value(env_filter.as_deref()),
+    );
+    diagnostics.maintain();
+    let _ = DIAGNOSTICS.set(diagnostics);
+}
+
+/// Record a typed diagnostic event when diagnostics initialized successfully.
+pub fn record(event: DiagnosticEvent) {
+    if let Some(diagnostics) = DIAGNOSTICS.get() {
+        diagnostics.record(event);
+    }
+}
+
+#[cfg(test)]
+pub fn init_at_path_for_test(path: &Path) {
+    let diagnostics = Diagnostics::at_path(path, DiagnosticFilter::default());
+    diagnostics.maintain();
+    let _ = DIAGNOSTICS.set(diagnostics);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read as _;
+
+    fn diagnostic_log_names(directory: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| {
+                name == "trench.log"
+                    || name
+                        .strip_prefix("trench.log.")
+                        .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    fn product_outcome_with_diagnostics(diagnostics: &Diagnostics) -> &'static str {
+        diagnostics.record(DiagnosticEvent::error(
+            Operation::Switch,
+            Stage::Complete,
+            Duration::from_millis(13),
+            DiagnosticError::Io,
+        ));
+        "product-result"
+    }
+
+    #[test]
+    fn default_filter_records_warnings_but_not_debug_events() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+
+        diagnostics.record(DiagnosticEvent::debug(
+            Operation::List,
+            Stage::Git,
+            std::time::Duration::from_millis(7),
+        ));
+        diagnostics.record(DiagnosticEvent::warning(
+            Operation::List,
+            Stage::Git,
+            std::time::Duration::from_millis(11),
+            DiagnosticError::Io,
+        ));
+
+        let contents = std::fs::read_to_string(log_path).unwrap();
+        assert!(!contents.contains("duration_ms=7"));
+        assert!(contents.contains("level=warn operation=list stage=git duration_ms=11 error=io"));
+    }
+
+    #[test]
+    fn trench_log_debug_enables_diagnostic_detail() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        let diagnostics =
+            Diagnostics::at_path(&log_path, DiagnosticFilter::from_env_value(Some("debug")));
+
+        diagnostics.record(DiagnosticEvent::debug(
+            Operation::Create,
+            Stage::Validate,
+            std::time::Duration::from_millis(3),
+        ));
+
+        let contents = std::fs::read_to_string(log_path).unwrap();
+        assert!(contents
+            .contains("level=debug operation=create stage=validate duration_ms=3 error=none"));
+    }
+
+    #[test]
+    fn rotates_the_active_file_at_one_mibibyte() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        std::fs::write(&log_path, vec![b'x'; 1024 * 1024]).unwrap();
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+
+        diagnostics.record(DiagnosticEvent::warning(
+            Operation::Sync,
+            Stage::Git,
+            std::time::Duration::from_millis(29),
+            DiagnosticError::Git,
+        ));
+
+        assert_eq!(
+            std::fs::metadata(dir.path().join("trench.log.1"))
+                .unwrap()
+                .len(),
+            1024 * 1024
+        );
+        let active = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            active,
+            "level=warn operation=sync stage=git duration_ms=29 error=git\n"
+        );
+    }
+
+    #[test]
+    fn retains_only_the_active_file_and_four_rotated_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        std::fs::write(&log_path, vec![b'x'; 1024 * 1024]).unwrap();
+        for index in 1..=5 {
+            std::fs::write(
+                dir.path().join(format!("trench.log.{index}")),
+                format!("old-{index}"),
+            )
+            .unwrap();
+        }
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+
+        diagnostics.record(DiagnosticEvent::warning(
+            Operation::Remove,
+            Stage::Complete,
+            std::time::Duration::from_millis(31),
+            DiagnosticError::Io,
+        ));
+
+        let names = diagnostic_log_names(dir.path());
+        assert_eq!(
+            names,
+            [
+                "trench.log",
+                "trench.log.1",
+                "trench.log.2",
+                "trench.log.3",
+                "trench.log.4",
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("trench.log.1")).unwrap(),
+            "x".repeat(1024 * 1024)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("trench.log.4")).unwrap(),
+            "old-3"
+        );
+    }
+
+    #[test]
+    fn normalizes_excess_retention_when_active_file_is_below_limit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        std::fs::write(&log_path, "active").unwrap();
+        for index in 1..=9 {
+            std::fs::write(
+                dir.path().join(format!("trench.log.{index}")),
+                format!("old-{index}"),
+            )
+            .unwrap();
+        }
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+
+        diagnostics.record(DiagnosticEvent::warning(
+            Operation::Watch,
+            Stage::Observe,
+            Duration::ZERO,
+            DiagnosticError::Io,
+        ));
+
+        let names = diagnostic_log_names(dir.path());
+        assert_eq!(
+            names,
+            [
+                "trench.log",
+                "trench.log.1",
+                "trench.log.2",
+                "trench.log.3",
+                "trench.log.4",
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("trench.log.4")).unwrap(),
+            "old-4"
+        );
+    }
+
+    #[test]
+    fn typed_events_never_persist_secret_bearing_inputs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::Debug);
+        let forbidden_inputs = [
+            "hook-stdout-canary",
+            "hook-stderr-canary",
+            "HOOK_TOKEN=environment-canary",
+            "--password=argument-canary",
+            "editor --credential configured-command-canary",
+            "remote rejected token=error-canary",
+        ];
+
+        diagnostics.record(DiagnosticEvent::error(
+            Operation::Create,
+            Stage::Hook,
+            std::time::Duration::from_millis(41),
+            DiagnosticError::Hook,
+        ));
+
+        let contents = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            contents,
+            "level=error operation=create stage=hook duration_ms=41 error=hook\n"
+        );
+        for canary in forbidden_inputs {
+            assert!(!contents.contains(canary));
+        }
+    }
+
+    #[test]
+    fn missing_parent_directories_are_created_best_effort() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("missing/state/trench/trench.log");
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+
+        diagnostics.record(DiagnosticEvent::warning(
+            Operation::Open,
+            Stage::Resolve,
+            std::time::Duration::from_millis(5),
+            DiagnosticError::NotFound,
+        ));
+
+        assert_eq!(
+            std::fs::read_to_string(log_path).unwrap(),
+            "level=warn operation=open stage=resolve duration_ms=5 error=not_found\n"
+        );
+    }
+
+    #[test]
+    fn open_failures_do_not_change_product_outcomes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let diagnostics = Diagnostics::at_path(dir.path(), DiagnosticFilter::default());
+
+        assert_eq!(
+            product_outcome_with_diagnostics(&diagnostics),
+            "product-result"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_failures_do_not_change_product_outcomes() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let diagnostics =
+            Diagnostics::at_path(&state_dir.join("trench.log"), DiagnosticFilter::default());
+
+        let outcome = product_outcome_with_diagnostics(&diagnostics);
+
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(outcome, "product-result");
+    }
+
+    #[test]
+    fn rotation_and_deletion_failures_do_not_change_product_outcomes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        std::fs::write(&log_path, vec![b'x'; 1024 * 1024]).unwrap();
+        for index in 1..=4 {
+            let blocking_dir = dir.path().join(format!("trench.log.{index}"));
+            std::fs::create_dir(&blocking_dir).unwrap();
+            std::fs::write(blocking_dir.join("keep"), "not removable as a file").unwrap();
+        }
+        let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+
+        assert_eq!(
+            product_outcome_with_diagnostics(&diagnostics),
+            "product-result"
+        );
+        assert!(std::fs::metadata(log_path).unwrap().len() > 1024 * 1024);
+    }
+
+    #[test]
+    fn write_failures_are_ignored_by_the_diagnostic_boundary() {
+        struct FailingWriter;
+
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("simulated full device"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let event = DiagnosticEvent::error(
+            Operation::Tui,
+            Stage::Render,
+            Duration::from_millis(17),
+            DiagnosticError::Internal,
+        );
+
+        write_event_best_effort(&mut FailingWriter, event);
+    }
+
+    #[test]
+    fn each_event_is_written_as_one_buffer() {
+        #[derive(Default)]
+        struct CountingWriter {
+            calls: usize,
+            bytes: Vec<u8>,
+        }
+
+        impl std::io::Write for CountingWriter {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.calls += 1;
+                self.bytes.extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = CountingWriter::default();
+        let event = DiagnosticEvent::warning(
+            Operation::Watch,
+            Stage::Observe,
+            Duration::from_millis(23),
+            DiagnosticError::Io,
+        );
+
+        write_event_best_effort(&mut writer, event);
+
+        assert_eq!(writer.calls, 1);
+        assert_eq!(
+            String::from_utf8(writer.bytes).unwrap(),
+            "level=warn operation=watch stage=observe duration_ms=23 error=io\n"
+        );
+    }
+
+    #[test]
+    fn a_busy_process_lock_skips_diagnostics_without_blocking() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("trench.log");
+        let process_lock_path = dir.path().join(".trench.log.lock");
+        let process_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(process_lock_path)
+            .unwrap();
+        process_lock.lock().unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let diagnostics = Diagnostics::at_path(&log_path, DiagnosticFilter::default());
+            started_tx.send(()).unwrap();
+            diagnostics.record(DiagnosticEvent::warning(
+                Operation::Watch,
+                Stage::Observe,
+                Duration::ZERO,
+                DiagnosticError::Io,
+            ));
+            finished_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        let finished_while_locked = finished_rx.recv_timeout(Duration::from_millis(250)).is_ok();
+
+        process_lock.unlock().unwrap();
+        if !finished_while_locked {
+            finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        writer.join().unwrap();
+
+        assert!(finished_while_locked, "diagnostics blocked on a busy lock");
+        assert!(!dir.path().join("trench.log").exists());
+
+        let diagnostics =
+            Diagnostics::at_path(&dir.path().join("trench.log"), DiagnosticFilter::default());
+        diagnostics.record(DiagnosticEvent::warning(
+            Operation::Watch,
+            Stage::Observe,
+            Duration::ZERO,
+            DiagnosticError::Io,
+        ));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("trench.log")).unwrap(),
+            "level=warn operation=watch stage=observe duration_ms=0 error=io\n"
+        );
+    }
 
     #[test]
     fn init_creates_log_file() {
@@ -80,71 +769,8 @@ mod tests {
 
         assert!(!log_path.exists(), "log file should not exist before init");
 
-        // init_with_log_path may fail to set the global subscriber (parallel tests),
-        // but the log file should still be created.
-        let _ = init_with_log_path(&log_path);
+        Diagnostics::at_path(&log_path, DiagnosticFilter::default()).prepare();
 
         assert!(log_path.exists(), "log file should exist after init");
-    }
-
-    #[test]
-    fn default_filter_level_is_warn() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let log_path = dir.path().join("test.log");
-        let file = File::options()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .unwrap();
-
-        let subscriber = build_subscriber(file);
-
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::info!("this info should be filtered");
-            tracing::warn!("this warn should appear");
-        });
-
-        let mut contents = String::new();
-        File::open(&log_path)
-            .unwrap()
-            .read_to_string(&mut contents)
-            .unwrap();
-
-        assert!(
-            !contents.contains("this info should be filtered"),
-            "info events should be filtered out at default warn level"
-        );
-        assert!(
-            contents.contains("this warn should appear"),
-            "warn events should be logged at default warn level"
-        );
-    }
-
-    #[test]
-    fn custom_filter_overrides_default() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let log_path = dir.path().join("test.log");
-        let file = File::options()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .unwrap();
-
-        let subscriber = build_subscriber_with_filter(file, EnvFilter::new("debug"));
-
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::debug!("this debug should appear");
-        });
-
-        let mut contents = String::new();
-        File::open(&log_path)
-            .unwrap()
-            .read_to_string(&mut contents)
-            .unwrap();
-
-        assert!(
-            contents.contains("this debug should appear"),
-            "debug events should be logged when filter is set to debug"
-        );
     }
 }
