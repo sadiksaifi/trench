@@ -4,6 +4,8 @@ use ratatui::style::{Color, Style};
 pub struct Theme {
     pub fg: Color,
     pub fg_muted: Color,
+    pub helper_fg: Color,
+    pub placeholder_fg: Color,
     pub bg: Color,
     pub bg_elevated: Color,
     pub bg_panel: Color,
@@ -20,6 +22,7 @@ pub struct Theme {
     pub disabled_fg: Color,
     pub border: Color,
     pub border_active: Color,
+    pub border_focus: Color,
     pub selection_bg: Color,
     pub selection_fg: Color,
 }
@@ -54,6 +57,8 @@ fn ops() -> Theme {
     Theme {
         fg: Color::Rgb(250, 249, 245),
         fg_muted: Color::Rgb(170, 166, 157),
+        helper_fg: Color::Rgb(250, 249, 245),
+        placeholder_fg: Color::Rgb(250, 249, 245),
         bg: Color::Rgb(20, 20, 19),
         bg_elevated: Color::Rgb(39, 36, 31),
         bg_panel: Color::Rgb(28, 27, 24),
@@ -70,6 +75,7 @@ fn ops() -> Theme {
         disabled_fg: Color::Rgb(119, 113, 104),
         border: Color::Rgb(119, 113, 104),
         border_active: Color::Rgb(113, 183, 255),
+        border_focus: Color::Rgb(240, 139, 101),
         selection_bg: Color::Rgb(168, 93, 70),
         selection_fg: Color::Rgb(250, 249, 245),
     }
@@ -79,6 +85,8 @@ fn catppuccin() -> Theme {
     Theme {
         fg: Color::Rgb(205, 214, 244),
         fg_muted: Color::Rgb(127, 132, 156),
+        helper_fg: Color::Rgb(205, 214, 244),
+        placeholder_fg: Color::Rgb(205, 214, 244),
         bg: Color::Rgb(30, 30, 46),
         bg_elevated: Color::Rgb(49, 50, 68),
         bg_panel: Color::Rgb(24, 24, 37),
@@ -95,6 +103,7 @@ fn catppuccin() -> Theme {
         disabled_fg: Color::Rgb(127, 132, 156),
         border: Color::Rgb(88, 91, 112),
         border_active: Color::Rgb(137, 180, 250),
+        border_focus: Color::Rgb(245, 194, 231),
         selection_bg: Color::Rgb(88, 91, 112),
         selection_fg: Color::Rgb(205, 214, 244),
     }
@@ -104,6 +113,8 @@ fn gruvbox() -> Theme {
     Theme {
         fg: Color::Rgb(235, 219, 178),
         fg_muted: Color::Rgb(168, 153, 132),
+        helper_fg: Color::Rgb(235, 219, 178),
+        placeholder_fg: Color::Rgb(235, 219, 178),
         bg: Color::Rgb(29, 32, 33),
         bg_elevated: Color::Rgb(40, 40, 40),
         bg_panel: Color::Rgb(50, 48, 47),
@@ -120,6 +131,7 @@ fn gruvbox() -> Theme {
         disabled_fg: Color::Rgb(146, 131, 116),
         border: Color::Rgb(80, 73, 69),
         border_active: Color::Rgb(131, 165, 152),
+        border_focus: Color::Rgb(250, 189, 47),
         selection_bg: Color::Rgb(87, 145, 148),
         selection_fg: Color::Rgb(29, 32, 33),
     }
@@ -129,6 +141,8 @@ fn minimal() -> Theme {
     Theme {
         fg: Color::White,
         fg_muted: Color::DarkGray,
+        helper_fg: Color::White,
+        placeholder_fg: Color::White,
         bg: Color::Reset,
         bg_elevated: Color::Black,
         bg_panel: Color::Reset,
@@ -145,6 +159,7 @@ fn minimal() -> Theme {
         disabled_fg: Color::DarkGray,
         border: Color::Gray,
         border_active: Color::White,
+        border_focus: Color::Cyan,
         selection_bg: Color::Blue,
         selection_fg: Color::White,
     }
@@ -193,6 +208,21 @@ mod tests {
             assert!(
                 contrast(theme.selection_fg, theme.selection_bg) >= 4.5,
                 "{name} selected text must meet 4.5:1 contrast"
+            );
+        }
+    }
+
+    #[test]
+    fn rgb_themes_keep_create_helpers_and_placeholders_at_accessible_contrast() {
+        for name in ["ops", "catppuccin", "gruvbox"] {
+            let theme = from_name(name);
+            assert!(
+                contrast(theme.helper_fg, theme.bg_elevated) >= 4.5,
+                "{name} helper text must meet 4.5:1 contrast"
+            );
+            assert!(
+                contrast(theme.placeholder_fg, theme.control_bg) >= 4.5,
+                "{name} placeholder text must meet 4.5:1 contrast"
             );
         }
     }
@@ -256,6 +286,8 @@ mod tests {
         let colors = [
             theme.fg,
             theme.fg_muted,
+            theme.helper_fg,
+            theme.placeholder_fg,
             theme.bg,
             theme.bg_elevated,
             theme.bg_panel,
@@ -272,6 +304,7 @@ mod tests {
             theme.disabled_fg,
             theme.border,
             theme.border_active,
+            theme.border_focus,
             theme.selection_bg,
             theme.selection_fg,
         ];

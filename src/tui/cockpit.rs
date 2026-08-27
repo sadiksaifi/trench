@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::operation::{OperationKind, OperationStage};
 use crate::tui::{
     app::{unavailable_reason, AppState, Viewport, WorktreeIdentity, WorktreeStatus},
-    create_flow::{CreateDialog, CreateMode},
+    create_flow::{BranchKind, CreateDialog, CreateMode},
     keymap::{self, Binding, Context},
     line_input::LineInput,
     operation_modal::{ModalStatus, OperationModal},
@@ -108,10 +108,16 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
 }
 
 fn dim_background(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let scrim_bg = if theme.bg == ratatui::style::Color::Reset {
+        ratatui::style::Color::Black
+    } else {
+        theme.bg
+    };
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
             if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
                 cell.set_fg(theme.disabled_fg)
+                    .set_bg(scrim_bg)
                     .set_style(Style::default().add_modifier(Modifier::DIM));
             }
         }
@@ -494,113 +500,33 @@ fn render_create_dialog(
     area: Rect,
     theme: &Theme,
 ) {
-    let footer = Rect {
-        x: area.x,
-        y: area.bottom().saturating_sub(1),
-        width: area.width,
-        height: 1,
+    let Some(layout) = create_dialog_layout(dialog, area) else {
+        return;
     };
-    let content_area = Rect {
-        height: area.height.saturating_sub(1),
-        ..area
+    let candidates = dialog.base_candidates();
+    let suggestions = dialog.branch_suggestions();
+    frame.render_widget(Clear, layout.modal);
+    let title = match dialog.mode() {
+        CreateMode::SelectBase => " Create worktree · 1 of 2 ",
+        CreateMode::Name => " Create worktree · 2 of 2 ",
     };
+    let block = active_panel(Some(title.to_string()), theme).title_alignment(Alignment::Center);
+    frame.render_widget(block, layout.modal);
+
     match dialog.mode() {
-        CreateMode::Form => {
-            let modal = centered_rect(
-                content_area.width.saturating_sub(8).min(76),
-                13,
-                content_area,
-            );
-            frame.render_widget(Clear, modal);
-            let block = active_panel(Some(" Create worktree ".to_string()), theme);
-            let inner = block.inner(modal);
-            frame.render_widget(block, modal);
-            let [branch_input, details] =
-                Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
-            render_text_input(
+        CreateMode::SelectBase => {
+            render_create_intro(
                 frame,
-                branch_input,
-                "Branch",
-                dialog.branch_input(),
-                "Type a branch name",
+                layout.intro,
+                "Choose the branch this worktree starts from.",
                 theme,
             );
-            let mut lines = Vec::new();
-            if let Some(preview) = dialog.preview() {
-                if preview.base_visible {
-                    lines.push(selector_line(
-                        "Create from",
-                        preview.base.as_deref().unwrap_or("Select a base"),
-                        theme,
-                    ));
-                }
-                lines.extend([
-                    metric_line("Worktree", &preview.worktree, theme),
-                    metric_line("Path", &preview.path.to_string_lossy(), theme),
-                ]);
-            }
-            if let Some(error) = dialog.validation_error() {
-                lines.push(Line::from(""));
-                lines.push(error_line(error, theme));
-            }
-            let suggestions = dialog.branch_suggestions();
-            if !suggestions.is_empty() {
-                lines.push(Line::from(""));
-                lines.extend(
-                    suggestions
-                        .iter()
-                        .enumerate()
-                        .take(3)
-                        .map(|(index, suggestion)| {
-                            selectable_line(
-                                &suggestion.label,
-                                index == dialog.branch_selection(),
-                                details.width,
-                                theme,
-                            )
-                        }),
-                );
-            }
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: true })
-                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
-                details,
-            );
-            let has_base = dialog.preview().is_some_and(|preview| preview.base_visible);
-            let submit = if dialog.submission().is_some() {
-                KeyHint::primary("Enter", "create")
-            } else {
-                KeyHint::disabled("Enter", "create (branch required)")
-            };
-            let mut items = vec![submit];
-            if has_base {
-                items.push(KeyHint::secondary("Tab", "base"));
-            }
-            items.extend([
-                KeyHint::secondary("Esc", "close"),
-                KeyHint::secondary("?", "help"),
-            ]);
-            render_dialog_keybar(frame, footer, theme, &items);
-        }
-        CreateMode::BasePicker => {
-            let modal = centered_rect(
-                content_area.width.saturating_sub(6).min(86),
-                content_area.height.saturating_sub(4).min(20),
-                content_area,
-            );
-            frame.render_widget(Clear, modal);
-            let block = active_panel(Some(" Create worktree · Select base ".to_string()), theme);
-            let inner = block.inner(modal);
-            frame.render_widget(block, modal);
-            let [search_input, options] =
-                Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
-            render_text_input(
+            render_create_label(frame, layout.label, "Base branch", theme);
+            render_create_input(
                 frame,
-                search_input,
-                "Search",
+                layout.input,
                 dialog.base_input(),
-                "Type to filter bases",
+                "Type to filter branches",
                 theme,
             );
             let mut lines = Vec::new();
@@ -611,44 +537,458 @@ fn render_create_dialog(
                 )));
             }
             if let Some(warning) = dialog.warning() {
-                lines.push(Line::from(warning));
+                lines.push(Line::from(Span::styled(
+                    head_ellipsize(warning, usize::from(layout.options.width)),
+                    Style::default().fg(theme.warning),
+                )));
             }
-            lines.push(Line::from(""));
-            lines.extend(
-                dialog
-                    .base_candidates()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, candidate)| {
-                        selectable_line(
-                            &candidate.name,
-                            index == dialog.base_selection(),
-                            inner.width,
-                            theme,
-                        )
-                    }),
-            );
+            if candidates.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "No matching branches. Edit the search to continue.",
+                    Style::default().fg(theme.helper_fg),
+                )));
+            } else {
+                lines.extend(create_row_window(dialog, layout.options).map(|index| {
+                    selectable_line(
+                        &candidates[index].name,
+                        index == dialog.base_selection(),
+                        layout.options.width,
+                        theme,
+                    )
+                }));
+            }
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
                     .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
-                options,
+                layout.options,
             );
-            render_dialog_keybar(
-                frame,
-                footer,
-                theme,
-                &[
-                    if dialog.base_candidates().is_empty() {
-                        KeyHint::disabled("Enter", "select (no matches)")
-                    } else {
-                        KeyHint::primary("Enter", "select")
-                    },
-                    KeyHint::secondary("Esc", "back"),
-                    KeyHint::secondary("?", "help"),
-                ],
-            );
+            render_create_action(frame, layout.action, "Next", !candidates.is_empty(), theme);
+            render_dialog_keybar(frame, layout.footer, theme, &create_key_hints(dialog));
         }
+        CreateMode::Name => {
+            render_create_intro(
+                frame,
+                layout.intro,
+                "Name the branch and review what will happen.",
+                theme,
+            );
+            render_create_label(frame, layout.label, "Worktree branch", theme);
+            render_create_input(
+                frame,
+                layout.input,
+                dialog.branch_input(),
+                "Type a branch name",
+                theme,
+            );
+            let preview = dialog.preview();
+            let mut lines = Vec::new();
+            if let Some(preview) = preview.as_ref() {
+                lines.push(create_metric_line(
+                    "Outcome",
+                    create_outcome_label(&preview.kind),
+                    layout.options.width,
+                    theme,
+                ));
+                if preview.base_visible {
+                    lines.push(create_metric_line(
+                        "Base",
+                        preview.base.as_deref().unwrap_or("Unavailable"),
+                        layout.options.width,
+                        theme,
+                    ));
+                }
+                lines.push(create_metric_line(
+                    "Worktree",
+                    &preview.worktree,
+                    layout.options.width,
+                    theme,
+                ));
+                lines.push(create_metric_line(
+                    "Path",
+                    &preview.path.to_string_lossy(),
+                    layout.options.width,
+                    theme,
+                ));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "Enter a branch name to continue",
+                    Style::default()
+                        .fg(theme.helper_fg)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            if let Some(error) = dialog.validation_error() {
+                lines.push(create_error_line(error, layout.options.width, theme));
+            }
+            lines.extend(create_row_window(dialog, layout.options).map(|index| {
+                selectable_line(
+                    &suggestions[index].label,
+                    index == dialog.branch_selection(),
+                    layout.options.width,
+                    theme,
+                )
+            }));
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: true })
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
+                layout.options,
+            );
+            let (action_label, _, enabled) = create_action_details(dialog);
+            render_create_action(frame, layout.action, action_label, enabled, theme);
+            render_dialog_keybar(frame, layout.footer, theme, &create_key_hints(dialog));
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreateHitTarget {
+    Input,
+    Row(usize),
+    Back,
+    Cta,
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct CreateHitMap {
+    pub(crate) input: Rect,
+    pub(crate) rows: Vec<Rect>,
+    row_indices: Vec<usize>,
+    pub(crate) back: Rect,
+    pub(crate) cta: Rect,
+    pub(crate) help: Rect,
+    options: Rect,
+}
+
+impl CreateHitMap {
+    pub(crate) fn target_at(&self, point: (u16, u16)) -> Option<CreateHitTarget> {
+        if rect_contains(self.input, point) {
+            return Some(CreateHitTarget::Input);
+        }
+        if let Some((local_index, _)) = self
+            .rows
+            .iter()
+            .enumerate()
+            .find(|(_, area)| rect_contains(**area, point))
+        {
+            return self
+                .row_indices
+                .get(local_index)
+                .copied()
+                .map(CreateHitTarget::Row);
+        }
+        if rect_contains(self.cta, point) {
+            return Some(CreateHitTarget::Cta);
+        }
+        if rect_contains(self.back, point) {
+            return Some(CreateHitTarget::Back);
+        }
+        rect_contains(self.help, point).then_some(CreateHitTarget::Help)
+    }
+
+    pub(crate) fn options_contain(&self, point: (u16, u16)) -> bool {
+        rect_contains(self.options, point)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CreateDialogLayout {
+    footer: Rect,
+    modal: Rect,
+    intro: Rect,
+    label: Rect,
+    input: Rect,
+    options: Rect,
+    action: Rect,
+}
+
+fn create_dialog_layout(dialog: &CreateDialog, area: Rect) -> Option<CreateDialogLayout> {
+    if area.width < Viewport::MIN_WIDTH || area.height < Viewport::MIN_HEIGHT {
+        return None;
+    }
+    let footer = Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    let content_area = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let desired_height = match dialog.mode() {
+        CreateMode::SelectBase => 9u16.saturating_add(dialog.base_candidates().len().min(4) as u16),
+        CreateMode::Name => {
+            let preview_rows = dialog
+                .preview()
+                .map_or(1, |preview| if preview.base_visible { 4 } else { 3 });
+            let error_rows = usize::from(dialog.validation_error().is_some());
+            8u16.saturating_add(
+                (preview_rows + error_rows + dialog.branch_suggestions().len().min(3)) as u16,
+            )
+        }
+    };
+    let modal = centered_rect(
+        content_area.width.saturating_sub(6).min(78),
+        desired_height
+            .min(content_area.height.saturating_sub(2))
+            .max(9),
+        content_area,
+    );
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+    let [intro, label, input, options, action] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    Some(CreateDialogLayout {
+        footer,
+        modal,
+        intro,
+        label,
+        input,
+        options,
+        action,
+    })
+}
+
+pub(crate) fn create_hit_map(dialog: &CreateDialog, area: Rect) -> CreateHitMap {
+    let Some(layout) = create_dialog_layout(dialog, area) else {
+        return CreateHitMap::default();
+    };
+    let prefix_rows = match dialog.mode() {
+        CreateMode::SelectBase => {
+            usize::from(dialog.origin_spinner_visible()) + usize::from(dialog.warning().is_some())
+        }
+        CreateMode::Name => {
+            let preview_rows = dialog
+                .preview()
+                .map_or(1, |preview| if preview.base_visible { 4 } else { 3 });
+            preview_rows + usize::from(dialog.validation_error().is_some())
+        }
+    };
+    let row_indices = create_row_window(dialog, layout.options).collect::<Vec<_>>();
+    let rows = row_indices
+        .iter()
+        .enumerate()
+        .map(|(local_index, _)| Rect {
+            x: layout.options.x,
+            y: layout
+                .options
+                .y
+                .saturating_add(prefix_rows as u16)
+                .saturating_add(local_index as u16),
+            width: layout.options.width,
+            height: 1,
+        })
+        .collect();
+    let (action_label, _, _) = create_action_details(dialog);
+    let cta_width = UnicodeWidthStr::width(format!("[ Enter  {action_label} ]").as_str())
+        .min(usize::from(layout.action.width)) as u16;
+    let cta = Rect {
+        x: layout.action.right().saturating_sub(cta_width),
+        width: cta_width,
+        ..layout.action
+    };
+    let hints = create_key_hints(dialog);
+    let footer_hits = keybar_hit_areas(layout.footer, &hints);
+    let hit_for_key = |key: &str| {
+        footer_hits
+            .iter()
+            .find_map(|(index, rect)| (hints[*index].key == key).then_some(*rect))
+            .unwrap_or_default()
+    };
+    CreateHitMap {
+        input: layout.input,
+        rows,
+        row_indices,
+        back: hit_for_key("Esc"),
+        cta,
+        help: hit_for_key("?"),
+        options: layout.options,
+    }
+}
+
+fn create_row_window(dialog: &CreateDialog, options: Rect) -> std::ops::Range<usize> {
+    let prefix_rows = match dialog.mode() {
+        CreateMode::SelectBase => {
+            usize::from(dialog.origin_spinner_visible()) + usize::from(dialog.warning().is_some())
+        }
+        CreateMode::Name => {
+            dialog
+                .preview()
+                .map_or(1, |preview| if preview.base_visible { 4 } else { 3 })
+                + usize::from(dialog.validation_error().is_some())
+        }
+    };
+    let (total, selected) = match dialog.mode() {
+        CreateMode::SelectBase => (dialog.base_candidates().len(), dialog.base_selection()),
+        CreateMode::Name => (dialog.branch_suggestions().len(), dialog.branch_selection()),
+    };
+    selection_window(
+        total,
+        selected,
+        usize::from(options.height).saturating_sub(prefix_rows),
+    )
+}
+
+fn selection_window(total: usize, selected: usize, capacity: usize) -> std::ops::Range<usize> {
+    if total == 0 || capacity == 0 {
+        return 0..0;
+    }
+    let selected = selected.min(total - 1);
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(capacity)
+        .min(total.saturating_sub(capacity));
+    start..start.saturating_add(capacity).min(total)
+}
+
+pub(crate) fn help_close_hit(area: Rect, point: (u16, u16)) -> bool {
+    if area.width < Viewport::MIN_WIDTH || area.height < Viewport::MIN_HEIGHT {
+        return false;
+    }
+    let footer = Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    keybar_hit_areas(footer, &[KeyHint::secondary("?", "close help")])
+        .first()
+        .is_some_and(|(_, hit)| rect_contains(*hit, point))
+}
+
+fn create_action_details(dialog: &CreateDialog) -> (&'static str, &'static str, bool) {
+    match dialog.mode() {
+        CreateMode::SelectBase if dialog.base_candidates().is_empty() => {
+            ("Next unavailable", "next unavailable", false)
+        }
+        CreateMode::SelectBase => ("Next", "next", true),
+        CreateMode::Name => match dialog.preview().as_ref().map(|value| &value.kind) {
+            Some(BranchKind::New) => ("Create worktree", "create", true),
+            Some(BranchKind::Local) | Some(BranchKind::Remote { .. }) => {
+                ("Add worktree", "add", true)
+            }
+            Some(BranchKind::CheckedOut { .. }) => ("Open worktree", "open", true),
+            None => ("Create unavailable", "create unavailable", false),
+        },
+    }
+}
+
+fn create_key_hints(dialog: &CreateDialog) -> Vec<KeyHint<'static>> {
+    let (_, footer_action, enabled) = create_action_details(dialog);
+    vec![
+        if enabled {
+            KeyHint::primary("Enter", footer_action)
+        } else {
+            KeyHint::disabled("Enter", footer_action)
+        },
+        KeyHint::secondary("Tab", "complete"),
+        KeyHint::secondary(
+            "Esc",
+            if dialog.mode() == CreateMode::SelectBase {
+                "cancel"
+            } else {
+                "back"
+            },
+        ),
+        KeyHint::secondary("?", "help"),
+    ]
+}
+
+fn rect_contains(area: Rect, (x, y): (u16, u16)) -> bool {
+    area.width > 0
+        && area.height > 0
+        && x >= area.x
+        && x < area.right()
+        && y >= area.y
+        && y < area.bottom()
+}
+
+#[cfg(test)]
+fn center(area: Rect) -> (u16, u16) {
+    (area.x + area.width / 2, area.y + area.height / 2)
+}
+
+fn render_create_intro(frame: &mut Frame, area: Rect, text: &str, theme: &Theme) {
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(theme.with_bg(Style::default().fg(theme.helper_fg), theme.bg_elevated)),
+        area,
+    );
+}
+
+fn render_create_label(frame: &mut Frame, area: Rect, label: &str, theme: &Theme) {
+    frame.render_widget(
+        Paragraph::new(label).style(theme.with_bg(
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            theme.bg_elevated,
+        )),
+        area,
+    );
+}
+
+fn render_create_input(
+    frame: &mut Frame,
+    area: Rect,
+    input: &LineInput,
+    placeholder: &str,
+    theme: &Theme,
+) {
+    let value_width = usize::from(area.width.saturating_sub(2)).saturating_sub(3);
+    let mut content = vec![Span::styled("> ", Style::default().fg(theme.accent))];
+    content.extend(input_value_spans(input, placeholder, value_width, theme));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focus))
+        .style(theme.with_bg(Style::default(), theme.control_bg));
+    frame.render_widget(
+        Paragraph::new(Line::from(content))
+            .block(block)
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.control_bg)),
+        area,
+    );
+}
+
+fn render_create_action(frame: &mut Frame, area: Rect, label: &str, enabled: bool, theme: &Theme) {
+    let style = if enabled {
+        theme.with_bg(
+            Style::default()
+                .fg(theme.primary_fg)
+                .add_modifier(Modifier::BOLD),
+            theme.primary_bg,
+        )
+    } else {
+        theme.with_bg(
+            Style::default()
+                .fg(theme.fg_muted)
+                .add_modifier(Modifier::BOLD),
+            theme.control_bg,
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("[ Enter  {label} ]"),
+            style,
+        )))
+        .alignment(Alignment::Right)
+        .style(theme.with_bg(Style::default(), theme.bg_elevated)),
+        area,
+    );
+}
+
+fn create_outcome_label(kind: &BranchKind) -> &'static str {
+    match kind {
+        BranchKind::New => "Create new branch",
+        BranchKind::Local => "Use existing local branch",
+        BranchKind::Remote { .. } => "Track remote branch",
+        BranchKind::CheckedOut { .. } => "Already checked out",
     }
 }
 
@@ -693,7 +1033,7 @@ fn input_value_spans(
             Span::styled("▌", Style::default().fg(theme.accent)),
             Span::styled(
                 tail_ellipsize(placeholder, width),
-                Style::default().fg(theme.fg_muted),
+                Style::default().fg(theme.placeholder_fg),
             ),
         ];
     }
@@ -728,6 +1068,31 @@ fn tail_ellipsize(value: &str, width: usize) -> String {
     }
     tail.reverse();
     format!("…{}", tail.concat())
+}
+
+fn head_ellipsize(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    let budget = width - 1;
+    let mut used = 0;
+    let mut head = String::new();
+    for grapheme in value.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used + grapheme_width > budget {
+            break;
+        }
+        head.push_str(grapheme);
+        used += grapheme_width;
+    }
+    head.push('…');
+    head
 }
 
 fn selector_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
@@ -799,8 +1164,8 @@ fn focused_control_line(label: &str, width: u16, theme: &Theme) -> Line<'static>
 
 fn selectable_line(label: &str, selected: bool, width: u16, theme: &Theme) -> Line<'static> {
     let marker = if selected { "›" } else { " " };
-    let content = format!("{marker} {label}");
-    let padding = usize::from(width).saturating_sub(content.chars().count());
+    let content = head_ellipsize(&format!("{marker} {label}"), usize::from(width));
+    let padding = usize::from(width).saturating_sub(UnicodeWidthStr::width(content.as_str()));
     let style = if selected {
         theme.with_bg(
             Style::default()
@@ -1022,29 +1387,7 @@ impl<'a> KeyHint<'a> {
 }
 
 fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[KeyHint<'_>]) {
-    let mut visible = items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            (
-                index,
-                format!(
-                    "[{}] {}",
-                    item.key,
-                    compact_key_action(item.action, area.width)
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    while keybar_width(&visible) > usize::from(area.width) {
-        let Some(position) = visible.iter().position(|(index, _)| {
-            let item = &items[*index];
-            matches!(item.tone, KeyTone::Secondary) && !matches!(item.key, "Esc" | "?")
-        }) else {
-            break;
-        };
-        visible.remove(position);
-    }
+    let visible = visible_key_hints(items, area.width);
     let mut spans = Vec::new();
     for (position, (index, label)) in visible.into_iter().enumerate() {
         if position > 0 {
@@ -1080,6 +1423,47 @@ fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[K
             .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
         area,
     );
+}
+
+fn visible_key_hints(items: &[KeyHint<'_>], width: u16) -> Vec<(usize, String)> {
+    let mut visible = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            (
+                index,
+                format!("[{}] {}", item.key, compact_key_action(item.action, width)),
+            )
+        })
+        .collect::<Vec<_>>();
+    while keybar_width(&visible) > usize::from(width) {
+        let Some(position) = visible.iter().position(|(index, _)| {
+            let item = &items[*index];
+            matches!(item.tone, KeyTone::Secondary) && !matches!(item.key, "Esc" | "?")
+        }) else {
+            break;
+        };
+        visible.remove(position);
+    }
+    visible
+}
+
+fn keybar_hit_areas(area: Rect, items: &[KeyHint<'_>]) -> Vec<(usize, Rect)> {
+    let mut x = area.x;
+    visible_key_hints(items, area.width)
+        .into_iter()
+        .map(|(index, label)| {
+            let width = UnicodeWidthStr::width(label.as_str()) as u16;
+            let rect = Rect {
+                x,
+                y: area.y,
+                width,
+                height: area.height,
+            };
+            x = x.saturating_add(width).saturating_add(2);
+            (index, rect)
+        })
+        .collect()
 }
 
 fn compact_key_action(action: &str, width: u16) -> &str {
@@ -1461,15 +1845,16 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
         } else if state
             .create_dialog
             .as_ref()
-            .is_some_and(|dialog| dialog.mode() == CreateMode::BasePicker)
+            .is_some_and(|dialog| dialog.mode() == CreateMode::SelectBase)
         {
             (
                 " Help · Create worktree ",
                 &[
                     ("type", "search bases"),
                     ("↑/↓", "select base"),
-                    ("Enter", "select base"),
-                    ("Esc", "back"),
+                    ("Tab", "complete base match"),
+                    ("Enter", "continue to branch name"),
+                    ("Esc", "cancel"),
                     ("?", "close help"),
                 ],
             )
@@ -1479,9 +1864,9 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
                 &[
                     ("type", "search branches"),
                     ("↑/↓", "select suggestion"),
-                    ("Tab", "select base"),
-                    ("Enter", "create or navigate"),
-                    ("Esc", "close"),
+                    ("Tab", "complete branch match"),
+                    ("Enter", "create, add, or open"),
+                    ("Esc", "back to base"),
                     ("?", "close help"),
                 ],
             )
@@ -1639,6 +2024,32 @@ fn metric_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
         ),
         Span::styled(value.to_string(), Style::default().fg(theme.fg)),
     ])
+}
+
+fn create_metric_line(label: &str, value: &str, width: u16, theme: &Theme) -> Line<'static> {
+    let label_width = usize::from(width).min(14);
+    let value_width = usize::from(width).saturating_sub(label_width);
+    Line::from(vec![
+        Span::styled(
+            head_ellipsize(&format!("{label:<14}"), label_width),
+            Style::default()
+                .fg(theme.fg_muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            head_ellipsize(value, value_width),
+            Style::default().fg(theme.fg),
+        ),
+    ])
+}
+
+fn create_error_line(message: &str, width: u16, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        head_ellipsize(&format!("Error: {message}"), usize::from(width)),
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn error_line(message: &str, theme: &Theme) -> Line<'static> {
@@ -2218,7 +2629,7 @@ mod tests {
     }
 
     #[test]
-    fn create_form_and_picker_transform_over_the_unchanged_cockpit_with_contextual_help() {
+    fn create_steps_transform_over_the_unchanged_cockpit_with_contextual_help() {
         use crate::{
             ref_catalog::RefSnapshot,
             tui::create_flow::{CreateDialog, CreateKey, OriginRefresh},
@@ -2233,24 +2644,20 @@ mod tests {
         );
         let mut state = sample_state();
         let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
-        dialog.set_branch("feature/auth");
+        dialog.set_origin_refresh(OriginRefresh::Loading);
         state.create_dialog = Some(dialog);
 
-        let form = text(&render_buffer(&mut state, 100, 24, "ops"));
+        let picker = text(&render_buffer(&mut state, 100, 24, "ops"));
         for expected in [
-            "Create worktree",
-            "Branch",
-            "feature/auth",
-            "Create from",
-            "origin/main",
-            "Worktree",
-            "feature-auth",
-            "/worktrees/trench/feature-auth",
+            "Create worktree · 1 of 2",
+            "Base branch",
+            "Updating origin",
+            "release",
         ] {
-            assert!(form.contains(expected), "missing {expected:?}\n{form}");
+            assert!(picker.contains(expected), "missing {expected:?}\n{picker}");
         }
-        assert!(!form.contains("Hooks"), "{form}");
-        assert!(form
+        assert!(!picker.contains("Hooks"), "{picker}");
+        assert!(picker
             .lines()
             .last()
             .unwrap()
@@ -2258,14 +2665,21 @@ mod tests {
             .ends_with("[?] help"));
 
         let dialog = state.create_dialog.as_mut().unwrap();
-        dialog.handle_key(CreateKey::Tab);
-        dialog.set_origin_refresh(OriginRefresh::Loading);
-        let picker = text(&render_buffer(&mut state, 100, 24, "ops"));
-        assert_eq!(picker.matches("Create worktree").count(), 1, "{picker}");
-        assert!(picker.contains("Select base"), "{picker}");
-        assert!(picker.contains("Updating origin"), "{picker}");
-        assert!(picker.contains("release"), "{picker}");
-        assert!(picker
+        dialog.handle_key(CreateKey::Enter);
+        dialog.set_branch("feature/auth");
+        let name = text(&render_buffer(&mut state, 100, 24, "ops"));
+        for expected in [
+            "Create worktree · 2 of 2",
+            "Worktree branch",
+            "feature/auth",
+            "Base",
+            "Worktree",
+            "feature-auth",
+            "/worktrees/trench/feature-auth",
+        ] {
+            assert!(name.contains(expected), "missing {expected:?}\n{name}");
+        }
+        assert!(name
             .lines()
             .last()
             .unwrap()
@@ -2275,8 +2689,279 @@ mod tests {
         state.help_open = true;
         let help = text(&render_buffer(&mut state, 100, 24, "ops"));
         assert!(help.contains("Help · Create worktree"), "{help}");
-        assert!(help.contains("select base"), "{help}");
+        assert!(help.contains("complete branch match"), "{help}");
         assert!(!help.contains("Help · Worktrees"), "{help}");
+    }
+
+    #[test]
+    fn create_flow_renders_two_clear_steps_with_in_dialog_actions() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::create_flow::{CreateDialog, CreateKey},
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main", "release"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs,
+            [],
+        ));
+
+        let select_base = text(&render_buffer(&mut state, 60, 16, "ops"));
+        for expected in [
+            "Create worktree · 1 of 2",
+            "Base branch",
+            "[ Enter  Next ]",
+            "[Enter] next",
+            "[Esc] cancel",
+        ] {
+            assert!(
+                select_base.contains(expected),
+                "missing {expected:?}\n{select_base}"
+            );
+        }
+
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(CreateKey::Enter);
+        let name = text(&render_buffer(&mut state, 60, 16, "ops"));
+        for expected in [
+            "Create worktree · 2 of 2",
+            "Worktree branch",
+            "Enter a branch name to continue",
+            "[ Enter  Create unavailable ]",
+            "[Esc] back",
+        ] {
+            assert!(name.contains(expected), "missing {expected:?}\n{name}");
+        }
+    }
+
+    #[test]
+    fn create_base_step_highlights_the_configured_default_not_candidate_zero() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new_with_configured_base(
+            "trench",
+            Path::new("/worktrees"),
+            RefSnapshot::from_parts(
+                ["main", "release"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            Some("release"),
+            [],
+        ));
+
+        let output = text(&render_buffer(&mut state, 80, 20, "ops"));
+        assert!(output.contains("› release"), "{output}");
+        assert!(!output.contains("› main"), "{output}");
+    }
+
+    #[test]
+    fn create_base_step_visibly_highlights_the_exact_remote_default_alias() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            RefSnapshot::from_parts(
+                ["alpha", "main"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            [],
+        ));
+
+        let output = text(&render_buffer(&mut state, 80, 20, "ops"));
+        assert!(output.contains("› origin/main"), "{output}");
+        assert!(!output.contains("› alpha"), "{output}");
+        assert!(!output.contains("› main"), "{output}");
+    }
+
+    #[test]
+    fn create_name_step_explains_each_branch_outcome_and_action() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::create_flow::{CheckedOutBranch, CreateDialog},
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main", "local-only", "busy"],
+            ["origin/main", "origin/remote-only"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let checked_out = CheckedOutBranch::new(
+            "busy",
+            WorktreeId::new("/worktrees/trench/busy"),
+            "/worktrees/trench/busy",
+        );
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs,
+            [checked_out],
+        ));
+
+        for (branch, outcome, action) in [
+            (
+                "feature/new",
+                "Create new branch",
+                "[ Enter  Create worktree ]",
+            ),
+            (
+                "local-only",
+                "Use existing local branch",
+                "[ Enter  Add worktree ]",
+            ),
+            (
+                "remote-only",
+                "Track remote branch",
+                "[ Enter  Add worktree ]",
+            ),
+            ("busy", "Already checked out", "[ Enter  Open worktree ]"),
+        ] {
+            state.create_dialog.as_mut().unwrap().set_branch(branch);
+            let output = text(&render_buffer(&mut state, 80, 18, "ops"));
+            assert!(output.contains(outcome), "missing {outcome:?}\n{output}");
+            assert!(output.contains(action), "missing {action:?}\n{output}");
+        }
+    }
+
+    #[test]
+    fn create_hit_map_tracks_the_rendered_input_rows_actions_and_tiny_boundary() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let dialog = CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            RefSnapshot::from_parts(
+                ["main", "release"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            [],
+        );
+        let hits = create_hit_map(&dialog, Rect::new(0, 0, 80, 24));
+
+        assert_eq!(
+            hits.target_at(center(hits.input)),
+            Some(CreateHitTarget::Input)
+        );
+        assert_eq!(
+            hits.target_at(center(hits.rows[1])),
+            Some(CreateHitTarget::Row(1))
+        );
+        assert_eq!(hits.target_at(center(hits.cta)), Some(CreateHitTarget::Cta));
+        assert_eq!(
+            hits.target_at(center(hits.back)),
+            Some(CreateHitTarget::Back)
+        );
+        assert_eq!(
+            hits.target_at(center(hits.help)),
+            Some(CreateHitTarget::Help)
+        );
+        assert_eq!(hits.target_at((0, 0)), None);
+
+        let tiny = create_hit_map(&dialog, Rect::new(0, 0, 59, 15));
+        assert_eq!(tiny.target_at((30, 8)), None);
+    }
+
+    #[test]
+    fn create_selection_window_keeps_deep_base_and_name_rows_visible_at_all_sizes() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let branches = (0..15).map(|index| format!("branch-{index:02}"));
+        let refs =
+            RefSnapshot::from_parts(branches, [] as [&str; 0], None, Some("branch-00"), false);
+        for (width, height) in [(120, 30), (80, 20), (60, 16)] {
+            let mut state = sample_state();
+            let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs.clone(), []);
+            for _ in 0..12 {
+                dialog.handle_key(crate::tui::create_flow::CreateKey::Down);
+            }
+            let hits = create_hit_map(&dialog, Rect::new(0, 0, width, height));
+            assert!(
+                hits.rows
+                    .iter()
+                    .any(|row| hits.target_at(center(*row)) == Some(CreateHitTarget::Row(12))),
+                "base hit missing at {width}x{height}"
+            );
+            state.create_dialog = Some(dialog);
+            let output = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(output.contains("› branch-12"), "{width}x{height}\n{output}");
+
+            let mut name = CreateDialog::new("trench", Path::new("/worktrees"), refs.clone(), []);
+            name.set_branch("");
+            for _ in 0..12 {
+                name.handle_key(crate::tui::create_flow::CreateKey::Down);
+            }
+            let hits = create_hit_map(&name, Rect::new(0, 0, width, height));
+            assert!(
+                hits.rows
+                    .iter()
+                    .any(|row| hits.target_at(center(*row)) == Some(CreateHitTarget::Row(12))),
+                "name hit missing at {width}x{height}"
+            );
+            state.create_dialog = Some(name);
+            let output = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(output.contains("› branch-12"), "{width}x{height}\n{output}");
+        }
+    }
+
+    #[test]
+    fn long_preview_and_error_keep_name_row_render_and_hit_geometry_aligned_at_minimum_width() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new(
+            "trench",
+            Path::new("/a/very/long/worktree/root/whose/path/would/otherwise/wrap"),
+            RefSnapshot::from_parts(
+                ["branch-one"],
+                [] as [&str; 0],
+                None,
+                Some("branch-one"),
+                false,
+            ),
+            [],
+        );
+        dialog.set_branch("branch-one");
+        dialog.set_validation_error(Some(
+            "This deliberately long validation explanation must remain one deterministic row"
+                .to_string(),
+        ));
+        let hits = create_hit_map(&dialog, Rect::new(0, 0, 60, 16));
+        assert_eq!(hits.rows.len(), 1);
+        state.create_dialog = Some(dialog);
+
+        let buffer = render_buffer(&mut state, 60, 16, "ops");
+        let (_, rendered_y) = find_text(&buffer, "› branch-one");
+        assert_eq!(rendered_y, hits.rows[0].y, "{}", text(&buffer));
+        assert_eq!(
+            hits.target_at((hits.rows[0].x, rendered_y)),
+            Some(CreateHitTarget::Row(0))
+        );
     }
 
     #[test]
@@ -2304,16 +2989,17 @@ mod tests {
             .find(|cell| cell.symbol() == "f" && cell.bg == theme.control_bg)
             .expect("typed branch should sit on a distinct input surface");
 
-        assert!(output.contains("Branch · typing"), "{output}");
+        assert!(output.contains("Worktree branch"), "{output}");
         assert!(output.contains("> feature/auth▌"), "{output}");
         assert_eq!(input_cell.fg, theme.fg);
         assert!(
             buffer
                 .content()
                 .iter()
-                .any(|cell| cell.symbol() == "│" && cell.fg == theme.border_active),
-            "focused input should have an active border\n{output}"
+                .any(|cell| cell.symbol() == "│" && cell.fg == theme.border_focus),
+            "focused input should have the strongest focus border\n{output}"
         );
+        assert_ne!(theme.border_focus, theme.border_active);
     }
 
     #[test]
@@ -2368,9 +3054,9 @@ mod tests {
             .create_dialog
             .as_mut()
             .unwrap()
-            .handle_key(CreateKey::Tab);
+            .handle_key(CreateKey::Escape);
         let candidates = render_buffer(&mut state, 100, 24, "ops");
-        let selected = find_text(&candidates, "› main");
+        let selected = find_text(&candidates, "› origin/main");
         let unselected = find_text(&candidates, "release");
         assert_eq!(candidates.cell(selected).unwrap().bg, theme.selection_bg);
         assert_eq!(candidates.cell(selected).unwrap().fg, theme.selection_fg);
@@ -2378,7 +3064,7 @@ mod tests {
     }
 
     #[test]
-    fn create_base_selector_and_picker_search_look_like_controls() {
+    fn create_base_and_branch_inputs_look_like_distinct_controls() {
         use crate::{
             ref_catalog::RefSnapshot,
             tui::create_flow::{CreateDialog, CreateKey},
@@ -2392,38 +3078,38 @@ mod tests {
             true,
         );
         let mut state = sample_state();
-        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
-        dialog.set_branch("feature/auth");
-        state.create_dialog = Some(dialog);
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs,
+            [],
+        ));
         let theme = crate::tui::theme::from_name("ops");
 
-        let form = render_buffer(&mut state, 100, 24, "ops");
-        let selector = find_text(&form, "[ origin/main  ▾ ]");
-        assert_eq!(
-            form.cell(selector).unwrap().bg,
-            theme.control_bg,
-            "base selector needs a distinct control surface\n{}",
-            text(&form)
+        let picker = render_buffer(&mut state, 100, 24, "ops");
+        let placeholder = find_text(&picker, "Type to filter branches");
+        assert!(text(&picker).contains("Base branch"), "{}", text(&picker));
+        assert!(
+            text(&picker).contains("> ▌Type to filter branches"),
+            "{}",
+            text(&picker)
         );
+        assert_eq!(picker.cell(placeholder).unwrap().bg, theme.control_bg);
 
         state
             .create_dialog
             .as_mut()
             .unwrap()
-            .handle_key(CreateKey::Tab);
-        let picker = render_buffer(&mut state, 100, 24, "ops");
-        let placeholder = find_text(&picker, "Type to filter bases");
+            .handle_key(CreateKey::Enter);
+        let name = render_buffer(&mut state, 100, 24, "ops");
+        let placeholder = find_text(&name, "Type a branch name");
+        assert!(text(&name).contains("Worktree branch"), "{}", text(&name));
         assert!(
-            text(&picker).contains("Search · typing"),
+            text(&name).contains("> ▌Type a branch name"),
             "{}",
-            text(&picker)
+            text(&name)
         );
-        assert!(
-            text(&picker).contains("> ▌Type to filter bases"),
-            "{}",
-            text(&picker)
-        );
-        assert_eq!(picker.cell(placeholder).unwrap().bg, theme.control_bg);
+        assert_eq!(name.cell(placeholder).unwrap().bg, theme.control_bg);
     }
 
     #[test]
@@ -2449,7 +3135,10 @@ mod tests {
         for leaked in ["s sync", "/ search", "r refresh", "i inspector", "q quit"] {
             assert!(!footer.contains(leaked), "leaked {leaked:?}: {footer}");
         }
-        assert_eq!(footer, "[Enter] create  [Tab] base  [Esc] close  [?] help");
+        assert_eq!(
+            footer,
+            "[Enter] create  [Tab] complete  [Esc] back  [?] help"
+        );
     }
 
     #[test]
@@ -2475,8 +3164,13 @@ mod tests {
         ));
         let theme = crate::tui::theme::from_name("ops");
 
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(crate::tui::create_flow::CreateKey::Enter);
         let disabled_create = render_buffer(&mut state, 100, 24, "ops");
-        let disabled = find_text(&disabled_create, "[Enter] create (branch required)");
+        let disabled = find_text(&disabled_create, "[Enter] create unavailable");
         assert_eq!(
             disabled_create.cell(disabled).unwrap().fg,
             theme.disabled_fg
@@ -2548,7 +3242,7 @@ mod tests {
         state.create_dialog = Some(create);
 
         let create = text(&render_buffer(&mut state, 60, 16, "ops"));
-        for visible in ["Branch · typing", "[Enter] create", "[Esc] close"] {
+        for visible in ["Worktree branch", "[Enter] create", "[Esc] back"] {
             assert!(create.contains(visible), "missing {visible:?}\n{create}");
         }
 
