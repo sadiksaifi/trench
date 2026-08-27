@@ -1598,17 +1598,17 @@ impl RemovalMutationBoundary for ProductionRemovalBoundary {}
 #[cfg(unix)]
 fn remove_exact_worktree_with_boundary(
     assessment: &RemovalAssessment,
-    _allow_dirty: bool,
+    allow_dirty: bool,
     boundary: &dyn RemovalMutationBoundary,
 ) -> Result<(), ExactRemovalFailure> {
-    let pending = prepare_exact_worktree_removal_with_boundary(assessment, _allow_dirty, boundary)?;
+    let pending = prepare_exact_worktree_removal_with_boundary(assessment, allow_dirty, boundary)?;
     pending.retire(assessment, boundary)
 }
 
 #[cfg(unix)]
 fn prepare_exact_worktree_removal_with_boundary(
     assessment: &RemovalAssessment,
-    _allow_dirty: bool,
+    allow_dirty: bool,
     boundary: &dyn RemovalMutationBoundary,
 ) -> Result<PendingExactRemoval, ExactRemovalFailure> {
     let target = ExactTarget::open(assessment).map_err(ExactRemovalFailure::not_started)?;
@@ -1666,9 +1666,48 @@ fn prepare_exact_worktree_removal_with_boundary(
             &common,
         ));
     }
-    target
-        .verify_quarantine(assessment, &quarantine)
-        .map_err(|error| recover_or_retain(error, &target, assessment, &quarantine, &common))?;
+    if let Err(error) = target.verify_quarantine(assessment, &quarantine) {
+        return Err(recover_or_retain(
+            error,
+            &target,
+            assessment,
+            &quarantine,
+            &common,
+        ));
+    }
+    if !allow_dirty {
+        let counts = match git::status::counts(&quarantine.path) {
+            Ok(counts) => counts,
+            Err(error) => {
+                return Err(recover_or_retain(
+                    error,
+                    &target,
+                    assessment,
+                    &quarantine,
+                    &common,
+                ));
+            }
+        };
+        if counts.staged > 0 || counts.modified > 0 || counts.untracked > 0 || counts.conflicted > 0
+        {
+            return Err(recover_or_retain(
+                git::GitError::PreconditionsChanged,
+                &target,
+                assessment,
+                &quarantine,
+                &common,
+            ));
+        }
+        if let Err(error) = target.verify_quarantine(assessment, &quarantine) {
+            return Err(recover_or_retain(
+                error,
+                &target,
+                assessment,
+                &quarantine,
+                &common,
+            ));
+        }
+    }
     delete_quarantined_contents(&target, assessment, &quarantine)
         .map_err(|error| ExactRemovalFailure::retained(error, quarantine.path.clone()))?;
     Ok(PendingExactRemoval { target, quarantine })
@@ -1976,6 +2015,8 @@ fn delete_exact_branch_with_boundary(
     force: bool,
     boundary: &dyn BranchDeletionBoundary,
 ) -> Result<(), git::GitError> {
+    boundary.before_git_delete();
+
     let branch = assessment
         .branch
         .as_deref()
@@ -1997,8 +2038,6 @@ fn delete_exact_branch_with_boundary(
             return Err(git::GitError::PreconditionsChanged);
         }
     }
-
-    boundary.before_git_delete();
 
     // Git owns the final checkout-safety decision. If another worktree checks
     // out the branch after the OID receipt is checked, `git branch` refuses the
@@ -2617,6 +2656,17 @@ mod tests {
     }
 
     #[cfg(unix)]
+    struct DirtyAfterQuarantine;
+
+    #[cfg(unix)]
+    impl RemovalMutationBoundary for DirtyAfterQuarantine {
+        fn after_quarantine(&self, path: &Path) -> Result<(), git::GitError> {
+            std::fs::write(path.join("late-untracked"), "preserve me").unwrap();
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
     struct FailAfterRepair;
 
     #[cfg(unix)]
@@ -2675,6 +2725,27 @@ mod tests {
         let live = RemovalAssessment::discover(&fixture.main, &fixture.branch, Some("main"))
             .expect("restored worktree should remain discoverable");
         assert_eq!(live.path, fixture.linked.canonicalize().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_quarantine_dirtiness_requires_force_and_restores_safely() {
+        let fixture = Fixture::new("feature/late-dirty");
+        let assessment = fixture.assess();
+
+        let failure =
+            remove_exact_worktree_with_boundary(&assessment, false, &DirtyAfterQuarantine)
+                .unwrap_err();
+
+        assert!(!failure.partially_applied);
+        assert_eq!(failure.retained_quarantine, None);
+        assert_eq!(
+            std::fs::read_to_string(fixture.linked.join("late-untracked")).unwrap(),
+            "preserve me"
+        );
+        let live = RemovalAssessment::discover(&fixture.main, &fixture.branch, Some("main"))
+            .expect("dirty worktree should be restored and discoverable");
+        assert!(live.dirty());
     }
 
     #[cfg(unix)]
@@ -2827,6 +2898,25 @@ mod tests {
         branch: String,
     }
 
+    struct ReplaceBranchAtDelete {
+        repo_path: PathBuf,
+        branch: String,
+        replacement: git2::Oid,
+    }
+
+    impl BranchDeletionBoundary for ReplaceBranchAtDelete {
+        fn before_git_delete(&self) {
+            let repo = git2::Repository::open(&self.repo_path).unwrap();
+            repo.reference(
+                &format!("refs/heads/{}", self.branch),
+                self.replacement,
+                true,
+                "replace branch at deletion boundary",
+            )
+            .unwrap();
+        }
+    }
+
     impl BranchDeletionBoundary for CheckoutAtBranchDelete {
         fn before_git_delete(&self) {
             let repo = git2::Repository::open(&self.repo_path).unwrap();
@@ -2860,6 +2950,42 @@ mod tests {
         assert!(repo
             .find_branch(&fixture.branch, git2::BranchType::Local)
             .is_ok());
+    }
+
+    #[test]
+    fn branch_replacement_at_deletion_boundary_is_preserved() {
+        let fixture = Fixture::new("feature/replaced-at-delete");
+        let assessment = fixture.assess();
+        remove_exact_worktree(&assessment, false).unwrap();
+
+        let repo = git2::Repository::open(&fixture.main).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = parent.tree().unwrap();
+        let replacement = repo
+            .commit(
+                None,
+                &signature,
+                &signature,
+                "replacement",
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        let boundary = ReplaceBranchAtDelete {
+            repo_path: fixture.main.clone(),
+            branch: fixture.branch.clone(),
+            replacement,
+        };
+
+        assert!(delete_exact_branch_with_boundary(&assessment, true, &boundary).is_err());
+        assert_eq!(
+            repo.find_branch(&fixture.branch, git2::BranchType::Local)
+                .unwrap()
+                .get()
+                .target(),
+            Some(replacement)
+        );
     }
 
     #[test]
