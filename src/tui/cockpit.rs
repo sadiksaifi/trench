@@ -158,21 +158,24 @@ fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, th
         inner,
     );
     let items = match dialog.mode() {
-        RemoveMode::Review | RemoveMode::Ready if dialog.can_delete_branch() => [
-            ("Space", "branch"),
-            ("Enter", "remove"),
-            ("Esc", "close"),
-            ("?", "help"),
-        ]
-        .as_slice(),
-        RemoveMode::Review | RemoveMode::Ready => {
-            [("Enter", "remove"), ("Esc", "close"), ("?", "help")].as_slice()
-        }
-        RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => {
-            [("Enter", "confirm"), ("Esc", "back"), ("?", "help")].as_slice()
-        }
+        RemoveMode::Review | RemoveMode::Ready if dialog.can_delete_branch() => vec![
+            KeyHint::secondary("Space", "branch"),
+            KeyHint::danger("Enter", "remove"),
+            KeyHint::secondary("Esc", "close"),
+            KeyHint::secondary("?", "help"),
+        ],
+        RemoveMode::Review | RemoveMode::Ready => vec![
+            KeyHint::danger("Enter", "remove"),
+            KeyHint::secondary("Esc", "close"),
+            KeyHint::secondary("?", "help"),
+        ],
+        RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => vec![
+            KeyHint::danger("Enter", "confirm"),
+            KeyHint::secondary("Esc", "back"),
+            KeyHint::secondary("?", "help"),
+        ],
     };
-    render_dialog_keybar(frame, footer, theme, items);
+    render_dialog_keybar(frame, footer, theme, &items);
 }
 
 fn render_sync_dialog(
@@ -226,16 +229,21 @@ fn render_sync_dialog(
                     .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
                 inner,
             );
+            let submit = if dialog.submission().is_some() {
+                KeyHint::primary("Enter", "sync")
+            } else {
+                KeyHint::disabled("Enter", "sync (select a base)")
+            };
             render_dialog_keybar(
                 frame,
                 footer,
                 theme,
                 &[
-                    ("Tab", "base"),
-                    ("←/→", "strategy"),
-                    ("Enter", "sync"),
-                    ("Esc", "close"),
-                    ("?", "help"),
+                    KeyHint::secondary("Tab", "base"),
+                    KeyHint::secondary("←/→", "strategy"),
+                    submit,
+                    KeyHint::secondary("Esc", "close"),
+                    KeyHint::secondary("?", "help"),
                 ],
             );
         }
@@ -294,7 +302,15 @@ fn render_sync_dialog(
                 frame,
                 footer,
                 theme,
-                &[("Enter", "select"), ("Esc", "back"), ("?", "help")],
+                &[
+                    if dialog.base_candidates().is_empty() {
+                        KeyHint::disabled("Enter", "select (no matches)")
+                    } else {
+                        KeyHint::primary("Enter", "select")
+                    },
+                    KeyHint::secondary("Esc", "back"),
+                    KeyHint::secondary("?", "help"),
+                ],
             );
         }
     }
@@ -523,18 +539,20 @@ fn render_create_dialog(
                 details,
             );
             let has_base = dialog.preview().is_some_and(|preview| preview.base_visible);
-            let items = if has_base {
-                [
-                    ("Enter", "create"),
-                    ("Tab", "base"),
-                    ("Esc", "close"),
-                    ("?", "help"),
-                ]
-                .as_slice()
+            let submit = if dialog.submission().is_some() {
+                KeyHint::primary("Enter", "create")
             } else {
-                [("Enter", "create"), ("Esc", "close"), ("?", "help")].as_slice()
+                KeyHint::disabled("Enter", "create (branch required)")
             };
-            render_dialog_keybar(frame, footer, theme, items);
+            let mut items = vec![submit];
+            if has_base {
+                items.push(KeyHint::secondary("Tab", "base"));
+            }
+            items.extend([
+                KeyHint::secondary("Esc", "close"),
+                KeyHint::secondary("?", "help"),
+            ]);
+            render_dialog_keybar(frame, footer, theme, &items);
         }
         CreateMode::BasePicker => {
             let modal = centered_rect(
@@ -591,7 +609,15 @@ fn render_create_dialog(
                 frame,
                 footer,
                 theme,
-                &[("Enter", "select"), ("Esc", "back"), ("?", "help")],
+                &[
+                    if dialog.base_candidates().is_empty() {
+                        KeyHint::disabled("Enter", "select (no matches)")
+                    } else {
+                        KeyHint::primary("Enter", "select")
+                    },
+                    KeyHint::secondary("Esc", "back"),
+                    KeyHint::secondary("?", "help"),
+                ],
             );
         }
     }
@@ -815,16 +841,26 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
                 crate::operation::MutationState::NotStarted
                 | crate::operation::MutationState::RolledBack,
             ..
-        } => [("↑/↓", "output"), ("Enter", "back"), ("?", "help")].as_slice(),
-        ModalStatus::Failed { .. } => [("↑/↓", "output"), ("?", "help")].as_slice(),
-        ModalStatus::Running if !modal.mutation_started() => {
-            [("↑/↓", "output"), ("Esc", "cancel"), ("?", "help")].as_slice()
-        }
-        ModalStatus::Running | ModalStatus::Succeeded => {
-            [("↑/↓", "output"), ("?", "help")].as_slice()
-        }
+        } => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::primary("Enter", "back"),
+            KeyHint::secondary("?", "help"),
+        ],
+        ModalStatus::Failed { .. } => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::secondary("?", "help"),
+        ],
+        ModalStatus::Running if !modal.mutation_started() => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::secondary("Esc", "cancel"),
+            KeyHint::secondary("?", "help"),
+        ],
+        ModalStatus::Running | ModalStatus::Succeeded => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::secondary("?", "help"),
+        ],
     };
-    render_dialog_keybar(frame, footer, theme, items);
+    render_dialog_keybar(frame, footer, theme, &items);
 }
 
 fn mutation_state_label(state: crate::operation::MutationState) -> &'static str {
@@ -836,35 +872,84 @@ fn mutation_state_label(state: crate::operation::MutationState) -> &'static str 
     }
 }
 
-fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[(&str, &str)]) {
+#[derive(Clone, Copy)]
+enum KeyTone {
+    Secondary,
+    Primary,
+    Danger,
+    Disabled,
+}
+
+#[derive(Clone, Copy)]
+struct KeyHint<'a> {
+    key: &'a str,
+    action: &'a str,
+    tone: KeyTone,
+}
+
+impl<'a> KeyHint<'a> {
+    const fn secondary(key: &'a str, action: &'a str) -> Self {
+        Self {
+            key,
+            action,
+            tone: KeyTone::Secondary,
+        }
+    }
+
+    const fn primary(key: &'a str, action: &'a str) -> Self {
+        Self {
+            key,
+            action,
+            tone: KeyTone::Primary,
+        }
+    }
+
+    const fn danger(key: &'a str, action: &'a str) -> Self {
+        Self {
+            key,
+            action,
+            tone: KeyTone::Danger,
+        }
+    }
+
+    const fn disabled(key: &'a str, action: &'a str) -> Self {
+        Self {
+            key,
+            action,
+            tone: KeyTone::Disabled,
+        }
+    }
+}
+
+fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[KeyHint<'_>]) {
     let mut spans = Vec::new();
-    for (index, (key, action)) in items.iter().enumerate() {
+    for (index, item) in items.iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw("  "));
         }
-        let destructive = matches!(*action, "remove" | "confirm");
-        let key = if destructive {
-            format!("[{key}]")
-        } else {
-            (*key).to_string()
-        };
-        let key_style = if destructive {
-            theme.with_bg(
+        let label = format!("[{}] {}", item.key, item.action);
+        let style = match item.tone {
+            KeyTone::Secondary => theme.with_bg(
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                theme.control_bg,
+            ),
+            KeyTone::Primary => theme.with_bg(
+                Style::default()
+                    .fg(theme.primary_fg)
+                    .add_modifier(Modifier::BOLD),
+                theme.primary_bg,
+            ),
+            KeyTone::Danger => theme.with_bg(
                 Style::default()
                     .fg(theme.danger_fg)
                     .add_modifier(Modifier::BOLD),
                 theme.danger_bg,
-            )
-        } else {
-            Style::default()
-                .fg(theme.selection_fg)
-                .add_modifier(Modifier::BOLD)
+            ),
+            KeyTone::Disabled => Style::default()
+                .fg(theme.disabled_fg)
+                .add_modifier(Modifier::DIM),
         };
-        spans.push(Span::styled(key, key_style));
-        spans.push(Span::styled(
-            format!(" {action}"),
-            Style::default().fg(theme.fg_muted),
-        ));
+        spans.push(Span::styled(label, style));
     }
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -1815,7 +1900,12 @@ mod tests {
             assert!(form.contains(expected), "missing {expected:?}\n{form}");
         }
         assert!(!form.contains("Hooks"), "{form}");
-        assert!(form.lines().last().unwrap().trim_end().ends_with("? help"));
+        assert!(form
+            .lines()
+            .last()
+            .unwrap()
+            .trim_end()
+            .ends_with("[?] help"));
 
         let dialog = state.create_dialog.as_mut().unwrap();
         dialog.handle_key(CreateKey::Tab);
@@ -1830,7 +1920,7 @@ mod tests {
             .last()
             .unwrap()
             .trim_end()
-            .ends_with("? help"));
+            .ends_with("[?] help"));
 
         state.help_open = true;
         let help = text(&render_buffer(&mut state, 100, 24, "ops"));
@@ -1981,11 +2071,75 @@ mod tests {
         let buffer = render_buffer(&mut state, 100, 24, "ops");
         let footer = lines(&buffer).last().unwrap().trim_end().to_string();
 
-        assert_eq!(footer.matches("? help").count(), 1, "{footer}");
+        assert_eq!(footer.matches("[?] help").count(), 1, "{footer}");
         for leaked in ["s sync", "/ search", "r refresh", "i inspector", "q quit"] {
             assert!(!footer.contains(leaked), "leaked {leaked:?}: {footer}");
         }
-        assert_eq!(footer, "Enter create  Tab base  Esc close  ? help");
+        assert_eq!(footer, "[Enter] create  [Tab] base  [Esc] close  [?] help");
+    }
+
+    #[test]
+    fn create_and_sync_keybars_distinguish_primary_and_disabled_actions() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::{create_flow::CreateDialog, sync_flow::SyncDialog},
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs,
+            [],
+        ));
+        let theme = crate::tui::theme::from_name("ops");
+
+        let disabled_create = render_buffer(&mut state, 100, 24, "ops");
+        let disabled = find_text(&disabled_create, "[Enter] create (branch required)");
+        assert_eq!(
+            disabled_create.cell(disabled).unwrap().fg,
+            theme.disabled_fg
+        );
+
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .set_branch("feature/auth");
+        let enabled_create = render_buffer(&mut state, 100, 24, "ops");
+        let primary = find_text(&enabled_create, "[Enter] create");
+        assert_eq!(
+            enabled_create.cell(primary).unwrap().bg,
+            Color::Rgb(240, 139, 101)
+        );
+        assert_eq!(
+            enabled_create.cell(primary).unwrap().fg,
+            Color::Rgb(20, 20, 19)
+        );
+
+        let target = state.identities[1].clone();
+        state.create_dialog = None;
+        state.sync_dialog = Some(SyncDialog::new(
+            &target,
+            RefSnapshot::from_parts(
+                std::iter::empty::<&str>(),
+                std::iter::empty::<&str>(),
+                None::<&str>,
+                None::<&str>,
+                false,
+            ),
+            None,
+        ));
+        let disabled_sync = render_buffer(&mut state, 100, 24, "ops");
+        let disabled = find_text(&disabled_sync, "[Enter] sync (select a base)");
+        assert_eq!(disabled_sync.cell(disabled).unwrap().fg, theme.disabled_fg);
     }
 
     #[test]
@@ -2061,7 +2215,12 @@ mod tests {
         ] {
             assert!(form.contains(expected), "missing {expected:?}\n{form}");
         }
-        assert!(form.lines().last().unwrap().trim_end().ends_with("? help"));
+        assert!(form
+            .lines()
+            .last()
+            .unwrap()
+            .trim_end()
+            .ends_with("[?] help"));
 
         state.sync_dialog.as_mut().unwrap().handle_key(SyncKey::Tab);
         let picker = text(&render_buffer(&mut state, 100, 24, "ops"));
@@ -2072,7 +2231,7 @@ mod tests {
             .last()
             .unwrap()
             .trim_end()
-            .ends_with("? help"));
+            .ends_with("[?] help"));
 
         state.help_open = true;
         let help = text(&render_buffer(&mut state, 100, 24, "ops"));
@@ -2100,7 +2259,7 @@ mod tests {
             .last()
             .unwrap()
             .trim_end()
-            .ends_with("? help"));
+            .ends_with("[?] help"));
     }
 
     #[test]
@@ -2180,7 +2339,7 @@ mod tests {
             .last()
             .unwrap()
             .trim_end()
-            .ends_with("? help"));
+            .ends_with("[?] help"));
 
         state.help_open = true;
         let help = text(&render_buffer(&mut state, 100, 24, "ops"));
@@ -2255,7 +2414,7 @@ mod tests {
             .last()
             .unwrap()
             .trim_end()
-            .ends_with("? help"));
+            .ends_with("[?] help"));
 
         state.help_open = true;
         let help = text(&render_buffer(&mut state, 100, 24, "ops"));
