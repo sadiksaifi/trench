@@ -386,7 +386,7 @@ impl CreateDialog {
                 }
             }
             CreateKey::Escape => return Some(CreateEffect::Close),
-            CreateKey::Tab => {}
+            CreateKey::Tab => self.base_picker.apply_match(),
         }
         None
     }
@@ -468,6 +468,24 @@ mod tests {
             dialog.handle_key(CreateKey::Escape),
             Some(CreateEffect::Close)
         );
+    }
+
+    #[test]
+    fn tab_applies_the_base_match_without_advancing() {
+        let mut dialog = CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs(),
+            [] as [CheckedOutBranch; 0],
+        );
+
+        dialog.handle_key(CreateKey::Character('r'));
+        dialog.handle_key(CreateKey::Character('e'));
+        assert_eq!(dialog.handle_key(CreateKey::Tab), None);
+
+        assert_eq!(dialog.mode(), CreateMode::SelectBase);
+        assert_eq!(dialog.base_query(), "release");
+        assert_eq!(dialog.preview(), None);
     }
 
     #[test]

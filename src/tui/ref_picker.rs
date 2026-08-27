@@ -77,6 +77,13 @@ impl RefPicker {
         self.selection
     }
 
+    pub fn apply_match(&mut self) {
+        if let Some(candidate) = self.candidates().get(self.selection) {
+            self.query = LineInput::from(candidate.name.as_str());
+            self.selection = 0;
+        }
+    }
+
     pub fn set_origin_refresh(&mut self, refresh: OriginRefresh) {
         self.origin_refresh = refresh;
     }
