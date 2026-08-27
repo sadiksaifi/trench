@@ -33,7 +33,8 @@ const TUI_SWITCH_PATH_FILE_ENV: &str = "TRENCH_TUI_SWITCH_PATH_FILE";
 #[command(
     name = "trench",
     version,
-    about = "A fast, ergonomic, headless-first Git worktree manager"
+    about = "A fast, ergonomic, headless-first Git worktree manager",
+    disable_help_subcommand = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -114,15 +115,6 @@ enum Commands {
         #[arg(long, hide = true)]
         print_path: bool,
     },
-    /// Manage tags on a worktree
-    Tag {
-        /// Branch name or sanitized name of the worktree
-        branch: String,
-
-        /// Tags to add (+name) or remove (-name). No arguments = list current tags
-        #[arg(allow_hyphen_values = true)]
-        tags: Vec<String>,
-    },
     /// Open a worktree in $EDITOR
     Open {
         /// Branch name or sanitized name of the worktree
@@ -130,12 +122,6 @@ enum Commands {
     },
     /// List all worktrees
     List,
-    /// Show worktree status
-    Status {
-        /// Branch name or sanitized name for deep status view.
-        /// Omit for summary of all worktrees.
-        branch: Option<String>,
-    },
     /// Sync a worktree with its base branch
     Sync {
         /// Branch name, worktree name, or path of the worktree to sync
@@ -152,23 +138,6 @@ enum Commands {
         /// Skip all lifecycle hooks (pre_sync, post_sync)
         #[arg(long)]
         no_hooks: bool,
-    },
-    /// View event log
-    Log {
-        /// Filter events to a specific worktree (by branch name or sanitized name)
-        branch: Option<String>,
-
-        /// Limit to the last N events
-        #[arg(long)]
-        tail: Option<usize>,
-
-        /// Show stdout/stderr from the last hook execution for the worktree
-        #[arg(long)]
-        output: bool,
-
-        /// Show aggregate statistics (total events, hook runs, avg duration, etc.)
-        #[arg(long)]
-        summary: bool,
     },
     /// Initialize .trench.toml in current directory
     Init {
@@ -281,15 +250,8 @@ fn main() -> anyhow::Result<()> {
             json,
         ),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
-        Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List) => run_list(json, porcelain),
-        Some(Commands::Status { branch }) => run_status(
-            branch.as_deref(),
-            json,
-            porcelain,
-            output_config.should_color(),
-        ),
         Some(Commands::Init { force }) => run_init(force),
         Some(Commands::ShellInit { shell }) => {
             print!("{}", cli::commands::shell_init::generate(shell));
@@ -305,19 +267,6 @@ fn main() -> anyhow::Result<()> {
             no_hooks,
             base,
         }) => run_sync(&branch, strategy, base.as_deref(), json, dry_run, no_hooks),
-        Some(Commands::Log {
-            branch,
-            tail,
-            output,
-            summary,
-        }) => run_log(
-            branch.as_deref(),
-            tail,
-            output,
-            summary,
-            json,
-            output_config.should_color(),
-        ),
         None => {
             anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
         }
