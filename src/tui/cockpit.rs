@@ -545,7 +545,7 @@ fn render_create_dialog(
             if candidates.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "No matching branches. Edit the search to continue.",
-                    Style::default().fg(theme.fg_muted),
+                    Style::default().fg(theme.helper_fg),
                 )));
             } else {
                 lines.extend(create_row_window(dialog, layout.options).map(|index| {
@@ -614,7 +614,7 @@ fn render_create_dialog(
                 lines.push(Line::from(Span::styled(
                     "Enter a branch name to continue",
                     Style::default()
-                        .fg(theme.fg_muted)
+                        .fg(theme.helper_fg)
                         .add_modifier(Modifier::BOLD),
                 )));
             }
@@ -919,7 +919,7 @@ fn center(area: Rect) -> (u16, u16) {
 fn render_create_intro(frame: &mut Frame, area: Rect, text: &str, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(text)
-            .style(theme.with_bg(Style::default().fg(theme.fg_muted), theme.bg_elevated)),
+            .style(theme.with_bg(Style::default().fg(theme.helper_fg), theme.bg_elevated)),
         area,
     );
 }
@@ -1033,7 +1033,7 @@ fn input_value_spans(
             Span::styled("▌", Style::default().fg(theme.accent)),
             Span::styled(
                 tail_ellipsize(placeholder, width),
-                Style::default().fg(theme.fg_muted),
+                Style::default().fg(theme.placeholder_fg),
             ),
         ];
     }

@@ -4,6 +4,8 @@ use ratatui::style::{Color, Style};
 pub struct Theme {
     pub fg: Color,
     pub fg_muted: Color,
+    pub helper_fg: Color,
+    pub placeholder_fg: Color,
     pub bg: Color,
     pub bg_elevated: Color,
     pub bg_panel: Color,
@@ -54,6 +56,8 @@ fn ops() -> Theme {
     Theme {
         fg: Color::Rgb(250, 249, 245),
         fg_muted: Color::Rgb(170, 166, 157),
+        helper_fg: Color::Rgb(250, 249, 245),
+        placeholder_fg: Color::Rgb(250, 249, 245),
         bg: Color::Rgb(20, 20, 19),
         bg_elevated: Color::Rgb(39, 36, 31),
         bg_panel: Color::Rgb(28, 27, 24),
@@ -79,6 +83,8 @@ fn catppuccin() -> Theme {
     Theme {
         fg: Color::Rgb(205, 214, 244),
         fg_muted: Color::Rgb(127, 132, 156),
+        helper_fg: Color::Rgb(205, 214, 244),
+        placeholder_fg: Color::Rgb(205, 214, 244),
         bg: Color::Rgb(30, 30, 46),
         bg_elevated: Color::Rgb(49, 50, 68),
         bg_panel: Color::Rgb(24, 24, 37),
@@ -104,6 +110,8 @@ fn gruvbox() -> Theme {
     Theme {
         fg: Color::Rgb(235, 219, 178),
         fg_muted: Color::Rgb(168, 153, 132),
+        helper_fg: Color::Rgb(235, 219, 178),
+        placeholder_fg: Color::Rgb(235, 219, 178),
         bg: Color::Rgb(29, 32, 33),
         bg_elevated: Color::Rgb(40, 40, 40),
         bg_panel: Color::Rgb(50, 48, 47),
@@ -129,6 +137,8 @@ fn minimal() -> Theme {
     Theme {
         fg: Color::White,
         fg_muted: Color::DarkGray,
+        helper_fg: Color::White,
+        placeholder_fg: Color::White,
         bg: Color::Reset,
         bg_elevated: Color::Black,
         bg_panel: Color::Reset,
@@ -197,6 +207,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rgb_themes_keep_create_helpers_and_placeholders_at_accessible_contrast() {
+        for name in ["ops", "catppuccin", "gruvbox"] {
+            let theme = from_name(name);
+            assert!(
+                contrast(theme.helper_fg, theme.bg_elevated) >= 4.5,
+                "{name} helper text must meet 4.5:1 contrast"
+            );
+            assert!(
+                contrast(theme.placeholder_fg, theme.control_bg) >= 4.5,
+                "{name} placeholder text must meet 4.5:1 contrast"
+            );
+        }
+    }
+
     fn contrast(foreground: Color, background: Color) -> f64 {
         let luminance = |color| {
             let Color::Rgb(red, green, blue) = color else {
@@ -256,6 +281,8 @@ mod tests {
         let colors = [
             theme.fg,
             theme.fg_muted,
+            theme.helper_fg,
+            theme.placeholder_fg,
             theme.bg,
             theme.bg_elevated,
             theme.bg_panel,
