@@ -946,7 +946,7 @@ fn render_create_input(
     content.extend(input_value_spans(input, placeholder, value_width, theme));
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border_active))
+        .border_style(Style::default().fg(theme.border_focus))
         .style(theme.with_bg(Style::default(), theme.control_bg));
     frame.render_widget(
         Paragraph::new(Line::from(content))
@@ -2972,9 +2972,10 @@ mod tests {
             buffer
                 .content()
                 .iter()
-                .any(|cell| cell.symbol() == "│" && cell.fg == theme.border_active),
-            "focused input should have an active border\n{output}"
+                .any(|cell| cell.symbol() == "│" && cell.fg == theme.border_focus),
+            "focused input should have the strongest focus border\n{output}"
         );
+        assert_ne!(theme.border_focus, theme.border_active);
     }
 
     #[test]
