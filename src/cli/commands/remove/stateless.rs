@@ -508,11 +508,24 @@ pub enum RemovalMutationState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemovalErrorClass {
+    Cancelled,
     PreconditionsChanged,
     Git,
     Hook,
     HookTimeout,
     Io,
+}
+
+pub trait RemovalMutationGuard: Send + Sync {
+    fn try_begin_mutation(&self) -> bool;
+}
+
+struct AlwaysBeginMutation;
+
+impl RemovalMutationGuard for AlwaysBeginMutation {
+    fn try_begin_mutation(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -742,6 +755,15 @@ pub async fn execute(
     hooks_config: Option<&HooksConfig>,
     sink: &dyn RemovalEventSink,
 ) -> Result<RemovalOutcome, RemovalFailure> {
+    execute_with_guard(plan, hooks_config, sink, &AlwaysBeginMutation).await
+}
+
+pub async fn execute_with_guard(
+    plan: RemovalPlan,
+    hooks_config: Option<&HooksConfig>,
+    sink: &dyn RemovalEventSink,
+    mutation_guard: &dyn RemovalMutationGuard,
+) -> Result<RemovalOutcome, RemovalFailure> {
     if plan.dry_run {
         let hooks = dry_run_hook_status(&plan, hooks_config);
         return Ok(RemovalOutcome::from_plan(
@@ -801,6 +823,17 @@ pub async fn execute(
         }
     }
     finish_stage(sink, RemovalStage::PreRemove, stage_started, true);
+
+    if !mutation_guard.try_begin_mutation() {
+        return Err(fail(
+            sink,
+            operation_started,
+            RemovalStage::Revalidate,
+            RemovalMutationState::NotStarted,
+            RemovalErrorClass::Cancelled,
+            "operation cancelled before Git mutation".to_string(),
+        ));
+    }
 
     // This is the final mutation boundary. It catches hook or concurrent
     // changes and the Git helper proves the directory/repository identity
@@ -2157,6 +2190,14 @@ mod tests {
     use super::*;
     use crate::config::HookDef;
 
+    struct RejectMutation;
+
+    impl RemovalMutationGuard for RejectMutation {
+        fn try_begin_mutation(&self) -> bool {
+            false
+        }
+    }
+
     struct Fixture {
         root: tempfile::TempDir,
         main: PathBuf,
@@ -2488,6 +2529,42 @@ mod tests {
         assert_eq!(outcome.hooks, RemovalHooksStatus::Planned);
         assert_eq!(outcome.confirmation, RemovalConfirmation::DryRun);
         assert!(events.events().is_empty());
+    }
+
+    #[test]
+    fn cancellation_after_silent_pre_hook_aborts_before_git_mutation() {
+        cancellation_after_pre_hook_aborts_before_git_mutation("true");
+    }
+
+    #[test]
+    fn cancellation_after_active_pre_hook_aborts_before_git_mutation() {
+        cancellation_after_pre_hook_aborts_before_git_mutation("printf active-hook");
+    }
+
+    fn cancellation_after_pre_hook_aborts_before_git_mutation(command: &str) {
+        let fixture = Fixture::new("feature/cancel-before-mutation");
+        let plan = fixture.assess().authorize(Fixture::options()).unwrap();
+        let hooks = HooksConfig {
+            pre_remove: Some(HookDef {
+                run: Some(vec![command.to_string()]),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+        let events = RecordingRemovalEventSink::default();
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(execute_with_guard(
+                plan,
+                Some(&hooks),
+                &events,
+                &RejectMutation,
+            ))
+            .unwrap_err();
+
+        assert_eq!(error.class, RemovalErrorClass::Cancelled);
+        assert_eq!(error.mutation_state, RemovalMutationState::NotStarted);
+        assert!(fixture.linked.exists());
     }
 
     #[test]
