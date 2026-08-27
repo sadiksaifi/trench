@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 
-use crate::tui::app::WorktreeIdentity;
+use crate::tui::app::{WorktreeId, WorktreeIdentity};
 
 /// Rank the live catalog by a case-insensitive fuzzy subsequence match.
 ///
@@ -37,6 +37,24 @@ pub fn rank<'a>(rows: &'a [WorktreeIdentity], query: &str) -> Vec<&'a WorktreeId
             ))
     });
     matches.into_iter().map(|(_, _, row)| row).collect()
+}
+
+/// Keep a selected worktree only while it remains visible, otherwise select
+/// the first ranked result. An empty result set has no actionable target.
+pub fn reconcile_selection(
+    rows: &[WorktreeIdentity],
+    query: &str,
+    selected: Option<&WorktreeId>,
+) -> Option<WorktreeId> {
+    let visible = rank(rows, query);
+    selected
+        .and_then(|selected| {
+            visible
+                .iter()
+                .find(|row| &row.id == selected)
+                .map(|row| row.id.clone())
+        })
+        .or_else(|| visible.first().map(|row| row.id.clone()))
 }
 
 fn fuzzy_score(candidate: &str, query: &str) -> Option<u32> {
@@ -109,5 +127,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             [rows[1].id.clone(), rows[0].id.clone()]
         );
+    }
+
+    #[test]
+    fn reconcile_selection_preserves_visible_id_then_falls_back_without_stale_targets() {
+        let rows = vec![
+            identity("/worktrees/alpha", "alpha", Some("feature/alpha")),
+            identity("/worktrees/beta", "beta", Some("feature/beta")),
+        ];
+
+        assert_eq!(
+            reconcile_selection(&rows, "beta", Some(&rows[1].id)),
+            Some(rows[1].id.clone())
+        );
+        assert_eq!(
+            reconcile_selection(&rows, "alpha", Some(&rows[1].id)),
+            Some(rows[0].id.clone())
+        );
+        assert_eq!(reconcile_selection(&rows, "missing", None), None);
     }
 }
