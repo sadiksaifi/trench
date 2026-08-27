@@ -137,40 +137,16 @@ const SEARCH_BINDINGS: &[Binding] = &[
         action: Action::CloseSearch,
     },
     Binding {
-        keys: &[Key::Char('o')],
-        label: "o",
-        description: "open",
-        action: Action::Open,
-    },
-    Binding {
-        keys: &[Key::Char('s')],
-        label: "s",
-        description: "sync",
-        action: Action::Sync,
-    },
-    Binding {
-        keys: &[Key::Char('d')],
-        label: "d",
-        description: "remove",
-        action: Action::Remove,
-    },
-    Binding {
-        keys: &[Key::Down, Key::Char('j')],
-        label: "j/↓",
+        keys: &[Key::Down],
+        label: "↓",
         description: "next",
         action: Action::SelectNext,
     },
     Binding {
-        keys: &[Key::Up, Key::Char('k')],
-        label: "k/↑",
+        keys: &[Key::Up],
+        label: "↑",
         description: "previous",
         action: Action::SelectPrevious,
-    },
-    Binding {
-        keys: &[Key::Char('?')],
-        label: "?",
-        description: "help",
-        action: Action::Help,
     },
 ];
 
@@ -252,15 +228,13 @@ mod tests {
     }
 
     #[test]
-    fn every_contextual_keybar_ends_with_help() {
-        for context in [Context::Cockpit, Context::Search] {
-            for narrow in [false, true] {
-                let items = keybar_bindings(context, narrow);
-                assert_eq!(
-                    items.last().map(|binding| binding.action),
-                    Some(Action::Help)
-                );
-            }
+    fn cockpit_keybar_ends_with_help() {
+        for narrow in [false, true] {
+            let items = keybar_bindings(Context::Cockpit, narrow);
+            assert_eq!(
+                items.last().map(|binding| binding.action),
+                Some(Action::Help)
+            );
         }
     }
 
@@ -274,27 +248,23 @@ mod tests {
     }
 
     #[test]
-    fn search_context_reserves_launcher_actions_before_query_editing() {
+    fn search_context_reserves_only_non_printable_navigation_and_submit_keys() {
         let reserved = [
             (Key::Enter, Action::Switch),
             (Key::Escape, Action::CloseSearch),
-            (Key::Char('o'), Action::Open),
-            (Key::Char('s'), Action::Sync),
-            (Key::Char('d'), Action::Remove),
             (Key::Down, Action::SelectNext),
-            (Key::Char('j'), Action::SelectNext),
             (Key::Up, Action::SelectPrevious),
-            (Key::Char('k'), Action::SelectPrevious),
-            (Key::Char('?'), Action::Help),
         ];
         for (key, action) in reserved {
             assert_eq!(action_for(Context::Search, key), Some(action));
         }
         for editable in [
-            Key::Char('/'),
-            Key::Char('c'),
-            Key::Char('q'),
-            Key::Char('r'),
+            Key::Char('o'),
+            Key::Char('s'),
+            Key::Char('d'),
+            Key::Char('j'),
+            Key::Char('k'),
+            Key::Char('?'),
             Key::Backspace,
         ] {
             assert_eq!(action_for(Context::Search, editable), None);

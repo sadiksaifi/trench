@@ -2007,7 +2007,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_search_keeps_the_filtered_cockpit_and_contextual_help_visible() {
+    fn launcher_search_keeps_the_filtered_cockpit_and_input_keybar_visible() {
         let mut state = sample_state();
         let main_id = state.identities[1].id.clone();
         state.statuses.insert(main_id, WorktreeStatus::default());
@@ -2028,13 +2028,7 @@ mod tests {
         assert!(!output.contains("feature-auth"), "{output}");
         assert!(footer.contains("Esc clear"), "{footer}");
         assert!(!footer.contains("c create"), "{footer}");
-        assert!(footer.ends_with("? help"), "{footer}");
-
-        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('?')));
-        let help = text(&render_buffer(&mut state, 120, 24, "ops"));
-        assert!(help.contains("Help · Search"), "{help}");
-        assert!(!help.contains("c       create"), "{help}");
-        assert!(!help.contains("r       refresh"), "{help}");
+        assert!(!footer.contains("? help"), "{footer}");
     }
 
     #[test]
