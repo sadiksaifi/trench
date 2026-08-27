@@ -1,7 +1,4 @@
-use std::{
-    collections::VecDeque,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind};
@@ -10,12 +7,12 @@ use crate::{
     config,
     navigation::EditorCommand,
     tui::{
-        app::{self, AppState, Effect, Event, WorktreeId, WorktreeIdentity, WorktreeStatus},
+        app::{self, AppState, Effect, Event, WorktreeId},
         cockpit,
         keymap::Key,
+        refresh_runtime::RefreshRuntime,
         theme,
     },
-    worktree_catalog::WorktreeCatalog,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,77 +129,16 @@ impl DialogRegistry {
     }
 }
 
-struct CatalogSnapshot {
-    catalog: WorktreeCatalog,
-    pending_statuses: VecDeque<WorktreeId>,
-}
-
-impl CatalogSnapshot {
-    fn discover(cwd: &Path, default_base: Option<&str>) -> Result<(Self, Vec<WorktreeIdentity>)> {
-        let catalog = WorktreeCatalog::discover(cwd)?.with_base(default_base);
-        let identities = catalog
-            .identities()
-            .iter()
-            .map(|identity| WorktreeIdentity {
-                id: WorktreeId::new(identity.path.clone()),
-                worktree: identity.worktree.clone(),
-                branch: identity.branch.clone(),
-                path: identity.path.clone(),
-                head: identity.head.clone(),
-                is_main: identity.is_main,
-                is_current: identity.is_current,
-                detached: identity.detached,
-            })
-            .collect::<Vec<_>>();
-        let pending_statuses = identities
-            .iter()
-            .map(|identity| identity.id.clone())
-            .collect();
-        Ok((
-            Self {
-                catalog,
-                pending_statuses,
-            },
-            identities,
-        ))
-    }
-
-    fn populate_next_status(&mut self, state: &mut AppState) {
-        let Some(id) = self.pending_statuses.pop_front() else {
-            return;
-        };
-        let Ok(status) = self.catalog.status(id.as_path()) else {
-            return;
-        };
-        let _ = app::reduce(
-            state,
-            Event::StatusLoaded {
-                id,
-                status: WorktreeStatus {
-                    base: status.base,
-                    staged: status.staged,
-                    modified: status.modified,
-                    untracked: status.untracked,
-                    ahead: status.ahead,
-                    behind: status.behind,
-                },
-            },
-        );
-    }
-}
-
-struct CatalogRefreshDriver<'a> {
-    cwd: &'a Path,
-    default_base: Option<&'a str>,
-    catalog: &'a mut CatalogSnapshot,
+struct RuntimeRefreshDriver<'a> {
+    runtime: &'a mut RefreshRuntime,
     state: &'a mut AppState,
 }
 
-impl RefreshDriver for CatalogRefreshDriver<'_> {
+impl RefreshDriver for RuntimeRefreshDriver<'_> {
     fn refresh(&mut self, _cause: RefreshCause) -> Result<()> {
-        let (replacement, identities) = CatalogSnapshot::discover(self.cwd, self.default_base)?;
-        *self.catalog = replacement;
-        let _ = app::reduce(self.state, Event::IdentitiesLoaded(identities));
+        let result = self.runtime.editor_return();
+        apply_refresh_publications(self.runtime, self.state);
+        result?;
         Ok(())
     }
 }
@@ -213,9 +149,14 @@ pub fn run() -> Result<TuiExit> {
     let global = config::load_global_config()?;
     let project = config::load_project_config(&repo.path)?;
     let resolved = config::resolve_config(None, project.as_ref(), &global);
-    let (mut catalog, identities) =
-        CatalogSnapshot::discover(&cwd, resolved.git.default_base.as_deref())?;
-    let mut state = AppState::new(identities);
+    let mut refresh = RefreshRuntime::new(
+        cwd.clone(),
+        repo.path.clone(),
+        resolved.git.default_base.clone(),
+    );
+    refresh.launch()?;
+    let mut state = AppState::new(Vec::new());
+    apply_refresh_publications(&mut refresh, &mut state);
     let selected_theme = theme::from_name(&resolved.ui.theme);
     let mut dialogs = DialogRegistry::default();
 
@@ -229,9 +170,9 @@ pub fn run() -> Result<TuiExit> {
                 cockpit::render(&state, frame, frame.area(), &selected_theme);
             })?;
 
-            // Identity rows reach the terminal before any status work. Status remains
-            // synchronous until the refresh coordinator replaces this queue in #144.
-            catalog.populate_next_status(&mut state);
+            let _ = app::reduce(&mut state, Event::RefreshTick);
+            refresh.tick();
+            apply_refresh_publications(&mut refresh, &mut state);
 
             if !event::poll(std::time::Duration::from_millis(50))? {
                 continue;
@@ -264,16 +205,14 @@ pub fn run() -> Result<TuiExit> {
                             terminal: &mut terminal,
                         };
                         let mut launcher = ProcessEditorLauncher;
-                        let mut refresh = CatalogRefreshDriver {
-                            cwd: &cwd,
-                            default_base: resolved.git.default_base.as_deref(),
-                            catalog: &mut catalog,
+                        let mut refresh_driver = RuntimeRefreshDriver {
+                            runtime: &mut refresh,
                             state: &mut state,
                         };
                         if let Err(error) = open_editor(
                             &mut terminal_driver,
                             &mut launcher,
-                            &mut refresh,
+                            &mut refresh_driver,
                             &command,
                             id.as_path(),
                         ) {
@@ -285,10 +224,8 @@ pub fn run() -> Result<TuiExit> {
                     Effect::OpenRemove(id) => dialogs.register(DialogRequest::Remove(id)),
                     Effect::OpenSearch => dialogs.register(DialogRequest::Search),
                     Effect::Refresh => {
-                        let (replacement, identities) =
-                            CatalogSnapshot::discover(&cwd, resolved.git.default_base.as_deref())?;
-                        catalog = replacement;
-                        let _ = app::reduce(&mut state, Event::IdentitiesLoaded(identities));
+                        refresh.manual()?;
+                        apply_refresh_publications(&mut refresh, &mut state);
                     }
                     Effect::Quit => break 'event_loop Ok(TuiExit::Quit),
                     Effect::Unavailable { .. } => {}
@@ -304,6 +241,12 @@ pub fn run() -> Result<TuiExit> {
     ratatui::restore();
     super::restore_panic_hook();
     result
+}
+
+fn apply_refresh_publications(refresh: &mut RefreshRuntime, state: &mut AppState) {
+    for publication in refresh.drain_publications() {
+        let _ = app::reduce(state, Event::RefreshPublished(publication));
+    }
 }
 
 fn translate_key(key: KeyEvent) -> Option<Key> {
