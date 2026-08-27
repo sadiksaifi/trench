@@ -207,3 +207,38 @@ fn dirty_target_json_is_structured_and_reports_no_mutation() {
         })
     );
 }
+
+#[test]
+fn invalid_dry_run_base_uses_the_same_structured_failure_contract() {
+    let (root, worktree) = repository();
+    let output = trench(
+        &worktree,
+        root.path(),
+        &[
+            "sync",
+            "feature/topic",
+            "--strategy",
+            "rebase",
+            "--base",
+            "missing",
+            "--dry-run",
+            "--json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        serde_json::json!({
+            "ok": false,
+            "failure": {
+                "stage": "validate",
+                "mutation_state": "not_started",
+                "class": "invalid_base",
+                "message": "explicit base not found: missing"
+            },
+            "stages": []
+        })
+    );
+}

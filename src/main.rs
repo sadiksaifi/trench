@@ -982,16 +982,27 @@ fn run_sync(
         } else {
             cli::commands::sync::stateless::HookPolicy::Run
         };
-        let plan = cli::commands::sync::stateless::SyncPlanner::discover(
+        let planning_started = std::time::Instant::now();
+        let plan = match cli::commands::sync::stateless::SyncPlanner::discover(
             &cwd,
             resolved.git.default_base.as_deref(),
-        )?
-        .plan(
+        )
+        .and_then(|planner| planner.plan(
             identifier,
             explicit_base,
             strategy,
             hook_policy,
-        )?;
+        )) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return report_sync_failure(
+                    &error.into_failure(planning_started.elapsed()),
+                    Vec::new(),
+                    json,
+                    false,
+                )
+            }
+        };
         let preview = cli::commands::sync::stateless::preview(plan);
         if json {
             println!("{}", serde_json::to_string_pretty(&preview)?);
@@ -1027,6 +1038,7 @@ fn run_sync(
                 &error.into_failure(planning_started.elapsed()),
                 emitter.stages(),
                 json,
+                true,
             )
         }
     };
@@ -1050,7 +1062,7 @@ fn run_sync(
             }
             Ok(())
         }
-        Err(failure) => report_sync_failure(&failure, emitter.stages(), json),
+        Err(failure) => report_sync_failure(&failure, emitter.stages(), json, true),
     }
 }
 
@@ -1149,25 +1161,28 @@ fn report_sync_failure(
     failure: &cli::commands::sync::stateless::SyncFailure,
     stages: Vec<SyncStageOutput>,
     json: bool,
+    record_diagnostics: bool,
 ) -> anyhow::Result<()> {
     use cli::commands::sync::stateless::SyncErrorClass;
 
-    logging::record(logging::DiagnosticEvent::error(
-        logging::Operation::Sync,
-        sync_diagnostic_stage(failure.stage),
-        failure.elapsed,
-        match failure.class {
-            SyncErrorClass::InvalidTarget => logging::DiagnosticError::NotFound,
-            SyncErrorClass::InvalidBase
-            | SyncErrorClass::Dirty
-            | SyncErrorClass::Detached
-            | SyncErrorClass::OperationInProgress
-            | SyncErrorClass::PreconditionsChanged
-            | SyncErrorClass::Conflict => logging::DiagnosticError::InvalidInput,
-            SyncErrorClass::Git | SyncErrorClass::Rollback => logging::DiagnosticError::Git,
-            SyncErrorClass::Hook | SyncErrorClass::HookTimeout => logging::DiagnosticError::Hook,
-        },
-    ));
+    if record_diagnostics {
+        logging::record(logging::DiagnosticEvent::error(
+            logging::Operation::Sync,
+            sync_diagnostic_stage(failure.stage),
+            failure.elapsed,
+            match failure.class {
+                SyncErrorClass::InvalidTarget => logging::DiagnosticError::NotFound,
+                SyncErrorClass::InvalidBase
+                | SyncErrorClass::Dirty
+                | SyncErrorClass::Detached
+                | SyncErrorClass::OperationInProgress
+                | SyncErrorClass::PreconditionsChanged
+                | SyncErrorClass::Conflict => logging::DiagnosticError::InvalidInput,
+                SyncErrorClass::Git | SyncErrorClass::Rollback => logging::DiagnosticError::Git,
+                SyncErrorClass::Hook | SyncErrorClass::HookTimeout => logging::DiagnosticError::Hook,
+            },
+        ));
+    }
     if json {
         println!(
             "{}",
