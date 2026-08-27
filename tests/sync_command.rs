@@ -249,7 +249,10 @@ fn dry_run_does_not_fetch_run_hooks_or_create_runtime_state() {
     let repository = root.path().join("repository");
     let remote = root.path().join("remote.git");
     git2::Repository::init_bare(&remote).unwrap();
-    git(&repository, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(
+        &repository,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
     git(&repository, &["push", "-u", "origin", "main"]);
     let bare = git2::Repository::open_bare(&remote).unwrap();
     let head = bare.refname_to_id("refs/heads/main").unwrap();
@@ -265,7 +268,10 @@ fn dry_run_does_not_fetch_run_hooks_or_create_runtime_state() {
     )
     .unwrap();
 
-    let refs_before = git(&repository, &["for-each-ref", "--format=%(refname) %(objectname)"]);
+    let refs_before = git(
+        &repository,
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
     let output = trench(
         &worktree,
         root.path(),
@@ -281,7 +287,10 @@ fn dry_run_does_not_fetch_run_hooks_or_create_runtime_state() {
 
     assert!(output.status.success());
     assert_eq!(
-        git(&repository, &["for-each-ref", "--format=%(refname) %(objectname)"]),
+        git(
+            &repository,
+            &["for-each-ref", "--format=%(refname) %(objectname)"]
+        ),
         refs_before
     );
     assert!(!marker.exists());
@@ -302,13 +311,7 @@ fn pre_sync_timeout_has_stable_exit_seven_and_structured_truth() {
     let output = trench(
         &worktree,
         root.path(),
-        &[
-            "sync",
-            "feature/topic",
-            "--strategy",
-            "merge",
-            "--json",
-        ],
+        &["sync", "feature/topic", "--strategy", "merge", "--json"],
     );
 
     assert_eq!(output.status.code(), Some(7));
@@ -350,4 +353,53 @@ fn merge_conflict_reports_no_mutation_and_leaves_no_operation_state() {
     assert!(!git_dir.join("MERGE_HEAD").exists());
     assert!(!git_dir.join("rebase-merge").exists());
     assert!(!git_dir.join("rebase-apply").exists());
+}
+
+#[test]
+fn typed_sync_diagnostics_never_retain_hook_output() {
+    let (root, worktree) = repository();
+    fs::write(
+        root.path().join("repository/.trench.toml"),
+        "[hooks.pre_sync]\nshell = \"printf 'top-secret\\n'\"\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_trench"))
+        .current_dir(&worktree)
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env("XDG_DATA_HOME", root.path().join("data"))
+        .env("XDG_STATE_HOME", root.path().join("state"))
+        .env("XDG_CACHE_HOME", root.path().join("cache"))
+        .env("TRENCH_LOG", "debug")
+        .args(["sync", "feature/topic", "--strategy", "rebase"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("top-secret"));
+    let diagnostics = fs::read_to_string(root.path().join("state/trench/trench.log")).unwrap();
+    assert!(diagnostics.contains("operation=sync"));
+    assert!(diagnostics.contains("stage=hook"));
+    assert!(!diagnostics.contains("top-secret"));
+}
+
+#[test]
+fn sync_help_exposes_only_the_single_target_contract() {
+    let root = tempfile::tempdir().unwrap();
+    let output = trench(root.path(), root.path(), &["sync", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for option in [
+        "<BRANCH>",
+        "--strategy",
+        "--base",
+        "--no-hooks",
+        "--dry-run",
+        "--json",
+    ] {
+        assert!(help.contains(option), "missing {option}: {help}");
+    }
+    assert!(
+        !help.contains("--all"),
+        "legacy --all leaked into help: {help}"
+    );
 }

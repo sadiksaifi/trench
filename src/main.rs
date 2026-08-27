@@ -285,14 +285,7 @@ fn main() -> anyhow::Result<()> {
             strategy,
             no_hooks,
             base,
-        }) => run_sync(
-            &branch,
-            strategy,
-            base.as_deref(),
-            json,
-            dry_run,
-            no_hooks,
-        ),
+        }) => run_sync(&branch, strategy, base.as_deref(), json, dry_run, no_hooks),
         Some(Commands::Log {
             branch,
             tail,
@@ -987,12 +980,8 @@ fn run_sync(
             &cwd,
             resolved.git.default_base.as_deref(),
         )
-        .and_then(|planner| planner.plan(
-            identifier,
-            explicit_base,
-            strategy,
-            hook_policy,
-        )) {
+        .and_then(|planner| planner.plan(identifier, explicit_base, strategy, hook_policy))
+        {
             Ok(plan) => plan,
             Err(error) => {
                 return report_sync_failure(
@@ -1133,7 +1122,9 @@ impl CliSyncEmitter {
                     .iter()
                     .filter_map(|event| match event {
                         cli::commands::sync::stateless::SyncEvent::StageFinished {
-                            stage, success, ..
+                            stage,
+                            success,
+                            ..
                         } => Some(SyncStageOutput {
                             stage: *stage,
                             success: *success,
@@ -1148,6 +1139,26 @@ impl CliSyncEmitter {
 
 impl cli::commands::sync::stateless::SyncEmitter for CliSyncEmitter {
     fn emit(&self, event: cli::commands::sync::stateless::SyncEvent) {
+        match &event {
+            cli::commands::sync::stateless::SyncEvent::StageFinished {
+                stage,
+                success: true,
+                elapsed,
+            } => logging::record(logging::DiagnosticEvent::debug(
+                logging::Operation::Sync,
+                sync_diagnostic_stage(*stage),
+                *elapsed,
+            )),
+            cli::commands::sync::stateless::SyncEvent::Warning { stage, .. } => {
+                logging::record(logging::DiagnosticEvent::warning(
+                    logging::Operation::Sync,
+                    sync_diagnostic_stage(*stage),
+                    std::time::Duration::ZERO,
+                    logging::DiagnosticError::Git,
+                ));
+            }
+            _ => {}
+        }
         if let cli::commands::sync::stateless::SyncEvent::HookOutput { line, .. } = &event {
             eprintln!("{line}");
         }
@@ -1179,7 +1190,9 @@ fn report_sync_failure(
                 | SyncErrorClass::PreconditionsChanged
                 | SyncErrorClass::Conflict => logging::DiagnosticError::InvalidInput,
                 SyncErrorClass::Git | SyncErrorClass::Rollback => logging::DiagnosticError::Git,
-                SyncErrorClass::Hook | SyncErrorClass::HookTimeout => logging::DiagnosticError::Hook,
+                SyncErrorClass::Hook | SyncErrorClass::HookTimeout => {
+                    logging::DiagnosticError::Hook
+                }
             },
         ));
     }
@@ -1215,9 +1228,7 @@ fn report_sync_failure(
     .exit()
 }
 
-fn sync_diagnostic_stage(
-    stage: cli::commands::sync::stateless::SyncStage,
-) -> logging::Stage {
+fn sync_diagnostic_stage(stage: cli::commands::sync::stateless::SyncStage) -> logging::Stage {
     match stage {
         cli::commands::sync::stateless::SyncStage::Fetch => logging::Stage::Resolve,
         cli::commands::sync::stateless::SyncStage::Validate => logging::Stage::Validate,
@@ -2118,7 +2129,10 @@ mod tests {
     fn sync_subcommand_requires_strategy() {
         let error = Cli::try_parse_from(["trench", "sync", "foo"])
             .expect_err("sync without --strategy must fail");
-        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]
@@ -2163,15 +2177,9 @@ mod tests {
 
     #[test]
     fn sync_subcommand_rejects_all() {
-        let error = Cli::try_parse_from([
-            "trench",
-            "sync",
-            "topic",
-            "--all",
-            "--strategy",
-            "rebase",
-        ])
-        .expect_err("sync --all must be rejected");
+        let error =
+            Cli::try_parse_from(["trench", "sync", "topic", "--all", "--strategy", "rebase"])
+                .expect_err("sync --all must be rejected");
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
