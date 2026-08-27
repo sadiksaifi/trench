@@ -828,18 +828,45 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
         theme,
     )];
     for stage in modal.stages() {
-        let marker = if modal.current_stage() == Some(stage.stage) && modal.spinner_visible() {
-            flux_frame(modal.spinner_tick()).to_string()
-        } else if stage.success == Some(true) {
-            "✓".to_string()
-        } else if stage.success == Some(false) {
-            "×".to_string()
-        } else {
-            "·".to_string()
-        };
-        lines.push(Line::from(format!(
-            "{marker} {}",
-            operation_stage_label(modal.operation(), stage.stage)
+        let (marker, style) =
+            if modal.current_stage() == Some(stage.stage) && modal.spinner_visible() {
+                (
+                    flux_frame(modal.spinner_tick()).to_string(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if stage.success == Some(true) {
+                (
+                    "✓".to_string(),
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if stage.success == Some(false) {
+                (
+                    "×".to_string(),
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("·".to_string(), Style::default().fg(theme.fg_muted))
+            };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{marker} {}",
+                operation_stage_label(modal.operation(), stage.stage)
+            ),
+            style,
+        )));
+    }
+    for warning in modal.warnings() {
+        lines.push(Line::from(Span::styled(
+            format!("Warning: {warning}"),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
         )));
     }
     let hook_height = usize::from(inner.height.saturating_sub(lines.len() as u16 + 3));
@@ -861,9 +888,14 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
     } = modal.status()
     {
         lines.push(Line::from(""));
-        lines.push(Line::from(format!(
-            "Failed at {}: {message}",
-            operation_stage_label(modal.operation(), *stage)
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Error: Failed at {}: {message}",
+                operation_stage_label(modal.operation(), *stage)
+            ),
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(format!(
             "Mutation: {}",
@@ -880,7 +912,7 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
         inner,
     );
     let items = match modal.status() {
@@ -2527,6 +2559,50 @@ mod tests {
         let help = text(&render_buffer(&mut state, 100, 24, "ops"));
         assert!(help.contains("Help · Operation"), "{help}");
         assert!(help.contains("scroll output"), "{help}");
+    }
+
+    #[test]
+    fn operation_modal_styles_success_failure_and_warning_states_semantically() {
+        use std::time::Duration;
+
+        use crate::{
+            operation::{OperationEvent, OperationKind, OperationStage},
+            tui::operation_modal::OperationModal,
+        };
+
+        let mut modal = OperationModal::new(OperationKind::Create);
+        modal.apply(OperationEvent::StageStarted {
+            stage: OperationStage::Revalidate,
+        });
+        modal.apply(OperationEvent::StageFinished {
+            stage: OperationStage::Revalidate,
+            duration: Duration::from_millis(10),
+            success: true,
+        });
+        modal.apply(OperationEvent::StageStarted {
+            stage: OperationStage::PreHook,
+        });
+        modal.apply(OperationEvent::StageFinished {
+            stage: OperationStage::PreHook,
+            duration: Duration::from_millis(10),
+            success: false,
+        });
+        modal.apply(OperationEvent::Warning {
+            stage: OperationStage::PostHook,
+            message: "cache cleanup failed".to_string(),
+        });
+        let mut state = sample_state();
+        state.operation_modal = Some(modal);
+        let theme = crate::tui::theme::from_name("ops");
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let success = find_text(&buffer, "✓ Revalidate");
+        let failure = find_text(&buffer, "× Pre-create hook");
+        let warning = find_text(&buffer, "Warning: cache cleanup failed");
+
+        assert_eq!(buffer.cell(success).unwrap().fg, theme.success);
+        assert_eq!(buffer.cell(failure).unwrap().fg, theme.error);
+        assert_eq!(buffer.cell(warning).unwrap().fg, theme.warning);
     }
 
     #[test]
