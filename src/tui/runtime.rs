@@ -1290,11 +1290,7 @@ mod tests {
                 KeyModifiers::NONE,
                 LineEdit::PreviousCharacter,
             ),
-            (
-                KeyCode::Right,
-                KeyModifiers::NONE,
-                LineEdit::NextCharacter,
-            ),
+            (KeyCode::Right, KeyModifiers::NONE, LineEdit::NextCharacter),
             (KeyCode::Home, KeyModifiers::NONE, LineEdit::Start),
             (KeyCode::End, KeyModifiers::NONE, LineEdit::End),
             (

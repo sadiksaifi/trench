@@ -692,10 +692,7 @@ mod tests {
             let _ = reduce(&mut state, Event::Input(Key::Char(character)));
         }
         let _ = reduce(&mut state, Event::Input(Key::Edit(LineEdit::Start)));
-        let _ = reduce(
-            &mut state,
-            Event::Input(Key::Edit(LineEdit::NextCharacter)),
-        );
+        let _ = reduce(&mut state, Event::Input(Key::Edit(LineEdit::NextCharacter)));
         let _ = reduce(
             &mut state,
             Event::Input(Key::Edit(LineEdit::DeleteNextCharacter)),

@@ -458,10 +458,7 @@ fn render_search(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &T
     let value_width = usize::from(area.width.saturating_sub(2))
         .saturating_sub(3)
         .saturating_sub(result_width);
-    let mut content = vec![Span::styled(
-        "> ",
-        Style::default().fg(theme.accent),
-    )];
+    let mut content = vec![Span::styled("> ", Style::default().fg(theme.accent))];
     content.extend(input_value_spans(
         query.input(),
         "Type to filter worktrees",
@@ -484,8 +481,8 @@ fn render_search(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &T
         .style(theme.with_bg(Style::default(), theme.control_bg));
     frame.render_widget(
         Paragraph::new(Line::from(content))
-        .block(block)
-        .style(theme.with_bg(Style::default().fg(theme.fg), theme.control_bg)),
+            .block(block)
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.control_bg)),
         area,
     );
 }
@@ -664,10 +661,7 @@ fn render_text_input(
     theme: &Theme,
 ) {
     let value_width = usize::from(area.width.saturating_sub(2)).saturating_sub(3);
-    let mut content = vec![Span::styled(
-        "> ",
-        Style::default().fg(theme.accent),
-    )];
+    let mut content = vec![Span::styled("> ", Style::default().fg(theme.accent))];
     content.extend(input_value_spans(input, placeholder, value_width, theme));
     let content = Line::from(content);
     let block = Block::default()
