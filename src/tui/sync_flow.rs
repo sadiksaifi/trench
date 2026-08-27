@@ -3,6 +3,7 @@ use crate::{
     ref_catalog::RefSnapshot,
     tui::{
         app::{WorktreeId, WorktreeIdentity, WorktreeStatus},
+        line_input::{LineEdit, LineInput},
         ref_picker::{RefPicker, RefPickerEffect, RefPickerKey},
     },
 };
@@ -17,6 +18,7 @@ pub enum SyncMode {
 pub enum SyncKey {
     Character(char),
     Backspace,
+    Edit(LineEdit),
     Tab,
     Enter,
     Escape,
@@ -104,6 +106,10 @@ impl SyncDialog {
         self.base_picker.query()
     }
 
+    pub fn base_input(&self) -> &LineInput {
+        self.base_picker.query_input()
+    }
+
     pub fn base_selection(&self) -> usize {
         self.base_picker.selection()
     }
@@ -166,7 +172,11 @@ impl SyncDialog {
             }
             SyncKey::Enter => self.submission().map(SyncEffect::Submit),
             SyncKey::Escape => Some(SyncEffect::Close),
-            SyncKey::Character(_) | SyncKey::Backspace | SyncKey::Up | SyncKey::Down => None,
+            SyncKey::Character(_)
+            | SyncKey::Backspace
+            | SyncKey::Edit(_)
+            | SyncKey::Up
+            | SyncKey::Down => None,
         }
     }
 
@@ -178,6 +188,9 @@ impl SyncDialog {
             }
             SyncKey::Backspace => {
                 self.base_picker.handle_key(RefPickerKey::Backspace);
+            }
+            SyncKey::Edit(edit) => {
+                self.base_picker.handle_key(RefPickerKey::Edit(edit));
             }
             SyncKey::Up => {
                 self.base_picker.handle_key(RefPickerKey::Up);
@@ -195,7 +208,15 @@ impl SyncDialog {
                 }
             }
             SyncKey::Escape => self.mode = SyncMode::Form,
-            SyncKey::Tab | SyncKey::Left | SyncKey::Right => {}
+            SyncKey::Left => {
+                self.base_picker
+                    .handle_key(RefPickerKey::Edit(LineEdit::PreviousCharacter));
+            }
+            SyncKey::Right => {
+                self.base_picker
+                    .handle_key(RefPickerKey::Edit(LineEdit::NextCharacter));
+            }
+            SyncKey::Tab => {}
         }
         None
     }
@@ -326,6 +347,33 @@ mod tests {
                 base: "origin/topic/two".to_string(),
                 strategy: SyncStrategy::Merge,
             }))
+        );
+    }
+
+    #[test]
+    fn base_query_supports_mid_line_unicode_edits_without_changing_strategy() {
+        use crate::tui::line_input::LineEdit;
+
+        let target = identity(Some("feature/auth"), false);
+        let mut dialog = SyncDialog::new(&target, refs(), None);
+        dialog.handle_key(SyncKey::Tab);
+        for character in "r👨‍👩‍👧‍👦e".chars() {
+            dialog.handle_key(SyncKey::Character(character));
+        }
+
+        dialog.handle_key(SyncKey::Edit(LineEdit::Start));
+        dialog.handle_key(SyncKey::Edit(LineEdit::NextCharacter));
+        dialog.handle_key(SyncKey::Edit(LineEdit::DeleteNextCharacter));
+
+        assert_eq!(dialog.base_query(), "re");
+        assert_eq!(dialog.strategy(), SyncStrategy::Rebase);
+        assert_eq!(
+            dialog
+                .base_candidates()
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            ["release"]
         );
     }
 }

@@ -290,10 +290,8 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 if let Some(query) = state.search.as_mut() {
                     let changed = match key {
                         Key::Backspace => query.backspace(),
-                        Key::Char(character) => {
-                            query.insert(character);
-                            true
-                        }
+                        Key::Edit(edit) => query.edit(edit),
+                        Key::Char(character) => query.insert(character),
                         _ => false,
                     };
                     if changed {
@@ -662,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn search_mode_edits_query_and_reserves_actions_before_text_input() {
+    fn search_mode_edits_query_and_keeps_submit_and_close_keys() {
         let alpha = identity("/worktrees/alpha", "alpha");
         let beta = identity("/worktrees/beta", "beta");
         let mut state = AppState::new(vec![alpha, beta.clone()]);
@@ -674,12 +672,6 @@ mod tests {
         assert_eq!(state.search.as_ref().unwrap().as_str(), "b");
         assert_eq!(state.selected_visible().unwrap().id, beta.id);
 
-        assert_eq!(
-            reduce(&mut state, Event::Input(Key::Char('o'))),
-            vec![Effect::Open(beta.id.clone())]
-        );
-        assert_eq!(state.search.as_ref().unwrap().as_str(), "b");
-
         assert!(reduce(&mut state, Event::Input(Key::Backspace)).is_empty());
         assert_eq!(state.search.as_ref().unwrap().as_str(), "");
         assert_eq!(state.selected_visible().unwrap().id, beta.id);
@@ -690,7 +682,41 @@ mod tests {
     }
 
     #[test]
-    fn launcher_actions_dispatch_only_the_visible_filtered_worktree() {
+    fn launcher_search_supports_mid_line_unicode_edits() {
+        use crate::tui::line_input::LineEdit;
+
+        let mut state = AppState::new(vec![identity("/worktrees/alpha", "alpha")]);
+        let _ = reduce(&mut state, Event::Input(Key::Char('/')));
+
+        for character in "a👨‍👩‍👧‍👦界".chars() {
+            let _ = reduce(&mut state, Event::Input(Key::Char(character)));
+        }
+        let _ = reduce(&mut state, Event::Input(Key::Edit(LineEdit::Start)));
+        let _ = reduce(&mut state, Event::Input(Key::Edit(LineEdit::NextCharacter)));
+        let _ = reduce(
+            &mut state,
+            Event::Input(Key::Edit(LineEdit::DeleteNextCharacter)),
+        );
+        let _ = reduce(&mut state, Event::Input(Key::Char('b')));
+
+        assert_eq!(state.search.as_ref().unwrap().as_str(), "ab界");
+    }
+
+    #[test]
+    fn focused_launcher_search_accepts_printable_cockpit_shortcuts_as_text() {
+        let mut state = AppState::new(vec![identity("/worktrees/alpha", "alpha")]);
+        assert!(reduce(&mut state, Event::Input(Key::Char('/'))).is_empty());
+
+        for character in "osdjk?".chars() {
+            assert!(reduce(&mut state, Event::Input(Key::Char(character))).is_empty());
+        }
+
+        assert_eq!(state.search.as_ref().unwrap().as_str(), "osdjk?");
+        assert!(!state.help_open);
+    }
+
+    #[test]
+    fn launcher_submit_dispatches_only_the_visible_filtered_worktree() {
         let alpha = identity("/worktrees/alpha", "alpha");
         let beta = identity("/worktrees/beta", "beta");
         let mut state = AppState::new(vec![alpha, beta.clone()]);
@@ -700,15 +726,11 @@ mod tests {
         let _ = reduce(&mut state, Event::Input(Key::Char('/')));
         let _ = reduce(&mut state, Event::Input(Key::Char('b')));
 
-        for (key, expected) in [
-            (Key::Enter, Effect::Switch(beta.id.clone())),
-            (Key::Char('o'), Effect::Open(beta.id.clone())),
-            (Key::Char('s'), Effect::OpenSync(beta.id.clone())),
-            (Key::Char('d'), Effect::OpenRemove(beta.id.clone())),
-        ] {
-            assert_eq!(reduce(&mut state, Event::Input(key)), vec![expected]);
-            assert_eq!(state.search.as_ref().unwrap().as_str(), "b");
-        }
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Enter)),
+            vec![Effect::Switch(beta.id.clone())]
+        );
+        assert_eq!(state.search.as_ref().unwrap().as_str(), "b");
     }
 
     #[test]
@@ -747,12 +769,10 @@ mod tests {
         );
         assert!(state.selected_visible().is_none());
 
-        for key in [Key::Enter, Key::Char('o'), Key::Char('s'), Key::Char('d')] {
-            assert!(matches!(
-                reduce(&mut state, Event::Input(key)).as_slice(),
-                [Effect::Unavailable { reason, .. }] if reason == "No worktree selected"
-            ));
-        }
+        assert!(matches!(
+            reduce(&mut state, Event::Input(Key::Enter)).as_slice(),
+            [Effect::Unavailable { reason, .. }] if reason == "No worktree selected"
+        ));
     }
 
     #[test]
@@ -773,6 +793,7 @@ mod tests {
             let _ = reduce(&mut state, Event::Input(Key::Char(character)));
         }
         assert_eq!(state.selected, Some(detached.id.clone()));
+        let _ = reduce(&mut state, Event::Input(Key::Escape));
         assert_eq!(
             reduce(&mut state, Event::Input(Key::Char('s'))),
             vec![Effect::Unavailable {
@@ -785,12 +806,12 @@ mod tests {
             vec![Effect::OpenRemove(detached.id)]
         );
 
-        let _ = reduce(&mut state, Event::Input(Key::Escape));
         let _ = reduce(&mut state, Event::Input(Key::Char('/')));
         for character in "mai".chars() {
             let _ = reduce(&mut state, Event::Input(Key::Char(character)));
         }
         assert_eq!(state.selected, Some(main.id));
+        let _ = reduce(&mut state, Event::Input(Key::Escape));
         assert_eq!(
             reduce(&mut state, Event::Input(Key::Char('d'))),
             vec![Effect::Unavailable {

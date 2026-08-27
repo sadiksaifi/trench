@@ -2,6 +2,7 @@ pub mod app;
 pub mod cockpit;
 pub mod create_flow;
 pub mod keymap;
+pub mod line_input;
 pub mod operation_modal;
 pub mod operation_runtime;
 pub mod ref_picker;

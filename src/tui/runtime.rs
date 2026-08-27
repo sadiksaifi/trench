@@ -4,7 +4,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
 
 use crate::{
     cli::commands::sync::stateless::{HookPolicy as SyncHookPolicy, SyncPlanner},
@@ -20,6 +22,7 @@ use crate::{
             OriginRefresh,
         },
         keymap::Key,
+        line_input::LineEdit,
         operation_modal::{ModalEffect, ModalKey},
         operation_runtime::{
             OperationRuntime, OperationRuntimeEffect, SystemRuntimeClock, ThreadOperationLauncher,
@@ -1006,13 +1009,41 @@ fn apply_refresh_publication(state: &mut AppState, publication: RefreshPublicati
 }
 
 fn translate_key(key: KeyEvent) -> Option<Key> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Some(Key::Down),
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => return Some(Key::Up),
+        _ => {}
+    }
+    if let Some(edit) = translate_line_edit(key) {
+        return Some(Key::Edit(edit));
+    }
+
     match key.code {
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Esc => Some(Key::Escape),
         KeyCode::Up => Some(Key::Up),
         KeyCode::Down => Some(Key::Down),
-        KeyCode::Backspace => Some(Key::Backspace),
-        KeyCode::Char(character) => Some(Key::Char(character)),
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Key::Char(character))
+        }
+        _ => None,
+    }
+}
+
+fn translate_line_edit(key: KeyEvent) -> Option<LineEdit> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('a'), KeyModifiers::CONTROL) => Some(LineEdit::Start),
+        (KeyCode::Char('e'), KeyModifiers::CONTROL) => Some(LineEdit::End),
+        (KeyCode::Char('b'), KeyModifiers::CONTROL) => Some(LineEdit::PreviousCharacter),
+        (KeyCode::Char('f'), KeyModifiers::CONTROL) => Some(LineEdit::NextCharacter),
+        (KeyCode::Char('h'), KeyModifiers::CONTROL) => Some(LineEdit::DeletePreviousCharacter),
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(LineEdit::DeleteNextCharacter),
+        (KeyCode::Left, KeyModifiers::NONE) => Some(LineEdit::PreviousCharacter),
+        (KeyCode::Right, KeyModifiers::NONE) => Some(LineEdit::NextCharacter),
+        (KeyCode::Home, KeyModifiers::NONE) => Some(LineEdit::Start),
+        (KeyCode::End, KeyModifiers::NONE) => Some(LineEdit::End),
+        (KeyCode::Backspace, KeyModifiers::NONE) => Some(LineEdit::DeletePreviousCharacter),
+        (KeyCode::Delete, KeyModifiers::NONE) => Some(LineEdit::DeleteNextCharacter),
         _ => None,
     }
 }
@@ -1022,29 +1053,49 @@ fn visible_surface_key(state: &AppState, key: KeyEvent) -> Option<KeyEvent> {
 }
 
 fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Some(CreateKey::Down),
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => return Some(CreateKey::Up),
+        _ => {}
+    }
+    if let Some(edit) = translate_line_edit(key) {
+        return Some(CreateKey::Edit(edit));
+    }
+
     match key.code {
         KeyCode::Enter => Some(CreateKey::Enter),
         KeyCode::Esc => Some(CreateKey::Escape),
         KeyCode::Up => Some(CreateKey::Up),
         KeyCode::Down => Some(CreateKey::Down),
         KeyCode::Tab => Some(CreateKey::Tab),
-        KeyCode::Backspace => Some(CreateKey::Backspace),
-        KeyCode::Char(character) => Some(CreateKey::Character(character)),
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(CreateKey::Character(character))
+        }
         _ => None,
     }
 }
 
 fn translate_sync_key(key: KeyEvent) -> Option<SyncKey> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Some(SyncKey::Down),
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => return Some(SyncKey::Up),
+        (KeyCode::Left, KeyModifiers::NONE) => return Some(SyncKey::Left),
+        (KeyCode::Right, KeyModifiers::NONE) => return Some(SyncKey::Right),
+        _ => {}
+    }
+    if let Some(edit) = translate_line_edit(key) {
+        return Some(SyncKey::Edit(edit));
+    }
+
     match key.code {
         KeyCode::Enter => Some(SyncKey::Enter),
         KeyCode::Esc => Some(SyncKey::Escape),
         KeyCode::Up => Some(SyncKey::Up),
         KeyCode::Down => Some(SyncKey::Down),
-        KeyCode::Left => Some(SyncKey::Left),
-        KeyCode::Right => Some(SyncKey::Right),
         KeyCode::Tab => Some(SyncKey::Tab),
-        KeyCode::Backspace => Some(SyncKey::Backspace),
-        KeyCode::Char(character) => Some(SyncKey::Character(character)),
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(SyncKey::Character(character))
+        }
         _ => None,
     }
 }
@@ -1202,7 +1253,7 @@ mod tests {
                 KeyCode::Backspace,
                 crossterm::event::KeyModifiers::NONE,
             )),
-            Some(Key::Backspace)
+            Some(Key::Edit(LineEdit::DeletePreviousCharacter))
         );
         assert_eq!(
             translate_key(KeyEvent::new(
@@ -1214,6 +1265,88 @@ mod tests {
     }
 
     #[test]
+    fn terminal_keys_preserve_standard_single_line_editing_commands() {
+        use crossterm::event::KeyModifiers;
+
+        let cases = [
+            (KeyCode::Char('a'), KeyModifiers::CONTROL, LineEdit::Start),
+            (KeyCode::Char('e'), KeyModifiers::CONTROL, LineEdit::End),
+            (
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+                LineEdit::PreviousCharacter,
+            ),
+            (
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL,
+                LineEdit::NextCharacter,
+            ),
+            (
+                KeyCode::Char('h'),
+                KeyModifiers::CONTROL,
+                LineEdit::DeletePreviousCharacter,
+            ),
+            (
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                LineEdit::DeleteNextCharacter,
+            ),
+            (
+                KeyCode::Left,
+                KeyModifiers::NONE,
+                LineEdit::PreviousCharacter,
+            ),
+            (KeyCode::Right, KeyModifiers::NONE, LineEdit::NextCharacter),
+            (KeyCode::Home, KeyModifiers::NONE, LineEdit::Start),
+            (KeyCode::End, KeyModifiers::NONE, LineEdit::End),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+                LineEdit::DeletePreviousCharacter,
+            ),
+            (
+                KeyCode::Delete,
+                KeyModifiers::NONE,
+                LineEdit::DeleteNextCharacter,
+            ),
+        ];
+
+        for (code, modifiers, expected) in cases {
+            assert_eq!(
+                translate_key(KeyEvent::new(code, modifiers)),
+                Some(Key::Edit(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognized_control_characters_do_not_become_text_or_cockpit_actions() {
+        for character in ['k', 'o', 'q', 's', 'u', 'x'] {
+            let key = KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL);
+            assert_eq!(
+                translate_key(key),
+                None,
+                "Control-{character} must not lose its modifier",
+            );
+            assert_eq!(translate_create_key(key), None);
+            assert_eq!(translate_sync_key(key), None);
+        }
+    }
+
+    #[test]
+    fn control_navigation_maps_to_candidates_on_every_editable_surface() {
+        let next = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        let previous = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+
+        assert_eq!(translate_key(next), Some(Key::Down));
+        assert_eq!(translate_key(previous), Some(Key::Up));
+        assert_eq!(translate_create_key(next), Some(CreateKey::Down));
+        assert_eq!(translate_create_key(previous), Some(CreateKey::Up));
+        assert_eq!(translate_sync_key(next), Some(SyncKey::Down));
+        assert_eq!(translate_sync_key(previous), Some(SyncKey::Up));
+    }
+
+    #[test]
     fn terminal_keys_translate_to_create_form_vocabulary() {
         let modifiers = crossterm::event::KeyModifiers::NONE;
         assert_eq!(
@@ -1222,7 +1355,7 @@ mod tests {
         );
         assert_eq!(
             translate_create_key(KeyEvent::new(KeyCode::Backspace, modifiers)),
-            Some(CreateKey::Backspace)
+            Some(CreateKey::Edit(LineEdit::DeletePreviousCharacter))
         );
         assert_eq!(
             translate_create_key(KeyEvent::new(KeyCode::Char('x'), modifiers)),
@@ -2247,6 +2380,7 @@ mod tests {
         launcher.add("alpha");
         let beta = launcher.add("beta");
         launcher.search("bet");
+        let _ = app::reduce(&mut launcher.state, Event::Input(Key::Escape));
         for (key, expected) in [
             (Key::Enter, app::Effect::Switch(beta.id.clone())),
             (Key::Char('o'), app::Effect::Open(beta.id.clone())),

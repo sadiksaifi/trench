@@ -14,6 +14,7 @@ use crate::tui::{
     app::{unavailable_reason, AppState, Viewport, WorktreeIdentity, WorktreeStatus},
     create_flow::{CreateDialog, CreateMode},
     keymap::{self, Binding, Context},
+    line_input::LineInput,
     operation_modal::{ModalStatus, OperationModal},
     remove_flow::{RemoveDialog, RemoveMode},
     sync_flow::{SyncDialog, SyncMode},
@@ -292,7 +293,7 @@ fn render_sync_dialog(
                 frame,
                 search_input,
                 "Search",
-                dialog.base_query(),
+                dialog.base_input(),
                 "Type to filter bases",
                 theme,
             );
@@ -457,12 +458,17 @@ fn render_search(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &T
     let value_width = usize::from(area.width.saturating_sub(2))
         .saturating_sub(3)
         .saturating_sub(result_width);
-    let value = input_value_span(
-        query.as_str(),
+    let mut content = vec![Span::styled("> ", Style::default().fg(theme.accent))];
+    content.extend(input_value_spans(
+        query.input(),
         "Type to filter worktrees",
         value_width,
         theme,
-    );
+    ));
+    content.push(Span::styled(
+        format!("  {result_label}"),
+        Style::default().fg(theme.fg_muted),
+    ));
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_active))
@@ -474,17 +480,9 @@ fn render_search(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &T
         )
         .style(theme.with_bg(Style::default(), theme.control_bg));
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().fg(theme.accent)),
-            value,
-            Span::styled("▌", Style::default().fg(theme.accent)),
-            Span::styled(
-                format!("  {result_label}"),
-                Style::default().fg(theme.fg_muted),
-            ),
-        ]))
-        .block(block)
-        .style(theme.with_bg(Style::default().fg(theme.fg), theme.control_bg)),
+        Paragraph::new(Line::from(content))
+            .block(block)
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.control_bg)),
         area,
     );
 }
@@ -523,7 +521,7 @@ fn render_create_dialog(
                 frame,
                 branch_input,
                 "Branch",
-                dialog.branch(),
+                dialog.branch_input(),
                 "Type a branch name",
                 theme,
             );
@@ -601,7 +599,7 @@ fn render_create_dialog(
                 frame,
                 search_input,
                 "Search",
-                dialog.base_query(),
+                dialog.base_input(),
                 "Type to filter bases",
                 theme,
             );
@@ -658,16 +656,14 @@ fn render_text_input(
     frame: &mut Frame,
     area: Rect,
     label: &str,
-    value: &str,
+    input: &LineInput,
     placeholder: &str,
     theme: &Theme,
 ) {
     let value_width = usize::from(area.width.saturating_sub(2)).saturating_sub(3);
-    let content = Line::from(vec![
-        Span::styled("> ", Style::default().fg(theme.accent)),
-        input_value_span(value, placeholder, value_width, theme),
-        Span::styled("▌", Style::default().fg(theme.accent)),
-    ]);
+    let mut content = vec![Span::styled("> ", Style::default().fg(theme.accent))];
+    content.extend(input_value_spans(input, placeholder, value_width, theme));
+    let content = Line::from(content);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_active))
@@ -686,13 +682,27 @@ fn render_text_input(
     );
 }
 
-fn input_value_span(value: &str, placeholder: &str, width: usize, theme: &Theme) -> Span<'static> {
-    let (source, color) = if value.is_empty() {
-        (placeholder, theme.fg_muted)
-    } else {
-        (value, theme.fg)
-    };
-    Span::styled(tail_ellipsize(source, width), Style::default().fg(color))
+fn input_value_spans(
+    input: &LineInput,
+    placeholder: &str,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    if input.value().is_empty() {
+        return vec![
+            Span::styled("▌", Style::default().fg(theme.accent)),
+            Span::styled(
+                tail_ellipsize(placeholder, width),
+                Style::default().fg(theme.fg_muted),
+            ),
+        ];
+    }
+    let window = input.window(width);
+    vec![
+        Span::styled(window.before_cursor, Style::default().fg(theme.fg)),
+        Span::styled("▌", Style::default().fg(theme.accent)),
+        Span::styled(window.after_cursor, Style::default().fg(theme.fg)),
+    ]
 }
 
 fn tail_ellipsize(value: &str, width: usize) -> String {
@@ -2007,7 +2017,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_search_keeps_the_filtered_cockpit_and_contextual_help_visible() {
+    fn launcher_search_keeps_the_filtered_cockpit_and_input_keybar_visible() {
         let mut state = sample_state();
         let main_id = state.identities[1].id.clone();
         state.statuses.insert(main_id, WorktreeStatus::default());
@@ -2028,13 +2038,7 @@ mod tests {
         assert!(!output.contains("feature-auth"), "{output}");
         assert!(footer.contains("Esc clear"), "{footer}");
         assert!(!footer.contains("c create"), "{footer}");
-        assert!(footer.ends_with("? help"), "{footer}");
-
-        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('?')));
-        let help = text(&render_buffer(&mut state, 120, 24, "ops"));
-        assert!(help.contains("Help · Search"), "{help}");
-        assert!(!help.contains("c       create"), "{help}");
-        assert!(!help.contains("r       refresh"), "{help}");
+        assert!(!footer.contains("? help"), "{footer}");
     }
 
     #[test]
@@ -2048,7 +2052,7 @@ mod tests {
         let placeholder = find_text(&buffer, "Type to filter worktrees");
 
         assert!(output.contains("Search · typing"), "{output}");
-        assert!(output.contains("> Type to filter worktrees▌"), "{output}");
+        assert!(output.contains("> ▌Type to filter worktrees"), "{output}");
         assert!(output.contains("2 results"), "{output}");
         assert_eq!(buffer.cell(placeholder).unwrap().bg, theme.control_bg);
         assert!(buffer
@@ -2090,6 +2094,35 @@ mod tests {
         let search = text(&render_buffer(&mut state, 60, 16, "ops"));
         assert!(search.contains("xxxxxxxx▌"), "{search}");
         assert!(search.contains("> …"), "{search}");
+    }
+
+    #[test]
+    fn long_input_scrolls_to_keep_a_moved_cursor_visible() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::{
+                create_flow::{CreateDialog, CreateKey},
+                line_input::LineEdit,
+            },
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/a-very-long-branch-name-that-keeps-going-past-the-control");
+        dialog.handle_key(CreateKey::Edit(LineEdit::Start));
+        state.create_dialog = Some(dialog);
+
+        let output = text(&render_buffer(&mut state, 60, 16, "ops"));
+
+        assert!(output.contains("> ▌feature/a"), "{output}");
+        assert!(!output.contains("past-the-control▌"), "{output}");
     }
 
     #[test]
@@ -2152,7 +2185,7 @@ mod tests {
         assert!(!footer.contains("Enter switch"), "{footer}");
         assert!(!footer.contains("o open"), "{footer}");
         assert!(footer.contains("Esc clear"), "{footer}");
-        assert!(footer.ends_with("? help"), "{footer}");
+        assert!(!footer.contains("? help"), "{footer}");
     }
 
     #[test]
@@ -2386,7 +2419,7 @@ mod tests {
             text(&picker)
         );
         assert!(
-            text(&picker).contains("> Type to filter bases▌"),
+            text(&picker).contains("> ▌Type to filter bases"),
             "{}",
             text(&picker)
         );

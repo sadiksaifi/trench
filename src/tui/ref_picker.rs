@@ -1,11 +1,14 @@
-use crate::ref_catalog::{RefCandidate, RefSnapshot};
+use crate::{
+    ref_catalog::{RefCandidate, RefSnapshot},
+    tui::line_input::{LineEdit, LineInput},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefPicker {
     refs: RefSnapshot,
     configured_base: Option<String>,
     selected: Option<String>,
-    query: String,
+    query: LineInput,
     selection: usize,
     origin_refresh: OriginRefresh,
 }
@@ -14,6 +17,7 @@ pub struct RefPicker {
 pub enum RefPickerKey {
     Character(char),
     Backspace,
+    Edit(LineEdit),
     Up,
     Down,
     Enter,
@@ -38,7 +42,7 @@ impl RefPicker {
             refs,
             configured_base: configured_base.map(ToOwned::to_owned),
             selected,
-            query: String::new(),
+            query: LineInput::default(),
             selection: 0,
             origin_refresh: OriginRefresh::Idle,
         }
@@ -52,16 +56,20 @@ impl RefPicker {
         self.refs
             .candidates()
             .into_iter()
-            .filter(|candidate| fuzzy_matches(&candidate.name, &self.query))
+            .filter(|candidate| fuzzy_matches(&candidate.name, self.query.value()))
             .collect()
     }
 
     pub fn open(&mut self) {
-        self.query.clear();
+        self.query = LineInput::default();
         self.selection = 0;
     }
 
     pub fn query(&self) -> &str {
+        self.query.value()
+    }
+
+    pub fn query_input(&self) -> &LineInput {
         &self.query
     }
 
@@ -100,13 +108,15 @@ impl RefPicker {
     pub fn handle_key(&mut self, key: RefPickerKey) -> Option<RefPickerEffect> {
         match key {
             RefPickerKey::Character(character) => {
-                self.query.push(character);
-                self.selection = 0;
+                self.edit_query(LineEdit::Insert(character));
                 None
             }
             RefPickerKey::Backspace => {
-                self.query.pop();
-                self.selection = 0;
+                self.edit_query(LineEdit::DeletePreviousCharacter);
+                None
+            }
+            RefPickerKey::Edit(edit) => {
+                self.edit_query(edit);
                 None
             }
             RefPickerKey::Up => {
@@ -128,6 +138,14 @@ impl RefPicker {
                 self.selected = Some(selected.clone());
                 Some(RefPickerEffect::Selected(selected))
             }
+        }
+    }
+
+    fn edit_query(&mut self, edit: LineEdit) {
+        let before = self.query.value().to_string();
+        self.query.edit(edit);
+        if self.query.value() != before {
+            self.selection = 0;
         }
     }
 }
@@ -199,5 +217,29 @@ mod tests {
             Some(RefPickerEffect::Selected("release".to_string()))
         );
         assert_eq!(picker.selected(), Some("release"));
+    }
+
+    #[test]
+    fn picker_query_supports_mid_line_unicode_edits() {
+        use crate::tui::line_input::LineEdit;
+
+        let mut picker = RefPicker::new(refs(), None);
+        for character in "r👨‍👩‍👧‍👦e".chars() {
+            picker.handle_key(RefPickerKey::Character(character));
+        }
+
+        picker.handle_key(RefPickerKey::Edit(LineEdit::Start));
+        picker.handle_key(RefPickerKey::Edit(LineEdit::NextCharacter));
+        picker.handle_key(RefPickerKey::Edit(LineEdit::DeleteNextCharacter));
+
+        assert_eq!(picker.query(), "re");
+        assert_eq!(
+            picker
+                .candidates()
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            ["release"]
+        );
     }
 }

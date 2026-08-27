@@ -5,6 +5,7 @@ use crate::{
     ref_catalog::{RefKind, RefSnapshot},
     tui::{
         app::WorktreeId,
+        line_input::{LineEdit, LineInput},
         ref_picker::{RefPicker, RefPickerEffect, RefPickerKey},
     },
 };
@@ -70,6 +71,7 @@ pub enum CreateMode {
 pub enum CreateKey {
     Character(char),
     Backspace,
+    Edit(LineEdit),
     Tab,
     Enter,
     Escape,
@@ -97,7 +99,7 @@ pub struct CreateDialog {
     worktree_root: PathBuf,
     refs: RefSnapshot,
     checked_out: Vec<CheckedOutBranch>,
-    branch: String,
+    branch: LineInput,
     branch_selection: usize,
     base_picker: RefPicker,
     mode: CreateMode,
@@ -133,7 +135,7 @@ impl CreateDialog {
             base_picker: RefPicker::new(refs.clone(), configured_base),
             refs,
             checked_out: checked_out.into_iter().collect(),
-            branch: String::new(),
+            branch: LineInput::default(),
             branch_selection: 0,
             mode: CreateMode::Form,
             validation_error: None,
@@ -141,13 +143,14 @@ impl CreateDialog {
     }
 
     pub fn set_branch(&mut self, branch: impl Into<String>) {
-        self.branch = branch.into();
+        let branch = branch.into();
+        self.branch = LineInput::from(branch.as_str());
         self.branch_selection = 0;
         self.validation_error = None;
     }
 
     pub fn preview(&self) -> Option<CreatePreview> {
-        let selection = self.branch.trim();
+        let selection = self.branch.value().trim();
         if selection.is_empty() {
             return None;
         }
@@ -178,7 +181,7 @@ impl CreateDialog {
     }
 
     pub fn branch_suggestions(&self) -> Vec<BranchSuggestion> {
-        let query = self.branch.trim();
+        let query = self.branch.value().trim();
         let mut suggestions = self
             .refs
             .candidates()
@@ -217,6 +220,10 @@ impl CreateDialog {
     }
 
     pub fn branch(&self) -> &str {
+        self.branch.value()
+    }
+
+    pub fn branch_input(&self) -> &LineInput {
         &self.branch
     }
 
@@ -226,6 +233,10 @@ impl CreateDialog {
 
     pub fn base_query(&self) -> &str {
         self.base_picker.query()
+    }
+
+    pub fn base_input(&self) -> &LineInput {
+        self.base_picker.query_input()
     }
 
     pub fn base_selection(&self) -> usize {
@@ -292,12 +303,17 @@ impl CreateDialog {
     fn handle_form_key(&mut self, key: CreateKey) -> Option<CreateEffect> {
         match key {
             CreateKey::Character(character) => {
-                self.branch.push(character);
+                self.branch.edit(LineEdit::Insert(character));
                 self.branch_selection = 0;
                 self.validation_error = None;
             }
             CreateKey::Backspace => {
-                self.branch.pop();
+                self.branch.edit(LineEdit::DeletePreviousCharacter);
+                self.branch_selection = 0;
+                self.validation_error = None;
+            }
+            CreateKey::Edit(edit) => {
+                self.branch.edit(edit);
                 self.branch_selection = 0;
                 self.validation_error = None;
             }
@@ -311,7 +327,7 @@ impl CreateDialog {
                     .get(self.branch_selection)
                     .map(|suggestion| suggestion.selection.clone())
                 {
-                    self.branch = selection;
+                    self.branch = LineInput::from(selection.as_str());
                 }
                 let preview = self.preview()?;
                 return match preview.kind {
@@ -351,6 +367,9 @@ impl CreateDialog {
             }
             CreateKey::Backspace => {
                 self.base_picker.handle_key(RefPickerKey::Backspace);
+            }
+            CreateKey::Edit(edit) => {
+                self.base_picker.handle_key(RefPickerKey::Edit(edit));
             }
             CreateKey::Up => {
                 self.base_picker.handle_key(RefPickerKey::Up);
@@ -530,6 +549,21 @@ mod tests {
                 from: Some("origin/main".to_string()),
             }))
         );
+    }
+
+    #[test]
+    fn branch_name_supports_mid_line_unicode_edits() {
+        use crate::tui::line_input::LineEdit;
+
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs(), []);
+        dialog.set_branch("a👨‍👩‍👧‍👦界");
+
+        dialog.handle_key(CreateKey::Edit(LineEdit::Start));
+        dialog.handle_key(CreateKey::Edit(LineEdit::NextCharacter));
+        dialog.handle_key(CreateKey::Edit(LineEdit::DeleteNextCharacter));
+        dialog.handle_key(CreateKey::Character('b'));
+
+        assert_eq!(dialog.branch(), "ab界");
     }
 
     #[test]
