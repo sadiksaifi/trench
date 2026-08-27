@@ -3,9 +3,35 @@ use crate::{
     ref_catalog::RefSnapshot,
     tui::{
         app::{WorktreeId, WorktreeIdentity, WorktreeStatus},
-        ref_picker::RefPicker,
+        ref_picker::{RefPicker, RefPickerEffect, RefPickerKey},
     },
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    Form,
+    BasePicker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncKey {
+    Character(char),
+    Backspace,
+    Tab,
+    Enter,
+    Escape,
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncEffect {
+    Close,
+    RefreshOrigin,
+    Submit(SyncSubmission),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncSubmission {
@@ -19,6 +45,7 @@ pub struct SyncDialog {
     target: WorktreeId,
     base_picker: RefPicker,
     strategy: SyncStrategy,
+    mode: SyncMode,
 }
 
 impl SyncDialog {
@@ -31,6 +58,7 @@ impl SyncDialog {
             target: target.id.clone(),
             base_picker: RefPicker::new(refs, configured_base),
             strategy: SyncStrategy::Rebase,
+            mode: SyncMode::Form,
         }
     }
 
@@ -46,12 +74,77 @@ impl SyncDialog {
         self.strategy = strategy;
     }
 
+    pub fn mode(&self) -> SyncMode {
+        self.mode
+    }
+
+    pub fn base_candidates(&self) -> Vec<crate::ref_catalog::RefCandidate> {
+        self.base_picker.candidates()
+    }
+
     pub fn submission(&self) -> Option<SyncSubmission> {
         Some(SyncSubmission {
             target: self.target.clone(),
             base: self.base()?.to_string(),
             strategy: self.strategy,
         })
+    }
+
+    pub fn handle_key(&mut self, key: SyncKey) -> Option<SyncEffect> {
+        match self.mode {
+            SyncMode::Form => self.handle_form_key(key),
+            SyncMode::BasePicker => self.handle_base_picker_key(key),
+        }
+    }
+
+    fn handle_form_key(&mut self, key: SyncKey) -> Option<SyncEffect> {
+        match key {
+            SyncKey::Tab => {
+                self.base_picker.open();
+                self.mode = SyncMode::BasePicker;
+                Some(SyncEffect::RefreshOrigin)
+            }
+            SyncKey::Left => {
+                self.strategy = SyncStrategy::Rebase;
+                None
+            }
+            SyncKey::Right => {
+                self.strategy = SyncStrategy::Merge;
+                None
+            }
+            SyncKey::Enter => self.submission().map(SyncEffect::Submit),
+            SyncKey::Escape => Some(SyncEffect::Close),
+            SyncKey::Character(_) | SyncKey::Backspace | SyncKey::Up | SyncKey::Down => None,
+        }
+    }
+
+    fn handle_base_picker_key(&mut self, key: SyncKey) -> Option<SyncEffect> {
+        match key {
+            SyncKey::Character(character) => {
+                self.base_picker
+                    .handle_key(RefPickerKey::Character(character));
+            }
+            SyncKey::Backspace => {
+                self.base_picker.handle_key(RefPickerKey::Backspace);
+            }
+            SyncKey::Up => {
+                self.base_picker.handle_key(RefPickerKey::Up);
+            }
+            SyncKey::Down => {
+                self.base_picker.handle_key(RefPickerKey::Down);
+            }
+            SyncKey::Enter => {
+                if matches!(
+                    self.base_picker.handle_key(RefPickerKey::Enter),
+                    Some(RefPickerEffect::Selected(_))
+                ) {
+                    self.mode = SyncMode::Form;
+                }
+            }
+            SyncKey::Escape => self.mode = SyncMode::Form,
+            SyncKey::Tab | SyncKey::Left | SyncKey::Right => {}
+        }
+        None
     }
 }
 
@@ -144,6 +237,42 @@ mod tests {
         assert_eq!(
             unavailable_reason(&identity(None, false), Some(&clean)),
             Some("Detached worktrees cannot be synced")
+        );
+    }
+
+    #[test]
+    fn keys_transform_into_the_picker_choose_remote_base_and_submit_merge() {
+        let target = identity(Some("feature/auth"), false);
+        let mut dialog = SyncDialog::new(&target, refs(), None);
+
+        assert_eq!(
+            dialog.handle_key(SyncKey::Tab),
+            Some(SyncEffect::RefreshOrigin)
+        );
+        assert_eq!(dialog.mode(), SyncMode::BasePicker);
+        for character in "ttwo".chars() {
+            assert_eq!(dialog.handle_key(SyncKey::Character(character)), None);
+        }
+        assert_eq!(
+            dialog
+                .base_candidates()
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            ["origin/topic/two"]
+        );
+        assert_eq!(dialog.handle_key(SyncKey::Enter), None);
+        assert_eq!(dialog.mode(), SyncMode::Form);
+        assert_eq!(dialog.base(), Some("origin/topic/two"));
+
+        assert_eq!(dialog.handle_key(SyncKey::Right), None);
+        assert_eq!(
+            dialog.handle_key(SyncKey::Enter),
+            Some(SyncEffect::Submit(SyncSubmission {
+                target: target.id,
+                base: "origin/topic/two".to_string(),
+                strategy: SyncStrategy::Merge,
+            }))
         );
     }
 }
