@@ -139,14 +139,8 @@ fn live_resolution_does_not_write_legacy_removal_events() {
         .collect();
 
     assert!(
-        event_types.contains(&"created"),
-        "should contain 'created' event, got: {:?}",
-        event_types
-    );
-    assert!(
-        !event_types.contains(&"removed"),
-        "live worktree resolution must not write legacy removal events, got: {:?}",
-        event_types
+        event_types.is_empty(),
+        "stateless create/remove must not write legacy events, got: {event_types:?}"
     );
 
     // Each event should have a worktree (string or null for repo-level events)
@@ -168,7 +162,7 @@ fn live_resolution_does_not_write_legacy_removal_events() {
 }
 
 #[test]
-fn log_table_output_after_create() {
+fn log_after_create_remains_empty() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -196,19 +190,9 @@ fn log_table_output_after_create() {
 
     let stdout = String::from_utf8_lossy(&log_output.stdout);
 
-    // Should have table headers
-    assert!(stdout.contains("Timestamp"), "should have Timestamp header");
-    assert!(stdout.contains("Type"), "should have Type header");
-    assert!(stdout.contains("Worktree"), "should have Worktree header");
-
-    // Should show the created event
     assert!(
-        stdout.contains("created"),
-        "should show created event, got: {stdout}"
-    );
-    assert!(
-        stdout.contains("log-table-test"),
-        "should show worktree name, got: {stdout}"
+        stdout.contains("No events"),
+        "stateless create must not add history, got: {stdout}"
     );
 }
 
@@ -289,7 +273,7 @@ fn log_scoped_to_worktree_filters_events() {
 }
 
 #[test]
-fn log_tail_limits_output() {
+fn log_tail_after_stateless_operations_is_empty() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -323,11 +307,11 @@ fn log_tail_limits_output() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     let arr = parsed.as_array().expect("array");
-    assert_eq!(arr.len(), 1, "tail 1 should return exactly 1 event");
+    assert!(arr.is_empty(), "stateless operations must not add history");
 }
 
 #[test]
-fn log_scoped_and_tail_combined() {
+fn log_scoped_to_removed_stateless_worktree_is_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -368,24 +352,16 @@ fn log_scoped_and_tail_combined() {
         .output()
         .expect("trench log combo-a --tail 1 --json");
 
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
-    let arr = parsed.as_array().expect("array");
-    assert_eq!(arr.len(), 1, "combined filter should return 1 event");
     assert_eq!(
-        arr[0]["worktree"].as_str().unwrap_or(""),
-        "combo-a",
-        "event should be for combo-a"
+        exit_code(output.status),
+        2,
+        "removed stateless worktree has no history identity, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
 #[test]
-fn log_output_replays_hook_stdout_stderr() {
+fn hook_output_is_streamed_to_create_and_not_replayable() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -411,6 +387,9 @@ timeout_secs = 30
         "trench create should succeed, stderr: {}",
         String::from_utf8_lossy(&create.stderr)
     );
+    let create_stderr = String::from_utf8_lossy(&create.stderr);
+    assert!(create_stderr.contains("hook_run_output"));
+    assert!(create_stderr.contains("hook_shell_output"));
 
     // Replay hook output via --output (table mode)
     let output = trench_cmd(tmp.path())
@@ -426,35 +405,14 @@ timeout_secs = 30
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Should contain actual hook output
     assert!(
-        stdout.contains("hook_run_output"),
-        "should contain run output, got: {stdout}"
-    );
-    assert!(
-        stdout.contains("hook_shell_output"),
-        "should contain shell output, got: {stdout}"
-    );
-
-    // Should contain step labels
-    assert!(
-        stdout.contains("[run]"),
-        "should contain [run] step label, got: {stdout}"
-    );
-    assert!(
-        stdout.contains("[shell]"),
-        "should contain [shell] step label, got: {stdout}"
-    );
-
-    // Should contain event type header
-    assert!(
-        stdout.contains("hook:post_create"),
-        "should contain event type, got: {stdout}"
+        stdout.contains("No events"),
+        "hook output must not be replayable from history, got: {stdout}"
     );
 }
 
 #[test]
-fn log_output_json_returns_structured_output() {
+fn log_output_json_has_no_persisted_hook_output() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -495,27 +453,11 @@ timeout_secs = 30
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
 
-    assert_eq!(parsed["event_type"], "hook:post_create");
-    assert_eq!(parsed["exit_code"], 0);
-    assert!(parsed["duration_secs"].is_number());
-    assert!(parsed["timestamp"].is_string());
-
-    let lines = parsed["lines"].as_array().expect("lines array");
-    assert!(!lines.is_empty(), "should have at least one output line");
-
-    // Find the line containing our output
-    let has_output = lines
-        .iter()
-        .any(|l| l["line"].as_str() == Some("json_test_output"));
-    assert!(has_output, "should contain our hook output, got: {parsed}");
-
-    // Check step label
-    let run_line = lines
-        .iter()
-        .find(|l| l["line"].as_str() == Some("json_test_output"))
-        .unwrap();
-    assert_eq!(run_line["step"], "run");
-    assert_eq!(run_line["stream"], "stdout");
+    assert_eq!(
+        parsed,
+        serde_json::json!([]),
+        "hook output must not be persisted"
+    );
 }
 
 #[test]
@@ -537,7 +479,7 @@ fn log_output_without_branch_exits_8() {
 }
 
 #[test]
-fn log_output_no_hooks_exits_2() {
+fn log_output_no_hooks_reports_empty_history() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -554,12 +496,12 @@ fn log_output_no_hooks_exits_2() {
         .output()
         .expect("trench log --output");
 
-    assert_eq!(
-        exit_code(output.status),
-        2,
-        "should exit 2 when no hook output, stderr: {}",
+    assert!(
+        output.status.success(),
+        "empty history should succeed, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("No events"));
 }
 
 #[test]
@@ -613,7 +555,7 @@ fn log_summary_json_empty_state_returns_zeroed_stats() {
 }
 
 #[test]
-fn log_summary_shows_accurate_stats_after_events() {
+fn log_summary_remains_empty_after_stateless_create_hooks() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -664,47 +606,16 @@ run = ["echo hello"]
     let stdout = String::from_utf8_lossy(&summary_output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
-    // Should have at least 4 events (2 created + 2 hook:post_create)
     let total = parsed["total_events"].as_u64().unwrap();
-    assert!(total >= 4, "should have at least 4 events, got {total}");
-
-    // Should have at least 2 hook runs
+    assert_eq!(total, 0, "stateless create must not add history");
     let hooks = parsed["hook_runs"].as_u64().unwrap();
-    assert!(hooks >= 2, "should have at least 2 hook runs, got {hooks}");
-
-    // Hook duration should be > 0
+    assert_eq!(hooks, 0, "hooks must not be persisted");
     let avg = parsed["avg_hook_duration_secs"].as_f64().unwrap();
-    assert!(
-        avg >= 0.0,
-        "avg_hook_duration_secs should be non-negative, got {avg}"
-    );
-
-    // Successes should be >= 2 (both hooks succeeded)
+    assert_eq!(avg, 0.0);
     let successes = parsed["successes"].as_u64().unwrap();
-    assert!(
-        successes >= 2,
-        "should have at least 2 successes, got {successes}"
-    );
-
-    assert_eq!(parsed["failures"], 0, "no hook failures expected");
-
-    // Most active worktree should be present
-    assert!(
-        parsed["most_active_worktree"].is_object(),
-        "most_active_worktree should be an object"
-    );
-    // Lexicographic tie-break: "summary-feat-1" < "summary-feat-2"
-    assert_eq!(
-        parsed["most_active_worktree"]["name"], "summary-feat-1",
-        "when event counts tie, most_active_worktree should use lexicographic name tie-break"
-    );
-    assert!(
-        parsed["most_active_worktree"]["event_count"]
-            .as_u64()
-            .unwrap()
-            >= 2,
-        "most_active_worktree should have at least 2 events"
-    );
+    assert_eq!(successes, 0);
+    assert_eq!(parsed["failures"], 0);
+    assert!(parsed["most_active_worktree"].is_null());
 
     // Also verify human-readable output has the expected labels
     let human_output = trench_cmd(tmp.path())
@@ -714,30 +625,7 @@ run = ["echo hello"]
     assert!(human_output.status.success());
 
     let human_stdout = String::from_utf8_lossy(&human_output.stdout);
-    assert!(
-        human_stdout.contains("Total events:"),
-        "should have Total events label"
-    );
-    assert!(
-        human_stdout.contains("Hook runs:"),
-        "should have Hook runs label"
-    );
-    assert!(
-        human_stdout.contains("Avg hook duration:"),
-        "should have Avg hook duration label"
-    );
-    assert!(
-        human_stdout.contains("Successes:"),
-        "should have Successes label"
-    );
-    assert!(
-        human_stdout.contains("Failures:"),
-        "should have Failures label"
-    );
-    assert!(
-        human_stdout.contains("Most active:"),
-        "should have Most active label"
-    );
+    assert!(human_stdout.contains("No events"));
 }
 
 #[test]

@@ -51,6 +51,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Watch
 notify = "7"
 shell-words = "1.1.1"
+libc = "0.2"
 
 [dev-dependencies]
 serial_test = "3"

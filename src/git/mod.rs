@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+pub mod create;
 pub mod status;
 pub mod worktrees;
 
@@ -382,6 +383,9 @@ pub enum GitError {
         operation: &'static str,
         message: String,
     },
+
+    #[error("Git preconditions changed after planning")]
+    PreconditionsChanged,
 
     #[error("merge conflict while syncing '{branch}': resolve conflicts manually")]
     MergeConflict { branch: String },
