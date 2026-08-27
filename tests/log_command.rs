@@ -109,7 +109,7 @@ fn live_resolution_does_not_write_legacy_removal_events() {
 
     // Remove the worktree
     let remove_output = trench_cmd(tmp.path())
-        .args(["remove", "log-test-feature", "--force", "--no-hooks"])
+        .args(["remove", "log-test-feature", "--yes", "--no-hooks"])
         .output()
         .expect("failed to run trench remove");
     assert!(
@@ -288,7 +288,7 @@ fn log_tail_after_stateless_operations_is_empty() {
         String::from_utf8_lossy(&out.stderr)
     );
     let out = trench_cmd(tmp.path())
-        .args(["remove", "tail-test", "--force", "--no-hooks"])
+        .args(["remove", "tail-test", "--yes", "--no-hooks"])
         .output()
         .expect("remove");
     assert!(
@@ -337,7 +337,7 @@ fn log_scoped_to_removed_stateless_worktree_is_not_found() {
 
     // Remove combo-a to generate more events for it
     let out = trench_cmd(tmp.path())
-        .args(["remove", "combo-a", "--force", "--no-hooks"])
+        .args(["remove", "combo-a", "--yes", "--no-hooks"])
         .output()
         .expect("remove combo-a");
     assert!(
