@@ -63,8 +63,15 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
     let model = ViewModel::new(state, area);
     if model.is_tiny() {
         render_resize(&model, frame, theme);
-    } else {
-        render_cockpit(&model, frame, theme);
+        return;
+    }
+    render_cockpit(&model, frame, theme);
+    let has_dialog = state.operation_modal.is_some()
+        || state.create_dialog.is_some()
+        || state.sync_dialog.is_some()
+        || state.remove_dialog.is_some();
+    if has_dialog {
+        dim_background(frame, area, theme);
     }
     if let Some(modal) = state.operation_modal.as_ref() {
         render_operation_modal(modal, frame, area, theme);
@@ -76,14 +83,34 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
         render_remove_dialog(dialog, frame, area, theme);
     }
     if state.help_open {
-        if state.operation_modal.is_some()
-            || state.create_dialog.is_some()
-            || state.sync_dialog.is_some()
-            || state.remove_dialog.is_some()
-        {
+        dim_background(frame, area, theme);
+        if has_dialog {
             render_overlay_help(state, frame, area, theme);
         } else {
             render_help(&model, frame, theme);
+        }
+        let footer = Rect {
+            x: area.x,
+            y: area.bottom().saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
+        render_dialog_keybar(
+            frame,
+            footer,
+            theme,
+            &[KeyHint::secondary("?", "close help")],
+        );
+    }
+}
+
+fn dim_background(frame: &mut Frame, area: Rect, theme: &Theme) {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                cell.set_fg(theme.disabled_fg)
+                    .set_style(Style::default().add_modifier(Modifier::DIM));
+            }
         }
     }
 }
@@ -1229,7 +1256,7 @@ fn render_help(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
         Context::Search => " Help · Search ",
         Context::Resize => " Help · Resize ",
     };
-    let block = panel(Some(title.to_string()), theme);
+    let block = active_panel(Some(title.to_string()), theme);
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
     if two_columns {
@@ -1381,25 +1408,32 @@ fn render_help_column(
     let lines = bindings.iter().map(|binding| {
         let reason = unavailable_reason(state, binding.action);
         let description = reason.unwrap_or(binding.description);
-        let style = if reason.is_some() {
-            Style::default().fg(theme.fg_muted)
+        let unavailable = reason.is_some();
+        let key_style = if unavailable {
+            Style::default()
+                .fg(theme.disabled_fg)
+                .add_modifier(Modifier::DIM)
+        } else {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        };
+        let description_style = if unavailable {
+            Style::default()
+                .fg(theme.disabled_fg)
+                .add_modifier(Modifier::DIM)
         } else {
             Style::default().fg(theme.fg)
         };
         Line::from(vec![
-            Span::styled(
-                format!("{:<8}", binding.label),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(description.to_string(), style),
+            Span::styled(format!("{:<8}", binding.label), key_style),
+            Span::styled(description.to_string(), description_style),
         ])
     });
     frame.render_widget(
         Paragraph::new(lines.collect::<Vec<_>>())
             .wrap(Wrap { trim: true })
-            .style(theme.with_bg(Style::default(), theme.bg_panel)),
+            .style(theme.with_bg(Style::default(), theme.bg_elevated)),
         area,
     );
 }
@@ -1600,6 +1634,64 @@ mod tests {
             !exact_minimum.contains("Resize terminal"),
             "{exact_minimum}"
         );
+    }
+
+    #[test]
+    fn tiny_view_suppresses_dialogs_and_help_until_the_terminal_is_usable() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs,
+            [],
+        ));
+        state.help_open = true;
+
+        let output = text(&render_buffer(&mut state, 59, 16, "ops"));
+        assert!(output.contains("Resize terminal"), "{output}");
+        assert!(!output.contains("Create worktree"), "{output}");
+        assert!(!output.contains("Help ·"), "{output}");
+    }
+
+    #[test]
+    fn help_replaces_the_footer_and_dims_the_background() {
+        let mut state = sample_state();
+        state.help_open = true;
+        let theme = crate::tui::theme::from_name("ops");
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let footer = lines(&buffer).last().unwrap().trim_end().to_string();
+
+        assert_eq!(footer, "[?] close help");
+        assert_eq!(buffer.cell((0, 0)).unwrap().fg, theme.disabled_fg);
+    }
+
+    #[test]
+    fn unavailable_help_binding_mutes_both_the_key_and_reason() {
+        let main = identity("/repos/trench", "trench", Some("main"), true, true);
+        let id = main.id.clone();
+        let mut state = AppState::new(vec![main]);
+        state.statuses.insert(id, WorktreeStatus::default());
+        state.help_open = true;
+        let theme = crate::tui::theme::from_name("ops");
+
+        let buffer = render_buffer(&mut state, 120, 20, "ops");
+        let binding = find_text(&buffer, "d       The main worktree cannot be removed");
+        let key = buffer.cell(binding).unwrap();
+        let reason = buffer.cell((binding.0 + 8, binding.1)).unwrap();
+
+        assert_eq!(key.fg, theme.disabled_fg);
+        assert_eq!(reason.fg, theme.disabled_fg);
+        assert!(key.modifier.contains(Modifier::DIM));
     }
 
     #[test]
