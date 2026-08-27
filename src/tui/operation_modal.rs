@@ -55,7 +55,7 @@ impl OperationModal {
             current_stage: None,
             elapsed: Duration::ZERO,
             spinner_tick: 0,
-            mutation_started: false,
+            mutation_started: operation == OperationKind::Sync,
             hook_lines: Vec::new(),
             hook_scroll: 0,
             warnings: Vec::new(),
@@ -271,5 +271,13 @@ mod tests {
             modal.handle_key(ModalKey::Enter),
             Some(ModalEffect::ReturnToForm)
         );
+    }
+
+    #[test]
+    fn sync_modal_is_non_cancellable_from_its_first_frame() {
+        let mut modal = OperationModal::new(OperationKind::Sync);
+
+        assert!(modal.mutation_started());
+        assert_eq!(modal.handle_key(ModalKey::Escape), None);
     }
 }
