@@ -1009,6 +1009,11 @@ fn apply_refresh_publication(state: &mut AppState, publication: RefreshPublicati
 }
 
 fn translate_key(key: KeyEvent) -> Option<Key> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Some(Key::Down),
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => return Some(Key::Up),
+        _ => {}
+    }
     if let Some(edit) = translate_line_edit(key) {
         return Some(Key::Edit(edit));
     }
@@ -1046,6 +1051,11 @@ fn visible_surface_key(state: &AppState, key: KeyEvent) -> Option<KeyEvent> {
 }
 
 fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Some(CreateKey::Down),
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => return Some(CreateKey::Up),
+        _ => {}
+    }
     if let Some(edit) = translate_line_edit(key) {
         return Some(CreateKey::Edit(edit));
     }
@@ -1063,6 +1073,8 @@ fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
 
 fn translate_sync_key(key: KeyEvent) -> Option<SyncKey> {
     match (key.code, key.modifiers) {
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Some(SyncKey::Down),
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => return Some(SyncKey::Up),
         (KeyCode::Left, KeyModifiers::NONE) => return Some(SyncKey::Left),
         (KeyCode::Right, KeyModifiers::NONE) => return Some(SyncKey::Right),
         _ => {}
@@ -1303,6 +1315,19 @@ mod tests {
                 Some(Key::Edit(expected))
             );
         }
+    }
+
+    #[test]
+    fn control_navigation_maps_to_candidates_on_every_editable_surface() {
+        let next = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        let previous = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+
+        assert_eq!(translate_key(next), Some(Key::Down));
+        assert_eq!(translate_key(previous), Some(Key::Up));
+        assert_eq!(translate_create_key(next), Some(CreateKey::Down));
+        assert_eq!(translate_create_key(previous), Some(CreateKey::Up));
+        assert_eq!(translate_sync_key(next), Some(SyncKey::Down));
+        assert_eq!(translate_sync_key(previous), Some(SyncKey::Up));
     }
 
     #[test]
