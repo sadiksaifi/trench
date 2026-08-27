@@ -274,6 +274,35 @@ mod tests {
     }
 
     #[test]
+    fn remove_modal_tracks_all_shared_stages_and_locks_cancellation_at_mutation() {
+        let mut modal = OperationModal::new(OperationKind::Remove);
+        for stage in [
+            OperationStage::Revalidate,
+            OperationStage::PreHook,
+            OperationStage::RemoveWorktree,
+            OperationStage::Prune,
+            OperationStage::DeleteBranch,
+            OperationStage::PostHook,
+        ] {
+            modal.apply(OperationEvent::StageStarted { stage });
+            modal.apply(OperationEvent::StageFinished {
+                stage,
+                duration: Duration::from_millis(10),
+                success: true,
+            });
+        }
+        modal.tick(Duration::from_millis(750));
+        assert_eq!(modal.elapsed(), Duration::from_millis(750));
+        assert_eq!(modal.stages().len(), 6);
+        assert_eq!(
+            modal.handle_key(ModalKey::Escape),
+            Some(ModalEffect::Cancel)
+        );
+        modal.apply(OperationEvent::MutationStarted);
+        assert_eq!(modal.handle_key(ModalKey::Escape), None);
+    }
+
+    #[test]
     fn sync_modal_is_non_cancellable_from_its_first_frame() {
         let mut modal = OperationModal::new(OperationKind::Sync);
 

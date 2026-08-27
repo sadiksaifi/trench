@@ -13,6 +13,7 @@ use crate::tui::{
     create_flow::{CreateDialog, CreateMode},
     keymap::{self, Binding, Context},
     operation_modal::{ModalStatus, OperationModal},
+    remove_flow::{RemoveDialog, RemoveMode},
     sync_flow::{SyncDialog, SyncMode},
     theme::Theme,
 };
@@ -71,17 +72,103 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
         render_create_dialog(dialog, state.refresh.spinner_tick, frame, area, theme);
     } else if let Some(dialog) = state.sync_dialog.as_ref() {
         render_sync_dialog(dialog, state.refresh.spinner_tick, frame, area, theme);
+    } else if let Some(dialog) = state.remove_dialog.as_ref() {
+        render_remove_dialog(dialog, frame, area, theme);
     }
     if state.help_open {
         if state.operation_modal.is_some()
             || state.create_dialog.is_some()
             || state.sync_dialog.is_some()
+            || state.remove_dialog.is_some()
         {
             render_overlay_help(state, frame, area, theme);
         } else {
             render_help(&model, frame, theme);
         }
     }
+}
+
+fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let footer = Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    let content_area = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let modal = centered_rect(
+        content_area.width.saturating_sub(8).min(76),
+        13,
+        content_area,
+    );
+    frame.render_widget(Clear, modal);
+    let title = match dialog.mode() {
+        RemoveMode::Review | RemoveMode::Ready => " Remove worktree ",
+        RemoveMode::ConfirmDirtyWorktree => " Confirm dirty worktree removal ",
+        RemoveMode::ConfirmUnmergedBranch => " Confirm unmerged branch deletion ",
+    };
+    let block = panel(Some(title.to_string()), theme);
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    let target = dialog.target();
+    let mut lines = vec![
+        metric_line("Worktree", &target.worktree, theme),
+        metric_line(
+            "Branch",
+            target.branch.as_deref().unwrap_or("detached"),
+            theme,
+        ),
+        Line::from(""),
+    ];
+    match dialog.mode() {
+        RemoveMode::Review | RemoveMode::Ready => {
+            lines.push(Line::from("The worktree directory will be removed."));
+            if dialog.can_delete_branch() {
+                let marker = if dialog.delete_branch() { "[x]" } else { "[ ]" };
+                lines.push(Line::from(format!(
+                    "{marker} Also delete local branch {}",
+                    target.branch.as_deref().unwrap_or_default()
+                )));
+            }
+        }
+        RemoveMode::ConfirmDirtyWorktree => {
+            lines.push(Line::from("This worktree has uncommitted changes."));
+            lines.push(Line::from("Press Enter to remove those changes."));
+        }
+        RemoveMode::ConfirmUnmergedBranch => {
+            lines.push(Line::from("This local branch is not merged."));
+            lines.push(Line::from("Press Enter to force branch deletion."));
+        }
+    }
+    if let Some(error) = dialog.validation_error() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("Changed: {error}")));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+        inner,
+    );
+    let items = match dialog.mode() {
+        RemoveMode::Review | RemoveMode::Ready if dialog.can_delete_branch() => [
+            ("Space", "branch"),
+            ("Enter", "remove"),
+            ("Esc", "close"),
+            ("?", "help"),
+        ]
+        .as_slice(),
+        RemoveMode::Review | RemoveMode::Ready => {
+            [("Enter", "remove"), ("Esc", "close"), ("?", "help")].as_slice()
+        }
+        RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => {
+            [("Enter", "confirm"), ("Esc", "back"), ("?", "help")].as_slice()
+        }
+    };
+    render_dialog_keybar(frame, footer, theme, items);
 }
 
 fn render_sync_dialog(
@@ -1580,5 +1667,63 @@ mod tests {
         let help = text(&render_buffer(&mut state, 100, 24, "ops"));
         assert!(help.contains("Help · Operation"), "{help}");
         assert!(help.contains("scroll output"), "{help}");
+    }
+
+    #[test]
+    fn remove_dialog_renders_worktree_first_unchecked_local_branch_only_and_help_last() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = git2::Repository::init(directory.path()).unwrap();
+        repository.set_head("refs/heads/main").unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repository.index().unwrap().write_tree().unwrap();
+        let tree = repository.find_tree(tree_id).unwrap();
+        let commit_id = repository
+            .commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
+            .unwrap();
+        drop(tree);
+        let commit = repository.find_commit(commit_id).unwrap();
+        repository.branch("feature", &commit, false).unwrap();
+        drop(commit);
+        let path = directory.path().join("worktrees").join("feature");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let reference = repository.find_reference("refs/heads/feature").unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(&reference));
+        repository
+            .worktree("feature", &path, Some(&options))
+            .unwrap();
+        let assessment = crate::cli::commands::remove::stateless::RemovalAssessment::discover(
+            directory.path(),
+            path.to_str().unwrap(),
+            Some("main"),
+        )
+        .unwrap();
+        let mut state = AppState::new(vec![identity(
+            path.to_str().unwrap(),
+            "feature",
+            Some("feature"),
+            false,
+            false,
+        )]);
+        state.remove_dialog = Some(
+            crate::tui::remove_flow::RemoveDialog::new(WorktreeId::new(&path), assessment).unwrap(),
+        );
+
+        let output = text(&render_buffer(&mut state, 100, 24, "ops"));
+        assert!(
+            output.contains("The worktree directory will be removed."),
+            "{output}"
+        );
+        assert!(
+            output.contains("[ ] Also delete local branch feature"),
+            "{output}"
+        );
+        assert!(!output.to_lowercase().contains("remote branch"), "{output}");
+        assert!(output
+            .lines()
+            .last()
+            .unwrap()
+            .trim_end()
+            .ends_with("? help"));
     }
 }
