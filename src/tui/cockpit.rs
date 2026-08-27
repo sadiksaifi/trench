@@ -805,6 +805,21 @@ pub(crate) fn create_hit_map(dialog: &CreateDialog, area: Rect) -> CreateHitMap 
     }
 }
 
+pub(crate) fn help_close_hit(area: Rect, point: (u16, u16)) -> bool {
+    if area.width < Viewport::MIN_WIDTH || area.height < Viewport::MIN_HEIGHT {
+        return false;
+    }
+    let footer = Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    keybar_hit_areas(footer, &[KeyHint::secondary("?", "close help")])
+        .first()
+        .is_some_and(|(_, hit)| rect_contains(*hit, point))
+}
+
 fn create_action_details(dialog: &CreateDialog) -> (&'static str, &'static str, bool) {
     match dialog.mode() {
         CreateMode::SelectBase if dialog.base_candidates().is_empty() => {

@@ -1,12 +1,18 @@
 use std::{
+    io::{self, Write},
     path::{Path, PathBuf},
     time::Instant,
 };
 
 use anyhow::{Context, Result};
-use crossterm::event::{
-    self, Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+use crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event as TerminalEvent, KeyCode, KeyEvent,
+        KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
+    execute,
 };
+use ratatui::layout::Rect;
 
 use crate::{
     cli::commands::sync::stateless::{HookPolicy as SyncHookPolicy, SyncPlanner},
@@ -92,19 +98,58 @@ fn open_editor(
     Ok(())
 }
 
-struct RatatuiTerminalDriver<'a> {
-    terminal: &'a mut ratatui::DefaultTerminal,
+struct MouseCapture<W: Write> {
+    writer: W,
+    enabled: bool,
 }
 
-impl TerminalDriver for RatatuiTerminalDriver<'_> {
+impl<W: Write> MouseCapture<W> {
+    fn enable(mut writer: W) -> io::Result<Self> {
+        execute!(writer, EnableMouseCapture)?;
+        Ok(Self {
+            writer,
+            enabled: true,
+        })
+    }
+
+    fn suspend(&mut self) -> io::Result<()> {
+        if self.enabled {
+            execute!(self.writer, DisableMouseCapture)?;
+            self.enabled = false;
+        }
+        Ok(())
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        if !self.enabled {
+            execute!(self.writer, EnableMouseCapture)?;
+            self.enabled = true;
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> Drop for MouseCapture<W> {
+    fn drop(&mut self) {
+        let _ = self.suspend();
+    }
+}
+
+struct RatatuiTerminalDriver<'a, W: Write> {
+    terminal: &'a mut ratatui::DefaultTerminal,
+    mouse_capture: &'a mut MouseCapture<W>,
+}
+
+impl<W: Write> TerminalDriver for RatatuiTerminalDriver<'_, W> {
     fn suspend(&mut self) -> Result<()> {
+        self.mouse_capture.suspend()?;
         ratatui::restore();
         Ok(())
     }
 
     fn resume(&mut self) -> Result<()> {
         *self.terminal = ratatui::init();
-        Ok(())
+        self.mouse_capture.resume().map_err(Into::into)
     }
 }
 
@@ -487,6 +532,51 @@ fn finish_create_success(
     }
 }
 
+fn apply_create_input_effect(
+    effect: Option<CreateInputEffect>,
+    state: &mut AppState,
+    refresh: &mut RefreshRuntime,
+    operation: &mut OperationRuntime<ThreadOperationLauncher, SystemRuntimeClock>,
+) {
+    match effect {
+        Some(CreateInputEffect::RefreshOrigin) => {
+            if let Err(error) = refresh.ref_picker() {
+                tracing::warn!(%error, "base picker origin refresh failed");
+                if let Some(dialog) = state.create_dialog.as_mut() {
+                    dialog.set_origin_refresh(OriginRefresh::Failed);
+                }
+            }
+            apply_refresh_publications(refresh, state);
+        }
+        Some(CreateInputEffect::Navigate(id)) => match refresh.post_operation() {
+            Ok(()) => {
+                apply_refresh_publications(refresh, state);
+                if state.identities.iter().any(|row| row.id == id) {
+                    let _ = app::reduce(state, Event::Select(id));
+                    state.create_dialog = None;
+                    state.help_open = false;
+                } else if let Some(dialog) = state.create_dialog.as_mut() {
+                    dialog.set_validation_error(Some(
+                        "Checked-out worktree changed; press Enter to revalidate".to_string(),
+                    ));
+                }
+            }
+            Err(error) => {
+                if let Some(dialog) = state.create_dialog.as_mut() {
+                    dialog.set_validation_error(Some(format!(
+                        "Could not refresh checked-out worktree: {error}"
+                    )));
+                }
+            }
+        },
+        Some(CreateInputEffect::Start(request)) => {
+            operation.start(*request);
+            state.operation_modal = operation.modal().cloned();
+        }
+        None => {}
+    }
+}
+
 fn finish_sync_success(
     state: &mut AppState,
     refresh: &mut impl PostOperationRefresh,
@@ -649,6 +739,14 @@ pub fn run() -> Result<TuiExit> {
 
     super::install_panic_hook();
     let mut terminal = ratatui::init();
+    let mut mouse_capture = match MouseCapture::enable(std::io::stdout()) {
+        Ok(capture) => capture,
+        Err(error) => {
+            ratatui::restore();
+            super::restore_panic_hook();
+            return Err(error.into());
+        }
+    };
     let result = (|| -> Result<TuiExit> {
         'event_loop: loop {
             for effect in operation.tick() {
@@ -685,7 +783,42 @@ pub fn run() -> Result<TuiExit> {
             if !event::poll(std::time::Duration::from_millis(50))? {
                 continue;
             }
-            let TerminalEvent::Key(key) = event::read()? else {
+            let terminal_event = event::read()?;
+            if let TerminalEvent::Mouse(mouse) = terminal_event {
+                if state.help_open {
+                    if cockpit::help_close_hit(
+                        Rect::new(0, 0, width, height),
+                        (mouse.column, mouse.row),
+                    ) {
+                        state.help_open = false;
+                    }
+                    continue;
+                }
+                if let Some(dialog) = state.create_dialog.as_mut() {
+                    match route_create_mouse(dialog, mouse, Rect::new(0, 0, width, height)) {
+                        CreateMouseEffect::Key(key) => {
+                            let effect = handle_create_input(
+                                &mut state,
+                                key,
+                                &cwd,
+                                &resolved.worktrees.root,
+                                resolved.git.default_base.as_deref(),
+                                resolved.hooks.clone(),
+                            )?;
+                            apply_create_input_effect(
+                                effect,
+                                &mut state,
+                                &mut refresh,
+                                &mut operation,
+                            );
+                        }
+                        CreateMouseEffect::Help => state.help_open = true,
+                        CreateMouseEffect::Handled | CreateMouseEffect::Ignored => {}
+                    }
+                }
+                continue;
+            }
+            let TerminalEvent::Key(key) = terminal_event else {
                 continue;
             };
             if key.kind != KeyEventKind::Press {
@@ -781,51 +914,15 @@ pub fn run() -> Result<TuiExit> {
                 let Some(create_key) = translate_create_key(key) else {
                     continue;
                 };
-                match handle_create_input(
+                let effect = handle_create_input(
                     &mut state,
                     create_key,
                     &cwd,
                     &resolved.worktrees.root,
                     resolved.git.default_base.as_deref(),
                     resolved.hooks.clone(),
-                )? {
-                    Some(CreateInputEffect::RefreshOrigin) => {
-                        if let Err(error) = refresh.ref_picker() {
-                            tracing::warn!(%error, "base picker origin refresh failed");
-                            if let Some(dialog) = state.create_dialog.as_mut() {
-                                dialog.set_origin_refresh(OriginRefresh::Failed);
-                            }
-                        }
-                        apply_refresh_publications(&mut refresh, &mut state);
-                    }
-                    Some(CreateInputEffect::Navigate(id)) => match refresh.post_operation() {
-                        Ok(()) => {
-                            apply_refresh_publications(&mut refresh, &mut state);
-                            if state.identities.iter().any(|row| row.id == id) {
-                                let _ = app::reduce(&mut state, Event::Select(id));
-                                state.create_dialog = None;
-                                state.help_open = false;
-                            } else if let Some(dialog) = state.create_dialog.as_mut() {
-                                dialog.set_validation_error(Some(
-                                    "Checked-out worktree changed; press Enter to revalidate"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                        Err(error) => {
-                            if let Some(dialog) = state.create_dialog.as_mut() {
-                                dialog.set_validation_error(Some(format!(
-                                    "Could not refresh checked-out worktree: {error}"
-                                )));
-                            }
-                        }
-                    },
-                    Some(CreateInputEffect::Start(request)) => {
-                        operation.start(*request);
-                        state.operation_modal = operation.modal().cloned();
-                    }
-                    None => {}
-                }
+                )?;
+                apply_create_input_effect(effect, &mut state, &mut refresh, &mut operation);
                 continue;
             }
 
@@ -896,6 +993,7 @@ pub fn run() -> Result<TuiExit> {
                             EditorCommand::from_environment(resolved.editor_command.as_deref())?;
                         let mut terminal_driver = RatatuiTerminalDriver {
                             terminal: &mut terminal,
+                            mouse_capture: &mut mouse_capture,
                         };
                         let mut launcher = ProcessEditorLauncher;
                         let mut refresh_driver = RuntimeRefreshDriver {
@@ -973,6 +1071,7 @@ pub fn run() -> Result<TuiExit> {
         }
     })();
 
+    drop(mouse_capture);
     ratatui::restore();
     super::restore_panic_hook();
     result
@@ -1072,6 +1171,53 @@ fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
             Some(CreateKey::Character(character))
         }
         _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateMouseEffect {
+    Key(CreateKey),
+    Help,
+    Handled,
+    Ignored,
+}
+
+fn route_create_mouse(
+    dialog: &mut CreateDialog,
+    mouse: MouseEvent,
+    area: Rect,
+) -> CreateMouseEffect {
+    let point = (mouse.column, mouse.row);
+    let hits = cockpit::create_hit_map(dialog, area);
+    match mouse.kind {
+        MouseEventKind::ScrollUp if hits.options_contain(point) => {
+            CreateMouseEffect::Key(CreateKey::Up)
+        }
+        MouseEventKind::ScrollDown if hits.options_contain(point) => {
+            CreateMouseEffect::Key(CreateKey::Down)
+        }
+        MouseEventKind::Down(MouseButton::Left) => match hits.target_at(point) {
+            Some(cockpit::CreateHitTarget::Input) => CreateMouseEffect::Handled,
+            Some(cockpit::CreateHitTarget::Row(index)) => {
+                dialog.select_visible_row(index);
+                CreateMouseEffect::Handled
+            }
+            Some(cockpit::CreateHitTarget::Back) => CreateMouseEffect::Key(CreateKey::Escape),
+            Some(cockpit::CreateHitTarget::Cta) if create_cta_enabled(dialog) => {
+                CreateMouseEffect::Key(CreateKey::Enter)
+            }
+            Some(cockpit::CreateHitTarget::Cta) => CreateMouseEffect::Handled,
+            Some(cockpit::CreateHitTarget::Help) => CreateMouseEffect::Help,
+            None => CreateMouseEffect::Ignored,
+        },
+        _ => CreateMouseEffect::Ignored,
+    }
+}
+
+fn create_cta_enabled(dialog: &CreateDialog) -> bool {
+    match dialog.mode() {
+        crate::tui::create_flow::CreateMode::SelectBase => !dialog.base_candidates().is_empty(),
+        crate::tui::create_flow::CreateMode::Name => dialog.preview().is_some(),
     }
 }
 
@@ -1361,6 +1507,139 @@ mod tests {
             translate_create_key(KeyEvent::new(KeyCode::Char('x'), modifiers)),
             Some(CreateKey::Character('x'))
         );
+    }
+
+    #[test]
+    fn create_mouse_routes_rows_input_actions_help_wheel_and_safe_no_ops() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let mut dialog = CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            RefSnapshot::from_parts(
+                ["main", "release"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            [],
+        );
+        let area = Rect::new(0, 0, 80, 24);
+        let hits = cockpit::create_hit_map(&dialog, area);
+        let left_click = |rect: Rect| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + rect.width / 2,
+            row: rect.y + rect.height / 2,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert_eq!(
+            route_create_mouse(&mut dialog, left_click(hits.rows[1]), area),
+            CreateMouseEffect::Handled
+        );
+        assert_eq!(dialog.base_selection(), 1);
+        assert_eq!(
+            route_create_mouse(&mut dialog, left_click(hits.input), area),
+            CreateMouseEffect::Handled
+        );
+        assert_eq!(
+            route_create_mouse(&mut dialog, left_click(hits.cta), area),
+            CreateMouseEffect::Key(CreateKey::Enter)
+        );
+        assert_eq!(
+            route_create_mouse(&mut dialog, left_click(hits.back), area),
+            CreateMouseEffect::Key(CreateKey::Escape)
+        );
+        assert_eq!(
+            route_create_mouse(&mut dialog, left_click(hits.help), area),
+            CreateMouseEffect::Help
+        );
+        assert_eq!(
+            route_create_mouse(
+                &mut dialog,
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: hits.rows[0].x,
+                    row: hits.rows[0].y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                area,
+            ),
+            CreateMouseEffect::Key(CreateKey::Down)
+        );
+        assert_eq!(
+            route_create_mouse(
+                &mut dialog,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                area,
+            ),
+            CreateMouseEffect::Ignored
+        );
+
+        dialog.set_branch("");
+        let disabled = cockpit::create_hit_map(&dialog, area);
+        assert_eq!(
+            route_create_mouse(&mut dialog, left_click(disabled.cta), area),
+            CreateMouseEffect::Handled
+        );
+        dialog.set_branch("feature/auth");
+        let enabled = cockpit::create_hit_map(&dialog, area);
+        assert_eq!(
+            route_create_mouse(&mut dialog, left_click(enabled.cta), area),
+            CreateMouseEffect::Key(CreateKey::Enter)
+        );
+        assert!(cockpit::help_close_hit(area, (1, area.bottom() - 1)));
+        assert!(!cockpit::help_close_hit(area, (1, 1)));
+        assert_eq!(
+            route_create_mouse(
+                &mut dialog,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 30,
+                    row: 8,
+                    modifiers: KeyModifiers::NONE,
+                },
+                Rect::new(0, 0, 59, 15),
+            ),
+            CreateMouseEffect::Ignored
+        );
+    }
+
+    #[test]
+    fn mouse_capture_balances_start_suspend_resume_and_drop() {
+        use std::io::{self, Write};
+
+        #[derive(Clone, Default)]
+        struct SharedWriter(Rc<RefCell<Vec<u8>>>);
+
+        impl Write for SharedWriter {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let output = SharedWriter::default();
+        let mut capture = MouseCapture::enable(output.clone()).unwrap();
+        capture.suspend().unwrap();
+        capture.resume().unwrap();
+        drop(capture);
+
+        let bytes = output.0.borrow();
+        let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(text.matches("\u{1b}[?1000h").count(), 2);
+        assert_eq!(text.matches("\u{1b}[?1000l").count(), 2);
     }
 
     #[test]

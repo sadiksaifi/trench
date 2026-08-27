@@ -244,6 +244,16 @@ impl CreateDialog {
         self.base_picker.selection()
     }
 
+    pub fn select_visible_row(&mut self, index: usize) {
+        match self.mode {
+            CreateMode::SelectBase => self.base_picker.select(index),
+            CreateMode::Name => {
+                self.branch_selection =
+                    index.min(self.branch_suggestions().len().saturating_sub(1));
+            }
+        }
+    }
+
     pub fn set_origin_refresh(&mut self, refresh: OriginRefresh) {
         self.base_picker.set_origin_refresh(refresh);
     }

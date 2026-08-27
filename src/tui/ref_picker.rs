@@ -77,6 +77,10 @@ impl RefPicker {
         self.selection
     }
 
+    pub fn select(&mut self, index: usize) {
+        self.selection = index.min(self.candidates().len().saturating_sub(1));
+    }
+
     pub fn apply_match(&mut self) {
         if let Some(candidate) = self.candidates().get(self.selection) {
             self.query = LineInput::from(candidate.name.as_str());
