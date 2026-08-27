@@ -93,7 +93,7 @@ fn clap_exit_2_rejects_removed_sync_all_without_strategy() {
 }
 
 #[test]
-fn exit_code_8_remove_json_without_force() {
+fn exit_code_8_remove_json_without_yes() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
     create_worktree(tmp.path(), "json-needs-force");
@@ -106,7 +106,7 @@ fn exit_code_8_remove_json_without_force() {
     assert_eq!(
         output.status.code(),
         Some(8),
-        "remove --json without --force should exit 8, stderr: {}",
+        "remove --json without --yes should exit 8, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -297,6 +297,23 @@ fn create_worktree(repo_dir: &Path, branch: &str) {
     );
 }
 
+fn worktree_path(repo_dir: &Path, branch: &str) -> PathBuf {
+    let output = trench_cmd(repo_dir)
+        .args(["list", "--json"])
+        .output()
+        .expect("failed to list worktrees");
+    let records: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    PathBuf::from(
+        records
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["branch"] == branch)
+            .and_then(|record| record["path"].as_str())
+            .expect("worktree should be listed"),
+    )
+}
+
 #[test]
 fn dry_run_remove_does_not_delete_worktree() {
     let tmp = tempfile::tempdir().unwrap();
@@ -327,7 +344,7 @@ fn dry_run_remove_does_not_delete_worktree() {
 
     // Run remove with --dry-run
     let output = trench_cmd(tmp.path())
-        .args(["remove", "dry-run-integ", "--force", "--dry-run"])
+        .args(["remove", "dry-run-integ", "--dry-run"])
         .output()
         .expect("failed to run trench remove --dry-run");
 
@@ -346,7 +363,7 @@ fn dry_run_remove_does_not_delete_worktree() {
     // Verify stdout contains plan info
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Dry run"),
+        stdout.contains("Would remove"),
         "stdout should contain dry-run plan, got: {stdout}"
     );
     assert!(
@@ -364,7 +381,7 @@ fn dry_run_remove_with_json_outputs_valid_json() {
 
     // Run remove with --dry-run --json
     let output = trench_cmd(tmp.path())
-        .args(["remove", "json-dry-integ", "--force", "--dry-run", "--json"])
+        .args(["remove", "json-dry-integ", "--dry-run", "--json"])
         .output()
         .expect("failed to run trench remove --dry-run --json");
 
@@ -379,10 +396,10 @@ fn dry_run_remove_with_json_outputs_valid_json() {
         serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
 
     assert_eq!(json["dry_run"], true);
-    assert_eq!(json["name"], "json-dry-integ");
+    assert_eq!(json["worktree"], "json-dry-integ");
     assert_eq!(json["branch"], "json-dry-integ");
-    assert_eq!(json["delete_branch_requested"], false);
-    assert_eq!(json["force"], true);
+    assert_eq!(json["delete_branch"], false);
+    assert_eq!(json["confirmation"], "dry_run");
     assert!(json["path"].is_string(), "path should be a string");
 
     // Verify worktree still exists
@@ -404,7 +421,6 @@ fn dry_run_remove_with_delete_branch_shows_requested_true() {
         .args([
             "remove",
             "delete-branch-dry-integ",
-            "--force",
             "--delete-branch",
             "--dry-run",
             "--json",
@@ -423,8 +439,8 @@ fn dry_run_remove_with_delete_branch_shows_requested_true() {
 
     assert_eq!(json["dry_run"], true);
     assert_eq!(
-        json["delete_branch_requested"], true,
-        "delete_branch_requested should be true in JSON output"
+        json["delete_branch"], true,
+        "delete_branch should be true in JSON output"
     );
 }
 
@@ -439,7 +455,7 @@ fn remove_live_json_with_delete_branch_outputs_json() {
             "--json",
             "remove",
             "json-delete-branch",
-            "--force",
+            "--yes",
             "--delete-branch",
             "--no-hooks",
         ])
@@ -456,14 +472,15 @@ fn remove_live_json_with_delete_branch_outputs_json() {
         serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
     assert_eq!(json["worktree"], "json-delete-branch");
     assert_eq!(json["branch"], "json-delete-branch");
-    assert_eq!(json["delete_branch_requested"], true);
+    assert_eq!(json["delete_branch"], true);
     assert_eq!(json["branch_deleted"], true);
-    assert_eq!(json["branch_delete_forced"], true);
-    assert!(json["branch_delete_error"].is_null());
+    assert_eq!(json["force_branch"], false);
+    assert_eq!(json["confirmation"], "flag");
+    assert_eq!(json["no_hooks"], true);
 }
 
 #[test]
-fn exit_code_8_remove_without_force_outside_interactive_terminal() {
+fn exit_code_8_remove_without_yes_outside_interactive_terminal() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
     create_worktree(tmp.path(), "needs-force");
@@ -476,9 +493,51 @@ fn exit_code_8_remove_without_force_outside_interactive_terminal() {
     assert_eq!(
         output.status.code(),
         Some(8),
-        "remove without --force outside interactive terminal should exit 8, stderr: {}",
+        "remove without --yes outside interactive terminal should exit 8, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn yes_does_not_authorize_dirty_worktree_removal() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "dirty-needs-force-worktree");
+    let path = worktree_path(tmp.path(), "dirty-needs-force-worktree");
+    std::fs::write(path.join("untracked"), "preserve").unwrap();
+
+    let refused = trench_cmd(tmp.path())
+        .args(["remove", "dirty-needs-force-worktree", "--yes"])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(path.join("untracked").exists());
+
+    let removed = trench_cmd(tmp.path())
+        .args([
+            "remove",
+            "dirty-needs-force-worktree",
+            "--yes",
+            "--force-worktree",
+        ])
+        .output()
+        .unwrap();
+    assert!(removed.status.success());
+    assert!(!path.exists());
+}
+
+#[test]
+fn force_branch_without_delete_branch_is_a_flag_conflict() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "force-branch-conflict");
+
+    let output = trench_cmd(tmp.path())
+        .args(["remove", "force-branch-conflict", "--yes", "--force-branch"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(9));
 }
 
 #[test]
