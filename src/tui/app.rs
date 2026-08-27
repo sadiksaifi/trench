@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::{
     ref_catalog::RefSnapshot,
     tui::{
+        create_flow::CreateDialog,
         keymap::{self, Action, Context, Key},
+        operation_modal::OperationModal,
         refresh::RefreshPublication,
         search::{self, QueryBuffer},
     },
@@ -54,6 +57,12 @@ pub enum Event {
     },
     RefreshPublished(RefreshPublication),
     RefreshTick,
+    OperationSucceeded {
+        select: Option<WorktreeId>,
+        message: String,
+        shown_at: Instant,
+    },
+    NotificationTick(Instant),
     Select(WorktreeId),
     Input(Key),
     ViewportChanged {
@@ -85,6 +94,18 @@ pub struct AppState {
     pub viewport: Viewport,
     pub inspector_override: Option<bool>,
     pub help_open: bool,
+    pub create_dialog: Option<CreateDialog>,
+    pub operation_modal: Option<OperationModal>,
+    pub notification: Option<Notification>,
+    pending_selection: Option<WorktreeId>,
+}
+
+pub const NOTIFICATION_DURATION: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    pub text: String,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -131,6 +152,10 @@ impl AppState {
             },
             inspector_override: None,
             help_open: false,
+            create_dialog: None,
+            operation_modal: None,
+            notification: None,
+            pending_selection: None,
         }
     }
 
@@ -187,6 +212,22 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             }
         }
         Event::RefreshPublished(publication) => {
+            let pending = state
+                .pending_selection
+                .as_ref()
+                .filter(|selected| {
+                    publication
+                        .identities
+                        .iter()
+                        .any(|row| &row.id == *selected)
+                })
+                .cloned();
+            if pending.is_some() {
+                state.pending_selection = None;
+            }
+            if pending.is_some() {
+                state.selected = pending;
+            }
             state.identities = publication.identities;
             state.statuses = publication.statuses;
             state.refs = publication.refs;
@@ -198,6 +239,29 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         Event::RefreshTick => {
             if state.refresh.updating_refs || !state.refresh.waiting_rows.is_empty() {
                 state.refresh.spinner_tick = state.refresh.spinner_tick.wrapping_add(1);
+            }
+        }
+        Event::OperationSucceeded {
+            select,
+            message,
+            shown_at,
+        } => {
+            state.pending_selection = select;
+            state.create_dialog = None;
+            state.operation_modal = None;
+            state.notification = Some(Notification {
+                text: message,
+                expires_at: shown_at + NOTIFICATION_DURATION,
+            });
+            return vec![Effect::Refresh];
+        }
+        Event::NotificationTick(now) => {
+            if state
+                .notification
+                .as_ref()
+                .is_some_and(|notification| now >= notification.expires_at)
+            {
+                state.notification = None;
             }
         }
         Event::Select(id) if state.visible_identities().iter().any(|row| row.id == id) => {
@@ -226,6 +290,9 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     action,
                     reason: reason.to_string(),
                 }];
+            }
+            if !matches!(action, Action::SelectNext | Action::SelectPrevious) {
+                state.notification = None;
             }
             return reduce_action(state, action);
         }
@@ -725,5 +792,71 @@ mod tests {
                 reason: "The main worktree cannot be removed".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn create_success_refreshes_selects_and_keeps_a_five_second_navigation_notice() {
+        let alpha = identity("/worktrees/alpha", "alpha");
+        let beta = identity("/worktrees/beta", "beta");
+        let mut state = AppState::new(vec![alpha.clone()]);
+        let shown_at = Instant::now();
+
+        assert_eq!(
+            reduce(
+                &mut state,
+                Event::OperationSucceeded {
+                    select: Some(beta.id.clone()),
+                    message: "Created feature/beta".to_string(),
+                    shown_at,
+                },
+            ),
+            [Effect::Refresh]
+        );
+        assert_eq!(
+            state
+                .notification
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
+            Some("Created feature/beta")
+        );
+
+        let _ = reduce(
+            &mut state,
+            Event::RefreshPublished(RefreshPublication {
+                identities: vec![alpha, beta.clone()],
+                refs: None,
+                statuses: BTreeMap::new(),
+                waiting_rows: BTreeSet::new(),
+                updating_refs: false,
+                warning: None,
+            }),
+        );
+        assert_eq!(state.selected, Some(beta.id));
+
+        let _ = reduce(&mut state, Event::Input(Key::Up));
+        assert!(state.notification.is_some());
+        let _ = reduce(
+            &mut state,
+            Event::OperationSucceeded {
+                select: None,
+                message: "Created feature/beta".to_string(),
+                shown_at,
+            },
+        );
+        let _ = reduce(&mut state, Event::Input(Key::Char('?')));
+        assert!(state.notification.is_none());
+        let _ = reduce(
+            &mut state,
+            Event::OperationSucceeded {
+                select: None,
+                message: "Created feature/beta".to_string(),
+                shown_at,
+            },
+        );
+        let _ = reduce(
+            &mut state,
+            Event::NotificationTick(shown_at + NOTIFICATION_DURATION),
+        );
+        assert!(state.notification.is_none());
     }
 }
