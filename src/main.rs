@@ -7,6 +7,7 @@ mod git;
 mod hooks;
 mod live_worktree;
 mod logging;
+mod navigation;
 mod operation;
 mod output;
 mod paths;
@@ -102,7 +103,7 @@ enum Commands {
         branch: String,
 
         /// Print only the worktree path (for shell integration)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         print_path: bool,
     },
     /// Manage tags on a worktree
@@ -234,8 +235,8 @@ fn main() -> anyhow::Result<()> {
         std::io::stdout().is_terminal(),
     ) {
         match tui::run() {
-            Ok(Some(path)) => write_tui_switch_path(&path)?,
-            Ok(None) => {}
+            Ok(tui::runtime::TuiExit::Switch(path)) => write_tui_switch_path(&path)?,
+            Ok(tui::runtime::TuiExit::Quit) => {}
             Err(e) if e.downcast_ref::<config::ConfigError>().is_some() => {
                 eprintln!("error: {e}");
                 ExitCode::ConfigError.exit();
@@ -336,7 +337,14 @@ fn main() -> anyhow::Result<()> {
             }
             ExitCode::GitError.exit();
         }
-        if e.downcast_ref::<worktree_catalog::CatalogError>().is_some() {
+        if let Some(catalog_error) = e.downcast_ref::<worktree_catalog::CatalogError>() {
+            if let worktree_catalog::CatalogError::Git(git_error) = catalog_error {
+                eprintln!("Error: {git_error}");
+                if matches!(git_error, git::GitError::NotAGitRepo { .. }) {
+                    eprintln!("hint: Run `trench` inside a Git worktree.");
+                }
+                ExitCode::GitError.exit();
+            }
             eprintln!("error: {e}");
             ExitCode::NotFound.exit();
         }
@@ -345,23 +353,23 @@ fn main() -> anyhow::Result<()> {
     result
 }
 
-fn write_tui_switch_path(path: &str) -> anyhow::Result<()> {
-    eprintln!("{}", format_switch_notice(path));
+fn write_tui_switch_path(path: &std::path::Path) -> anyhow::Result<()> {
     if let Some(sink_path) = std::env::var_os(TUI_SWITCH_PATH_FILE_ENV) {
-        std::fs::write(&sink_path, path).with_context(|| {
+        std::fs::write(&sink_path, path.as_os_str().as_encoded_bytes()).with_context(|| {
             format!(
                 "failed to write TUI switch path to {}",
                 std::path::PathBuf::from(&sink_path).display()
             )
         })?;
     } else {
-        println!("{path}");
+        println!("{}", path.display());
+        eprintln!("{}", format_switch_hint());
     }
     Ok(())
 }
 
-fn format_switch_notice(path: &str) -> String {
-    format!("Switched to {path}")
+fn format_switch_hint() -> &'static str {
+    "hint: a child process cannot change its parent shell; use `tn switch <worktree>` to cd"
 }
 
 fn existing_db_path() -> anyhow::Result<Option<std::path::PathBuf>> {
@@ -737,18 +745,12 @@ fn handle_remove_error(e: anyhow::Error) -> anyhow::Result<()> {
 
 fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = runtime_db_path()?;
-    let db = state::Database::open(&db_path)?;
-
-    match cli::commands::switch::execute(identifier, &cwd, &db) {
+    match cli::commands::switch::execute(identifier, &cwd) {
         Ok(result) => {
-            if print_path {
-                eprintln!("{}", format_switch_notice(&result.path));
-                println!("{}", result.path);
-                return Ok(());
+            println!("{}", result.path);
+            if !print_path {
+                eprintln!("{}", format_switch_hint());
             }
-
-            println!("Switched to worktree '{}' at {}", result.name, result.path);
             Ok(())
         }
         Err(e) => {
@@ -757,16 +759,13 @@ fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
                 eprintln!("error: {e}");
                 ExitCode::NotFound.exit();
             }
-            Err(e)
+            Err(e.into())
         }
     }
 }
 
 fn run_open(identifier: &str) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = runtime_db_path()?;
-    let db = state::Database::open(&db_path)?;
-
     let repo_info = git::discover_repo(&cwd)?;
 
     let project_config = config::load_project_config(&repo_info.path)?;
@@ -774,46 +773,7 @@ fn run_open(identifier: &str) -> anyhow::Result<()> {
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
     let editor_command = resolved.editor_command;
 
-    run_open_editor(identifier, &cwd, &db, editor_command.as_deref())
-}
-
-fn run_open_editor(
-    identifier: &str,
-    cwd: &std::path::Path,
-    db: &state::Database,
-    editor_command: Option<&str>,
-) -> anyhow::Result<()> {
-    match cli::commands::open::resolve(identifier, cwd, db, editor_command) {
-        Ok(result) => {
-            let parts = shell_words::split(&result.editor)
-                .with_context(|| format!("invalid editor command: '{}'", result.editor))?;
-            let (program, args) = parts
-                .split_first()
-                .ok_or_else(|| anyhow::anyhow!("editor command is empty after parsing"))?;
-
-            let status = std::process::Command::new(program)
-                .args(args)
-                .arg(&result.path)
-                .status()
-                .with_context(|| format!("failed to launch editor '{}'", result.editor))?;
-
-            if !status.success() {
-                ExitCode::GeneralError.exit();
-            }
-
-            cli::commands::open::record_open_for_identifier(identifier, cwd, db)?;
-
-            Ok(())
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not found") || msg.contains("not tracked") {
-                eprintln!("error: {e}");
-                ExitCode::NotFound.exit();
-            }
-            Err(e)
-        }
-    }
+    cli::commands::open::execute(identifier, &cwd, editor_command.as_deref())
 }
 
 fn run_tag(identifier: &str, tags: &[String]) -> anyhow::Result<()> {
@@ -1599,7 +1559,7 @@ mod tests {
         let sink_path = dir.path().join("switch-path.txt");
 
         std::env::set_var(TUI_SWITCH_PATH_FILE_ENV, &sink_path);
-        let result = write_tui_switch_path("/tmp/wt/feat-x");
+        let result = write_tui_switch_path(std::path::Path::new("/tmp/wt/feat-x"));
         std::env::remove_var(TUI_SWITCH_PATH_FILE_ENV);
 
         result.expect("sink file write should succeed");
@@ -1615,7 +1575,7 @@ mod tests {
         let sink_path = dir.path().join("missing").join("switch-path.txt");
 
         std::env::set_var(TUI_SWITCH_PATH_FILE_ENV, &sink_path);
-        let result = write_tui_switch_path("/tmp/wt/feat-x");
+        let result = write_tui_switch_path(std::path::Path::new("/tmp/wt/feat-x"));
         std::env::remove_var(TUI_SWITCH_PATH_FILE_ENV);
 
         let err = result.expect_err("missing sink parent should fail");
@@ -1627,10 +1587,10 @@ mod tests {
     }
 
     #[test]
-    fn format_switch_notice_includes_absolute_path() {
+    fn direct_switch_hint_explains_parent_shell_navigation() {
         assert_eq!(
-            format_switch_notice("/tmp/wt/feat-x"),
-            "Switched to /tmp/wt/feat-x"
+            format_switch_hint(),
+            "hint: a child process cannot change its parent shell; use `tn switch <worktree>` to cd"
         );
     }
 

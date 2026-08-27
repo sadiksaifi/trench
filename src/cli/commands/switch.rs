@@ -1,372 +1,72 @@
 use std::path::Path;
 
-use anyhow::Result;
+use crate::worktree_catalog::{CatalogError, WorktreeCatalog};
 
-use crate::state::Database;
-
-/// Result of a successful switch operation.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwitchResult {
-    /// Absolute path to the worktree.
     pub path: String,
-    /// Sanitized name of the worktree.
     pub name: String,
 }
 
-/// Execute the `trench switch <identifier>` command.
-///
-/// Resolves the worktree by sanitized name or branch name, updates
-/// `last_accessed` and session state, and returns the worktree path.
-/// If the worktree is unmanaged (not in DB), it is silently adopted.
-pub fn execute(identifier: &str, cwd: &Path, db: &Database) -> Result<SwitchResult> {
-    let repo_info = crate::git::discover_repo(cwd)?;
-    let live = crate::live_worktree::resolve(identifier, &repo_info, db)?;
-    let (repo, wt) = crate::live_worktree::ensure_metadata(db, &repo_info, &live.entry)?;
-
-    // Update last_accessed timestamp
-    let now = crate::state::unix_epoch_secs() as i64;
-    db.update_worktree(
-        wt.id,
-        &crate::state::WorktreeUpdate {
-            last_accessed: Some(Some(now)),
-            ..Default::default()
-        },
-    )?;
-
-    // Update session state
-    db.set_session("current_worktree", &live.entry.name)?;
-
-    // Record "switched" event
-    db.insert_event(repo.id, Some(wt.id), "switched", None)?;
-
+pub fn execute(identifier: &str, cwd: &Path) -> Result<SwitchResult, CatalogError> {
+    let catalog = WorktreeCatalog::discover(cwd)?;
+    let identity = catalog.resolve(identifier)?;
     Ok(SwitchResult {
-        path: live.entry.path.to_string_lossy().to_string(),
-        name: live.entry.name.clone(),
+        path: identity.path.to_string_lossy().into_owned(),
+        name: identity.worktree.clone(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::Database;
 
-    /// Helper: create a temp git repo with an initial commit.
-    fn init_repo_with_commit(dir: &Path) -> git2::Repository {
-        let repo = git2::Repository::init(dir).expect("failed to init repo");
+    fn init_repo(path: &Path) -> git2::Repository {
+        let repo = git2::Repository::init(path).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
         {
-            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-            let tree_id = repo.index().unwrap().write_tree().unwrap();
             let tree = repo.find_tree(tree_id).unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[])
+            repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
                 .unwrap();
         }
         repo
     }
 
-    fn create_live_worktree(
-        repo_dir: &Path,
-        db: &Database,
-        branch: &str,
-    ) -> (tempfile::TempDir, std::path::PathBuf) {
-        let wt_root = tempfile::tempdir().unwrap();
-        let result = crate::cli::commands::create::execute(
-            branch,
-            None,
-            repo_dir,
-            wt_root.path(),
-            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
-            db,
-        )
-        .expect("create should succeed");
-        (wt_root, result.path)
+    fn add_worktree(repo: &git2::Repository, branch: &str, path: &Path) {
+        let commit = repo.head().unwrap().peel_to_commit().unwrap();
+        let local = repo.branch(branch, &commit, false).unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(local.get()));
+        repo.worktree("feature-auth", path, Some(&options)).unwrap();
     }
 
     #[test]
-    fn switch_resolves_by_branch_name() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let _repo = init_repo_with_commit(repo_dir.path());
-        let db = Database::open_in_memory().unwrap();
-        let (_wt_root, wt_path) = create_live_worktree(repo_dir.path(), &db, "my-feature");
+    fn switch_returns_the_live_path_without_product_state() {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        let linked = root.path().join("feature-auth");
+        std::fs::create_dir(&main).unwrap();
+        let repo = init_repo(&main);
+        add_worktree(&repo, "feature/auth", &linked);
 
-        let result = execute("my-feature", repo_dir.path(), &db);
-        let switch = result.expect("switch should succeed");
+        let result = execute("feature/auth", &main).unwrap();
 
-        assert_eq!(switch.path, wt_path.to_string_lossy());
-        assert_eq!(switch.name, "my-feature");
-    }
-
-    #[test]
-    fn switch_resolves_by_branch_with_slash() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let _repo = init_repo_with_commit(repo_dir.path());
-        let db = Database::open_in_memory().unwrap();
-        let (_wt_root, wt_path) = create_live_worktree(repo_dir.path(), &db, "feature/auth");
-
-        // Switch using the original branch name (with slash)
-        let switch = execute("feature/auth", repo_dir.path(), &db)
-            .expect("switch by branch name should succeed");
-        assert_eq!(switch.path, wt_path.to_string_lossy());
-        assert_eq!(switch.name, "feature-auth");
-
-        // Switch using the sanitized name
-        let switch = execute("feature-auth", repo_dir.path(), &db)
-            .expect("switch by sanitized name should succeed");
-        assert_eq!(switch.path, wt_path.to_string_lossy());
-        assert_eq!(switch.name, "feature-auth");
-    }
-
-    #[test]
-    fn switch_rejects_nonexact_sanitized_fallback() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let _repo = init_repo_with_commit(repo_dir.path());
-        let db = Database::open_in_memory().unwrap();
-        let (_wt_root, _wt_path) = create_live_worktree(repo_dir.path(), &db, "feat-login");
-
-        // User passes "feat/login" which sanitizes to "feat-login"
-        let switch = execute("feat/login", repo_dir.path(), &db);
-        assert!(switch.is_err(), "only exact live identities should resolve");
-    }
-
-    #[test]
-    fn switch_updates_last_accessed() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let _repo = init_repo_with_commit(repo_dir.path());
-        let db = Database::open_in_memory().unwrap();
-        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let db_repo = db
-            .get_repo_by_path(repo_path.to_str().unwrap())
-            .unwrap()
-            .unwrap();
-        let wt = db
-            .find_worktree_by_identifier(db_repo.id, "my-feature")
-            .unwrap()
-            .unwrap();
-
-        assert!(
-            wt.last_accessed.is_none(),
-            "last_accessed should be None initially"
-        );
-
-        execute("my-feature", repo_dir.path(), &db).expect("switch should succeed");
-
-        let updated = db.get_worktree(wt.id).unwrap().unwrap();
-        assert!(
-            updated.last_accessed.is_some(),
-            "last_accessed should be set after switch"
-        );
-        assert!(
-            updated.last_accessed.unwrap() > 0,
-            "last_accessed should be a positive timestamp"
-        );
-    }
-
-    #[test]
-    fn switch_updates_session_state() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let _repo = init_repo_with_commit(repo_dir.path());
-        let db = Database::open_in_memory().unwrap();
-        let (_wt_root, _) = create_live_worktree(repo_dir.path(), &db, "my-feature");
-
-        // No session state initially
-        assert!(db.get_session("current_worktree").unwrap().is_none());
-
-        execute("my-feature", repo_dir.path(), &db).expect("switch should succeed");
-
-        let current = db.get_session("current_worktree").unwrap();
         assert_eq!(
-            current.as_deref(),
-            Some("my-feature"),
-            "session should track current worktree name"
+            result.path,
+            linked.canonicalize().unwrap().to_string_lossy()
         );
+        assert_eq!(result.name, "feature-auth");
     }
 
     #[test]
-    fn switch_adopts_unmanaged_worktree() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let git_repo = init_repo_with_commit(repo_dir.path());
-        let db = Database::open_in_memory().unwrap();
+    fn switch_reports_a_missing_live_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
 
-        // Register repo in DB but NOT the worktree
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-
-        // Create a git worktree manually (not via trench)
-        let wt_dir = tempfile::tempdir().unwrap();
-        let wt_path = wt_dir.path().join("unmanaged-feat");
-        git_repo
-            .branch(
-                "unmanaged-feat",
-                &git_repo.head().unwrap().peel_to_commit().unwrap(),
-                false,
-            )
-            .unwrap();
-        let branch_ref = git_repo
-            .find_branch("unmanaged-feat", git2::BranchType::Local)
-            .unwrap();
-        let mut opts = git2::WorktreeAddOptions::new();
-        opts.reference(Some(branch_ref.get()));
-        git_repo
-            .worktree("unmanaged-feat", &wt_path, Some(&opts))
-            .unwrap();
-
-        // Switch to the unmanaged worktree — should trigger adoption
-        let result = execute("unmanaged-feat", repo_dir.path(), &db);
-        let switch = result.expect("switch to unmanaged worktree should succeed");
-        assert_eq!(switch.name, "unmanaged-feat");
-
-        // Verify worktree was adopted in DB
-        let wt = db
-            .find_worktree_by_identifier(db_repo.id, "unmanaged-feat")
-            .unwrap()
-            .expect("adopted worktree should be in DB");
-        assert!(wt.adopted_at.is_some(), "adopted_at should be set");
-        assert!(wt.managed, "should be managed after adoption");
-        assert!(
-            wt.last_accessed.is_some(),
-            "last_accessed should be set after switch"
-        );
-    }
-
-    #[test]
-    fn switch_not_found_returns_error() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let _repo = init_repo_with_commit(repo_dir.path());
-        let db = Database::open_in_memory().unwrap();
-
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        db.insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-
-        let result = execute("nonexistent", repo_dir.path(), &db);
-        let err = result.expect_err("should error for nonexistent worktree");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not found"),
-            "error should mention 'not found', got: {msg}"
-        );
-    }
-
-    #[test]
-    fn integration_manual_git_worktree_add_then_switch_adopts_and_lists_managed() {
-        // Full integration test per acceptance criteria:
-        // git worktree add manually → trench switch → verify in DB → shows managed
-        let repo_dir = tempfile::tempdir().unwrap();
-        let git_repo = init_repo_with_commit(repo_dir.path());
-        let db_dir = tempfile::tempdir().unwrap();
-        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
-
-        // Step 1: Register repo in DB (as trench create would)
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db
-            .insert_repo("my-project", repo_path_str, Some("main"))
-            .unwrap();
-
-        // Step 2: Manually create a git worktree (simulating `git worktree add`)
-        let wt_dir = tempfile::tempdir().unwrap();
-        let wt_path = wt_dir.path().join("manual-feature");
-        git_repo
-            .branch(
-                "manual-feature",
-                &git_repo.head().unwrap().peel_to_commit().unwrap(),
-                false,
-            )
-            .unwrap();
-        let branch_ref = git_repo
-            .find_branch("manual-feature", git2::BranchType::Local)
-            .unwrap();
-        let mut opts = git2::WorktreeAddOptions::new();
-        opts.reference(Some(branch_ref.get()));
-        git_repo
-            .worktree("manual-feature", &wt_path, Some(&opts))
-            .unwrap();
-
-        // Step 3: Verify it's NOT in DB yet
-        let found = db
-            .find_worktree_by_identifier(db_repo.id, "manual-feature")
-            .unwrap();
-        assert!(
-            found.is_none(),
-            "worktree should NOT be in DB before switch"
-        );
-
-        // Step 4: Switch to the manually-created worktree
-        let switch = execute("manual-feature", repo_dir.path(), &db)
-            .expect("switch to manually-created worktree should succeed");
-        assert_eq!(switch.name, "manual-feature");
-
-        // Step 5: Verify worktree IS in DB with adopted_at set
-        let wt = db
-            .find_worktree_by_identifier(db_repo.id, "manual-feature")
-            .unwrap()
-            .expect("worktree should be in DB after switch");
-        assert!(wt.adopted_at.is_some(), "adopted_at should be set");
-        assert!(wt.managed, "should be managed after adoption");
-        assert!(wt.last_accessed.is_some(), "last_accessed should be set");
-
-        // Step 6: Verify it appears in list_worktrees (i.e. shows as managed)
-        let worktrees = db.list_worktrees(db_repo.id).unwrap();
-        assert_eq!(worktrees.len(), 1);
-        assert_eq!(worktrees[0].name, "manual-feature");
-        assert!(worktrees[0].managed);
-    }
-
-    #[test]
-    fn create_then_switch_updates_last_accessed_and_session() {
-        let repo_dir = tempfile::tempdir().unwrap();
-        let _repo = init_repo_with_commit(repo_dir.path());
-        let wt_root = tempfile::tempdir().unwrap();
-        let db_dir = tempfile::tempdir().unwrap();
-        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
-
-        // Create a worktree end-to-end
-        let create_result = crate::cli::commands::create::execute(
-            "my-feature",
-            None,
-            repo_dir.path(),
-            wt_root.path(),
-            crate::paths::DEFAULT_WORKTREE_TEMPLATE,
-            &db,
-        )
-        .expect("create should succeed");
-        assert!(create_result.path.exists());
-
-        // Verify last_accessed is None after create
-        let repo_path = repo_dir.path().canonicalize().unwrap();
-        let repo_path_str = repo_path.to_str().unwrap();
-        let db_repo = db.get_repo_by_path(repo_path_str).unwrap().unwrap();
-        let wt_before = db
-            .find_worktree_by_identifier(db_repo.id, "my-feature")
-            .unwrap()
-            .unwrap();
-        assert!(
-            wt_before.last_accessed.is_none(),
-            "last_accessed should be None before switch"
-        );
-
-        // Switch to the worktree
-        let switch = execute("my-feature", repo_dir.path(), &db).expect("switch should succeed");
-        assert_eq!(switch.name, "my-feature");
-        assert_eq!(switch.path, create_result.path.to_str().unwrap());
-
-        // Verify last_accessed is now set
-        let wt_after = db.get_worktree(wt_before.id).unwrap().unwrap();
-        assert!(
-            wt_after.last_accessed.is_some(),
-            "last_accessed should be set after switch"
-        );
-
-        // Verify session state
-        let current = db.get_session("current_worktree").unwrap();
-        assert_eq!(current.as_deref(), Some("my-feature"));
-
-        // Verify a "switched" event was recorded
-        let event_count = db.count_events(wt_before.id, Some("switched")).unwrap();
-        assert_eq!(event_count, 1, "exactly one 'switched' event should exist");
+        assert!(matches!(
+            execute("missing", root.path()),
+            Err(CatalogError::NotFound { .. })
+        ));
     }
 }

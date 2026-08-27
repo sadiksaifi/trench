@@ -486,7 +486,7 @@ fn exit_code_8_remove_without_force_outside_interactive_terminal() {
 }
 
 #[test]
-fn switch_print_path_keeps_stdout_raw_and_reports_path_on_stderr() {
+fn switch_print_path_keeps_stdout_raw_and_suppresses_the_direct_use_hint() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -530,9 +530,5 @@ fn switch_print_path_keeps_stdout_raw_and_reports_path_on_stderr() {
         "stdout must stay raw path for shell integration"
     );
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(&format!("Switched to {}", wt_path)),
-        "stderr should report switched absolute path, got: {stderr}"
-    );
+    assert!(output.stderr.is_empty());
 }

@@ -1283,14 +1283,14 @@ impl App {
             KeyCode::Enter => {
                 if let Some(row) = self.list_state.rows.get(self.list_state.selected) {
                     let name = row.name.clone();
-                    let Some((cwd, db)) = Self::open_db() else {
+                    let Some((cwd, _db)) = Self::open_db() else {
                         self.list_state.status_message = Some(screens::list::StatusMessage {
                             text: "Switch failed: could not access current repo state".into(),
                             success: false,
                         });
                         return;
                     };
-                    match crate::cli::commands::switch::execute(&name, &cwd, &db) {
+                    match crate::cli::commands::switch::execute(&name, &cwd) {
                         Ok(result) => {
                             let action = crate::tmux::resolve_tmux_action(
                                 false,
