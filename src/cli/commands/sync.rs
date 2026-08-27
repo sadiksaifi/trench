@@ -10,6 +10,8 @@ use crate::hooks::{self, HookEnvContext, HookEvent};
 use crate::live_worktree::LiveWorktree;
 use crate::state::{Database, Repo, Worktree};
 
+pub mod stateless;
+
 /// Typed errors for the `sync` command.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {

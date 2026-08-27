@@ -74,10 +74,8 @@ fn git(dir: &std::path::Path, args: &[&str]) {
     );
 }
 
-// ── Exit code 8: Missing required flag ─────────────────────────────────
-
 #[test]
-fn exit_code_8_sync_all_without_strategy() {
+fn clap_exit_2_rejects_removed_sync_all_without_strategy() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -88,8 +86,8 @@ fn exit_code_8_sync_all_without_strategy() {
 
     assert_eq!(
         output.status.code(),
-        Some(8),
-        "sync --all without --strategy should exit 8, stderr: {}",
+        Some(2),
+        "removed sync --all should be rejected by clap, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -266,10 +264,8 @@ fn exit_code_5_git_error_not_a_repo() {
     );
 }
 
-// ── Exit code 1: General error ─────────────────────────────────────────
-
 #[test]
-fn exit_code_1_sync_branch_with_all_flag() {
+fn clap_exit_2_rejects_removed_sync_all_with_target() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -280,8 +276,8 @@ fn exit_code_1_sync_branch_with_all_flag() {
 
     assert_eq!(
         output.status.code(),
-        Some(1),
-        "sync with both --all and <BRANCH> should exit 1, stderr: {}",
+        Some(2),
+        "removed sync --all should be rejected by clap, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

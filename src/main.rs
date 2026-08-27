@@ -130,17 +130,16 @@ enum Commands {
     },
     /// Sync a worktree with its base branch
     Sync {
-        /// Branch name or sanitized name of the worktree to sync.
-        /// Omit when using --all.
-        branch: Option<String>,
+        /// Branch name, worktree name, or path of the worktree to sync
+        branch: String,
 
-        /// Sync all active worktrees. Requires --strategy.
+        /// Sync strategy: rebase or merge
         #[arg(long)]
-        all: bool,
+        strategy: SyncStrategy,
 
-        /// Sync strategy: rebase or merge. Prompts interactively if omitted.
+        /// Base branch or ref to sync onto
         #[arg(long)]
-        strategy: Option<SyncStrategy>,
+        base: Option<String>,
 
         /// Skip all lifecycle hooks (pre_sync, post_sync)
         #[arg(long)]
@@ -283,28 +282,10 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Sync {
             branch,
-            all,
             strategy,
             no_hooks,
-        }) => {
-            if all && branch.is_some() {
-                eprintln!("error: <BRANCH> cannot be used with --all");
-                ExitCode::GeneralError.exit();
-            }
-            if all {
-                if strategy.is_none() {
-                    eprintln!("error: {}", cli::commands::sync::BatchSyncMissingStrategy);
-                    ExitCode::MissingRequiredFlag.exit();
-                }
-                run_sync_all(strategy.unwrap(), json, dry_run, no_hooks)
-            } else {
-                let branch = branch.unwrap_or_else(|| {
-                    eprintln!("error: <BRANCH> is required when --all is not set");
-                    ExitCode::GeneralError.exit();
-                });
-                run_sync(&branch, strategy, json, dry_run, no_hooks)
-            }
-        }
+            base,
+        }) => run_sync(&branch, strategy, base.as_deref(), json, dry_run, no_hooks),
         Some(Commands::Log {
             branch,
             tail,
@@ -970,158 +951,291 @@ fn run_status(
 
 fn run_sync(
     identifier: &str,
-    strategy: Option<SyncStrategy>,
+    strategy: SyncStrategy,
+    explicit_base: Option<&str>,
     json: bool,
     dry_run: bool,
     no_hooks: bool,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
 
-    // Determine strategy: use CLI flag, or prompt interactively
-    // This runs BEFORE any DB work so dry-run can fail fast.
-    let resolved_strategy = match strategy {
-        Some(s) => s,
-        None => {
-            if dry_run {
-                eprintln!("error: --strategy is required with --dry-run (use --strategy rebase or --strategy merge)");
-                ExitCode::MissingRequiredFlag.exit();
-            }
-            if !std::io::stdin().is_terminal() {
-                eprintln!("error: --strategy is required in non-interactive mode (use --strategy rebase or --strategy merge)");
-                ExitCode::MissingRequiredFlag.exit();
-            }
-            eprint!("Sync strategy — (r)ebase or (m)erge? ");
-            let mut input = String::new();
-            std::io::stdin()
-                .read_line(&mut input)
-                .context("failed to read strategy input")?;
-            match input.trim().to_lowercase().as_str() {
-                "r" | "rebase" => SyncStrategy::Rebase,
-                "m" | "merge" => SyncStrategy::Merge,
-                other => {
-                    eprintln!("error: unknown strategy '{other}'. Use 'rebase' or 'merge'.");
-                    ExitCode::GeneralError.exit();
-                }
-            }
-        }
-    };
+    let repo_info = git::discover_repo(&cwd)?;
+    let project_config = config::load_project_config(&repo_info.path)?;
+    let global_config = config::load_global_config()?;
+    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+    let hooks_config = if no_hooks { None } else { resolved.hooks };
 
-    let sync_strategy = match resolved_strategy {
-        SyncStrategy::Rebase => cli::commands::sync::Strategy::Rebase,
-        SyncStrategy::Merge => cli::commands::sync::Strategy::Merge,
-    };
-
-    // Load hooks config (needed for both dry-run preview and actual execution)
-    let hooks_config = if no_hooks {
-        None
-    } else {
-        let repo_info = git::discover_repo(&cwd)?;
-        let project_config = config::load_project_config(&repo_info.path)?;
-        let global_config = config::load_global_config()?;
-        config::resolve_config(None, project_config.as_ref(), &global_config).hooks
-    };
-
-    // Dry-run: open existing DB (read-only) for accurate base-branch metadata
     if dry_run {
-        let db = if let Some(db_path) = existing_db_path()? {
-            Some(state::Database::open(&db_path)?)
-        } else {
-            None
+        let strategy = match strategy {
+            SyncStrategy::Rebase => cli::commands::sync::stateless::SyncStrategy::Rebase,
+            SyncStrategy::Merge => cli::commands::sync::stateless::SyncStrategy::Merge,
         };
-        let plan = cli::commands::sync::execute_dry_run(
-            identifier,
-            &cwd,
-            db.as_ref(),
-            sync_strategy,
-            hooks_config.as_ref(),
-            no_hooks,
-        )?;
-        if json {
-            println!("{}", serde_json::to_string_pretty(&plan)?);
+        let hook_policy = if no_hooks {
+            cli::commands::sync::stateless::HookPolicy::Skip
         } else {
-            print!("{plan}");
+            cli::commands::sync::stateless::HookPolicy::Run
+        };
+        let planning_started = std::time::Instant::now();
+        let plan = match cli::commands::sync::stateless::SyncPlanner::discover(
+            &cwd,
+            resolved.git.default_base.as_deref(),
+        )
+        .and_then(|planner| planner.plan(identifier, explicit_base, strategy, hook_policy))
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                return report_sync_failure(
+                    &error.into_failure(planning_started.elapsed()),
+                    Vec::new(),
+                    json,
+                    false,
+                )
+            }
+        };
+        let preview = cli::commands::sync::stateless::preview(plan);
+        if json {
+            println!("{}", serde_json::to_string_pretty(&preview)?);
+        } else {
+            println!("{preview}");
         }
         return Ok(());
     }
 
-    // Real execution path — open DB here (after dry-run early-return)
-    let db_path = runtime_db_path()?;
-    let db = state::Database::open(&db_path)?;
-
-    let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
-
-    match rt.block_on(cli::commands::sync::execute_with_hooks(
-        identifier,
+    let stateless_strategy = match strategy {
+        SyncStrategy::Rebase => cli::commands::sync::stateless::SyncStrategy::Rebase,
+        SyncStrategy::Merge => cli::commands::sync::stateless::SyncStrategy::Merge,
+    };
+    let hook_policy = if no_hooks {
+        cli::commands::sync::stateless::HookPolicy::Skip
+    } else {
+        cli::commands::sync::stateless::HookPolicy::Run
+    };
+    let emitter = CliSyncEmitter::default();
+    let planning_started = std::time::Instant::now();
+    let plan = match cli::commands::sync::stateless::plan_after_best_effort_origin_fetch(
         &cwd,
-        &db,
-        sync_strategy,
+        resolved.git.default_base.as_deref(),
+        identifier,
+        explicit_base,
+        stateless_strategy,
+        hook_policy,
+        &emitter,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return report_sync_failure(
+                &error.into_failure(planning_started.elapsed()),
+                emitter.stages(),
+                json,
+                true,
+            )
+        }
+    };
+    let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
+    match rt.block_on(cli::commands::sync::stateless::execute(
+        plan,
         hooks_config.as_ref(),
-        no_hooks,
-        None,
+        &emitter,
     )) {
         Ok(outcome) => {
-            // Report post_sync hook failure to stderr (FR-24: Report)
-            if let Some(ref hook_err) = outcome.post_sync_error {
-                eprintln!("error: post_sync hook failed: {hook_err:#}");
-            }
-
             if json {
                 println!(
                     "{}",
-                    output::json::format_json_value(&outcome.result.to_json())?
+                    output::json::format_json_value(&SyncSuccessOutput::new(
+                        &outcome,
+                        emitter.stages()
+                    ))?
                 );
             } else {
-                eprintln!(
-                    "Synced '{}' via {}",
-                    outcome.result.name, outcome.result.strategy
-                );
-                eprintln!(
-                    "  before: ahead={}, behind={}",
-                    outcome.result.before_ahead, outcome.result.before_behind
-                );
-                eprintln!(
-                    "  after:  ahead={}, behind={}",
-                    outcome.result.after_ahead, outcome.result.after_behind
-                );
-            }
-
-            // Exit 4 if post_sync hook failed (FR-24: Report — non-zero exit but sync completed)
-            if let Some(ref hook_err) = outcome.post_sync_error {
-                if hook_err.chain().any(|c| {
-                    c.downcast_ref::<hooks::runner::HookTimeoutError>()
-                        .is_some()
-                }) {
-                    ExitCode::HookTimeout.exit();
-                }
-                ExitCode::HookFailed.exit();
+                println!("{outcome}");
             }
             Ok(())
         }
-        Err(e) => {
-            // Check for hook timeout first (more specific than hook failure)
-            if e.chain().any(|c| {
-                c.downcast_ref::<hooks::runner::HookTimeoutError>()
-                    .is_some()
-            }) {
-                eprintln!("error: {e:#}");
-                ExitCode::HookTimeout.exit();
-            }
-            // Check for hook failure (pre_sync) via typed error
-            if e.downcast_ref::<cli::commands::sync::SyncError>().is_some() {
-                eprintln!("error: {e:#}");
-                ExitCode::HookFailed.exit();
-            }
-            if let Some(git::GitError::MergeConflict { .. }) = e.downcast_ref::<git::GitError>() {
-                eprintln!("error: {e}");
-                ExitCode::GitError.exit();
-            }
-            let msg = e.to_string();
-            if msg.contains("not found") || msg.contains("not tracked") {
-                eprintln!("error: {e}");
-                ExitCode::NotFound.exit();
-            }
-            Err(e)
+        Err(failure) => report_sync_failure(&failure, emitter.stages(), json, true),
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SyncStageOutput {
+    stage: cli::commands::sync::stateless::SyncStage,
+    success: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SyncSuccessOutput<'a> {
+    ok: bool,
+    target: &'a str,
+    branch: &'a str,
+    path: &'a std::path::Path,
+    base: &'a str,
+    strategy: cli::commands::sync::stateless::SyncStrategy,
+    before: &'a cli::commands::sync::stateless::AheadBehind,
+    after: &'a cli::commands::sync::stateless::AheadBehind,
+    mutation_state: cli::commands::sync::stateless::MutationState,
+    stages: Vec<SyncStageOutput>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SyncFailureOutput<'a> {
+    ok: bool,
+    failure: SyncFailureDetail<'a>,
+    stages: Vec<SyncStageOutput>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SyncFailureDetail<'a> {
+    stage: cli::commands::sync::stateless::SyncStage,
+    mutation_state: cli::commands::sync::stateless::MutationState,
+    class: cli::commands::sync::stateless::SyncErrorClass,
+    message: &'a str,
+}
+
+impl<'a> SyncSuccessOutput<'a> {
+    fn new(
+        outcome: &'a cli::commands::sync::stateless::SyncOutcome,
+        stages: Vec<SyncStageOutput>,
+    ) -> Self {
+        Self {
+            ok: true,
+            target: &outcome.target,
+            branch: &outcome.branch,
+            path: &outcome.path,
+            base: &outcome.base,
+            strategy: outcome.strategy,
+            before: &outcome.before,
+            after: &outcome.after,
+            mutation_state: outcome.mutation_state,
+            stages,
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CliSyncEmitter(std::sync::Mutex<Vec<cli::commands::sync::stateless::SyncEvent>>);
+
+impl CliSyncEmitter {
+    fn stages(&self) -> Vec<SyncStageOutput> {
+        self.0
+            .lock()
+            .map(|events| {
+                events
+                    .iter()
+                    .filter_map(|event| match event {
+                        cli::commands::sync::stateless::SyncEvent::StageFinished {
+                            stage,
+                            success,
+                            ..
+                        } => Some(SyncStageOutput {
+                            stage: *stage,
+                            success: *success,
+                        }),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl cli::commands::sync::stateless::SyncEmitter for CliSyncEmitter {
+    fn emit(&self, event: cli::commands::sync::stateless::SyncEvent) {
+        match &event {
+            cli::commands::sync::stateless::SyncEvent::StageFinished {
+                stage,
+                success: true,
+                elapsed,
+            } => logging::record(logging::DiagnosticEvent::debug(
+                logging::Operation::Sync,
+                sync_diagnostic_stage(*stage),
+                *elapsed,
+            )),
+            cli::commands::sync::stateless::SyncEvent::Warning { stage, .. } => {
+                logging::record(logging::DiagnosticEvent::warning(
+                    logging::Operation::Sync,
+                    sync_diagnostic_stage(*stage),
+                    std::time::Duration::ZERO,
+                    logging::DiagnosticError::Git,
+                ));
+            }
+            _ => {}
+        }
+        if let cli::commands::sync::stateless::SyncEvent::HookOutput { line, .. } = &event {
+            eprintln!("{line}");
+        }
+        if let Ok(mut events) = self.0.lock() {
+            events.push(event);
+        }
+    }
+}
+
+fn report_sync_failure(
+    failure: &cli::commands::sync::stateless::SyncFailure,
+    stages: Vec<SyncStageOutput>,
+    json: bool,
+    record_diagnostics: bool,
+) -> anyhow::Result<()> {
+    use cli::commands::sync::stateless::SyncErrorClass;
+
+    if record_diagnostics {
+        logging::record(logging::DiagnosticEvent::error(
+            logging::Operation::Sync,
+            sync_diagnostic_stage(failure.stage),
+            failure.elapsed,
+            match failure.class {
+                SyncErrorClass::InvalidTarget => logging::DiagnosticError::NotFound,
+                SyncErrorClass::InvalidBase
+                | SyncErrorClass::Dirty
+                | SyncErrorClass::Detached
+                | SyncErrorClass::OperationInProgress
+                | SyncErrorClass::PreconditionsChanged
+                | SyncErrorClass::Conflict => logging::DiagnosticError::InvalidInput,
+                SyncErrorClass::Git | SyncErrorClass::Rollback => logging::DiagnosticError::Git,
+                SyncErrorClass::Hook | SyncErrorClass::HookTimeout => {
+                    logging::DiagnosticError::Hook
+                }
+            },
+        ));
+    }
+    if json {
+        println!(
+            "{}",
+            output::json::format_json_value(&SyncFailureOutput {
+                ok: false,
+                failure: SyncFailureDetail {
+                    stage: failure.stage,
+                    mutation_state: failure.mutation_state,
+                    class: failure.class,
+                    message: &failure.message,
+                },
+                stages,
+            })?
+        );
+    } else {
+        eprintln!("error: {}", failure.message);
+    }
+    match failure.class {
+        SyncErrorClass::InvalidTarget => ExitCode::NotFound,
+        SyncErrorClass::Git | SyncErrorClass::Rollback => ExitCode::GitError,
+        SyncErrorClass::Hook => ExitCode::HookFailed,
+        SyncErrorClass::HookTimeout => ExitCode::HookTimeout,
+        SyncErrorClass::InvalidBase
+        | SyncErrorClass::Dirty
+        | SyncErrorClass::Detached
+        | SyncErrorClass::OperationInProgress
+        | SyncErrorClass::PreconditionsChanged
+        | SyncErrorClass::Conflict => ExitCode::GeneralError,
+    }
+    .exit()
+}
+
+fn sync_diagnostic_stage(stage: cli::commands::sync::stateless::SyncStage) -> logging::Stage {
+    match stage {
+        cli::commands::sync::stateless::SyncStage::Fetch => logging::Stage::Resolve,
+        cli::commands::sync::stateless::SyncStage::Validate => logging::Stage::Validate,
+        cli::commands::sync::stateless::SyncStage::PreHook
+        | cli::commands::sync::stateless::SyncStage::PostHook => logging::Stage::Hook,
+        cli::commands::sync::stateless::SyncStage::Sync
+        | cli::commands::sync::stateless::SyncStage::Rollback => logging::Stage::Git,
     }
 }
 
@@ -1420,8 +1534,17 @@ mod tests {
         assert!(result.is_ok(), "remove with branch should be accepted");
         let result = Cli::try_parse_from(["trench", "switch", "my-feature"]);
         assert!(result.is_ok(), "switch with branch should be accepted");
-        let result = Cli::try_parse_from(["trench", "sync", "my-feature"]);
-        assert!(result.is_ok(), "sync with branch should be accepted");
+        let result = Cli::try_parse_from([
+            "trench",
+            "sync",
+            "my-feature",
+            "--strategy",
+            "rebase",
+        ]);
+        assert!(
+            result.is_ok(),
+            "sync with branch and strategy should be accepted"
+        );
     }
 
     #[test]
@@ -1989,8 +2112,8 @@ mod tests {
             Some(Commands::Sync {
                 branch, strategy, ..
             }) => {
-                assert_eq!(branch, Some("foo".to_string()));
-                assert_eq!(strategy, Some(SyncStrategy::Rebase));
+                assert_eq!(branch, "foo");
+                assert_eq!(strategy, SyncStrategy::Rebase);
             }
             _ => panic!("expected Commands::Sync"),
         }
@@ -2004,26 +2127,21 @@ mod tests {
             Some(Commands::Sync {
                 branch, strategy, ..
             }) => {
-                assert_eq!(branch, Some("foo".to_string()));
-                assert_eq!(strategy, Some(SyncStrategy::Merge));
+                assert_eq!(branch, "foo");
+                assert_eq!(strategy, SyncStrategy::Merge);
             }
             _ => panic!("expected Commands::Sync"),
         }
     }
 
     #[test]
-    fn sync_subcommand_strategy_defaults_to_none() {
-        let cli = Cli::try_parse_from(["trench", "sync", "foo"])
-            .expect("sync without --strategy should parse");
-        match cli.command {
-            Some(Commands::Sync {
-                branch, strategy, ..
-            }) => {
-                assert_eq!(branch, Some("foo".to_string()));
-                assert!(strategy.is_none());
-            }
-            _ => panic!("expected Commands::Sync"),
-        }
+    fn sync_subcommand_requires_strategy() {
+        let error = Cli::try_parse_from(["trench", "sync", "foo"])
+            .expect_err("sync without --strategy must fail");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]
@@ -2047,7 +2165,7 @@ mod tests {
             Some(Commands::Sync {
                 branch, no_hooks, ..
             }) => {
-                assert_eq!(branch, Some("foo".to_string()));
+                assert_eq!(branch, "foo");
                 assert!(no_hooks, "--no-hooks should be true");
             }
             _ => panic!("expected Commands::Sync"),
@@ -2056,7 +2174,7 @@ mod tests {
 
     #[test]
     fn sync_subcommand_no_hooks_defaults_to_false() {
-        let cli = Cli::try_parse_from(["trench", "sync", "foo"])
+        let cli = Cli::try_parse_from(["trench", "sync", "foo", "--strategy", "rebase"])
             .expect("sync without --no-hooks should parse");
         match cli.command {
             Some(Commands::Sync { no_hooks, .. }) => {
@@ -2067,65 +2185,28 @@ mod tests {
     }
 
     #[test]
-    fn sync_all_flag_parses_with_strategy() {
-        let cli = Cli::try_parse_from(["trench", "sync", "--all", "--strategy", "rebase"])
-            .expect("sync --all --strategy rebase should parse");
-        match cli.command {
-            Some(Commands::Sync {
-                branch,
-                all,
-                strategy,
-                ..
-            }) => {
-                assert!(branch.is_none(), "branch should be None when --all is used");
-                assert!(all, "--all should be true");
-                assert_eq!(strategy, Some(SyncStrategy::Rebase));
-            }
-            _ => panic!("expected Commands::Sync"),
-        }
+    fn sync_subcommand_rejects_all() {
+        let error =
+            Cli::try_parse_from(["trench", "sync", "topic", "--all", "--strategy", "rebase"])
+                .expect_err("sync --all must be rejected");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn sync_all_flag_parses_without_branch() {
-        let cli = Cli::try_parse_from(["trench", "sync", "--all", "--strategy", "merge"])
-            .expect("sync --all --strategy merge should parse");
+    fn sync_subcommand_accepts_explicit_base() {
+        let cli = Cli::try_parse_from([
+            "trench",
+            "sync",
+            "feature/topic",
+            "--strategy",
+            "merge",
+            "--base",
+            "release",
+        ])
+        .expect("sync --base should parse");
         match cli.command {
-            Some(Commands::Sync {
-                branch,
-                all,
-                strategy,
-                ..
-            }) => {
-                assert!(branch.is_none());
-                assert!(all);
-                assert_eq!(strategy, Some(SyncStrategy::Merge));
-            }
-            _ => panic!("expected Commands::Sync"),
-        }
-    }
-
-    #[test]
-    fn sync_branch_still_works_without_all() {
-        let cli = Cli::try_parse_from(["trench", "sync", "my-feature", "--strategy", "rebase"])
-            .expect("sync with branch should still parse");
-        match cli.command {
-            Some(Commands::Sync { branch, all, .. }) => {
-                assert_eq!(branch, Some("my-feature".to_string()));
-                assert!(!all, "--all should default to false");
-            }
-            _ => panic!("expected Commands::Sync"),
-        }
-    }
-
-    #[test]
-    fn sync_all_without_strategy_parses_but_strategy_is_none() {
-        // CLI parsing succeeds — the exit-code-8 validation happens at runtime
-        let cli = Cli::try_parse_from(["trench", "sync", "--all"])
-            .expect("sync --all without --strategy should still parse");
-        match cli.command {
-            Some(Commands::Sync { all, strategy, .. }) => {
-                assert!(all);
-                assert!(strategy.is_none(), "--strategy should be None");
+            Some(Commands::Sync { base, .. }) => {
+                assert_eq!(base.as_deref(), Some("release"));
             }
             _ => panic!("expected Commands::Sync"),
         }
