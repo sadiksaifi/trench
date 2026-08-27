@@ -682,4 +682,49 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn filtered_main_and_detached_rows_keep_their_action_eligibility() {
+        let mut detached = identity("/worktrees/review", "review");
+        detached.branch = None;
+        detached.detached = true;
+        let mut main = identity("/repos/trench", "trench");
+        main.branch = Some("main".to_string());
+        main.is_main = true;
+        let mut state = AppState::new(vec![main.clone(), detached.clone()]);
+        state
+            .statuses
+            .insert(main.id.clone(), WorktreeStatus::default());
+
+        let _ = reduce(&mut state, Event::Input(Key::Char('/')));
+        for character in "rev".chars() {
+            let _ = reduce(&mut state, Event::Input(Key::Char(character)));
+        }
+        assert_eq!(state.selected, Some(detached.id.clone()));
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('s'))),
+            vec![Effect::Unavailable {
+                action: Action::Sync,
+                reason: "Detached worktrees cannot be synced".to_string(),
+            }]
+        );
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('d'))),
+            vec![Effect::OpenRemove(detached.id)]
+        );
+
+        let _ = reduce(&mut state, Event::Input(Key::Escape));
+        let _ = reduce(&mut state, Event::Input(Key::Char('/')));
+        for character in "mai".chars() {
+            let _ = reduce(&mut state, Event::Input(Key::Char(character)));
+        }
+        assert_eq!(state.selected, Some(main.id));
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('d'))),
+            vec![Effect::Unavailable {
+                action: Action::Remove,
+                reason: "The main worktree cannot be removed".to_string(),
+            }]
+        );
+    }
 }
