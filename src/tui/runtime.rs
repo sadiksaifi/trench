@@ -775,12 +775,9 @@ pub fn run() -> Result<TuiExit> {
                 }
             }
             state.operation_modal = operation.modal().cloned();
-            mouse_capture
-                .set_active(interactive_mouse_surface_visible(&state))
-                .context("failed to update mouse capture")?;
             let _ = app::reduce(&mut state, Event::NotificationTick(Instant::now()));
             let (width, height) = crossterm::terminal::size()?;
-            let _ = app::reduce(&mut state, Event::ViewportChanged { width, height });
+            sync_mouse_capture_for_viewport(&mut state, &mut mouse_capture, width, height)?;
             terminal.draw(|frame| {
                 cockpit::render(&state, frame, frame.area(), &selected_theme);
             })?;
@@ -798,12 +795,7 @@ pub fn run() -> Result<TuiExit> {
                     continue;
                 }
                 if state.help_open {
-                    if cockpit::help_close_hit(
-                        Rect::new(0, 0, width, height),
-                        (mouse.column, mouse.row),
-                    ) {
-                        state.help_open = false;
-                    }
+                    route_visible_help_mouse(&mut state, mouse, Rect::new(0, 0, width, height));
                     continue;
                 }
                 if let Some(effect) =
@@ -1177,8 +1169,31 @@ fn visible_surface_key(state: &AppState, key: KeyEvent) -> Option<KeyEvent> {
 
 fn interactive_mouse_surface_visible(state: &AppState) -> bool {
     !state.viewport.is_tiny()
-        && state.operation_modal.is_none()
-        && (state.create_dialog.is_some() || state.help_open)
+        && (state.help_open || (state.operation_modal.is_none() && state.create_dialog.is_some()))
+}
+
+fn sync_mouse_capture_for_viewport<W: Write>(
+    state: &mut AppState,
+    capture: &mut MouseCapture<W>,
+    width: u16,
+    height: u16,
+) -> Result<()> {
+    let _ = app::reduce(state, Event::ViewportChanged { width, height });
+    capture
+        .set_active(interactive_mouse_surface_visible(state))
+        .context("failed to update mouse capture")
+}
+
+fn route_visible_help_mouse(state: &mut AppState, mouse: MouseEvent, area: Rect) -> bool {
+    if !interactive_mouse_surface_visible(state) || !state.help_open {
+        return false;
+    }
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        && cockpit::help_close_hit(area, (mouse.column, mouse.row))
+    {
+        state.help_open = false;
+    }
+    true
 }
 
 fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
@@ -1808,16 +1823,34 @@ mod tests {
         let output = SharedWriter::default();
         let mut capture = MouseCapture::new(output.clone());
 
-        for (width, height, expected) in [(59, 16, false), (60, 16, true), (60, 15, false)] {
-            let _ = app::reduce(&mut state, Event::ViewportChanged { width, height });
+        for (width, height, expected) in [
+            (60, 16, true),
+            (59, 16, false),
+            (60, 16, true),
+            (60, 15, false),
+            (60, 16, true),
+        ] {
+            sync_mouse_capture_for_viewport(&mut state, &mut capture, width, height).unwrap();
             assert_eq!(interactive_mouse_surface_visible(&state), expected);
-            capture.set_active(expected).unwrap();
+            let area = Rect::new(0, 0, width, height);
+            let cta = cockpit::create_hit_map(state.create_dialog.as_ref().unwrap(), area).cta;
+            let click = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: cta.x + cta.width / 2,
+                row: cta.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            assert_eq!(
+                route_visible_create_mouse(&mut state, click, area).is_some(),
+                expected,
+                "capture and first-click routing must change in the same production step"
+            );
         }
         drop(capture);
 
         let text = String::from_utf8_lossy(&output.0.borrow()).into_owned();
-        assert_eq!(text.matches("\u{1b}[?1000h").count(), 1);
-        assert_eq!(text.matches("\u{1b}[?1000l").count(), 1);
+        assert_eq!(text.matches("\u{1b}[?1000h").count(), 3);
+        assert_eq!(text.matches("\u{1b}[?1000l").count(), 3);
         assert!(visible_surface_key(
             &state,
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
@@ -1862,6 +1895,39 @@ mod tests {
         assert!(!interactive_mouse_surface_visible(&state));
         assert_eq!(route_visible_create_mouse(&mut state, click, area), None);
         assert_eq!(state.operation_modal, before);
+    }
+
+    #[test]
+    fn help_over_a_running_operation_remains_mouse_interactive_and_closes() {
+        let area = Rect::new(0, 0, 80, 20);
+        let mut state = AppState::new(Vec::new());
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: area.width,
+                height: area.height,
+            },
+        );
+        state.help_open = true;
+        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
+            crate::operation::OperationKind::Create,
+        ));
+        let close = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .find(|point| cockpit::help_close_hit(area, *point))
+            .expect("help close target");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: close.0,
+            row: close.1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(interactive_mouse_surface_visible(&state));
+        assert!(route_visible_help_mouse(&mut state, click, area));
+        assert!(!state.help_open);
+        assert!(state.operation_modal.is_some());
+        assert!(!interactive_mouse_surface_visible(&state));
     }
 
     #[test]
