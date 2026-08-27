@@ -53,6 +53,13 @@ impl LineInput {
             LineEdit::Insert(character) => {
                 self.value.insert(self.cursor, character);
                 self.cursor += character.len_utf8();
+                self.cursor = self
+                    .value
+                    .grapheme_indices(true)
+                    .map(|(index, _)| index)
+                    .chain(std::iter::once(self.value.len()))
+                    .find(|boundary| *boundary >= self.cursor)
+                    .unwrap_or(self.value.len());
             }
             LineEdit::Start => self.cursor = 0,
             LineEdit::End => self.cursor = self.value.len(),
@@ -173,5 +180,16 @@ mod tests {
         input.edit(LineEdit::DeletePreviousCharacter);
 
         assert_eq!(input.value(), "a界");
+    }
+
+    #[test]
+    fn inserted_combining_marks_never_leave_the_cursor_inside_a_grapheme() {
+        let mut input = LineInput::from("\u{301}x");
+
+        input.edit(LineEdit::Start);
+        input.edit(LineEdit::Insert('a'));
+        input.edit(LineEdit::DeletePreviousCharacter);
+
+        assert_eq!(input.value(), "x");
     }
 }
