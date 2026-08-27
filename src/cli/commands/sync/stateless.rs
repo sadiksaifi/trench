@@ -469,7 +469,7 @@ pub async fn execute(
             });
             let (class, mutation_state) = match error {
                 git::sync::SyncGitError::Conflict => {
-                    (SyncErrorClass::Conflict, MutationState::RolledBack)
+                    (SyncErrorClass::Conflict, MutationState::NotStarted)
                 }
                 git::sync::SyncGitError::Rollback(_) => {
                     (SyncErrorClass::Rollback, MutationState::PartiallyApplied)
@@ -478,17 +478,8 @@ pub async fn execute(
                     SyncErrorClass::PreconditionsChanged,
                     MutationState::NotStarted,
                 ),
-                git::sync::SyncGitError::Git(_) => (SyncErrorClass::Git, MutationState::RolledBack),
+                git::sync::SyncGitError::Git(_) => (SyncErrorClass::Git, MutationState::NotStarted),
             };
-            if mutation_state == MutationState::RolledBack {
-                let rollback_started = Instant::now();
-                emitter.emit(SyncEvent::StageStarted(SyncStage::Rollback));
-                emitter.emit(SyncEvent::StageFinished {
-                    stage: SyncStage::Rollback,
-                    success: true,
-                    elapsed: rollback_started.elapsed(),
-                });
-            }
             return Err(failure(
                 started,
                 SyncStage::Sync,
@@ -816,7 +807,7 @@ mod tests {
 
         let repo = git2::Repository::open(&feature).unwrap();
         assert_eq!(failure.class, SyncErrorClass::Conflict);
-        assert_eq!(failure.mutation_state, MutationState::RolledBack);
+        assert_eq!(failure.mutation_state, MutationState::NotStarted);
         assert_eq!(repo.head().unwrap().target(), Some(head_before));
         assert_eq!(
             repo.index()
@@ -914,6 +905,34 @@ mod tests {
     #[tokio::test]
     async fn rebase_conflict_restores_exact_prestate_without_residue() {
         assert_conflict_is_atomic(SyncStrategy::Rebase).await;
+    }
+
+    #[tokio::test]
+    async fn in_memory_conflict_does_not_report_a_live_rollback_stage() {
+        let (_root, feature) = conflicting_worktree();
+        let plan = SyncPlanner::discover(&feature, None)
+            .unwrap()
+            .plan(
+                "feature/conflict",
+                Some("main"),
+                SyncStrategy::Rebase,
+                HookPolicy::Skip,
+            )
+            .unwrap();
+        let emitter = RecordingSyncEmitter::default();
+
+        let failure = execute(plan, None, &emitter).await.unwrap_err();
+
+        assert_eq!(failure.class, SyncErrorClass::Conflict);
+        assert_eq!(failure.mutation_state, MutationState::NotStarted);
+        assert!(emitter.events().iter().all(|event| !matches!(
+            event,
+            SyncEvent::StageStarted(SyncStage::Rollback)
+                | SyncEvent::StageFinished {
+                    stage: SyncStage::Rollback,
+                    ..
+                }
+        )));
     }
 
     #[tokio::test]
