@@ -1046,13 +1046,16 @@ fn visible_surface_key(state: &AppState, key: KeyEvent) -> Option<KeyEvent> {
 }
 
 fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
+    if let Some(edit) = translate_line_edit(key) {
+        return Some(CreateKey::Edit(edit));
+    }
+
     match key.code {
         KeyCode::Enter => Some(CreateKey::Enter),
         KeyCode::Esc => Some(CreateKey::Escape),
         KeyCode::Up => Some(CreateKey::Up),
         KeyCode::Down => Some(CreateKey::Down),
         KeyCode::Tab => Some(CreateKey::Tab),
-        KeyCode::Backspace => Some(CreateKey::Backspace),
         KeyCode::Char(character) => Some(CreateKey::Character(character)),
         _ => None,
     }
@@ -1305,7 +1308,7 @@ mod tests {
         );
         assert_eq!(
             translate_create_key(KeyEvent::new(KeyCode::Backspace, modifiers)),
-            Some(CreateKey::Backspace)
+            Some(CreateKey::Edit(LineEdit::DeletePreviousCharacter))
         );
         assert_eq!(
             translate_create_key(KeyEvent::new(KeyCode::Char('x'), modifiers)),
