@@ -4,6 +4,7 @@ pub enum Key {
     Escape,
     Up,
     Down,
+    Backspace,
     Char(char),
 }
 
@@ -16,6 +17,7 @@ pub enum Action {
     Remove,
     DeleteBranch,
     Search,
+    CloseSearch,
     Refresh,
     ToggleInspector,
     SelectNext,
@@ -27,6 +29,7 @@ pub enum Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Context {
     Cockpit,
+    Search,
     Resize,
 }
 
@@ -128,9 +131,61 @@ const RESIZE_BINDINGS: &[Binding] = &[
     },
 ];
 
+const SEARCH_BINDINGS: &[Binding] = &[
+    Binding {
+        keys: &[Key::Enter],
+        label: "Enter",
+        description: "switch",
+        action: Action::Switch,
+    },
+    Binding {
+        keys: &[Key::Escape],
+        label: "Esc",
+        description: "clear",
+        action: Action::CloseSearch,
+    },
+    Binding {
+        keys: &[Key::Char('o')],
+        label: "o",
+        description: "open",
+        action: Action::Open,
+    },
+    Binding {
+        keys: &[Key::Char('s')],
+        label: "s",
+        description: "sync",
+        action: Action::Sync,
+    },
+    Binding {
+        keys: &[Key::Char('d')],
+        label: "d",
+        description: "remove",
+        action: Action::Remove,
+    },
+    Binding {
+        keys: &[Key::Down, Key::Char('j')],
+        label: "j/↓",
+        description: "next",
+        action: Action::SelectNext,
+    },
+    Binding {
+        keys: &[Key::Up, Key::Char('k')],
+        label: "k/↑",
+        description: "previous",
+        action: Action::SelectPrevious,
+    },
+    Binding {
+        keys: &[Key::Char('?')],
+        label: "?",
+        description: "help",
+        action: Action::Help,
+    },
+];
+
 pub fn bindings(context: Context) -> &'static [Binding] {
     match context {
         Context::Cockpit => COCKPIT_BINDINGS,
+        Context::Search => SEARCH_BINDINGS,
         Context::Resize => RESIZE_BINDINGS,
     }
 }
@@ -151,10 +206,17 @@ pub fn keybar_bindings(context: Context, narrow: bool) -> Vec<&'static Binding> 
             !is_navigation
                 && (!narrow
                     || context == Context::Resize
-                    || matches!(
-                        binding.action,
-                        Action::Switch | Action::Create | Action::Search | Action::Help
-                    ))
+                    || match context {
+                        Context::Cockpit => matches!(
+                            binding.action,
+                            Action::Switch | Action::Create | Action::Search | Action::Help
+                        ),
+                        Context::Search => matches!(
+                            binding.action,
+                            Action::Switch | Action::CloseSearch | Action::Help
+                        ),
+                        Context::Resize => true,
+                    })
         })
         .collect();
     if let Some(help) = visible
