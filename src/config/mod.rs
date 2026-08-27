@@ -1,19 +1,43 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 
 use crate::paths;
 
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("failed to read config file {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid TOML in config file {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("invalid config file {path}: {key}: {message}")]
+    InvalidValue {
+        path: PathBuf,
+        key: &'static str,
+        message: &'static str,
+    },
+}
+
 // --- Hook types (FR-18, FR-19) ---
 
 pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_WORKTREE_ROOT: &str = "~/.worktrees";
 
 fn default_timeout_secs() -> Option<u64> {
     Some(DEFAULT_HOOK_TIMEOUT_SECS)
 }
 
 #[derive(Debug, Deserialize, serde::Serialize, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct HookDef {
     pub copy: Option<Vec<String>>,
     pub run: Option<Vec<String>>,
@@ -34,6 +58,7 @@ impl Default for HookDef {
 }
 
 #[derive(Debug, Default, Deserialize, serde::Serialize, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct HooksConfig {
     pub pre_create: Option<HookDef>,
     pub post_create: Option<HookDef>,
@@ -46,56 +71,65 @@ pub struct HooksConfig {
 // --- Config structs ---
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
     pub editor: Option<EditorConfig>,
-    pub shell: Option<ShellConfig>,
     pub worktrees: Option<WorktreesConfig>,
     pub hooks: Option<HooksConfig>,
 }
 
 /// Project-level config parsed from `.trench.toml` at repo root.
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     pub ui: Option<UiConfig>,
     pub git: Option<GitConfig>,
     pub editor: Option<EditorConfig>,
-    pub shell: Option<ShellConfig>,
     pub worktrees: Option<WorktreesConfig>,
     pub hooks: Option<HooksConfig>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct UiConfig {
     pub theme: Option<String>,
-    pub date_format: Option<String>,
-    pub show_ahead_behind: Option<bool>,
-    pub show_dirty_count: Option<bool>,
-    pub auto_refresh: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct GitConfig {
     pub default_base: Option<String>,
-    pub auto_prune: Option<bool>,
-    pub fetch_on_open: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct EditorConfig {
     pub command: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct WorktreesConfig {
     pub root: Option<String>,
-    pub scan: Option<Vec<String>>,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq)]
-pub struct ShellConfig {
-    pub tmux: Option<bool>,
+fn validate_worktree_root(path: &Path, worktrees: Option<&WorktreesConfig>) -> Result<()> {
+    let Some(root) = worktrees.and_then(|config| config.root.as_deref()) else {
+        return Ok(());
+    };
+
+    if root.contains("{{") || root.contains("}}") {
+        return Err(ConfigError::InvalidValue {
+            path: path.to_path_buf(),
+            key: "worktrees.root",
+            message: "path templates are not supported; configure a root directory",
+        }
+        .into());
+    }
+
+    Ok(())
 }
 
 /// Read and parse an optional TOML config file.
@@ -109,12 +143,17 @@ fn load_optional_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Opt
             return Ok(None);
         }
         Err(e) => {
-            return Err(anyhow::Error::new(e)
-                .context(format!("failed to read config file: {}", path.display())));
+            return Err(ConfigError::Read {
+                path: path.to_path_buf(),
+                source: e,
+            }
+            .into());
         }
     };
-    let config: T = toml::from_str(&contents)
-        .with_context(|| format!("invalid TOML in config file: {}", path.display()))?;
+    let config: T = toml::from_str(&contents).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
     Ok(Some(config))
 }
 
@@ -123,7 +162,11 @@ fn load_optional_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Opt
 /// Returns `Ok(None)` if the file does not exist.
 /// Returns an error if the file exists but contains invalid TOML.
 pub fn load_project_config_from(path: &Path) -> Result<Option<ProjectConfig>> {
-    load_optional_toml(path)
+    let config: Option<ProjectConfig> = load_optional_toml(path)?;
+    if let Some(config) = config.as_ref() {
+        validate_worktree_root(path, config.worktrees.as_ref())?;
+    }
+    Ok(config)
 }
 
 // --- Resolved config (FR-1) ---
@@ -140,62 +183,29 @@ pub struct ResolvedConfig {
     pub ui: ResolvedUiConfig,
     pub git: ResolvedGitConfig,
     pub editor_command: Option<String>,
-    pub shell: ResolvedShellConfig,
     pub worktrees: ResolvedWorktreesConfig,
     pub hooks: Option<HooksConfig>,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct ResolvedShellConfig {
-    pub tmux: bool,
-}
-
-impl Default for ResolvedShellConfig {
-    fn default() -> Self {
-        Self { tmux: false }
-    }
-}
-
-#[derive(Debug, PartialEq)]
 pub struct ResolvedUiConfig {
     pub theme: String,
-    pub date_format: String,
-    pub show_ahead_behind: bool,
-    pub show_dirty_count: bool,
-    pub auto_refresh: bool,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct ResolvedGitConfig {
-    pub default_base: String,
-    pub auto_prune: bool,
-    pub fetch_on_open: bool,
+    pub default_base: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct ResolvedWorktreesConfig {
-    pub root: String,
-    pub scan: Vec<String>,
+    pub root: PathBuf,
 }
 
 impl Default for ResolvedUiConfig {
     fn default() -> Self {
         Self {
             theme: "ops".to_string(),
-            date_format: "%Y-%m-%d %H:%M".to_string(),
-            show_ahead_behind: true,
-            show_dirty_count: true,
-            auto_refresh: true,
-        }
-    }
-}
-
-impl Default for ResolvedGitConfig {
-    fn default() -> Self {
-        Self {
-            default_base: "main".to_string(),
-            auto_prune: false,
-            fetch_on_open: true,
         }
     }
 }
@@ -203,8 +213,7 @@ impl Default for ResolvedGitConfig {
 impl Default for ResolvedWorktreesConfig {
     fn default() -> Self {
         Self {
-            root: crate::paths::DEFAULT_WORKTREE_TEMPLATE.to_string(),
-            scan: Vec::new(),
+            root: PathBuf::from(paths::expand_tilde(DEFAULT_WORKTREE_ROOT)),
         }
     }
 }
@@ -237,11 +246,6 @@ pub fn resolve_config(
         .and_then(|e| e.command.clone())
         .or_else(|| g_editor.and_then(|e| e.command.clone()));
 
-    // Shell: project > global > defaults
-    let p_shell = project.and_then(|p| p.shell.as_ref());
-    let g_shell = global.shell.as_ref();
-    let defaults_shell = ResolvedShellConfig::default();
-
     // Hooks: project replaces global entirely (FR-2)
     let p_hooks = project.and_then(|p| p.hooks.as_ref());
     let hooks = p_hooks.or(global.hooks.as_ref()).cloned();
@@ -252,55 +256,22 @@ pub fn resolve_config(
                 .and_then(|u| u.theme.clone())
                 .or_else(|| g_ui.and_then(|u| u.theme.clone()))
                 .unwrap_or(defaults_ui.theme),
-            date_format: p_ui
-                .and_then(|u| u.date_format.clone())
-                .or_else(|| g_ui.and_then(|u| u.date_format.clone()))
-                .unwrap_or(defaults_ui.date_format),
-            show_ahead_behind: p_ui
-                .and_then(|u| u.show_ahead_behind)
-                .or_else(|| g_ui.and_then(|u| u.show_ahead_behind))
-                .unwrap_or(defaults_ui.show_ahead_behind),
-            show_dirty_count: p_ui
-                .and_then(|u| u.show_dirty_count)
-                .or_else(|| g_ui.and_then(|u| u.show_dirty_count))
-                .unwrap_or(defaults_ui.show_dirty_count),
-            auto_refresh: p_ui
-                .and_then(|u| u.auto_refresh)
-                .or_else(|| g_ui.and_then(|u| u.auto_refresh))
-                .unwrap_or(defaults_ui.auto_refresh),
         },
         git: ResolvedGitConfig {
             default_base: cli
                 .and_then(|c| c.default_base.clone())
                 .or_else(|| p_git.and_then(|g| g.default_base.clone()))
                 .or_else(|| g_git.and_then(|g| g.default_base.clone()))
-                .unwrap_or(defaults_git.default_base),
-            auto_prune: p_git
-                .and_then(|g| g.auto_prune)
-                .or_else(|| g_git.and_then(|g| g.auto_prune))
-                .unwrap_or(defaults_git.auto_prune),
-            fetch_on_open: p_git
-                .and_then(|g| g.fetch_on_open)
-                .or_else(|| g_git.and_then(|g| g.fetch_on_open))
-                .unwrap_or(defaults_git.fetch_on_open),
+                .or(defaults_git.default_base),
         },
         editor_command,
-        shell: ResolvedShellConfig {
-            tmux: p_shell
-                .and_then(|s| s.tmux)
-                .or_else(|| g_shell.and_then(|s| s.tmux))
-                .unwrap_or(defaults_shell.tmux),
-        },
         worktrees: ResolvedWorktreesConfig {
-            root: cli
-                .and_then(|c| c.worktree_root.clone())
-                .or_else(|| p_wt.and_then(|w| w.root.clone()))
-                .or_else(|| g_wt.and_then(|w| w.root.clone()))
-                .unwrap_or(defaults_wt.root),
-            scan: p_wt
-                .and_then(|w| w.scan.clone())
-                .or_else(|| g_wt.and_then(|w| w.scan.clone()))
-                .unwrap_or(defaults_wt.scan),
+            root: PathBuf::from(paths::expand_tilde(
+                &cli.and_then(|c| c.worktree_root.clone())
+                    .or_else(|| p_wt.and_then(|w| w.root.clone()))
+                    .or_else(|| g_wt.and_then(|w| w.root.clone()))
+                    .unwrap_or_else(|| defaults_wt.root.to_string_lossy().into_owned()),
+            )),
         },
         hooks,
     }
@@ -322,7 +293,9 @@ pub fn load_project_config(repo_root: &Path) -> Result<Option<ProjectConfig>> {
 /// Returns `GlobalConfig::default()` if the file does not exist.
 /// Returns an error if the file exists but contains invalid TOML.
 pub fn load_global_config_from(path: &Path) -> Result<GlobalConfig> {
-    load_optional_toml(path).map(|opt| opt.unwrap_or_default())
+    let config: GlobalConfig = load_optional_toml(path)?.unwrap_or_default();
+    validate_worktree_root(path, config.worktrees.as_ref())?;
+    Ok(config)
 }
 
 /// Return the path to trench's global config file.
@@ -353,68 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_refresh_defaults_to_true() {
-        let resolved = resolve_config(None, None, &GlobalConfig::default());
-        assert!(
-            resolved.ui.auto_refresh,
-            "auto_refresh should default to true"
-        );
-    }
-
-    #[test]
-    fn auto_refresh_can_be_disabled_via_global_config() {
-        let global = GlobalConfig {
-            ui: Some(UiConfig {
-                auto_refresh: Some(false),
-                ..UiConfig::default()
-            }),
-            ..GlobalConfig::default()
-        };
-        let resolved = resolve_config(None, None, &global);
-        assert!(
-            !resolved.ui.auto_refresh,
-            "auto_refresh should be false when disabled in global config"
-        );
-    }
-
-    #[test]
-    fn auto_refresh_from_toml() {
-        let dir = TempDir::new().unwrap();
-        let path = write_config(
-            &dir,
-            r#"
-[ui]
-auto_refresh = false
-"#,
-        );
-        let config = load_global_config_from(&path).unwrap();
-        assert_eq!(config.ui.unwrap().auto_refresh, Some(false));
-    }
-
-    #[test]
-    fn auto_refresh_project_overrides_global() {
-        let global = GlobalConfig {
-            ui: Some(UiConfig {
-                auto_refresh: Some(true),
-                ..UiConfig::default()
-            }),
-            ..GlobalConfig::default()
-        };
-        let project = ProjectConfig {
-            ui: Some(UiConfig {
-                auto_refresh: Some(false),
-                ..UiConfig::default()
-            }),
-            ..ProjectConfig::default()
-        };
-        let resolved = resolve_config(None, Some(&project), &global);
-        assert!(
-            !resolved.ui.auto_refresh,
-            "project auto_refresh should override global"
-        );
-    }
-
-    #[test]
     fn missing_file_returns_defaults() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nonexistent.toml");
@@ -435,18 +346,12 @@ auto_refresh = false
             r#"
 [ui]
 theme = "dark"
-date_format = "%Y-%m-%d"
-show_ahead_behind = true
-show_dirty_count = false
 
 [git]
 default_base = "main"
-auto_prune = true
-fetch_on_open = false
 
 [worktrees]
-root = "{{ repo }}/{{ branch | sanitize }}"
-scan = ["/home/user/projects", "/tmp/worktrees"]
+root = "/home/user/.worktrees"
 "#,
         );
 
@@ -454,27 +359,12 @@ scan = ["/home/user/projects", "/tmp/worktrees"]
 
         let ui = config.ui.unwrap();
         assert_eq!(ui.theme.as_deref(), Some("dark"));
-        assert_eq!(ui.date_format.as_deref(), Some("%Y-%m-%d"));
-        assert_eq!(ui.show_ahead_behind, Some(true));
-        assert_eq!(ui.show_dirty_count, Some(false));
 
         let git = config.git.unwrap();
         assert_eq!(git.default_base.as_deref(), Some("main"));
-        assert_eq!(git.auto_prune, Some(true));
-        assert_eq!(git.fetch_on_open, Some(false));
 
         let wt = config.worktrees.unwrap();
-        assert_eq!(
-            wt.root.as_deref(),
-            Some("{{ repo }}/{{ branch | sanitize }}")
-        );
-        assert_eq!(
-            wt.scan,
-            Some(vec![
-                "/home/user/projects".to_string(),
-                "/tmp/worktrees".to_string()
-            ])
-        );
+        assert_eq!(wt.root.as_deref(), Some("/home/user/.worktrees"));
     }
 
     #[test]
@@ -492,9 +382,6 @@ theme = "solarized"
 
         let ui = config.ui.unwrap();
         assert_eq!(ui.theme.as_deref(), Some("solarized"));
-        assert!(ui.date_format.is_none());
-        assert!(ui.show_ahead_behind.is_none());
-        assert!(ui.show_dirty_count.is_none());
 
         assert!(config.git.is_none());
         assert!(config.worktrees.is_none());
@@ -510,7 +397,7 @@ theme = "solarized"
 default_base = "develop"
 
 [worktrees]
-scan = ["/opt/trees"]
+root = "/opt/trees"
 "#,
         );
 
@@ -520,12 +407,9 @@ scan = ["/opt/trees"]
 
         let git = config.git.unwrap();
         assert_eq!(git.default_base.as_deref(), Some("develop"));
-        assert!(git.auto_prune.is_none());
-        assert!(git.fetch_on_open.is_none());
 
         let wt = config.worktrees.unwrap();
-        assert!(wt.root.is_none());
-        assert_eq!(wt.scan, Some(vec!["/opt/trees".to_string()]));
+        assert_eq!(wt.root.as_deref(), Some("/opt/trees"));
     }
 
     #[test]
@@ -549,9 +433,101 @@ scan = ["/opt/trees"]
             "expected 'invalid TOML' in error: {msg}"
         );
         assert!(
-            msg.contains("config.toml"),
-            "expected file path in error: {msg}"
+            msg.contains(&path.display().to_string()),
+            "expected exact file path in error: {msg}"
         );
+    }
+
+    #[test]
+    fn unknown_global_section_reports_exact_file_and_key() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "[telemetry]\nenabled = true\n");
+
+        let err = load_global_config_from(&path).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "error should name exact config file: {msg}"
+        );
+        assert!(
+            msg.contains("telemetry"),
+            "error should name offending key: {msg}"
+        );
+    }
+
+    #[test]
+    fn former_ui_options_are_rejected() {
+        let dir = TempDir::new().unwrap();
+
+        for key_value in [
+            "date_format = \"%Y-%m-%d\"",
+            "show_ahead_behind = true",
+            "show_dirty_count = true",
+            "auto_refresh = true",
+        ] {
+            let path = write_config(&dir, &format!("[ui]\n{key_value}\n"));
+            let key = key_value.split_once(" = ").unwrap().0;
+
+            let err = load_global_config_from(&path).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains(&path.display().to_string()), "{msg}");
+            assert!(msg.contains(key), "{msg}");
+        }
+    }
+
+    #[test]
+    fn former_automatic_git_options_are_rejected() {
+        let dir = TempDir::new().unwrap();
+
+        for key_value in ["auto_prune = true", "fetch_on_open = true"] {
+            let path = write_config(&dir, &format!("[git]\n{key_value}\n"));
+            let key = key_value.split_once(" = ").unwrap().0;
+
+            let err = load_global_config_from(&path).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains(&path.display().to_string()), "{msg}");
+            assert!(msg.contains(key), "{msg}");
+        }
+    }
+
+    #[test]
+    fn former_worktree_options_are_rejected() {
+        let dir = TempDir::new().unwrap();
+
+        for (setting, key) in [
+            ("scan = [\"~/src\"]", "scan"),
+            ("template = \"{{ repo }}/{{ branch }}\"", "template"),
+        ] {
+            let path = write_config(&dir, &format!("[worktrees]\n{setting}\n"));
+            let err = load_global_config_from(&path).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains(&path.display().to_string()), "{msg}");
+            assert!(msg.contains(key), "{msg}");
+        }
+    }
+
+    #[test]
+    fn unknown_hook_lifecycle_reports_exact_file_and_key() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "[hooks.deploy]\nrun = [\"true\"]\n");
+
+        let err = load_global_config_from(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        assert!(msg.contains("deploy"), "{msg}");
+    }
+
+    #[test]
+    fn former_project_shell_section_reports_exact_file_and_key() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".trench.toml");
+        std::fs::write(&path, "[shell]\ntmux = true\n").unwrap();
+
+        let err = load_project_config_from(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        assert!(msg.contains("shell"), "{msg}");
     }
 
     #[test]
@@ -561,7 +537,7 @@ scan = ["/opt/trees"]
             &dir,
             r#"
 [ui]
-show_ahead_behind = "yes"
+theme = true
 "#,
         );
 
@@ -730,19 +706,13 @@ run = ["bun install"]
         let resolved = resolve_config(None, None, &GlobalConfig::default());
 
         assert_eq!(resolved.ui.theme, "ops");
-        assert_eq!(resolved.ui.date_format, "%Y-%m-%d %H:%M");
-        assert!(resolved.ui.show_ahead_behind);
-        assert!(resolved.ui.show_dirty_count);
 
-        assert_eq!(resolved.git.default_base, "main");
-        assert!(!resolved.git.auto_prune);
-        assert!(resolved.git.fetch_on_open);
+        assert_eq!(resolved.git.default_base, None);
 
         assert_eq!(
             resolved.worktrees.root,
-            crate::paths::DEFAULT_WORKTREE_TEMPLATE
+            PathBuf::from(paths::expand_tilde(DEFAULT_WORKTREE_ROOT))
         );
-        assert!(resolved.worktrees.scan.is_empty());
 
         assert!(resolved.hooks.is_none());
     }
@@ -752,19 +722,12 @@ run = ["bun install"]
         let global = GlobalConfig {
             ui: Some(UiConfig {
                 theme: Some("nord".to_string()),
-                date_format: None,
-                show_ahead_behind: Some(false),
-                show_dirty_count: None,
-                auto_refresh: None,
             }),
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
-                auto_prune: Some(true),
-                fetch_on_open: None,
             }),
             worktrees: Some(WorktreesConfig {
-                root: Some("custom/{{ repo }}/{{ branch }}".to_string()),
-                scan: Some(vec!["/extra".to_string()]),
+                root: Some("/custom/worktrees".to_string()),
             }),
             ..GlobalConfig::default()
         };
@@ -773,16 +736,8 @@ run = ["bun install"]
 
         // Overridden fields
         assert_eq!(resolved.ui.theme, "nord");
-        assert!(!resolved.ui.show_ahead_behind);
-        assert_eq!(resolved.git.default_base, "develop");
-        assert!(resolved.git.auto_prune);
-        assert_eq!(resolved.worktrees.root, "custom/{{ repo }}/{{ branch }}");
-        assert_eq!(resolved.worktrees.scan, vec!["/extra".to_string()]);
-
-        // Fallback to defaults
-        assert_eq!(resolved.ui.date_format, "%Y-%m-%d %H:%M");
-        assert!(resolved.ui.show_dirty_count);
-        assert!(resolved.git.fetch_on_open);
+        assert_eq!(resolved.git.default_base.as_deref(), Some("develop"));
+        assert_eq!(resolved.worktrees.root, PathBuf::from("/custom/worktrees"));
     }
 
     #[test]
@@ -790,15 +745,9 @@ run = ["bun install"]
         let global = GlobalConfig {
             ui: Some(UiConfig {
                 theme: Some("dark".to_string()),
-                date_format: Some("%d/%m/%Y".to_string()),
-                show_ahead_behind: None,
-                show_dirty_count: None,
-                auto_refresh: None,
             }),
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
-                auto_prune: Some(true),
-                fetch_on_open: None,
             }),
             ..GlobalConfig::default()
         };
@@ -806,19 +755,12 @@ run = ["bun install"]
         let project = ProjectConfig {
             ui: Some(UiConfig {
                 theme: Some("nord".to_string()),
-                date_format: None, // not overridden — should fall through to global
-                show_ahead_behind: Some(false),
-                show_dirty_count: None,
-                auto_refresh: None,
             }),
             git: Some(GitConfig {
                 default_base: Some("staging".to_string()),
-                auto_prune: None, // fall through to global
-                fetch_on_open: Some(false),
             }),
             worktrees: Some(WorktreesConfig {
-                root: Some("proj/{{ repo }}/{{ branch }}".to_string()),
-                scan: None,
+                root: Some("/project/worktrees".to_string()),
             }),
             ..ProjectConfig::default()
         };
@@ -827,18 +769,8 @@ run = ["bun install"]
 
         // Project wins over global
         assert_eq!(resolved.ui.theme, "nord");
-        assert!(!resolved.ui.show_ahead_behind);
-        assert_eq!(resolved.git.default_base, "staging");
-        assert!(!resolved.git.fetch_on_open);
-        assert_eq!(resolved.worktrees.root, "proj/{{ repo }}/{{ branch }}");
-
-        // Global fills in where project is None
-        assert_eq!(resolved.ui.date_format, "%d/%m/%Y");
-        assert!(resolved.git.auto_prune);
-
-        // Default fills in where both are None
-        assert!(resolved.ui.show_dirty_count);
-        assert!(resolved.worktrees.scan.is_empty());
+        assert_eq!(resolved.git.default_base.as_deref(), Some("staging"));
+        assert_eq!(resolved.worktrees.root, PathBuf::from("/project/worktrees"));
     }
 
     #[test]
@@ -900,7 +832,6 @@ run = ["bun install"]
         let project = ProjectConfig {
             git: Some(GitConfig {
                 default_base: Some("staging".to_string()),
-                ..GitConfig::default()
             }),
             hooks: None, // no hooks in project
             ..ProjectConfig::default()
@@ -911,7 +842,7 @@ run = ["bun install"]
         // Global hooks used because project has no hooks section
         let hooks = resolved.hooks.expect("global hooks should be used");
         assert!(hooks.post_create.is_some());
-        assert_eq!(resolved.git.default_base, "staging");
+        assert_eq!(resolved.git.default_base.as_deref(), Some("staging"));
     }
 
     #[test]
@@ -919,11 +850,9 @@ run = ["bun install"]
         let global = GlobalConfig {
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
-                ..GitConfig::default()
             }),
             worktrees: Some(WorktreesConfig {
-                root: Some("global/{{ repo }}".to_string()),
-                scan: None,
+                root: Some("/global/worktrees".to_string()),
             }),
             ..GlobalConfig::default()
         };
@@ -931,24 +860,22 @@ run = ["bun install"]
         let project = ProjectConfig {
             git: Some(GitConfig {
                 default_base: Some("staging".to_string()),
-                ..GitConfig::default()
             }),
             worktrees: Some(WorktreesConfig {
-                root: Some("project/{{ repo }}".to_string()),
-                scan: None,
+                root: Some("/project/worktrees".to_string()),
             }),
             ..ProjectConfig::default()
         };
 
         let cli = CliConfigOverrides {
             default_base: Some("cli-branch".to_string()),
-            worktree_root: Some("cli/{{ repo }}".to_string()),
+            worktree_root: Some("/cli/worktrees".to_string()),
         };
 
         let resolved = resolve_config(Some(&cli), Some(&project), &global);
 
-        assert_eq!(resolved.git.default_base, "cli-branch");
-        assert_eq!(resolved.worktrees.root, "cli/{{ repo }}");
+        assert_eq!(resolved.git.default_base.as_deref(), Some("cli-branch"));
+        assert_eq!(resolved.worktrees.root, PathBuf::from("/cli/worktrees"));
     }
 
     #[test]
@@ -956,22 +883,21 @@ run = ["bun install"]
         let global = GlobalConfig {
             git: Some(GitConfig {
                 default_base: Some("develop".to_string()),
-                ..GitConfig::default()
             }),
             ..GlobalConfig::default()
         };
 
         let cli = CliConfigOverrides {
             default_base: None,
-            worktree_root: Some("cli-root/{{ repo }}".to_string()),
+            worktree_root: Some("/cli/worktrees".to_string()),
         };
 
         let resolved = resolve_config(Some(&cli), None, &global);
 
         // CLI worktree_root wins
-        assert_eq!(resolved.worktrees.root, "cli-root/{{ repo }}");
+        assert_eq!(resolved.worktrees.root, PathBuf::from("/cli/worktrees"));
         // No CLI default_base → falls through to global
-        assert_eq!(resolved.git.default_base, "develop");
+        assert_eq!(resolved.git.default_base.as_deref(), Some("develop"));
     }
 
     #[test]
@@ -1001,7 +927,7 @@ run = ["bun install"]
 default_base = "develop"
 
 [worktrees]
-root = "project/{{ repo }}/{{ branch | sanitize }}"
+root = "/project/worktrees"
 
 [hooks.post_create]
 copy = [".env"]
@@ -1018,11 +944,9 @@ run = ["bun install"]
             r#"
 [ui]
 theme = "solarized"
-show_ahead_behind = false
 
 [git]
 default_base = "main"
-auto_prune = true
 
 [hooks.post_create]
 run = ["npm install"]
@@ -1048,24 +972,13 @@ shell = "echo global-cleanup"
         let resolved = resolve_config(None, Some(&project), &global);
 
         // Project git.default_base overrides global
-        assert_eq!(resolved.git.default_base, "develop");
-
-        // Global auto_prune fills in (project didn't set it)
-        assert!(resolved.git.auto_prune);
+        assert_eq!(resolved.git.default_base.as_deref(), Some("develop"));
 
         // Global UI fills in (project has no UI section)
         assert_eq!(resolved.ui.theme, "solarized");
-        assert!(!resolved.ui.show_ahead_behind);
-
-        // Defaults fill in for unset fields
-        assert!(resolved.ui.show_dirty_count);
-        assert!(resolved.git.fetch_on_open);
 
         // Project worktrees override global
-        assert_eq!(
-            resolved.worktrees.root,
-            "project/{{ repo }}/{{ branch | sanitize }}"
-        );
+        assert_eq!(resolved.worktrees.root, PathBuf::from("/project/worktrees"));
 
         // Project hooks REPLACE global hooks entirely (FR-2)
         let hooks = resolved.hooks.expect("hooks should be present");
@@ -1143,7 +1056,7 @@ theme = "nord"
 default_base = "develop"
 
 [worktrees]
-root = "custom/{{ repo }}/{{ branch | sanitize }}"
+root = "/custom/worktrees"
 
 [hooks.post_create]
 run = ["make setup"]
@@ -1154,7 +1067,7 @@ run = ["make setup"]
         assert_eq!(config.git.unwrap().default_base.as_deref(), Some("develop"));
         assert_eq!(
             config.worktrees.unwrap().root.as_deref(),
-            Some("custom/{{ repo }}/{{ branch | sanitize }}")
+            Some("/custom/worktrees")
         );
         assert!(config.hooks.unwrap().post_create.is_some());
     }
@@ -1212,74 +1125,5 @@ command = "code"
     fn editor_config_none_when_not_set() {
         let resolved = resolve_config(None, None, &GlobalConfig::default());
         assert!(resolved.editor_command.is_none());
-    }
-
-    #[test]
-    fn shell_config_tmux_deserializes_from_global() {
-        let dir = TempDir::new().unwrap();
-        let path = write_config(
-            &dir,
-            r#"
-[shell]
-tmux = true
-"#,
-        );
-
-        let config = load_global_config_from(&path).unwrap();
-        let shell = config.shell.expect("shell section should be present");
-        assert_eq!(shell.tmux, Some(true));
-    }
-
-    #[test]
-    fn shell_config_tmux_deserializes_from_project() {
-        let toml_str = r#"
-[shell]
-tmux = true
-"#;
-        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
-        let shell = config.shell.expect("shell section should be present");
-        assert_eq!(shell.tmux, Some(true));
-    }
-
-    #[test]
-    fn shell_config_absent_by_default() {
-        let config = GlobalConfig::default();
-        assert!(config.shell.is_none());
-    }
-
-    #[test]
-    fn shell_tmux_defaults_to_false_in_resolved() {
-        let resolved = resolve_config(None, None, &GlobalConfig::default());
-        assert!(!resolved.shell.tmux, "shell.tmux should default to false");
-    }
-
-    #[test]
-    fn shell_tmux_enabled_via_global_config() {
-        let global = GlobalConfig {
-            shell: Some(ShellConfig { tmux: Some(true) }),
-            ..GlobalConfig::default()
-        };
-        let resolved = resolve_config(None, None, &global);
-        assert!(
-            resolved.shell.tmux,
-            "shell.tmux should be true when set in global"
-        );
-    }
-
-    #[test]
-    fn shell_tmux_project_overrides_global() {
-        let global = GlobalConfig {
-            shell: Some(ShellConfig { tmux: Some(true) }),
-            ..GlobalConfig::default()
-        };
-        let project = ProjectConfig {
-            shell: Some(ShellConfig { tmux: Some(false) }),
-            ..ProjectConfig::default()
-        };
-        let resolved = resolve_config(None, Some(&project), &global);
-        assert!(
-            !resolved.shell.tmux,
-            "project shell.tmux should override global"
-        );
     }
 }

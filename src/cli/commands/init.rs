@@ -24,23 +24,21 @@ const SCAFFOLD: &str = r#"# trench — project configuration
 
 # [ui]
 # theme = "ops"                 # or "transparent", "catppuccin-transparent", "gruvbox-transparent"
-# date_format = "%Y-%m-%d %H:%M"
-# show_ahead_behind = true
-# show_dirty_count = true
-# auto_refresh = true
 
 # ─── Git ─────────────────────────────────────────────────────────────
 
 # [git]
-# default_base = "main"          # Base branch for new worktrees
-# auto_prune = false              # Prune stale remote-tracking branches
-# fetch_on_open = true            # Fetch from remote when opening a worktree
+# default_base = "main"          # Base ref used for comparisons and sync
+
+# ─── Editor ──────────────────────────────────────────────────────────
+
+# [editor]
+# command = "code --wait"
 
 # ─── Worktrees ───────────────────────────────────────────────────────
 
 # [worktrees]
-# root = "{{ repo }}/{{ branch | sanitize }}"   # Path template for worktree dirs
-# scan = []                                      # Extra directories to scan for worktrees
+# root = "~/.worktrees"
 
 # ─── Hooks ───────────────────────────────────────────────────────────
 #
@@ -145,6 +143,10 @@ mod tests {
             contents.contains("# [worktrees]"),
             "should contain commented [worktrees] section"
         );
+        assert!(
+            contents.contains("# [editor]"),
+            "should contain commented [editor] section"
+        );
 
         // All six hook sections
         assert!(
@@ -203,6 +205,30 @@ mod tests {
             contents.contains("Uncomment"),
             "should have usage instructions"
         );
+    }
+
+    #[test]
+    fn scaffold_only_documents_minimal_config_keys() {
+        let dir = TempDir::new().unwrap();
+        let path = execute(dir.path(), false).unwrap();
+        let contents = std::fs::read_to_string(path).unwrap();
+
+        for removed in [
+            "date_format",
+            "show_ahead_behind",
+            "show_dirty_count",
+            "auto_refresh",
+            "auto_prune",
+            "fetch_on_open",
+            "scan =",
+            "{{ repo }}",
+            "tmux",
+        ] {
+            assert!(
+                !contents.contains(removed),
+                "scaffold should not document removed setting {removed}"
+            );
+        }
     }
 
     #[test]

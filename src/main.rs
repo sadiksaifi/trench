@@ -99,10 +99,6 @@ enum Commands {
         /// Print only the worktree path (for shell integration)
         #[arg(long)]
         print_path: bool,
-
-        /// Open worktree in a new tmux window (requires running inside tmux)
-        #[arg(long)]
-        tmux: bool,
     },
     /// Manage tags on a worktree
     Tag {
@@ -117,10 +113,6 @@ enum Commands {
     Open {
         /// Branch name or sanitized name of the worktree
         branch: String,
-
-        /// Open worktree in a new tmux window instead of $EDITOR (requires running inside tmux)
-        #[arg(long)]
-        tmux: bool,
     },
     /// List all worktrees
     List {
@@ -238,8 +230,14 @@ fn main() -> anyhow::Result<()> {
         std::io::stdin().is_terminal(),
         std::io::stdout().is_terminal(),
     ) {
-        if let Some(path) = tui::run()? {
-            write_tui_switch_path(&path)?;
+        match tui::run() {
+            Ok(Some(path)) => write_tui_switch_path(&path)?,
+            Ok(None) => {}
+            Err(e) if e.downcast_ref::<config::ConfigError>().is_some() => {
+                eprintln!("error: {e}");
+                ExitCode::ConfigError.exit();
+            }
+            Err(e) => return Err(e),
         }
         return Ok(());
     }
@@ -260,16 +258,9 @@ fn main() -> anyhow::Result<()> {
             delete_branch,
             no_hooks,
         }) => run_remove(&branch, force, delete_branch, no_hooks, dry_run, json),
-        Some(Commands::Switch {
-            branch,
-            print_path,
-            tmux: tmux_flag,
-        }) => run_switch(&branch, print_path, tmux_flag),
+        Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
-        Some(Commands::Open {
-            branch,
-            tmux: tmux_flag,
-        }) => run_open(&branch, tmux_flag),
+        Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
         Some(Commands::Status { branch }) => run_status(
             branch.as_deref(),
@@ -331,6 +322,10 @@ fn main() -> anyhow::Result<()> {
     // Catch-all: map unhandled typed errors to their exit codes before
     // they fall through to anyhow's default "Error: ..." formatter.
     if let Err(ref e) = result {
+        if e.downcast_ref::<config::ConfigError>().is_some() {
+            eprintln!("error: {e}");
+            ExitCode::ConfigError.exit();
+        }
         if e.downcast_ref::<git::GitError>().is_some() {
             eprintln!("Error: {e}");
             ExitCode::GitError.exit();
@@ -385,22 +380,21 @@ fn run_create(
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
 
-    // Load config once so both dry-run and actual execution use the same
-    // resolved template and hooks.
+    // Load config once so both dry-run and actual execution use the same root
+    // and hooks.
     let repo_info = git::discover_repo(&cwd)?;
     let project_config = config::load_project_config(&repo_info.path)?;
     let global_config = config::load_global_config()?;
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+    let worktree_root = resolved.worktrees.root;
 
     if dry_run {
-        // Use the non-mutating path accessor — dry-run must not create dirs.
-        let worktree_root = paths::worktree_root_path()?;
         let plan = cli::commands::create::execute_dry_run(
             branch,
             from,
             &cwd,
             &worktree_root,
-            &resolved.worktrees.root,
+            paths::DEFAULT_WORKTREE_TEMPLATE,
             resolved.hooks.as_ref(),
         )?;
 
@@ -412,8 +406,13 @@ fn run_create(
         return Ok(());
     }
 
-    // Only real execution creates the worktree root directory on disk.
-    let worktree_root = paths::worktree_root()?;
+    // Only real execution creates the configured worktree root directory.
+    std::fs::create_dir_all(&worktree_root).with_context(|| {
+        format!(
+            "failed to create worktree root: {}",
+            worktree_root.display()
+        )
+    })?;
     let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
@@ -424,7 +423,7 @@ fn run_create(
         from,
         &cwd,
         &worktree_root,
-        &resolved.worktrees.root,
+        paths::DEFAULT_WORKTREE_TEMPLATE,
         &db,
         resolved.hooks.as_ref(),
         no_hooks,
@@ -764,73 +763,20 @@ fn handle_remove_error(e: anyhow::Error) -> anyhow::Result<()> {
     Err(e)
 }
 
-/// Execute a tmux command, returning whether it succeeded.
-///
-/// Returns `Ok(true)` on success, `Ok(false)` if `tmux` was not found on PATH
-/// (caller should fall back), or `Err` for other failures.
-fn execute_tmux_command(cmd: &[String]) -> anyhow::Result<bool> {
-    match std::process::Command::new(&cmd[0]).args(&cmd[1..]).status() {
-        Ok(status) if !status.success() => {
-            anyhow::bail!("tmux exited with status {}", status);
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e).context("failed to execute tmux"),
-        Ok(_) => Ok(true),
-    }
-}
-
-fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Result<()> {
+fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
     match cli::commands::switch::execute(identifier, &cwd, &db) {
         Ok(result) => {
-            // --print-path must always write to stdout (shell-init depends on it),
-            // so short-circuit before any tmux resolution.
             if print_path {
                 eprintln!("{}", format_switch_notice(&result.path));
                 println!("{}", result.path);
                 return Ok(());
             }
 
-            // Defer config loading until after early-exit paths so that
-            // malformed config files don't break --print-path or --tmux.
-            let config_tmux = if tmux_flag {
-                false // --tmux overrides config; skip loading
-            } else {
-                let repo_info = git::discover_repo(&cwd)?;
-                let project_config = config::load_project_config(&repo_info.path)?;
-                let global_config = config::load_global_config()?;
-                let resolved =
-                    config::resolve_config(None, project_config.as_ref(), &global_config);
-                resolved.shell.tmux
-            };
-
-            let action = tmux::resolve_tmux_action(
-                tmux_flag,
-                config_tmux,
-                tmux::is_inside_tmux(),
-                &result.path,
-                &result.name,
-            );
-
-            match action {
-                tmux::TmuxAction::TmuxNewWindow(cmd) => {
-                    if !execute_tmux_command(&cmd)? {
-                        eprintln!("warning: tmux not found, falling back to default behavior");
-                        println!("Switched to worktree '{}' at {}", result.name, result.path);
-                    }
-                }
-                tmux::TmuxAction::Fallback { warn_not_in_tmux } => {
-                    if warn_not_in_tmux {
-                        eprintln!(
-                            "warning: --tmux specified but not running inside a tmux session, falling back to default behavior"
-                        );
-                    }
-                    println!("Switched to worktree '{}' at {}", result.name, result.path);
-                }
-            }
+            println!("Switched to worktree '{}' at {}", result.name, result.path);
             Ok(())
         }
         Err(e) => {
@@ -844,57 +790,17 @@ fn run_switch(identifier: &str, print_path: bool, tmux_flag: bool) -> anyhow::Re
     }
 }
 
-fn run_open(identifier: &str, tmux_flag: bool) -> anyhow::Result<()> {
+fn run_open(identifier: &str) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
     let repo_info = git::discover_repo(&cwd)?;
 
-    // Load config once. When --tmux is explicit, skip loading so malformed
-    // config files don't break --tmux (same as run_switch).
-    let (config_tmux, editor_command) = if tmux_flag {
-        (false, None) // --tmux overrides config; defer editor lookup to fallback
-    } else {
-        let project_config = config::load_project_config(&repo_info.path)?;
-        let global_config = config::load_global_config()?;
-        let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-        (resolved.shell.tmux, resolved.editor_command)
-    };
-
-    let use_tmux = tmux_flag || config_tmux;
-
-    if use_tmux {
-        let live = crate::live_worktree::resolve(identifier, &repo_info, &db)?;
-
-        let action = tmux::resolve_tmux_action(
-            tmux_flag,
-            config_tmux,
-            tmux::is_inside_tmux(),
-            &live.entry.path.to_string_lossy(),
-            &live.entry.name,
-        );
-
-        match action {
-            tmux::TmuxAction::TmuxNewWindow(cmd) => {
-                if execute_tmux_command(&cmd)? {
-                    cli::commands::open::record_open_for_identifier(identifier, &cwd, &db)?;
-                } else {
-                    eprintln!("warning: tmux not found, falling back to $EDITOR");
-                    return run_open_editor(identifier, &cwd, &db, editor_command.as_deref());
-                }
-            }
-            tmux::TmuxAction::Fallback { warn_not_in_tmux } => {
-                if warn_not_in_tmux {
-                    eprintln!(
-                        "warning: --tmux specified but not running inside a tmux session, falling back to $EDITOR"
-                    );
-                }
-                return run_open_editor(identifier, &cwd, &db, editor_command.as_deref());
-            }
-        }
-        return Ok(());
-    }
+    let project_config = config::load_project_config(&repo_info.path)?;
+    let global_config = config::load_global_config()?;
+    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+    let editor_command = resolved.editor_command;
 
     run_open_editor(identifier, &cwd, &db, editor_command.as_deref())
 }
@@ -1074,17 +980,13 @@ fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()
     let db_path = runtime_db_path()?;
     let db = state::Database::open(&db_path)?;
 
-    // Load config to get scan paths (FR-30)
+    // Loading config here keeps invalid project/global files visible to every
+    // command even though list has no configurable scan paths.
     let repo_info = git::discover_repo(&cwd)?;
     let project_config = config::load_project_config(&repo_info.path)?;
     let global_config = config::load_global_config()?;
-    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-    let scan_paths: Vec<String> = resolved
-        .worktrees
-        .scan
-        .iter()
-        .map(|p| paths::expand_tilde(p))
-        .collect();
+    let _resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+    let scan_paths: Vec<String> = Vec::new();
 
     let output = if json {
         cli::commands::list::execute_json(&cwd, &db, tag, &scan_paths)?
@@ -1606,25 +1508,17 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "open", "my-feature"])
             .expect("open with branch should succeed");
         match cli.command {
-            Some(Commands::Open { branch, tmux }) => {
+            Some(Commands::Open { branch }) => {
                 assert_eq!(branch, "my-feature");
-                assert!(!tmux);
             }
             _ => panic!("expected Commands::Open"),
         }
     }
 
     #[test]
-    fn open_subcommand_accepts_tmux_flag() {
-        let cli = Cli::try_parse_from(["trench", "open", "my-feature", "--tmux"])
-            .expect("open with --tmux should succeed");
-        match cli.command {
-            Some(Commands::Open { branch, tmux }) => {
-                assert_eq!(branch, "my-feature");
-                assert!(tmux);
-            }
-            _ => panic!("expected Commands::Open"),
-        }
+    fn open_subcommand_rejects_removed_tmux_flag() {
+        let result = Cli::try_parse_from(["trench", "open", "my-feature", "--tmux"]);
+        assert!(result.is_err(), "open --tmux should be rejected");
     }
 
     #[test]
@@ -1876,14 +1770,9 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "switch", "my-feature"])
             .expect("switch with branch should succeed");
         match cli.command {
-            Some(Commands::Switch {
-                branch,
-                print_path,
-                tmux,
-            }) => {
+            Some(Commands::Switch { branch, print_path }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(!print_path);
-                assert!(!tmux);
             }
             _ => panic!("expected Commands::Switch"),
         }
@@ -1894,53 +1783,18 @@ mod tests {
         let cli = Cli::try_parse_from(["trench", "switch", "my-feature", "--print-path"])
             .expect("switch with --print-path should succeed");
         match cli.command {
-            Some(Commands::Switch {
-                branch,
-                print_path,
-                tmux,
-            }) => {
+            Some(Commands::Switch { branch, print_path }) => {
                 assert_eq!(branch, "my-feature");
                 assert!(print_path);
-                assert!(!tmux);
             }
             _ => panic!("expected Commands::Switch"),
         }
     }
 
     #[test]
-    fn switch_subcommand_accepts_tmux_flag() {
-        let cli = Cli::try_parse_from(["trench", "switch", "my-feature", "--tmux"])
-            .expect("switch with --tmux should succeed");
-        match cli.command {
-            Some(Commands::Switch {
-                branch,
-                print_path,
-                tmux,
-            }) => {
-                assert_eq!(branch, "my-feature");
-                assert!(!print_path);
-                assert!(tmux);
-            }
-            _ => panic!("expected Commands::Switch"),
-        }
-    }
-
-    #[test]
-    fn switch_subcommand_print_path_and_tmux_both_parse() {
-        let cli = Cli::try_parse_from(["trench", "switch", "my-feature", "--print-path", "--tmux"])
-            .expect("switch with --print-path and --tmux should succeed");
-        match cli.command {
-            Some(Commands::Switch {
-                branch,
-                print_path,
-                tmux,
-            }) => {
-                assert_eq!(branch, "my-feature");
-                assert!(print_path, "--print-path should be true");
-                assert!(tmux, "--tmux should be true");
-            }
-            _ => panic!("expected Commands::Switch"),
-        }
+    fn switch_subcommand_rejects_removed_tmux_flag() {
+        let result = Cli::try_parse_from(["trench", "switch", "my-feature", "--tmux"]);
+        assert!(result.is_err(), "switch --tmux should be rejected");
     }
 
     #[test]

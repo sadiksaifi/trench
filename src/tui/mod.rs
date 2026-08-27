@@ -44,41 +44,24 @@ static PREV_PANIC_HOOK: Mutex<Option<Arc<PanicHook>>> = Mutex::new(None);
 
 /// Launch the TUI. This is the single public entry point.
 pub fn run() -> Result<Option<String>> {
+    // Parse configuration before changing terminal state so strict config
+    // errors are reported normally.
+    let global = crate::config::load_global_config()?;
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::git::discover_repo(&cwd).ok())
+        .map(|repo| crate::config::load_project_config(&repo.path))
+        .transpose()?
+        .flatten();
+    let resolved_config = crate::config::resolve_config(None, project.as_ref(), &global);
+
     install_panic_hook();
     let mut terminal = ratatui::init();
     let mut app = App::new();
 
-    // Load config once and apply theme + auto_refresh
-    let resolved_config = if let Ok(global) = crate::config::load_global_config() {
-        let project = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| crate::git::discover_repo(&cwd).ok())
-            .and_then(|ri| crate::config::load_project_config(&ri.path).ok().flatten());
-        Some(crate::config::resolve_config(
-            None,
-            project.as_ref(),
-            &global,
-        ))
-    } else {
-        None
-    };
-
-    if let Some(ref resolved) = resolved_config {
-        app.theme = theme::from_name(&resolved.ui.theme);
-        app.ui_options = chrome::UiOptions {
-            theme_name: resolved.ui.theme.clone(),
-            date_format: resolved.ui.date_format.clone(),
-            show_ahead_behind: resolved.ui.show_ahead_behind,
-            show_dirty_count: resolved.ui.show_dirty_count,
-        };
-        app.tmux_enabled = resolved.shell.tmux;
-    }
-
-    // Set auto_refresh before any refresh that may build a watcher
-    app.auto_refresh = resolved_config
-        .as_ref()
-        .map(|c| c.ui.auto_refresh)
-        .unwrap_or(true);
+    app.theme = theme::from_name(&resolved_config.ui.theme);
+    app.ui_options.theme_name = resolved_config.ui.theme.clone();
+    app.worktree_root = resolved_config.worktrees.root.clone();
 
     // Load worktree data before entering the event loop
     app.refresh_list();
@@ -162,6 +145,7 @@ pub struct App {
     pub repo_path: Option<String>,
     pub switch_path: Option<String>,
     pub tmux_enabled: bool,
+    pub worktree_root: std::path::PathBuf,
     pub auto_refresh: bool,
     pub watcher: Option<watcher::DebouncedWatcher>,
 }
@@ -193,6 +177,9 @@ impl App {
             repo_path: None,
             switch_path: None,
             tmux_enabled: false,
+            worktree_root: std::path::PathBuf::from(paths::expand_tilde(
+                crate::config::DEFAULT_WORKTREE_ROOT,
+            )),
             auto_refresh: true,
             watcher: None,
         }
@@ -422,12 +409,12 @@ impl App {
     }
 
     /// Load hooks config from the project config.
-    fn load_hooks_config(cwd: &std::path::Path) -> Option<crate::config::HooksConfig> {
-        let repo_info = crate::git::discover_repo(cwd).ok()?;
-        let project_config = crate::config::load_project_config(&repo_info.path).ok()?;
-        let global_config = crate::config::load_global_config().ok()?;
+    fn load_hooks_config(cwd: &std::path::Path) -> Result<Option<crate::config::HooksConfig>> {
+        let repo_info = crate::git::discover_repo(cwd)?;
+        let project_config = crate::config::load_project_config(&repo_info.path)?;
+        let global_config = crate::config::load_global_config()?;
         let resolved = crate::config::resolve_config(None, project_config.as_ref(), &global_config);
-        resolved.hooks
+        Ok(resolved.hooks)
     }
 
     fn open_db() -> Option<(std::path::PathBuf, Database)> {
@@ -835,7 +822,18 @@ impl App {
         };
 
         // Check for hooks
-        let hooks_config = Self::load_hooks_config(&cwd);
+        let hooks_config = match Self::load_hooks_config(&cwd) {
+            Ok(config) => config,
+            Err(e) => {
+                if let Some(ref mut c) = self.delete_confirm_state {
+                    c.result = Some(screens::delete_confirm::DeleteResultMessage {
+                        success: false,
+                        message: format!("Delete failed to load config: {e:#}"),
+                    });
+                }
+                return;
+            }
+        };
         let has_hooks = hooks_config
             .as_ref()
             .map(|h| h.pre_remove.is_some() || h.post_remove.is_some())
@@ -1156,7 +1154,18 @@ impl App {
         };
 
         // Check for hooks
-        let hooks_config = Self::load_hooks_config(&cwd);
+        let hooks_config = match Self::load_hooks_config(&cwd) {
+            Ok(config) => config,
+            Err(e) => {
+                if let Some(ref mut p) = self.sync_picker_state {
+                    p.result = Some(screens::sync_picker::SyncResultMessage {
+                        success: false,
+                        message: format!("Sync failed to load config: {e:#}"),
+                    });
+                }
+                return;
+            }
+        };
         let has_hooks = hooks_config
             .as_ref()
             .map(|h| h.pre_sync.is_some() || h.post_sync.is_some())
@@ -1499,20 +1508,27 @@ impl App {
             return;
         };
 
-        let worktree_root = match paths::worktree_root() {
-            Ok(r) => r,
-            Err(e) => {
-                state.result = Some(screens::create::CreateResultMessage {
-                    success: false,
-                    message: format!("Failed to resolve worktree root: {e:#}"),
-                });
-                return;
-            }
-        };
+        let worktree_root = self.worktree_root.clone();
+        if let Err(e) = std::fs::create_dir_all(&worktree_root) {
+            state.result = Some(screens::create::CreateResultMessage {
+                success: false,
+                message: format!("Failed to create worktree root: {e}"),
+            });
+            return;
+        }
 
         // Load config to check for hooks
         let hooks_config = if hooks_enabled {
-            Self::load_hooks_config(&cwd)
+            match Self::load_hooks_config(&cwd) {
+                Ok(config) => config,
+                Err(e) => {
+                    state.result = Some(screens::create::CreateResultMessage {
+                        success: false,
+                        message: format!("Create failed to load config: {e:#}"),
+                    });
+                    return;
+                }
+            }
         } else {
             None
         };
@@ -1611,6 +1627,28 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serial_test::serial;
+
+    #[test]
+    fn hook_config_reload_propagates_strict_project_error() {
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        let config_path = repo.path().join(crate::config::PROJECT_CONFIG_FILENAME);
+        std::fs::write(
+            &config_path,
+            "[hooks.pre_remove]\ncontinue_on_error = true\n",
+        )
+        .unwrap();
+
+        let error = App::load_hooks_config(repo.path())
+            .expect_err("strict config errors must abort action-time hook reload");
+        let diagnostic = format!("{error:#}");
+
+        assert!(
+            diagnostic.contains(&config_path.display().to_string()),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("continue_on_error"), "{diagnostic}");
+    }
 
     #[test]
     fn app_has_repo_path_initially_none() {
@@ -2602,6 +2640,9 @@ mod tests {
     #[test]
     fn enter_on_hooks_field_with_branch_triggers_execute() {
         let mut app = app_with_create_state();
+        let blocked_root = tempfile::tempdir().unwrap();
+        app.worktree_root = blocked_root.path().join("not-a-directory");
+        std::fs::write(&app.worktree_root, "block directory creation").unwrap();
         // Type a branch name
         for c in "test-branch".chars() {
             app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
