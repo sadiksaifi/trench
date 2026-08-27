@@ -242,3 +242,50 @@ fn invalid_dry_run_base_uses_the_same_structured_failure_contract() {
         })
     );
 }
+
+#[test]
+fn dry_run_does_not_fetch_run_hooks_or_create_runtime_state() {
+    let (root, worktree) = repository();
+    let repository = root.path().join("repository");
+    let remote = root.path().join("remote.git");
+    git2::Repository::init_bare(&remote).unwrap();
+    git(&repository, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&repository, &["push", "-u", "origin", "main"]);
+    let bare = git2::Repository::open_bare(&remote).unwrap();
+    let head = bare.refname_to_id("refs/heads/main").unwrap();
+    bare.reference("refs/heads/unfetched", head, false, "test")
+        .unwrap();
+    let marker = root.path().join("hook-ran");
+    fs::write(
+        repository.join(".trench.toml"),
+        format!(
+            "[hooks.pre_sync]\nshell = {:?}\n",
+            format!("touch {}", marker.display())
+        ),
+    )
+    .unwrap();
+
+    let refs_before = git(&repository, &["for-each-ref", "--format=%(refname) %(objectname)"]);
+    let output = trench(
+        &worktree,
+        root.path(),
+        &[
+            "sync",
+            "feature/topic",
+            "--strategy",
+            "rebase",
+            "--dry-run",
+            "--json",
+        ],
+    );
+
+    assert!(output.status.success());
+    assert_eq!(
+        git(&repository, &["for-each-ref", "--format=%(refname) %(objectname)"]),
+        refs_before
+    );
+    assert!(!marker.exists());
+    for directory in ["config", "data", "state", "cache"] {
+        assert!(!root.path().join(directory).exists(), "created {directory}");
+    }
+}
