@@ -548,9 +548,9 @@ fn render_create_dialog(
                     Style::default().fg(theme.fg_muted),
                 )));
             } else {
-                lines.extend(candidates.iter().enumerate().map(|(index, candidate)| {
+                lines.extend(create_row_window(dialog, layout.options).map(|index| {
                     selectable_line(
-                        &candidate.name,
+                        &candidates[index].name,
                         index == dialog.base_selection(),
                         layout.options.width,
                         theme,
@@ -609,21 +609,14 @@ fn render_create_dialog(
             if let Some(error) = dialog.validation_error() {
                 lines.push(error_line(error, theme));
             }
-            let used = lines.len();
-            lines.extend(
-                suggestions
-                    .iter()
-                    .enumerate()
-                    .take(usize::from(layout.options.height).saturating_sub(used))
-                    .map(|(index, suggestion)| {
-                        selectable_line(
-                            &suggestion.label,
-                            index == dialog.branch_selection(),
-                            layout.options.width,
-                            theme,
-                        )
-                    }),
-            );
+            lines.extend(create_row_window(dialog, layout.options).map(|index| {
+                selectable_line(
+                    &suggestions[index].label,
+                    index == dialog.branch_selection(),
+                    layout.options.width,
+                    theme,
+                )
+            }));
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
@@ -650,6 +643,7 @@ pub(crate) enum CreateHitTarget {
 pub(crate) struct CreateHitMap {
     pub(crate) input: Rect,
     pub(crate) rows: Vec<Rect>,
+    row_indices: Vec<usize>,
     pub(crate) back: Rect,
     pub(crate) cta: Rect,
     pub(crate) help: Rect,
@@ -661,13 +655,17 @@ impl CreateHitMap {
         if rect_contains(self.input, point) {
             return Some(CreateHitTarget::Input);
         }
-        if let Some((index, _)) = self
+        if let Some((local_index, _)) = self
             .rows
             .iter()
             .enumerate()
             .find(|(_, area)| rect_contains(**area, point))
         {
-            return Some(CreateHitTarget::Row(index));
+            return self
+                .row_indices
+                .get(local_index)
+                .copied()
+                .map(CreateHitTarget::Row);
         }
         if rect_contains(self.cta, point) {
             return Some(CreateHitTarget::Cta);
@@ -762,19 +760,17 @@ pub(crate) fn create_hit_map(dialog: &CreateDialog, area: Rect) -> CreateHitMap 
             preview_rows + usize::from(dialog.validation_error().is_some())
         }
     };
-    let row_count = match dialog.mode() {
-        CreateMode::SelectBase => dialog.base_candidates().len(),
-        CreateMode::Name => dialog.branch_suggestions().len(),
-    }
-    .min(usize::from(layout.options.height).saturating_sub(prefix_rows));
-    let rows = (0..row_count)
-        .map(|index| Rect {
+    let row_indices = create_row_window(dialog, layout.options).collect::<Vec<_>>();
+    let rows = row_indices
+        .iter()
+        .enumerate()
+        .map(|(local_index, _)| Rect {
             x: layout.options.x,
             y: layout
                 .options
                 .y
                 .saturating_add(prefix_rows as u16)
-                .saturating_add(index as u16),
+                .saturating_add(local_index as u16),
             width: layout.options.width,
             height: 1,
         })
@@ -798,11 +794,47 @@ pub(crate) fn create_hit_map(dialog: &CreateDialog, area: Rect) -> CreateHitMap 
     CreateHitMap {
         input: layout.input,
         rows,
+        row_indices,
         back: hit_for_key("Esc"),
         cta,
         help: hit_for_key("?"),
         options: layout.options,
     }
+}
+
+fn create_row_window(dialog: &CreateDialog, options: Rect) -> std::ops::Range<usize> {
+    let prefix_rows = match dialog.mode() {
+        CreateMode::SelectBase => {
+            usize::from(dialog.origin_spinner_visible()) + usize::from(dialog.warning().is_some())
+        }
+        CreateMode::Name => {
+            dialog
+                .preview()
+                .map_or(1, |preview| if preview.base_visible { 4 } else { 3 })
+                + usize::from(dialog.validation_error().is_some())
+        }
+    };
+    let (total, selected) = match dialog.mode() {
+        CreateMode::SelectBase => (dialog.base_candidates().len(), dialog.base_selection()),
+        CreateMode::Name => (dialog.branch_suggestions().len(), dialog.branch_selection()),
+    };
+    selection_window(
+        total,
+        selected,
+        usize::from(options.height).saturating_sub(prefix_rows),
+    )
+}
+
+fn selection_window(total: usize, selected: usize, capacity: usize) -> std::ops::Range<usize> {
+    if total == 0 || capacity == 0 {
+        return 0..0;
+    }
+    let selected = selected.min(total - 1);
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(capacity)
+        .min(total.saturating_sub(capacity));
+    start..start.saturating_add(capacity).min(total)
 }
 
 pub(crate) fn help_close_hit(area: Rect, point: (u16, u16)) -> bool {
@@ -2766,6 +2798,48 @@ mod tests {
 
         let tiny = create_hit_map(&dialog, Rect::new(0, 0, 59, 15));
         assert_eq!(tiny.target_at((30, 8)), None);
+    }
+
+    #[test]
+    fn create_selection_window_keeps_deep_base_and_name_rows_visible_at_all_sizes() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let branches = (0..15).map(|index| format!("branch-{index:02}"));
+        let refs =
+            RefSnapshot::from_parts(branches, [] as [&str; 0], None, Some("branch-00"), false);
+        for (width, height) in [(120, 30), (80, 20), (60, 16)] {
+            let mut state = sample_state();
+            let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs.clone(), []);
+            for _ in 0..12 {
+                dialog.handle_key(crate::tui::create_flow::CreateKey::Down);
+            }
+            let hits = create_hit_map(&dialog, Rect::new(0, 0, width, height));
+            assert!(
+                hits.rows
+                    .iter()
+                    .any(|row| hits.target_at(center(*row)) == Some(CreateHitTarget::Row(12))),
+                "base hit missing at {width}x{height}"
+            );
+            state.create_dialog = Some(dialog);
+            let output = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(output.contains("› branch-12"), "{width}x{height}\n{output}");
+
+            let mut name = CreateDialog::new("trench", Path::new("/worktrees"), refs.clone(), []);
+            name.set_branch("");
+            for _ in 0..12 {
+                name.handle_key(crate::tui::create_flow::CreateKey::Down);
+            }
+            let hits = create_hit_map(&name, Rect::new(0, 0, width, height));
+            assert!(
+                hits.rows
+                    .iter()
+                    .any(|row| hits.target_at(center(*row)) == Some(CreateHitTarget::Row(12))),
+                "name hit missing at {width}x{height}"
+            );
+            state.create_dialog = Some(name);
+            let output = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(output.contains("› branch-12"), "{width}x{height}\n{output}");
+        }
     }
 
     #[test]
