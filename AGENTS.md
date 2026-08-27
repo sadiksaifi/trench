@@ -21,26 +21,25 @@
 
 - `Shape:` single Rust binary; CLI first, TUI only when no subcommand and stdin/stdout are TTYs
 - `Runtime:` Rust 2021; `clap` CLI, `git2` git ops, `tokio` orchestration, `ratatui`/`crossterm` TUI, `tracing` file logging
-- `State:` SQLite via `rusqlite` + embedded migrations in `src/state/sql`; DB stored under trench's resolved app data dir as `trench.db`
+- `State:` stateless; live Git worktrees and refs are the source of truth; trench owns no product database
 - `Config:` global trench config plus project `.trench.toml`; resolver in `src/config/mod.rs`
-- `Paths:` default worktree root `~/.worktrees`; default template `{{ repo }}/{{ branch | sanitize }}` in `src/paths.rs`
+- `Paths:` configured worktree root and branch sanitization are resolved without creating product state
 - `Core flow:` `src/main.rs` parses flags, launches TUI or dispatches commands, maps typed failures to stable exit codes
-- `Layout:` `src/cli/commands/*` command handlers; `src/git/*` low-level git/worktree ops; `src/adopt.rs` DB-first lookup + unmanaged worktree adoption; `src/hooks/*` lifecycle hooks + streaming; `src/output/*` table/json/porcelain; `src/tui/*` screens/theme/watcher; `tests/` process-level integration tests
+- `Layout:` `src/cli/commands/*` command handlers; `src/git/*` low-level git/worktree ops; `src/worktree_catalog.rs` live identity and status discovery; `src/hooks/*` lifecycle hooks + streaming; `src/output/*` table/json/porcelain; `src/tui/*` cockpit flows/theme/watcher; `tests/` process-level integration tests
 
 ## Design Principles
 
 - Headless-first. CLI output, exit codes, `--json`, `--porcelain`, `--dry-run` are product surface; TUI is secondary
 - TDD mandatory. New behavior starts red; keep unit tests near module, add `tests/` when behavior crosses process boundary
-- Keep `--dry-run` side-effect free. Use read-only path helpers and non-mutating resolution; no dir creation, DB writes, or git mutation
+- Keep `--dry-run` side-effect free. Use read-only path helpers and non-mutating resolution; no directory creation, config writes, hooks, network access, or git mutation
 - Preserve config contract. Precedence `CLI > .trench.toml > global trench config > defaults`; non-hook fields merge per-field; project hooks replace global hooks entirely
 - Treat structured output as API. Changes to JSON, porcelain, exit codes, event ordering, or log payloads need tests
-- Centralize worktree resolution. Raw branch names and sanitized names must keep matching through `adopt`/`paths`, not ad hoc per command
+- Centralize worktree resolution. Raw branch names and sanitized names must keep matching through the live catalog, not ad hoc per command
 
 ## Sharp Edges
 
 - Bare `trench` on non-TTY errors instead of falling back; automation must call explicit subcommands
 - Hook order is `copy -> run -> shell`; `pre_*` and `post_create` failures abort, `post_sync` reports after success, `post_remove` warns only
-- `resolve_or_adopt` writes DB state by adopting unmanaged git worktrees; read-only flows must use `resolve_only`
-- `Database::open` can rename an ahead-of-code DB to `*.backup-<ts>` and recreate fresh state
-- Worktree templates must render relative paths without `..`; branch sanitization folds `/`, space, `@`, `..` into `-`
+- Structured and preview flags are command-local: create/remove/sync support `--json` and `--dry-run`; list supports `--json` and `--porcelain`
+- Branch sanitization folds `/`, space, `@`, `..` into `-`
 - Startup logging writes to XDG state dir immediately; `TRENCH_LOG` controls filter

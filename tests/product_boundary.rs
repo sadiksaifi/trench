@@ -119,3 +119,31 @@ fn structured_and_preview_flags_are_scoped_to_supported_commands() {
         );
     }
 }
+
+#[test]
+fn completions_expose_only_supported_commands() {
+    let output = trench(&["completions", "bash"]);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let completion = String::from_utf8(output.stdout).unwrap();
+
+    for command in [
+        "create",
+        "remove",
+        "switch",
+        "open",
+        "list",
+        "sync",
+        "init",
+        "shell-init",
+        "completions",
+    ] {
+        assert!(completion.contains(command), "completion omitted {command}");
+    }
+    for retired in ["status", "tag", "log", "help"] {
+        assert!(
+            !completion.contains(&format!("trench__{retired}")),
+            "completion exposed retired command {retired}"
+        );
+    }
+}
