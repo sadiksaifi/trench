@@ -1023,7 +1023,9 @@ fn translate_key(key: KeyEvent) -> Option<Key> {
         KeyCode::Esc => Some(Key::Escape),
         KeyCode::Up => Some(Key::Up),
         KeyCode::Down => Some(Key::Down),
-        KeyCode::Char(character) => Some(Key::Char(character)),
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Key::Char(character))
+        }
         _ => None,
     }
 }
@@ -1066,7 +1068,9 @@ fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
         KeyCode::Up => Some(CreateKey::Up),
         KeyCode::Down => Some(CreateKey::Down),
         KeyCode::Tab => Some(CreateKey::Tab),
-        KeyCode::Char(character) => Some(CreateKey::Character(character)),
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(CreateKey::Character(character))
+        }
         _ => None,
     }
 }
@@ -1089,7 +1093,9 @@ fn translate_sync_key(key: KeyEvent) -> Option<SyncKey> {
         KeyCode::Up => Some(SyncKey::Up),
         KeyCode::Down => Some(SyncKey::Down),
         KeyCode::Tab => Some(SyncKey::Tab),
-        KeyCode::Char(character) => Some(SyncKey::Character(character)),
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(SyncKey::Character(character))
+        }
         _ => None,
     }
 }
@@ -1310,6 +1316,20 @@ mod tests {
                 translate_key(KeyEvent::new(code, modifiers)),
                 Some(Key::Edit(expected))
             );
+        }
+    }
+
+    #[test]
+    fn unrecognized_control_characters_do_not_become_text_or_cockpit_actions() {
+        for character in ['k', 'o', 'q', 's', 'u', 'x'] {
+            let key = KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL);
+            assert_eq!(
+                translate_key(key),
+                None,
+                "Control-{character} must not lose its modifier",
+            );
+            assert_eq!(translate_create_key(key), None);
+            assert_eq!(translate_sync_key(key), None);
         }
     }
 
