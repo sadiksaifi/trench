@@ -970,37 +970,38 @@ fn run_sync(
         SyncStrategy::Rebase => cli::commands::sync::Strategy::Rebase,
         SyncStrategy::Merge => cli::commands::sync::Strategy::Merge,
     };
-    let _ = explicit_base;
 
-    // Load hooks config (needed for both dry-run preview and actual execution)
-    let hooks_config = if no_hooks {
-        None
-    } else {
-        let repo_info = git::discover_repo(&cwd)?;
-        let project_config = config::load_project_config(&repo_info.path)?;
-        let global_config = config::load_global_config()?;
-        config::resolve_config(None, project_config.as_ref(), &global_config).hooks
-    };
+    let repo_info = git::discover_repo(&cwd)?;
+    let project_config = config::load_project_config(&repo_info.path)?;
+    let global_config = config::load_global_config()?;
+    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+    let hooks_config = if no_hooks { None } else { resolved.hooks };
 
-    // Dry-run: open existing DB (read-only) for accurate base-branch metadata
     if dry_run {
-        let db = if let Some(db_path) = existing_db_path()? {
-            Some(state::Database::open(&db_path)?)
-        } else {
-            None
+        let strategy = match strategy {
+            SyncStrategy::Rebase => cli::commands::sync::stateless::SyncStrategy::Rebase,
+            SyncStrategy::Merge => cli::commands::sync::stateless::SyncStrategy::Merge,
         };
-        let plan = cli::commands::sync::execute_dry_run(
-            identifier,
-            &cwd,
-            db.as_ref(),
-            sync_strategy,
-            hooks_config.as_ref(),
-            no_hooks,
-        )?;
-        if json {
-            println!("{}", serde_json::to_string_pretty(&plan)?);
+        let hook_policy = if no_hooks {
+            cli::commands::sync::stateless::HookPolicy::Skip
         } else {
-            print!("{plan}");
+            cli::commands::sync::stateless::HookPolicy::Run
+        };
+        let plan = cli::commands::sync::stateless::SyncPlanner::discover(
+            &cwd,
+            resolved.git.default_base.as_deref(),
+        )?
+        .plan(
+            identifier,
+            explicit_base,
+            strategy,
+            hook_policy,
+        )?;
+        let preview = cli::commands::sync::stateless::preview(plan);
+        if json {
+            println!("{}", serde_json::to_string_pretty(&preview)?);
+        } else {
+            println!("{preview}");
         }
         return Ok(());
     }
