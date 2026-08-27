@@ -210,6 +210,18 @@ impl CreateDialog {
         self.mode
     }
 
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    pub fn base_query(&self) -> &str {
+        &self.base_query
+    }
+
+    pub fn base_selection(&self) -> usize {
+        self.base_selection
+    }
+
     pub fn set_origin_refresh(&mut self, refresh: OriginRefresh) {
         self.origin_refresh = refresh;
     }

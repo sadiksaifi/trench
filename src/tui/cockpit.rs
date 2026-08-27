@@ -7,9 +7,12 @@ use ratatui::{
 };
 use tui_spinner::FluxFrames;
 
+use crate::operation::{OperationKind, OperationStage};
 use crate::tui::{
     app::{unavailable_reason, AppState, Viewport, WorktreeIdentity, WorktreeStatus},
+    create_flow::{CreateDialog, CreateMode},
     keymap::{self, Binding, Context},
+    operation_modal::{ModalStatus, OperationModal},
     theme::Theme,
 };
 
@@ -61,6 +64,11 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
     } else {
         render_cockpit(&model, frame, theme);
     }
+    if let Some(modal) = state.operation_modal.as_ref() {
+        render_operation_modal(modal, frame, area, theme);
+    } else if let Some(dialog) = state.create_dialog.as_ref() {
+        render_create_dialog(dialog, state.refresh.spinner_tick, frame, area, theme);
+    }
     if state.help_open {
         render_help(&model, frame, theme);
     }
@@ -99,9 +107,11 @@ fn render_resize(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
 
 fn render_cockpit(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
     let warning_height = u16::from(model.state.refresh.warning.is_some());
-    let [body, warning, keybar] = Layout::vertical([
+    let notification_height = u16::from(model.state.notification.is_some());
+    let [body, warning, notification, keybar] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(warning_height),
+        Constraint::Length(notification_height),
         Constraint::Length(1),
     ])
     .areas(model.area);
@@ -135,6 +145,19 @@ fn render_cockpit(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
                 ),
             ),
             warning,
+        );
+    }
+    if let Some(notice) = model.state.notification.as_ref() {
+        frame.render_widget(
+            Paragraph::new(notice.text.clone()).style(
+                theme.with_bg(
+                    Style::default()
+                        .fg(theme.selection_fg)
+                        .add_modifier(Modifier::BOLD),
+                    theme.accent_soft,
+                ),
+            ),
+            notification,
         );
     }
     render_keybar(
@@ -177,6 +200,251 @@ fn render_search(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &T
         .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
         area,
     );
+}
+
+fn render_create_dialog(
+    dialog: &CreateDialog,
+    spinner_tick: u64,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+) {
+    let footer = Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    let content_area = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    match dialog.mode() {
+        CreateMode::Form => {
+            let modal = centered_rect(
+                content_area.width.saturating_sub(8).min(76),
+                13,
+                content_area,
+            );
+            frame.render_widget(Clear, modal);
+            let block = panel(Some(" Create worktree ".to_string()), theme);
+            let inner = block.inner(modal);
+            frame.render_widget(block, modal);
+            let mut lines = vec![
+                metric_line("Branch", dialog.branch(), theme),
+                Line::from(""),
+            ];
+            if let Some(preview) = dialog.preview() {
+                if preview.base_visible {
+                    lines.push(metric_line(
+                        "Create from",
+                        preview.base.as_deref().unwrap_or("Select a base"),
+                        theme,
+                    ));
+                }
+                lines.extend([
+                    metric_line("Worktree", &preview.worktree, theme),
+                    metric_line("Path", &preview.path.to_string_lossy(), theme),
+                ]);
+            }
+            let suggestions = dialog.branch_suggestions();
+            if !suggestions.is_empty() {
+                lines.push(Line::from(""));
+                lines.extend(
+                    suggestions
+                        .iter()
+                        .take(3)
+                        .map(|suggestion| Line::from(format!("  {}", suggestion.label))),
+                );
+            }
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: true })
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+                inner,
+            );
+            let has_base = dialog.preview().is_some_and(|preview| preview.base_visible);
+            let items = if has_base {
+                [
+                    ("Enter", "create"),
+                    ("Tab", "base"),
+                    ("Esc", "close"),
+                    ("?", "help"),
+                ]
+                .as_slice()
+            } else {
+                [("Enter", "create"), ("Esc", "close"), ("?", "help")].as_slice()
+            };
+            render_dialog_keybar(frame, footer, theme, items);
+        }
+        CreateMode::BasePicker => {
+            let modal = centered_rect(
+                content_area.width.saturating_sub(6).min(86),
+                content_area.height.saturating_sub(4).min(20),
+                content_area,
+            );
+            frame.render_widget(Clear, modal);
+            let block = panel(Some(" Create worktree · Select base ".to_string()), theme);
+            let inner = block.inner(modal);
+            frame.render_widget(block, modal);
+            let mut lines = vec![metric_line("Search", dialog.base_query(), theme)];
+            if dialog.origin_spinner_visible() {
+                lines.push(Line::from(format!(
+                    "Updating origin {}",
+                    flux_frame(spinner_tick)
+                )));
+            }
+            if let Some(warning) = dialog.warning() {
+                lines.push(Line::from(warning));
+            }
+            lines.push(Line::from(""));
+            lines.extend(
+                dialog
+                    .base_candidates()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, candidate)| {
+                        let marker = if index == dialog.base_selection() {
+                            ">"
+                        } else {
+                            " "
+                        };
+                        Line::from(format!("{marker} {}", candidate.name))
+                    }),
+            );
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: true })
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+                inner,
+            );
+            render_dialog_keybar(
+                frame,
+                footer,
+                theme,
+                &[("Enter", "select"), ("Esc", "back"), ("?", "help")],
+            );
+        }
+    }
+}
+
+fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let footer = Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    let content_area = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let dialog = centered_rect(
+        content_area.width.saturating_sub(8).min(78),
+        content_area.height.saturating_sub(4).min(18),
+        content_area,
+    );
+    frame.render_widget(Clear, dialog);
+    let title = match modal.operation() {
+        OperationKind::Create => " Create worktree ",
+    };
+    let block = panel(Some(title.to_string()), theme);
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+    let mut lines = vec![metric_line(
+        "Elapsed",
+        &format_elapsed(modal.elapsed()),
+        theme,
+    )];
+    for stage in modal.stages() {
+        let marker = if modal.current_stage() == Some(stage.stage) && modal.spinner_visible() {
+            flux_frame(modal.spinner_tick()).to_string()
+        } else if stage.success == Some(true) {
+            "✓".to_string()
+        } else if stage.success == Some(false) {
+            "×".to_string()
+        } else {
+            "·".to_string()
+        };
+        lines.push(Line::from(format!(
+            "{marker} {}",
+            operation_stage_label(stage.stage)
+        )));
+    }
+    let hook_height = usize::from(inner.height.saturating_sub(lines.len() as u16 + 3));
+    if !modal.visible_hook_lines(hook_height).is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Hook output"));
+        lines.extend(
+            modal
+                .visible_hook_lines(hook_height)
+                .into_iter()
+                .map(|line| Line::from(format!("  {line}"))),
+        );
+    }
+    if let ModalStatus::Failed { stage, message } = modal.status() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!(
+            "Failed at {}: {message}",
+            operation_stage_label(*stage)
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+        inner,
+    );
+    let items = match modal.status() {
+        ModalStatus::Failed { .. } => {
+            [("↑/↓", "output"), ("Enter", "back"), ("?", "help")].as_slice()
+        }
+        ModalStatus::Running if !modal.mutation_started() => {
+            [("↑/↓", "output"), ("Esc", "cancel"), ("?", "help")].as_slice()
+        }
+        ModalStatus::Running | ModalStatus::Succeeded => {
+            [("↑/↓", "output"), ("?", "help")].as_slice()
+        }
+    };
+    render_dialog_keybar(frame, footer, theme, items);
+}
+
+fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[(&str, &str)]) {
+    let mut spans = Vec::new();
+    for (index, (key, action)) in items.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            *key,
+            Style::default()
+                .fg(theme.selection_fg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {action}"),
+            Style::default().fg(theme.fg_muted),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
+        area,
+    );
+}
+
+fn operation_stage_label(stage: OperationStage) -> &'static str {
+    match stage {
+        OperationStage::Revalidate => "Revalidate",
+        OperationStage::PreHook => "Pre-create hook",
+        OperationStage::CreateWorktree => "Create worktree",
+        OperationStage::PostHook => "Post-create hook",
+        OperationStage::Rollback => "Rollback",
+    }
+}
+
+fn format_elapsed(duration: std::time::Duration) -> String {
+    format!("{:.1}s", duration.as_secs_f64())
 }
 
 fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -537,7 +805,7 @@ fn metric_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 
@@ -875,5 +1143,97 @@ mod tests {
             "{output}"
         );
         assert!(output.contains("3 changed · ↑2 ↓1"), "{output}");
+    }
+
+    #[test]
+    fn create_form_and_picker_transform_over_the_unchanged_cockpit_with_contextual_help() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::create_flow::{CreateDialog, CreateKey, OriginRefresh},
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main", "release"],
+            ["origin/main", "origin/topic"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/auth");
+        state.create_dialog = Some(dialog);
+
+        let form = text(&render_buffer(&mut state, 100, 24, "ops"));
+        for expected in [
+            "Create worktree",
+            "Branch",
+            "feature/auth",
+            "Create from",
+            "origin/main",
+            "Worktree",
+            "feature-auth",
+            "/worktrees/trench/feature-auth",
+        ] {
+            assert!(form.contains(expected), "missing {expected:?}\n{form}");
+        }
+        assert!(!form.contains("Hooks"), "{form}");
+        assert!(form.lines().last().unwrap().trim_end().ends_with("? help"));
+
+        let dialog = state.create_dialog.as_mut().unwrap();
+        dialog.handle_key(CreateKey::Tab);
+        dialog.set_origin_refresh(OriginRefresh::Loading);
+        let picker = text(&render_buffer(&mut state, 100, 24, "ops"));
+        assert_eq!(picker.matches("Create worktree").count(), 1, "{picker}");
+        assert!(picker.contains("Select base"), "{picker}");
+        assert!(picker.contains("Updating origin"), "{picker}");
+        assert!(picker.contains("release"), "{picker}");
+        assert!(picker
+            .lines()
+            .last()
+            .unwrap()
+            .trim_end()
+            .ends_with("? help"));
+    }
+
+    #[test]
+    fn operation_modal_renders_named_stage_elapsed_spinner_and_hook_output_without_percentages() {
+        use std::time::Duration;
+
+        use crate::{
+            hooks::{
+                types::{HookStep, OutputStream},
+                HookEvent,
+            },
+            operation::{OperationEvent, OperationKind, OperationStage},
+            tui::operation_modal::OperationModal,
+        };
+
+        let mut state = sample_state();
+        let mut modal = OperationModal::new(OperationKind::Create);
+        modal.apply(OperationEvent::StageStarted {
+            stage: OperationStage::PreHook,
+        });
+        modal.apply(OperationEvent::Output {
+            hook: HookEvent::PreCreate,
+            step: HookStep::Run,
+            stream: OutputStream::Stdout,
+            line: "installing dependencies".to_string(),
+        });
+        modal.tick(Duration::from_millis(1_250));
+        state.operation_modal = Some(modal);
+
+        let output = text(&render_buffer(&mut state, 100, 24, "ops"));
+        assert!(output.contains("Create worktree"), "{output}");
+        assert!(output.contains("Pre-create hook"), "{output}");
+        assert!(output.contains("1.2s"), "{output}");
+        assert!(output.contains("installing dependencies"), "{output}");
+        assert!(!output.contains('%'), "{output}");
+        assert!(output
+            .lines()
+            .last()
+            .unwrap()
+            .trim_end()
+            .ends_with("? help"));
     }
 }
