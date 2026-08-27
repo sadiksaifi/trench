@@ -443,10 +443,17 @@ fn render_create_dialog(
             let block = panel(Some(" Create worktree ".to_string()), theme);
             let inner = block.inner(modal);
             frame.render_widget(block, modal);
-            let mut lines = vec![
-                metric_line("Branch", dialog.branch(), theme),
-                Line::from(""),
-            ];
+            let [branch_input, details] =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
+            render_text_input(
+                frame,
+                branch_input,
+                "Branch",
+                dialog.branch(),
+                "Type a branch name",
+                theme,
+            );
+            let mut lines = Vec::new();
             if let Some(preview) = dialog.preview() {
                 if preview.base_visible {
                     lines.push(metric_line(
@@ -486,7 +493,7 @@ fn render_create_dialog(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
                     .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
-                inner,
+                details,
             );
             let has_base = dialog.preview().is_some_and(|preview| preview.base_visible);
             let items = if has_base {
@@ -551,6 +558,45 @@ fn render_create_dialog(
             );
         }
     }
+}
+
+fn render_text_input(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+    placeholder: &str,
+    theme: &Theme,
+) {
+    let content = if value.is_empty() {
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(theme.accent)),
+            Span::styled(placeholder.to_string(), Style::default().fg(theme.fg_muted)),
+            Span::styled("▌", Style::default().fg(theme.accent)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(theme.accent)),
+            Span::styled(value.to_string(), Style::default().fg(theme.fg)),
+            Span::styled("▌", Style::default().fg(theme.accent)),
+        ])
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_active))
+        .title(format!(" {label} · typing "))
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(theme.with_bg(Style::default(), theme.bg_elevated));
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(block)
+            .style(theme.with_bg(Style::default(), theme.bg_elevated)),
+        area,
+    );
 }
 
 fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -1577,6 +1623,43 @@ mod tests {
         assert!(help.contains("Help · Create worktree"), "{help}");
         assert!(help.contains("select base"), "{help}");
         assert!(!help.contains("Help · Worktrees"), "{help}");
+    }
+
+    #[test]
+    fn focused_create_branch_is_visibly_an_input_in_the_rendered_terminal() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/auth");
+        state.create_dialog = Some(dialog);
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let output = text(&buffer);
+        let theme = crate::tui::theme::from_name("ops");
+        let input_cell = buffer
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "f" && cell.bg == theme.bg_elevated)
+            .expect("typed branch should sit on a distinct input surface");
+
+        assert!(output.contains("Branch · typing"), "{output}");
+        assert!(output.contains("> feature/auth▌"), "{output}");
+        assert_eq!(input_cell.fg, theme.fg);
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "│" && cell.fg == theme.border_active),
+            "focused input should have an active border\n{output}"
+        );
     }
 
     #[test]
