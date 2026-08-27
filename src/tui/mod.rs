@@ -6,6 +6,7 @@ pub mod refresh;
 pub mod refresh_runtime;
 pub mod runtime;
 pub mod screens;
+pub mod search;
 pub mod theme;
 pub mod watcher;
 
