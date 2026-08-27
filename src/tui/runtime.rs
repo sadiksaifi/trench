@@ -2123,6 +2123,181 @@ mod tests {
         );
     }
 
+    struct ControllerHarness {
+        repository: TempDir,
+        state: AppState,
+    }
+
+    impl ControllerHarness {
+        fn new() -> Self {
+            Self {
+                repository: init_repo(),
+                state: AppState::new(Vec::new()),
+            }
+        }
+
+        fn root(&self) -> &Path {
+            self.repository.path()
+        }
+
+        fn add(&mut self, branch: &str) -> WorktreeIdentity {
+            let name = branch.replace('/', "-");
+            let path = self.root().join("worktrees").join(&name);
+            add_worktree(self.root(), branch, &name, &path);
+            let path = path.canonicalize().unwrap();
+            let identity = WorktreeIdentity {
+                id: WorktreeId::new(&path),
+                worktree: name,
+                branch: Some(branch.to_string()),
+                path,
+                head: None,
+                is_main: false,
+                is_current: false,
+                detached: false,
+            };
+            self.state.identities.push(identity.clone());
+            self.state.selected = Some(identity.id.clone());
+            self.state
+                .statuses
+                .insert(identity.id.clone(), Default::default());
+            identity
+        }
+
+        fn refs(&mut self, branches: &[&str]) {
+            self.state.refs = Some(RefSnapshot::from_parts(
+                branches.iter().copied(),
+                [] as [&str; 0],
+                None,
+                Some("main"),
+                false,
+            ));
+        }
+
+        fn search(&mut self, query: &str) {
+            let _ = app::reduce(&mut self.state, Event::Input(Key::Char('/')));
+            for character in query.chars() {
+                let _ = app::reduce(&mut self.state, Event::Input(Key::Char(character)));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn controller_harness_covers_cross_boundary_workflow_matrix() {
+        // Launcher and search route every action to the filtered identity.
+        let mut launcher = ControllerHarness::new();
+        launcher.add("alpha");
+        let beta = launcher.add("beta");
+        launcher.search("bet");
+        for (key, expected) in [
+            (Key::Enter, app::Effect::Switch(beta.id.clone())),
+            (Key::Char('o'), app::Effect::Open(beta.id.clone())),
+            (Key::Char('s'), app::Effect::OpenSync(beta.id.clone())),
+            (Key::Char('d'), app::Effect::OpenRemove(beta.id.clone())),
+        ] {
+            assert_eq!(
+                app::reduce(&mut launcher.state, Event::Input(key)),
+                vec![expected]
+            );
+        }
+
+        // Create uses the live planner and preserves refresh failure truth.
+        let mut create = ControllerHarness::new();
+        create.refs(&["main"]);
+        let worktree_root = create.root().join("worktrees");
+        let request = build_create_dispatch(
+            &CreateSubmission {
+                branch: "feature/new".to_string(),
+                from: None,
+            },
+            create.root(),
+            &worktree_root,
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            matches!(request, CreateDispatch::Run(ref request) if matches!(**request, OperationRequest::Create(_)))
+        );
+        let CreateDispatch::Run(request) = request else {
+            unreachable!()
+        };
+        let outcome = crate::operation::execute(*request, &crate::operation::NoopEmitter)
+            .await
+            .unwrap();
+        let OperationOutcome::Create(outcome) = outcome else {
+            unreachable!()
+        };
+        let mut failed_refresh = FailingPostOperationRefresh::default();
+        finish_create_success(
+            &mut create.state,
+            &mut failed_refresh,
+            outcome,
+            Instant::now(),
+        );
+        assert!(failed_refresh.requested);
+        assert!(create.state.refresh.warning.is_some());
+
+        // Sync uses the planner and operation adapter, then refreshes comparisons.
+        let mut sync = ControllerHarness::new();
+        let target = sync.add("feature/sync");
+        sync.refs(&["main", "feature/sync"]);
+        let request = build_sync_request(
+            &SyncSubmission {
+                target: target.id.clone(),
+                base: "main".to_string(),
+                strategy: crate::cli::commands::sync::stateless::SyncStrategy::Rebase,
+            },
+            sync.root(),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        let events = crate::operation::RecordingEmitter::default();
+        assert!(matches!(
+            crate::operation::execute(request, &events).await.unwrap(),
+            OperationOutcome::Sync(_)
+        ));
+        assert!(events
+            .events()
+            .contains(&crate::operation::OperationEvent::MutationStarted));
+
+        // Remove exercises clean execution, stale-risk review, and retained recovery truth.
+        let mut remove = ControllerHarness::new();
+        let clean = remove.add("feature/remove");
+        let remove_root = remove.root().to_path_buf();
+        open_remove_dialog(&mut remove.state, &remove_root, &clean.id, Some("main")).unwrap();
+        let Some(RemoveInputEffect::Start(request)) = handle_remove_input(
+            &mut remove.state,
+            RemoveKey::Enter,
+            &remove_root,
+            Some("main"),
+            None,
+        )
+        .unwrap() else {
+            panic!("clean remove should start")
+        };
+        assert!(matches!(
+            crate::operation::execute(*request, &crate::operation::NoopEmitter)
+                .await
+                .unwrap(),
+            OperationOutcome::Remove(_)
+        ));
+        let mut modal = crate::tui::operation_modal::OperationModal::new(
+            crate::operation::OperationKind::Remove,
+        );
+        modal.fail(&crate::operation::OperationFailure {
+            stage: crate::operation::OperationStage::RemoveWorktree,
+            mutation_state: crate::operation::MutationState::PartiallyApplied,
+            class: crate::operation::ErrorClass::Git,
+            message: "restore manually".to_string(),
+            retained_quarantine: Some(remove_root.join("retained")),
+        });
+        assert_eq!(
+            modal.handle_key(crate::tui::operation_modal::ModalKey::Enter),
+            None
+        );
+    }
+
     fn init_repo() -> TempDir {
         let directory = TempDir::new().unwrap();
         let repository = git2::Repository::init(directory.path()).unwrap();
