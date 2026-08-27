@@ -85,13 +85,21 @@ enum Commands {
         /// Branch name or sanitized name of the worktree to remove
         branch: String,
 
-        /// Skip confirmation prompt
+        /// Confirm removal without an interactive prompt
         #[arg(long)]
-        force: bool,
+        yes: bool,
+
+        /// Allow removal of a dirty worktree
+        #[arg(long)]
+        force_worktree: bool,
 
         /// Also delete the corresponding local branch after removing the worktree
         #[arg(long)]
         delete_branch: bool,
+
+        /// Force deletion of an unmerged local branch
+        #[arg(long)]
+        force_branch: bool,
 
         /// Skip all lifecycle hooks (pre_remove, post_remove)
         #[arg(long)]
@@ -257,10 +265,21 @@ fn main() -> anyhow::Result<()> {
         }) => run_create(&branch, from.as_deref(), dry_run, json, no_hooks),
         Some(Commands::Remove {
             branch,
-            force,
+            yes,
+            force_worktree,
             delete_branch,
+            force_branch,
             no_hooks,
-        }) => run_remove(&branch, force, delete_branch, no_hooks, dry_run, json),
+        }) => run_remove(
+            &branch,
+            yes,
+            force_worktree,
+            delete_branch,
+            force_branch,
+            no_hooks,
+            dry_run,
+            json,
+        ),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::Open { branch }) => run_open(&branch),
@@ -430,6 +449,9 @@ fn run_create(
             }
             Ok(())
         }
+        Ok(operation::OperationOutcome::Remove(_)) => {
+            unreachable!("create request returned a remove outcome")
+        }
         Err(failure) => {
             if json {
                 println!("{}", output::json::format_json_value(&failure)?);
@@ -452,144 +474,126 @@ fn run_create(
 
 fn run_remove(
     identifier: &str,
-    force: bool,
+    yes: bool,
+    force_worktree: bool,
     delete_branch: bool,
+    force_branch: bool,
     no_hooks: bool,
     dry_run: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir().context("failed to determine current directory")?;
-
-    let repo_info = git::discover_repo(&cwd)?;
-
-    // Load hooks config (skip config I/O when --no-hooks is set)
-    let hooks_config = if no_hooks {
-        None
-    } else {
-        let project_config = config::load_project_config(&repo_info.path)?;
-        let global_config = config::load_global_config()?;
-        config::resolve_config(None, project_config.as_ref(), &global_config).hooks
+    use cli::commands::remove::stateless::{
+        InteractiveTerminal, RemovalAssessment, RemovalAuthorizationError, RemoveOptions,
     };
 
-    if dry_run {
-        let db = if let Some(db_path) = existing_db_path()? {
-            Some(state::Database::open(&db_path)?)
-        } else {
-            None
-        };
-
-        let plan = cli::commands::remove::execute_dry_run(
-            identifier,
-            &cwd,
-            db.as_ref(),
-            delete_branch,
-            force,
-            hooks_config.as_ref(),
-            no_hooks,
-        )?;
-
-        if json {
-            println!("{}", serde_json::to_string_pretty(&plan)?);
-        } else {
-            print!("{plan}");
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let repo_info = git::discover_repo(&cwd)?;
+    let project_config = config::load_project_config(&repo_info.path)?;
+    let global_config = config::load_global_config()?;
+    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+    let configured_base = resolved.git.default_base.clone();
+    let hooks_config = (!no_hooks).then_some(resolved.hooks).flatten();
+    let assessment = match RemovalAssessment::discover(&cwd, identifier, configured_base.as_deref())
+    {
+        Ok(assessment) => assessment,
+        Err(error) => {
+            eprintln!("error: {error}");
+            if error.to_string().contains("not found") {
+                ExitCode::NotFound.exit();
+            }
+            ExitCode::GeneralError.exit();
         }
-        return Ok(());
-    }
-
-    if json && !force {
-        eprintln!("error: trench remove --json requires --force");
-        ExitCode::MissingRequiredFlag.exit();
-    }
-
-    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    if !force && !interactive {
-        eprintln!("error: trench remove requires --force outside interactive terminals");
-        ExitCode::MissingRequiredFlag.exit();
-    }
-
-    let db_path = runtime_db_path()?;
-    let db = state::Database::open(&db_path)?;
-
-    let live = live_worktree::resolve(identifier, &repo_info, &db)?;
-    if let Some(warning) = process::format_process_warning(&live.entry.path.to_string_lossy()) {
+    };
+    if let Some(warning) = process::format_process_warning(&assessment.path().to_string_lossy()) {
         eprintln!("{warning}");
     }
-
-    if interactive && !force {
-        let confirmed = prompt_yes_no(&format!(
+    let options = RemoveOptions {
+        yes,
+        force_worktree,
+        delete_branch,
+        force_branch,
+        no_hooks,
+        dry_run,
+    };
+    let plan = if dry_run || yes {
+        assessment.authorize(options)
+    } else if let Some(terminal) = InteractiveTerminal::detect() {
+        let prompt = format!(
             "Remove worktree '{}' at {}?",
-            live.entry.name,
-            live.entry.path.display()
-        ))?;
-        if !confirmed {
-            eprintln!("Cancelled.");
-            return Ok(());
+            assessment.worktree(),
+            assessment.path().display()
+        );
+        match assessment.confirm_interactively(terminal, || {
+            prompt_yes_no(&prompt).map_err(|error| std::io::Error::other(error.to_string()))
+        })? {
+            Some(receipt) => assessment.authorize_confirmed(options, receipt),
+            None => {
+                eprintln!("Cancelled.");
+                return Ok(());
+            }
         }
+    } else {
+        Err(RemovalAuthorizationError::ConfirmationRequired)
+    };
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(error) => {
+            eprintln!("error: {error}");
+            match error {
+                RemovalAuthorizationError::ConfirmationRequired => {
+                    ExitCode::MissingRequiredFlag.exit()
+                }
+                RemovalAuthorizationError::ForceBranchRequiresDeleteBranch => {
+                    ExitCode::FlagConflict.exit()
+                }
+                _ => ExitCode::GeneralError.exit(),
+            }
+        }
+    };
+    if dry_run {
+        if json {
+            println!("{}", output::json::format_json_value(&plan)?);
+        } else {
+            println!("{plan}");
+        }
+        return Ok(());
     }
 
     let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
-    let outcome = match rt.block_on(cli::commands::remove::execute_live_resolved_with_hooks(
-        &live,
-        &repo_info,
-        &db,
-        force && delete_branch,
-        force && delete_branch,
-        hooks_config.as_ref(),
-        no_hooks,
-        None,
+    match rt.block_on(operation::execute(
+        operation::OperationRequest::Remove(operation::RemoveRequest {
+            plan,
+            hooks: hooks_config,
+        }),
+        &operation::TerminalEmitter,
     )) {
-        Ok(outcome) => outcome,
-        Err(e) => return handle_remove_error(e),
-    };
-
-    if let Some(ref hook_err) = outcome.post_remove_warning {
-        eprintln!("warning: post_remove hook failed: {hook_err:#}");
+        Ok(operation::OperationOutcome::Remove(outcome)) => {
+            if json {
+                println!("{}", output::json::format_json_value(&outcome)?);
+            } else {
+                eprintln!("{outcome}");
+            }
+            Ok(())
+        }
+        Ok(_) => unreachable!("remove request returned a create outcome"),
+        Err(failure) => {
+            if json {
+                println!("{}", output::json::format_json_value(&failure)?);
+            } else {
+                eprintln!("error: {failure}");
+            }
+            match failure.class {
+                operation::ErrorClass::Hook => ExitCode::HookFailed.exit(),
+                operation::ErrorClass::HookTimeout => ExitCode::HookTimeout.exit(),
+                operation::ErrorClass::Git => ExitCode::GitError.exit(),
+                operation::ErrorClass::Cancelled
+                | operation::ErrorClass::PreconditionsChanged
+                | operation::ErrorClass::Cleanup
+                | operation::ErrorClass::Io
+                | operation::ErrorClass::Internal => ExitCode::GeneralError.exit(),
+            }
+        }
     }
-
-    let (human_outcome, incomplete_requested_outcome) = if interactive && !force {
-        match outcome.result.branch.as_deref() {
-            Some(branch) => prompt_local_branch_delete(&repo_info.path, branch)?,
-            None => (RemoveHumanOutcome::WorktreeOnly, false),
-        }
-    } else {
-        let human = remove_human_outcome_from_result(&outcome.result);
-        let incomplete = outcome.result.branch_delete_error.is_some();
-        if json {
-            println!(
-                "{}",
-                output::json::format_json_value(
-                    &outcome.result.to_json_output(outcome.hooks_status)
-                )?
-            );
-        } else {
-            eprintln!(
-                "{}",
-                format_remove_human_outcome(&outcome.result.name, &human)
-            );
-        }
-        if incomplete {
-            ExitCode::GitError.exit();
-        }
-        return Ok(());
-    };
-
-    eprintln!(
-        "{}",
-        format_remove_human_outcome(&outcome.result.name, &human_outcome)
-    );
-    if incomplete_requested_outcome {
-        ExitCode::GitError.exit();
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RemoveHumanOutcome {
-    WorktreeOnly,
-    BranchDeleted(String),
-    BranchKept(String),
-    BranchAlreadyAbsent(String),
-    BranchDeleteFailed { branch: String, error: String },
 }
 
 fn prompt_yes_no(prompt: &str) -> anyhow::Result<bool> {
@@ -610,118 +614,6 @@ fn prompt_yes_no_from<R: BufRead, W: Write>(
     let mut line = String::new();
     input.read_line(&mut line)?;
     Ok(line.trim().eq_ignore_ascii_case("y"))
-}
-
-fn prompt_local_branch_delete(
-    repo_path: &std::path::Path,
-    branch: &str,
-) -> anyhow::Result<(RemoveHumanOutcome, bool)> {
-    if !prompt_yes_no(&format!("Delete local branch '{branch}' too?"))? {
-        return Ok((RemoveHumanOutcome::BranchKept(branch.to_string()), false));
-    }
-
-    match git::delete_local_branch(repo_path, branch, false) {
-        Ok(()) => Ok((RemoveHumanOutcome::BranchDeleted(branch.to_string()), false)),
-        Err(git::GitError::LocalBranchNotFound { .. }) => Ok((
-            RemoveHumanOutcome::BranchAlreadyAbsent(branch.to_string()),
-            false,
-        )),
-        Err(git::GitError::BranchNotFullyMerged { .. }) => {
-            if !prompt_yes_no(&format!(
-                "Branch '{branch}' is not fully merged. Force delete?"
-            ))? {
-                return Ok((RemoveHumanOutcome::BranchKept(branch.to_string()), false));
-            }
-            match git::delete_local_branch(repo_path, branch, true) {
-                Ok(()) => Ok((RemoveHumanOutcome::BranchDeleted(branch.to_string()), false)),
-                Err(git::GitError::LocalBranchNotFound { .. }) => Ok((
-                    RemoveHumanOutcome::BranchAlreadyAbsent(branch.to_string()),
-                    false,
-                )),
-                Err(e) => Ok((
-                    RemoveHumanOutcome::BranchDeleteFailed {
-                        branch: branch.to_string(),
-                        error: e.to_string(),
-                    },
-                    true,
-                )),
-            }
-        }
-        Err(e) => Ok((
-            RemoveHumanOutcome::BranchDeleteFailed {
-                branch: branch.to_string(),
-                error: e.to_string(),
-            },
-            true,
-        )),
-    }
-}
-
-fn remove_human_outcome_from_result(
-    result: &cli::commands::remove::RemoveResult,
-) -> RemoveHumanOutcome {
-    match (
-        result.delete_branch_requested,
-        result.branch.as_deref(),
-        result.branch_deleted,
-        result.branch_delete_error.as_deref(),
-    ) {
-        (_, _, false, Some(error)) => RemoveHumanOutcome::BranchDeleteFailed {
-            branch: result.branch.clone().unwrap_or_else(|| result.name.clone()),
-            error: error.to_string(),
-        },
-        (true, Some(branch), true, _) => RemoveHumanOutcome::BranchDeleted(branch.to_string()),
-        (true, Some(branch), false, _) => {
-            RemoveHumanOutcome::BranchAlreadyAbsent(branch.to_string())
-        }
-        _ => RemoveHumanOutcome::WorktreeOnly,
-    }
-}
-
-fn format_remove_human_outcome(worktree_name: &str, outcome: &RemoveHumanOutcome) -> String {
-    match outcome {
-        RemoveHumanOutcome::WorktreeOnly => format!("Removed worktree '{worktree_name}'."),
-        RemoveHumanOutcome::BranchDeleted(branch) => {
-            format!("Removed worktree '{worktree_name}' and branch '{branch}'.")
-        }
-        RemoveHumanOutcome::BranchKept(branch) => {
-            format!("Removed worktree '{worktree_name}'. Kept branch '{branch}'.")
-        }
-        RemoveHumanOutcome::BranchAlreadyAbsent(branch) => {
-            format!("Removed worktree '{worktree_name}'. Branch '{branch}' already absent.")
-        }
-        RemoveHumanOutcome::BranchDeleteFailed { branch, error } => {
-            format!("Removed worktree '{worktree_name}'. Branch '{branch}' not deleted: {error}")
-        }
-    }
-}
-
-fn handle_remove_error(e: anyhow::Error) -> anyhow::Result<()> {
-    if e.chain().any(|c| {
-        c.downcast_ref::<hooks::runner::HookTimeoutError>()
-            .is_some()
-    }) {
-        eprintln!("error: {e:#}");
-        ExitCode::HookTimeout.exit();
-    }
-    if e.downcast_ref::<cli::commands::remove::RemoveError>()
-        .is_some()
-    {
-        eprintln!("error: {e:#}");
-        ExitCode::HookFailed.exit();
-    }
-    if let Some(git_err) = e.downcast_ref::<git::GitError>() {
-        if matches!(git_err, git::GitError::WorktreeNotFound { .. }) {
-            eprintln!("error: {e}");
-            ExitCode::NotFound.exit();
-        }
-    }
-    let msg = e.to_string();
-    if msg.contains("not found") || msg.contains("not tracked") {
-        eprintln!("error: {e}");
-        ExitCode::NotFound.exit();
-    }
-    Err(e)
 }
 
 fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
@@ -1534,13 +1426,7 @@ mod tests {
         assert!(result.is_ok(), "remove with branch should be accepted");
         let result = Cli::try_parse_from(["trench", "switch", "my-feature"]);
         assert!(result.is_ok(), "switch with branch should be accepted");
-        let result = Cli::try_parse_from([
-            "trench",
-            "sync",
-            "my-feature",
-            "--strategy",
-            "rebase",
-        ]);
+        let result = Cli::try_parse_from(["trench", "sync", "my-feature", "--strategy", "rebase"]);
         assert!(
             result.is_ok(),
             "sync with branch and strategy should be accepted"
@@ -1776,13 +1662,17 @@ mod tests {
         match cli.command {
             Some(Commands::Remove {
                 branch,
-                force,
+                yes,
+                force_worktree,
                 delete_branch,
+                force_branch,
                 no_hooks,
             }) => {
                 assert_eq!(branch, "my-feature");
-                assert!(!force);
+                assert!(!yes);
+                assert!(!force_worktree);
                 assert!(!delete_branch);
+                assert!(!force_branch);
                 assert!(!no_hooks);
             }
             _ => panic!("expected Commands::Remove"),
@@ -1790,19 +1680,31 @@ mod tests {
     }
 
     #[test]
-    fn remove_subcommand_accepts_force_flag() {
-        let cli = Cli::try_parse_from(["trench", "remove", "my-feature", "--force"])
-            .expect("remove with --force should succeed");
+    fn remove_subcommand_accepts_independent_safety_flags() {
+        let cli = Cli::try_parse_from([
+            "trench",
+            "remove",
+            "my-feature",
+            "--yes",
+            "--force-worktree",
+            "--force-branch",
+            "--delete-branch",
+        ])
+        .expect("remove safety flags should parse");
         match cli.command {
             Some(Commands::Remove {
                 branch,
-                force,
+                yes,
+                force_worktree,
                 delete_branch,
+                force_branch,
                 no_hooks,
             }) => {
                 assert_eq!(branch, "my-feature");
-                assert!(force);
-                assert!(!delete_branch);
+                assert!(yes);
+                assert!(force_worktree);
+                assert!(delete_branch);
+                assert!(force_branch);
                 assert!(!no_hooks);
             }
             _ => panic!("expected Commands::Remove"),
@@ -1915,12 +1817,11 @@ mod tests {
         match cli.command {
             Some(Commands::Remove {
                 branch,
-                force,
                 delete_branch,
                 no_hooks,
+                ..
             }) => {
                 assert_eq!(branch, "my-feature");
-                assert!(!force);
                 assert!(delete_branch);
                 assert!(!no_hooks);
             }
@@ -1929,24 +1830,20 @@ mod tests {
     }
 
     #[test]
-    fn remove_subcommand_accepts_force_and_delete_branch_combined() {
-        let cli = Cli::try_parse_from([
-            "trench",
-            "remove",
-            "my-feature",
-            "--force",
-            "--delete-branch",
-        ])
-        .expect("remove with --force --delete-branch should succeed");
+    fn remove_subcommand_accepts_yes_and_delete_branch_combined() {
+        let cli =
+            Cli::try_parse_from(["trench", "remove", "my-feature", "--yes", "--delete-branch"])
+                .expect("remove with --yes --delete-branch should succeed");
         match cli.command {
             Some(Commands::Remove {
                 branch,
-                force,
+                yes,
                 delete_branch,
                 no_hooks,
+                ..
             }) => {
                 assert_eq!(branch, "my-feature");
-                assert!(force);
+                assert!(yes);
                 assert!(delete_branch);
                 assert!(!no_hooks);
             }

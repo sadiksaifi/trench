@@ -7,6 +7,7 @@ pub struct StatusCounts {
     pub staged: u32,
     pub modified: u32,
     pub untracked: u32,
+    pub conflicted: u32,
 }
 
 pub fn counts(worktree_path: &Path) -> Result<StatusCounts, GitError> {
@@ -20,6 +21,10 @@ pub fn counts(worktree_path: &Path) -> Result<StatusCounts, GitError> {
     let mut counts = StatusCounts::default();
     for entry in statuses.iter() {
         let status = entry.status();
+        if status.contains(git2::Status::CONFLICTED) {
+            counts.conflicted += 1;
+            continue;
+        }
         if status.is_wt_new() && !status.is_index_new() {
             counts.untracked += 1;
             continue;

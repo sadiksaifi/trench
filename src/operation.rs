@@ -9,9 +9,16 @@ use crate::config::HooksConfig;
 use crate::create_plan::{CreateAction, CreatePlan, CreatePlanner, HookPolicy};
 use crate::{git, logging};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum OperationRequest {
     Create(CreateRequest),
+    Remove(RemoveRequest),
+}
+
+#[derive(Debug)]
+pub struct RemoveRequest {
+    pub plan: crate::cli::commands::remove::stateless::RemovalPlan,
+    pub hooks: Option<HooksConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +32,7 @@ pub struct CreateRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationKind {
     Create,
+    Remove,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -33,6 +41,9 @@ pub enum OperationStage {
     Revalidate,
     PreHook,
     CreateWorktree,
+    RemoveWorktree,
+    Prune,
+    DeleteBranch,
     PostHook,
     Rollback,
 }
@@ -181,6 +192,7 @@ impl CancellationCheck for CancellationToken {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationOutcome {
     Create(CreateOutcome),
+    Remove(crate::cli::commands::remove::stateless::RemovalOutcome),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +227,8 @@ pub struct OperationFailure {
     pub mutation_state: MutationState,
     pub class: ErrorClass,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_quarantine: Option<PathBuf>,
 }
 
 pub async fn execute(
@@ -231,6 +245,118 @@ pub async fn execute_cancellable(
 ) -> Result<OperationOutcome, OperationFailure> {
     match request {
         OperationRequest::Create(request) => execute_create(request, emitter, cancellation).await,
+        OperationRequest::Remove(request) => execute_remove(request, emitter, cancellation).await,
+    }
+}
+
+async fn execute_remove(
+    request: RemoveRequest,
+    emitter: &dyn Emitter,
+    cancellation: &dyn CancellationCheck,
+) -> Result<OperationOutcome, OperationFailure> {
+    use crate::cli::commands::remove::stateless as remove;
+
+    if cancellation.is_cancelled() {
+        return Err(OperationFailure {
+            stage: OperationStage::Revalidate,
+            mutation_state: MutationState::NotStarted,
+            class: ErrorClass::Cancelled,
+            message: "operation cancelled before mutation".to_string(),
+            retained_quarantine: None,
+        });
+    }
+    let adapter = RemoveEmitterAdapter { emitter };
+    remove::execute(request.plan, request.hooks.as_ref(), &adapter)
+        .await
+        .map(OperationOutcome::Remove)
+        .map_err(|failure| OperationFailure {
+            stage: map_remove_stage(failure.stage),
+            mutation_state: map_remove_mutation(failure.mutation_state),
+            class: match failure.class {
+                remove::RemovalErrorClass::PreconditionsChanged => ErrorClass::PreconditionsChanged,
+                remove::RemovalErrorClass::Git => ErrorClass::Git,
+                remove::RemovalErrorClass::Hook => ErrorClass::Hook,
+                remove::RemovalErrorClass::HookTimeout => ErrorClass::HookTimeout,
+                remove::RemovalErrorClass::Io => ErrorClass::Io,
+            },
+            message: failure.message,
+            retained_quarantine: failure.retained_quarantine,
+        })
+}
+
+struct RemoveEmitterAdapter<'a> {
+    emitter: &'a dyn Emitter,
+}
+
+impl crate::cli::commands::remove::stateless::RemovalEventSink for RemoveEmitterAdapter<'_> {
+    fn emit(&self, event: crate::cli::commands::remove::stateless::RemovalEvent) {
+        use crate::cli::commands::remove::stateless::RemovalEvent;
+
+        let event = match event {
+            RemovalEvent::Started => OperationEvent::Started {
+                operation: OperationKind::Remove,
+            },
+            RemovalEvent::StageStarted { stage } => OperationEvent::StageStarted {
+                stage: map_remove_stage(stage),
+            },
+            RemovalEvent::Output {
+                hook,
+                step,
+                stream,
+                line,
+            } => OperationEvent::Output {
+                hook,
+                step,
+                stream,
+                line,
+            },
+            RemovalEvent::StageFinished {
+                stage,
+                duration,
+                success,
+            } => OperationEvent::StageFinished {
+                stage: map_remove_stage(stage),
+                duration,
+                success,
+            },
+            RemovalEvent::Warning { stage, message } => OperationEvent::Warning {
+                stage: map_remove_stage(stage),
+                message,
+            },
+            RemovalEvent::Finished {
+                mutation_state,
+                duration,
+            } => OperationEvent::Finished {
+                mutation_state: map_remove_mutation(mutation_state),
+                duration,
+            },
+        };
+        self.emitter.emit(event);
+    }
+}
+
+fn map_remove_stage(
+    stage: crate::cli::commands::remove::stateless::RemovalStage,
+) -> OperationStage {
+    use crate::cli::commands::remove::stateless::RemovalStage;
+    match stage {
+        RemovalStage::Revalidate => OperationStage::Revalidate,
+        RemovalStage::PreRemove => OperationStage::PreHook,
+        RemovalStage::RemoveWorktree => OperationStage::RemoveWorktree,
+        RemovalStage::Prune => OperationStage::Prune,
+        RemovalStage::DeleteBranch => OperationStage::DeleteBranch,
+        RemovalStage::PostRemove => OperationStage::PostHook,
+    }
+}
+
+fn map_remove_mutation(
+    state: crate::cli::commands::remove::stateless::RemovalMutationState,
+) -> MutationState {
+    use crate::cli::commands::remove::stateless::RemovalMutationState;
+    match state {
+        RemovalMutationState::NotStarted => MutationState::NotStarted,
+        RemovalMutationState::Applied => MutationState::Applied,
+        RemovalMutationState::PartiallyApplied => MutationState::PartiallyApplied,
     }
 }
 
@@ -1229,6 +1355,7 @@ fn fail(
         mutation_state: state,
         class,
         message,
+        retained_quarantine: None,
     }
 }
 
@@ -1236,7 +1363,11 @@ fn diagnostic_stage(stage: OperationStage) -> logging::Stage {
     match stage {
         OperationStage::Revalidate => logging::Stage::Validate,
         OperationStage::PreHook | OperationStage::PostHook => logging::Stage::Hook,
-        OperationStage::CreateWorktree | OperationStage::Rollback => logging::Stage::Git,
+        OperationStage::CreateWorktree
+        | OperationStage::RemoveWorktree
+        | OperationStage::Prune
+        | OperationStage::DeleteBranch
+        | OperationStage::Rollback => logging::Stage::Git,
     }
 }
 
@@ -2061,5 +2192,50 @@ mod tests {
             .find_branch(&plan.branch, git2::BranchType::Local)
             .is_err());
         assert!(repo.find_worktree(&plan.worktree).is_err());
+    }
+
+    #[test]
+    fn remove_emitter_maps_typed_stages_and_partial_state() {
+        use crate::cli::commands::remove::stateless::{
+            RemovalEvent, RemovalEventSink, RemovalMutationState, RemovalStage,
+        };
+
+        let emitter = RecordingEmitter::default();
+        let adapter = RemoveEmitterAdapter { emitter: &emitter };
+        adapter.emit(RemovalEvent::StageStarted {
+            stage: RemovalStage::Prune,
+        });
+        adapter.emit(RemovalEvent::Finished {
+            mutation_state: RemovalMutationState::PartiallyApplied,
+            duration: Duration::from_millis(1),
+        });
+
+        assert_eq!(
+            emitter.events(),
+            vec![
+                OperationEvent::StageStarted {
+                    stage: OperationStage::Prune,
+                },
+                OperationEvent::Finished {
+                    mutation_state: MutationState::PartiallyApplied,
+                    duration: Duration::from_millis(1),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn operation_failure_serializes_retained_quarantine() {
+        let failure = OperationFailure {
+            stage: OperationStage::RemoveWorktree,
+            mutation_state: MutationState::PartiallyApplied,
+            class: ErrorClass::Io,
+            message: "recovery required".to_string(),
+            retained_quarantine: Some(PathBuf::from("/tmp/retained-worktree")),
+        };
+
+        let value = serde_json::to_value(failure).unwrap();
+        assert_eq!(value["retained_quarantine"], "/tmp/retained-worktree");
+        assert_eq!(value["mutation_state"], "partially_applied");
     }
 }
