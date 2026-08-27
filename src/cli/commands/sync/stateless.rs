@@ -458,7 +458,7 @@ pub async fn execute(
         sync_started,
         sync_finished: Cell::new(false),
     };
-    let new_head = match git::sync::execute_with_emitter(&transaction, &transaction_emitter) {
+    let new_head = match git::sync::execute(&transaction, &transaction_emitter) {
         Ok(head) => {
             emitter.emit(SyncEvent::StageFinished {
                 stage: SyncStage::Sync,

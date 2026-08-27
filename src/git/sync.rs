@@ -28,13 +28,6 @@ pub trait TransactionEmitter {
     fn emit(&self, event: TransactionEvent);
 }
 
-#[derive(Debug)]
-pub struct NoopTransactionEmitter;
-
-impl TransactionEmitter for NoopTransactionEmitter {
-    fn emit(&self, _event: TransactionEvent) {}
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum SyncGitError {
     #[error("sync preconditions changed before mutation")]
@@ -49,11 +42,7 @@ pub enum SyncGitError {
     Git(#[from] git2::Error),
 }
 
-pub fn execute(plan: &TransactionPlan) -> Result<Oid, SyncGitError> {
-    execute_with_emitter(plan, &NoopTransactionEmitter)
-}
-
-pub fn execute_with_emitter(
+pub fn execute(
     plan: &TransactionPlan,
     emitter: &dyn TransactionEmitter,
 ) -> Result<Oid, SyncGitError> {
