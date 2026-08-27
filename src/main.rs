@@ -1534,8 +1534,17 @@ mod tests {
         assert!(result.is_ok(), "remove with branch should be accepted");
         let result = Cli::try_parse_from(["trench", "switch", "my-feature"]);
         assert!(result.is_ok(), "switch with branch should be accepted");
-        let result = Cli::try_parse_from(["trench", "sync", "my-feature"]);
-        assert!(result.is_ok(), "sync with branch should be accepted");
+        let result = Cli::try_parse_from([
+            "trench",
+            "sync",
+            "my-feature",
+            "--strategy",
+            "rebase",
+        ]);
+        assert!(
+            result.is_ok(),
+            "sync with branch and strategy should be accepted"
+        );
     }
 
     #[test]
