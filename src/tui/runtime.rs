@@ -2116,11 +2116,11 @@ mod tests {
         return_to_remove_form(&mut state, repository.path(), Some("main"), None);
 
         let dialog = state.remove_dialog.as_ref().unwrap();
+        assert_eq!(dialog.mode(), crate::tui::remove_flow::RemoveMode::Review);
         assert_eq!(
-            dialog.mode(),
-            crate::tui::remove_flow::RemoveMode::ConfirmDirtyWorktree
+            dialog.validation_error(),
+            Some("removal facts changed; review and confirm again")
         );
-        assert!(dialog.validation_error().is_none());
     }
 
     fn init_repo() -> TempDir {

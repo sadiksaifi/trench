@@ -40,6 +40,8 @@ pub enum RemoveFlowError {
     MainWorktree,
     #[error("the current removal risk has not been confirmed")]
     ConfirmationRequired,
+    #[error("removal facts changed; review and confirm again")]
+    FactsChanged,
     #[error(transparent)]
     Authorization(#[from] RemovalAuthorizationError),
 }
@@ -203,6 +205,20 @@ impl RemoveDialog {
             &self.target.id.as_path().to_string_lossy(),
             configured_base,
         )?;
+        if assessment != self.assessment {
+            self.target.worktree = assessment.worktree().to_string();
+            self.target.branch = assessment.branch().map(ToOwned::to_owned);
+            self.target.detached = assessment.detached();
+            self.target.dirty = assessment.dirty();
+            self.target.merged = assessment.merged();
+            self.assessment = assessment;
+            self.delete_branch = false;
+            self.dirty_confirmed = false;
+            self.unmerged_confirmed = false;
+            self.mode = RemoveMode::Review;
+            self.validation_error = Some("Removal facts changed; review again".to_string());
+            return Err(RemoveFlowError::FactsChanged);
+        }
         self.target.worktree = assessment.worktree().to_string();
         self.target.branch = assessment.branch().map(ToOwned::to_owned);
         self.target.detached = assessment.detached();
@@ -456,8 +472,11 @@ mod tests {
 
         assert!(matches!(
             dialog.revalidate_request(fixture.root.path(), Some("main"), None),
-            Err(RemoveFlowError::ConfirmationRequired)
+            Err(RemoveFlowError::FactsChanged)
         ));
+        assert_eq!(dialog.mode(), RemoveMode::Review);
+        assert!(!dialog.delete_branch());
+        assert_eq!(dialog.handle_key(RemoveKey::Enter), None);
         assert_eq!(dialog.mode(), RemoveMode::ConfirmDirtyWorktree);
         assert_eq!(
             dialog.handle_key(RemoveKey::Enter),
