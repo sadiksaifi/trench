@@ -110,7 +110,7 @@ fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, th
         RemoveMode::ConfirmDirtyWorktree => " Confirm dirty worktree removal ",
         RemoveMode::ConfirmUnmergedBranch => " Confirm unmerged branch deletion ",
     };
-    let block = panel(Some(title.to_string()), theme);
+    let block = active_panel(Some(title.to_string()), theme);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
     let target = dialog.target();
@@ -196,7 +196,7 @@ fn render_sync_dialog(
                 content_area,
             );
             frame.render_widget(Clear, modal);
-            let block = panel(Some(" Sync worktree ".to_string()), theme);
+            let block = active_panel(Some(" Sync worktree ".to_string()), theme);
             let inner = block.inner(modal);
             frame.render_widget(block, modal);
             let mut lines = vec![
@@ -243,7 +243,7 @@ fn render_sync_dialog(
                 content_area,
             );
             frame.render_widget(Clear, modal);
-            let block = panel(Some(" Sync worktree · Select base ".to_string()), theme);
+            let block = active_panel(Some(" Sync worktree · Select base ".to_string()), theme);
             let inner = block.inner(modal);
             frame.render_widget(block, modal);
             let mut lines = vec![metric_line("Search", dialog.base_query(), theme)];
@@ -409,7 +409,7 @@ fn render_search(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &T
                 Style::default().fg(theme.fg_muted),
             ),
         ]))
-        .block(panel(Some(" Search ".to_string()), theme))
+        .block(active_panel(Some(" Search ".to_string()), theme))
         .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
         area,
     );
@@ -440,7 +440,7 @@ fn render_create_dialog(
                 content_area,
             );
             frame.render_widget(Clear, modal);
-            let block = panel(Some(" Create worktree ".to_string()), theme);
+            let block = active_panel(Some(" Create worktree ".to_string()), theme);
             let inner = block.inner(modal);
             frame.render_widget(block, modal);
             let [branch_input, details] =
@@ -516,7 +516,7 @@ fn render_create_dialog(
                 content_area,
             );
             frame.render_widget(Clear, modal);
-            let block = panel(Some(" Create worktree · Select base ".to_string()), theme);
+            let block = active_panel(Some(" Create worktree · Select base ".to_string()), theme);
             let inner = block.inner(modal);
             frame.render_widget(block, modal);
             let mut lines = vec![metric_line("Search", dialog.base_query(), theme)];
@@ -641,7 +641,7 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
         OperationKind::Sync => " Sync worktree ",
         OperationKind::Remove => " Remove worktree ",
     };
-    let block = panel(Some(title.to_string()), theme);
+    let block = active_panel(Some(title.to_string()), theme);
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
     let mut lines = vec![metric_line(
@@ -1185,7 +1185,28 @@ fn panel(title: Option<String>, theme: &Theme) -> Block<'static> {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
         .style(theme.with_bg(Style::default(), theme.bg_panel));
+    match title {
+        Some(title) => block.title(title),
+        None => block,
+    }
+}
+
+fn active_panel(title: Option<String>, theme: &Theme) -> Block<'static> {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_active))
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(theme.with_bg(Style::default(), theme.bg_elevated));
     match title {
         Some(title) => block.title(title),
         None => block,
@@ -1760,6 +1781,41 @@ mod tests {
             assert!(!footer.contains(leaked), "leaked {leaked:?}: {footer}");
         }
         assert_eq!(footer, "Enter create  Tab base  Esc close  ? help");
+    }
+
+    #[test]
+    fn active_dialog_has_a_high_contrast_border_and_title() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs,
+            [],
+        ));
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let theme = crate::tui::theme::from_name("ops");
+        let (title_x, title_y) = find_text(&buffer, "Create worktree");
+        let title = buffer.cell((title_x, title_y)).unwrap();
+        let border_x = (0..title_x)
+            .rev()
+            .find(|x| buffer.cell((*x, title_y)).unwrap().symbol() == "┌")
+            .expect("dialog top border");
+        let border = buffer.cell((border_x, title_y)).unwrap();
+
+        assert_eq!(title.fg, theme.accent);
+        assert!(title.modifier.contains(Modifier::BOLD));
+        assert_eq!(border.fg, theme.border_active);
+        assert_ne!(border.bg, theme.bg_panel);
     }
 
     #[test]
