@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn deep_view_includes_hook_history() {
+    fn deep_view_omits_legacy_hook_history() {
         let repo_dir = tempfile::tempdir().unwrap();
         let _repo = init_repo_with_commit(repo_dir.path());
         let db = Database::open_in_memory().unwrap();
@@ -587,18 +587,9 @@ mod tests {
         let output =
             render_deep(repo_dir.path(), &db, "feature-auth").expect("deep should succeed");
 
-        assert!(
-            output.contains("Hook history"),
-            "should have Hook history section, got:\n{output}"
-        );
-        assert!(
-            output.contains("post_create"),
-            "should show post_create event, got:\n{output}"
-        );
-        assert!(
-            output.contains("post_sync"),
-            "should show post_sync event, got:\n{output}"
-        );
+        assert!(!output.contains("Hook history"), "got:\n{output}");
+        assert!(!output.contains("post_create"), "got:\n{output}");
+        assert!(!output.contains("post_sync"), "got:\n{output}");
     }
 
     #[test]

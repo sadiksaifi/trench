@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
 
+pub mod status;
+pub mod worktrees;
+
 /// Information about a discovered git repository.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepoInfo {
@@ -373,6 +376,12 @@ pub enum GitError {
 
     #[error("branch '{branch}' could not be deleted: {message}")]
     BranchDeleteBlocked { branch: String, message: String },
+
+    #[error("git command failed while {operation}: {message}")]
+    CommandFailed {
+        operation: &'static str,
+        message: String,
+    },
 
     #[error("merge conflict while syncing '{branch}': resolve conflicts manually")]
     MergeConflict { branch: String },

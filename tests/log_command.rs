@@ -92,7 +92,7 @@ fn log_json_empty_state_shows_empty_array() {
 }
 
 #[test]
-fn log_shows_events_after_create_and_remove() {
+fn live_resolution_does_not_write_legacy_removal_events() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
 
@@ -133,13 +133,6 @@ fn log_shows_events_after_create_and_remove() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
     let arr = parsed.as_array().expect("should be a JSON array");
 
-    // Should have at least a "created" and "removed" event
-    assert!(
-        arr.len() >= 2,
-        "should have at least 2 events (created + removed), got {}",
-        arr.len()
-    );
-
     let event_types: Vec<&str> = arr
         .iter()
         .filter_map(|e| e["event_type"].as_str())
@@ -151,17 +144,9 @@ fn log_shows_events_after_create_and_remove() {
         event_types
     );
     assert!(
-        event_types.contains(&"removed"),
-        "should contain 'removed' event, got: {:?}",
+        !event_types.contains(&"removed"),
+        "live worktree resolution must not write legacy removal events, got: {:?}",
         event_types
-    );
-
-    // Most recent first — "removed" should be before "created"
-    let removed_idx = event_types.iter().position(|&t| t == "removed").unwrap();
-    let created_idx = event_types.iter().position(|&t| t == "created").unwrap();
-    assert!(
-        removed_idx < created_idx,
-        "removed should be before created (most recent first)"
     );
 
     // Each event should have a worktree (string or null for repo-level events)

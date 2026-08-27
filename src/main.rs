@@ -12,6 +12,7 @@ mod process;
 mod state;
 mod tmux;
 mod tui;
+mod worktree_catalog;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -115,11 +116,7 @@ enum Commands {
         branch: String,
     },
     /// List all worktrees
-    List {
-        /// Filter worktrees by tag
-        #[arg(long)]
-        tag: Option<String>,
-    },
+    List,
     /// Show worktree status
     Status {
         /// Branch name or sanitized name for deep status view.
@@ -261,7 +258,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Tag { branch, tags }) => run_tag(&branch, &tags),
         Some(Commands::Open { branch }) => run_open(&branch),
-        Some(Commands::List { tag }) => run_list(tag.as_deref(), json, porcelain),
+        Some(Commands::List) => run_list(json, porcelain),
         Some(Commands::Status { branch }) => run_status(
             branch.as_deref(),
             json,
@@ -326,9 +323,16 @@ fn main() -> anyhow::Result<()> {
             eprintln!("error: {e}");
             ExitCode::ConfigError.exit();
         }
-        if e.downcast_ref::<git::GitError>().is_some() {
+        if let Some(git_error) = e.downcast_ref::<git::GitError>() {
             eprintln!("Error: {e}");
+            if matches!(git_error, git::GitError::NotAGitRepo { .. }) {
+                eprintln!("hint: Run `trench` inside a Git worktree.");
+            }
             ExitCode::GitError.exit();
+        }
+        if e.downcast_ref::<worktree_catalog::CatalogError>().is_some() {
+            eprintln!("error: {e}");
+            ExitCode::NotFound.exit();
         }
     }
 
@@ -975,25 +979,20 @@ fn run_log(
     Ok(())
 }
 
-fn run_list(tag: Option<&str>, json: bool, porcelain: bool) -> anyhow::Result<()> {
+fn run_list(json: bool, porcelain: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let db_path = runtime_db_path()?;
-    let db = state::Database::open(&db_path)?;
-
-    // Loading config here keeps invalid project/global files visible to every
-    // command even though list has no configurable scan paths.
     let repo_info = git::discover_repo(&cwd)?;
     let project_config = config::load_project_config(&repo_info.path)?;
     let global_config = config::load_global_config()?;
-    let _resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-    let scan_paths: Vec<String> = Vec::new();
+    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
+    let default_base = resolved.git.default_base.as_deref();
 
     let output = if json {
-        cli::commands::list::execute_json(&cwd, &db, tag, &scan_paths)?
+        cli::commands::list::execute_json(&cwd, default_base)?
     } else if porcelain {
-        cli::commands::list::execute_porcelain(&cwd, &db, tag, &scan_paths)?
+        cli::commands::list::execute_porcelain(&cwd, default_base)?
     } else {
-        cli::commands::list::execute(&cwd, &db, tag, &scan_paths)?
+        cli::commands::list::execute(&cwd, default_base)?
     };
     if output.ends_with('\n') {
         print!("{output}");
@@ -1830,15 +1829,9 @@ mod tests {
     }
 
     #[test]
-    fn list_subcommand_accepts_tag_filter() {
-        let cli = Cli::try_parse_from(["trench", "list", "--tag", "wip"])
-            .expect("list with --tag should succeed");
-        match cli.command {
-            Some(Commands::List { tag }) => {
-                assert_eq!(tag.as_deref(), Some("wip"));
-            }
-            _ => panic!("expected Commands::List"),
-        }
+    fn list_subcommand_rejects_removed_tag_filter() {
+        let result = Cli::try_parse_from(["trench", "list", "--tag", "wip"]);
+        assert!(result.is_err(), "list --tag should be rejected");
     }
 
     #[test]

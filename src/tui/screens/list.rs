@@ -1,9 +1,8 @@
 use std::path::Path;
 
-use anyhow::Result;
-
-use crate::git;
+#[cfg(test)]
 use crate::state::Database;
+use anyhow::Result;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -81,58 +80,32 @@ impl ListState {
     }
 }
 
-/// Load worktree data from the database and git, returning rows for the list view.
-///
-/// Additional directories in `scan_paths` are scanned for worktrees that
-/// may live outside the default location (FR-30).
-pub fn load_worktrees(
-    cwd: &Path,
-    db: &Database,
-    scan_paths: &[String],
-) -> Result<Vec<WorktreeRow>> {
-    let repo_info = git::discover_repo(cwd)?;
-    let repo_path = &repo_info.path;
-    let current_path = git::current_worktree_root(cwd)
-        .ok()
-        .map(|path| path.to_string_lossy().to_string());
-    let live_worktrees = crate::live_worktree::list(&repo_info, db, scan_paths)?;
-
-    let mut rows = Vec::new();
-
-    for worktree in live_worktrees {
-        let branch = worktree
-            .entry
-            .branch
-            .clone()
-            .unwrap_or_else(|| "(detached)".to_string());
-        let path = worktree.entry.path.to_string_lossy().to_string();
-        let base_branch = Some(crate::live_worktree::base_branch(&repo_info, &worktree));
-        let status = compute_status(repo_path, &branch, base_branch.as_deref(), &path);
-        let procs = crate::process::detect_processes(&path);
-        let processes = procs
-            .iter()
-            .map(|p| p.name.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
-        rows.push(WorktreeRow {
-            name: worktree.entry.name.clone(),
-            branch,
-            path,
-            status: status.0,
-            ahead_behind: status.1,
-            managed: true,
-            is_current: current_path
-                .as_deref()
-                .is_some_and(|path| path == rowsafe_path(&worktree.entry.path)),
-            processes,
-        });
-    }
-
-    Ok(rows)
-}
-
-fn rowsafe_path(path: &Path) -> String {
-    path.to_string_lossy().to_string()
+/// Load the list screen from the same read-only live catalog as the CLI.
+pub fn load_worktrees(cwd: &Path) -> Result<Vec<WorktreeRow>> {
+    crate::worktree_catalog::WorktreeCatalog::discover(cwd)?
+        .records()?
+        .into_iter()
+        .map(|record| {
+            let dirty = record.staged + record.modified + record.untracked;
+            Ok(WorktreeRow {
+                name: record.worktree,
+                branch: record.branch.unwrap_or_else(|| "(detached)".to_string()),
+                path: record.path,
+                status: if dirty == 0 {
+                    "clean".to_string()
+                } else {
+                    format!("~{dirty}")
+                },
+                ahead_behind: match (record.ahead, record.behind) {
+                    (Some(ahead), Some(behind)) => format!("+{ahead}/-{behind}"),
+                    _ => "-".to_string(),
+                },
+                managed: true,
+                is_current: record.is_current,
+                processes: String::new(),
+            })
+        })
+        .collect()
 }
 
 fn display_name(row: &WorktreeRow) -> String {
@@ -141,27 +114,6 @@ fn display_name(row: &WorktreeRow) -> String {
     } else {
         row.name.clone()
     }
-}
-
-fn compute_status(
-    repo_path: &Path,
-    branch: &str,
-    base_branch: Option<&str>,
-    wt_path: &str,
-) -> (String, String) {
-    let dirty = git::dirty_count(Path::new(wt_path)).unwrap_or(0);
-    let status = if dirty == 0 {
-        "clean".to_string()
-    } else {
-        format!("~{dirty}")
-    };
-
-    let ab = match git::ahead_behind(repo_path, branch, base_branch) {
-        Ok(Some((a, b))) => format!("+{a}/-{b}"),
-        _ => "-".to_string(),
-    };
-
-    (status, ab)
 }
 
 const KEYBAR_ITEMS: [(&str, &str); 8] = [
@@ -815,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn load_worktrees_hides_externally_deleted_worktree() {
+    fn load_worktrees_keeps_worktree_until_git_stops_reporting_it() {
         use crate::cli::commands::create;
         use crate::paths;
 
@@ -836,11 +788,11 @@ mod tests {
 
         std::fs::remove_dir_all(&created.path).expect("manual delete should succeed");
 
-        let rows = load_worktrees(repo_dir.path(), &db, &[]).expect("load should succeed");
+        let rows = load_worktrees(repo_dir.path()).expect("load should succeed");
 
         assert!(
-            rows.iter().all(|row| row.name != "ephemeral"),
-            "externally deleted worktree should not appear: {rows:?}"
+            rows.iter().any(|row| row.name == "ephemeral"),
+            "Git-reported worktree identity should remain visible: {rows:?}"
         );
     }
 
@@ -864,7 +816,7 @@ mod tests {
         )
         .expect("create should succeed");
 
-        let rows = load_worktrees(&created.path, &db, &[]).expect("load should succeed");
+        let rows = load_worktrees(&created.path).expect("load should succeed");
         let current = rows
             .iter()
             .find(|row| row.name == "focus-me")

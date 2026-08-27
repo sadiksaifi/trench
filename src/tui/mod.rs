@@ -467,7 +467,7 @@ impl App {
             return;
         }
 
-        let Some((cwd, db)) = Self::open_db() else {
+        let Ok(cwd) = std::env::current_dir() else {
             return;
         };
         // Discover and cache repo path for session scoping
@@ -476,7 +476,7 @@ impl App {
                 self.repo_path = Some(repo_info.path.to_string_lossy().to_string());
             }
         }
-        if let Ok(rows) = screens::list::load_worktrees(&cwd, &db, &[]) {
+        if let Ok(rows) = screens::list::load_worktrees(&cwd) {
             let prev_selected = self.list_state.selected;
             self.list_state = screens::list::ListState::new(rows);
             if self.list_state.rows.len() > prev_selected {

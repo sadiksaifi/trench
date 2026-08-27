@@ -506,7 +506,7 @@ fn switch_print_path_keeps_stdout_raw_and_reports_path_on_stderr() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|item| item["name"] == "switch-print-path")
+        .find(|item| item["worktree"] == "switch-print-path")
         .and_then(|item| item["path"].as_str())
         .expect("should find worktree path")
         .to_string();
