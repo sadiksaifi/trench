@@ -176,12 +176,12 @@ fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, th
     }
     if let Some(error) = dialog.validation_error() {
         lines.push(Line::from(""));
-        lines.push(Line::from(format!("Changed: {error}")));
+        lines.push(error_line(error, theme));
     }
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
-            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+            .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
         inner,
     );
     let items = match dialog.mode() {
@@ -248,12 +248,12 @@ fn render_sync_dialog(
             ];
             if let Some(error) = dialog.validation_error() {
                 lines.push(Line::from(""));
-                lines.push(Line::from(format!("Changed: {error}")));
+                lines.push(error_line(error, theme));
             }
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
-                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
                 inner,
             );
             let submit = if dialog.submission().is_some() {
@@ -322,7 +322,7 @@ fn render_sync_dialog(
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
-                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
                 options,
             );
             render_dialog_keybar(
@@ -541,7 +541,7 @@ fn render_create_dialog(
             }
             if let Some(error) = dialog.validation_error() {
                 lines.push(Line::from(""));
-                lines.push(Line::from(format!("Changed: {error}")));
+                lines.push(error_line(error, theme));
             }
             let suggestions = dialog.branch_suggestions();
             if !suggestions.is_empty() {
@@ -564,7 +564,7 @@ fn render_create_dialog(
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
-                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
                 details,
             );
             let has_base = dialog.preview().is_some_and(|preview| preview.base_visible);
@@ -631,7 +631,7 @@ fn render_create_dialog(
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
-                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
                 options,
             );
             render_dialog_keybar(
@@ -1578,6 +1578,15 @@ fn metric_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
     ])
 }
 
+fn error_line(message: &str, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("Error: {message}"),
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -2180,6 +2189,29 @@ mod tests {
     }
 
     #[test]
+    fn changed_form_errors_are_labeled_and_error_toned() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.set_branch("feature/auth");
+        dialog.set_validation_error(Some("branch changed while open".to_string()));
+        state.create_dialog = Some(dialog);
+        let theme = crate::tui::theme::from_name("ops");
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let error = find_text(&buffer, "Error: branch changed while open");
+        assert_eq!(buffer.cell(error).unwrap().fg, theme.error);
+    }
+
+    #[test]
     fn selected_create_suggestions_and_base_candidates_have_a_selection_surface() {
         use crate::{
             ref_catalog::RefSnapshot,
@@ -2354,6 +2386,59 @@ mod tests {
         let disabled_sync = render_buffer(&mut state, 100, 24, "ops");
         let disabled = find_text(&disabled_sync, "[Enter] sync (select a base)");
         assert_eq!(disabled_sync.cell(disabled).unwrap().fg, theme.disabled_fg);
+
+        state
+            .sync_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(crate::tui::sync_flow::SyncKey::Tab);
+        let empty_picker = render_buffer(&mut state, 100, 24, "ops");
+        let disabled = find_text(&empty_picker, "[Enter] select (no matches)");
+        assert_eq!(empty_picker.cell(disabled).unwrap().fg, theme.disabled_fg);
+    }
+
+    #[test]
+    fn create_sync_and_help_keep_controls_visible_at_exact_minimum_size() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::{
+                create_flow::CreateDialog,
+                sync_flow::{SyncDialog, SyncKey},
+            },
+        };
+
+        let refs = RefSnapshot::from_parts(
+            ["main", "release"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = sample_state();
+        let mut create = CreateDialog::new("trench", Path::new("/worktrees"), refs.clone(), []);
+        create.set_branch("feature/auth");
+        state.create_dialog = Some(create);
+
+        let create = text(&render_buffer(&mut state, 60, 16, "ops"));
+        for visible in ["Branch · typing", "[Enter] create", "[Esc] close"] {
+            assert!(create.contains(visible), "missing {visible:?}\n{create}");
+        }
+
+        let target = state.identities[1].clone();
+        let mut sync = SyncDialog::new(&target, refs, Some("main"));
+        sync.handle_key(SyncKey::Tab);
+        state.create_dialog = None;
+        state.sync_dialog = Some(sync);
+        let picker = text(&render_buffer(&mut state, 60, 16, "ops"));
+        for visible in ["Search · typing", "[Enter] select", "[Esc] back"] {
+            assert!(picker.contains(visible), "missing {visible:?}\n{picker}");
+        }
+
+        state.sync_dialog = None;
+        state.help_open = true;
+        let help = text(&render_buffer(&mut state, 60, 16, "ops"));
+        assert!(help.contains("Help · Worktrees"), "{help}");
+        assert!(help.lines().last().unwrap().contains("[?] close help"));
     }
 
     #[test]
@@ -2384,11 +2469,14 @@ mod tests {
             .find(|x| buffer.cell((*x, title_y)).unwrap().symbol() == "┌")
             .expect("dialog top border");
         let border = buffer.cell((border_x, title_y)).unwrap();
+        let blank_inner = buffer.cell((border_x + 2, title_y + 8)).unwrap();
 
         assert_eq!(title.fg, theme.accent);
         assert!(title.modifier.contains(Modifier::BOLD));
         assert_eq!(border.fg, theme.border_active);
         assert_ne!(border.bg, theme.bg_panel);
+        assert_eq!(blank_inner.bg, theme.bg_elevated);
+        assert_ne!(blank_inner.bg, theme.bg_panel);
     }
 
     #[test]
@@ -2668,6 +2756,21 @@ mod tests {
             .unwrap()
             .trim_end()
             .ends_with("[?] help"));
+
+        state
+            .remove_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(crate::tui::remove_flow::RemoveKey::Space);
+        let minimum = text(&render_buffer(&mut state, 60, 16, "ops"));
+        for visible in [
+            "Remove worktree",
+            "› [x] Also delete local branch feature",
+            "[Enter] remove",
+            "[Esc] close",
+        ] {
+            assert!(minimum.contains(visible), "missing {visible:?}\n{minimum}");
+        }
 
         state.help_open = true;
         let help = text(&render_buffer(&mut state, 100, 24, "ops"));
