@@ -1037,6 +1037,7 @@ fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &The
             theme.selection_bg,
         ),
     )
+    .highlight_symbol("› ")
     .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel));
     let mut table_state = TableState::default();
     let selected = model
@@ -1718,6 +1719,7 @@ mod tests {
         let mut state = sample_state();
         let buffer = render_buffer(&mut state, 80, 20, "catppuccin");
         let theme = crate::tui::theme::from_name("catppuccin");
+        let output = text(&buffer);
         let selected_cells = buffer
             .content()
             .iter()
@@ -1726,6 +1728,37 @@ mod tests {
 
         assert!(selected_cells > 0);
         assert_ne!(theme.selection_bg, Color::Reset);
+        assert!(output.contains("› * feature-auth"), "{output}");
+    }
+
+    #[test]
+    fn selected_sync_strategy_has_a_distinct_surface_in_every_theme() {
+        use crate::{ref_catalog::RefSnapshot, tui::sync_flow::SyncDialog};
+
+        for theme_name in ["ops", "catppuccin", "gruvbox", "minimal"] {
+            let mut state = sample_state();
+            let target = state.identities[1].clone();
+            let refs = RefSnapshot::from_parts(
+                ["main", "release"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            );
+            state.sync_dialog = Some(SyncDialog::new(&target, refs, Some("release")));
+            let theme = crate::tui::theme::from_name(theme_name);
+            let buffer = render_buffer(&mut state, 100, 24, theme_name);
+            let selected = find_text(&buffer, "[● Rebase]");
+            let idle = find_text(&buffer, "[○ Merge]");
+
+            assert_eq!(buffer.cell(selected).unwrap().bg, theme.selection_bg);
+            assert_eq!(buffer.cell(idle).unwrap().bg, theme.control_bg);
+            assert_ne!(
+                buffer.cell(selected).unwrap().bg,
+                buffer.cell(idle).unwrap().bg,
+                "{theme_name} rendered selected and idle choices alike"
+            );
+        }
     }
 
     #[test]
@@ -2022,12 +2055,13 @@ mod tests {
         let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
         dialog.set_branch("feature/auth");
         state.create_dialog = Some(dialog);
+        let theme = crate::tui::theme::from_name("ops");
 
         let form = render_buffer(&mut state, 100, 24, "ops");
         let selector = find_text(&form, "[ origin/main  ▾ ]");
         assert_eq!(
             form.cell(selector).unwrap().bg,
-            Color::Rgb(50, 46, 41),
+            theme.control_bg,
             "base selector needs a distinct control surface\n{}",
             text(&form)
         );
@@ -2049,7 +2083,7 @@ mod tests {
             "{}",
             text(&picker)
         );
-        assert_eq!(picker.cell(placeholder).unwrap().bg, Color::Rgb(50, 46, 41));
+        assert_eq!(picker.cell(placeholder).unwrap().bg, theme.control_bg);
     }
 
     #[test]
@@ -2386,6 +2420,7 @@ mod tests {
         state.remove_dialog = Some(
             crate::tui::remove_flow::RemoveDialog::new(WorktreeId::new(&path), assessment).unwrap(),
         );
+        let theme = crate::tui::theme::from_name("ops");
 
         let buffer = render_buffer(&mut state, 100, 24, "ops");
         let output = text(&buffer);
@@ -2398,16 +2433,10 @@ mod tests {
             "{output}"
         );
         let checkbox = find_text(&buffer, "› [ ] Also delete local branch feature");
-        assert_eq!(buffer.cell(checkbox).unwrap().bg, Color::Rgb(50, 46, 41));
+        assert_eq!(buffer.cell(checkbox).unwrap().bg, theme.control_bg);
         let destructive = find_text(&buffer, "[Enter] remove");
-        assert_eq!(
-            buffer.cell(destructive).unwrap().bg,
-            Color::Rgb(162, 59, 56)
-        );
-        assert_eq!(
-            buffer.cell(destructive).unwrap().fg,
-            Color::Rgb(250, 249, 245)
-        );
+        assert_eq!(buffer.cell(destructive).unwrap().bg, theme.danger_bg);
+        assert_eq!(buffer.cell(destructive).unwrap().fg, theme.danger_fg);
         assert!(!output.to_lowercase().contains("remote branch"), "{output}");
         assert!(output
             .lines()

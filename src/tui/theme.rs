@@ -53,24 +53,24 @@ pub fn from_name(name: &str) -> Theme {
 fn ops() -> Theme {
     Theme {
         fg: Color::Rgb(250, 249, 245),
-        fg_muted: Color::Rgb(176, 174, 165),
+        fg_muted: Color::Rgb(170, 166, 157),
         bg: Color::Rgb(20, 20, 19),
-        bg_elevated: Color::Rgb(28, 27, 24),
-        bg_panel: Color::Rgb(34, 33, 30),
+        bg_elevated: Color::Rgb(39, 36, 31),
+        bg_panel: Color::Rgb(28, 27, 24),
         control_bg: Color::Rgb(50, 46, 41),
-        accent: Color::Rgb(217, 119, 87),
-        accent_soft: Color::Rgb(88, 63, 55),
-        success: Color::Rgb(120, 140, 93),
-        error: Color::Rgb(201, 95, 77),
-        warning: Color::Rgb(201, 154, 99),
+        accent: Color::Rgb(240, 139, 101),
+        accent_soft: Color::Rgb(168, 93, 70),
+        success: Color::Rgb(145, 199, 136),
+        error: Color::Rgb(255, 123, 114),
+        warning: Color::Rgb(230, 182, 115),
         danger_bg: Color::Rgb(162, 59, 56),
         danger_fg: Color::Rgb(250, 249, 245),
         primary_bg: Color::Rgb(240, 139, 101),
         primary_fg: Color::Rgb(20, 20, 19),
         disabled_fg: Color::Rgb(119, 113, 104),
-        border: Color::Rgb(62, 58, 51),
-        border_active: Color::Rgb(106, 155, 204),
-        selection_bg: Color::Rgb(60, 44, 39),
+        border: Color::Rgb(119, 113, 104),
+        border_active: Color::Rgb(113, 183, 255),
+        selection_bg: Color::Rgb(168, 93, 70),
         selection_fg: Color::Rgb(250, 249, 245),
     }
 }
@@ -95,7 +95,7 @@ fn catppuccin() -> Theme {
         disabled_fg: Color::Rgb(127, 132, 156),
         border: Color::Rgb(88, 91, 112),
         border_active: Color::Rgb(137, 180, 250),
-        selection_bg: Color::Rgb(69, 71, 90),
+        selection_bg: Color::Rgb(88, 91, 112),
         selection_fg: Color::Rgb(205, 214, 244),
     }
 }
@@ -166,8 +166,24 @@ mod tests {
         let theme = from_name("ops");
         assert_eq!(theme.fg, Color::Rgb(250, 249, 245));
         assert_eq!(theme.bg, Color::Rgb(20, 20, 19));
-        assert_eq!(theme.accent, Color::Rgb(217, 119, 87));
+        assert_eq!(theme.bg_panel, Color::Rgb(28, 27, 24));
+        assert_eq!(theme.bg_elevated, Color::Rgb(39, 36, 31));
+        assert_eq!(theme.accent, Color::Rgb(240, 139, 101));
+        assert_eq!(theme.border, Color::Rgb(119, 113, 104));
+        assert_eq!(theme.border_active, Color::Rgb(113, 183, 255));
+        assert_eq!(theme.selection_bg, Color::Rgb(168, 93, 70));
         assert_eq!(theme.selection_fg, Color::Rgb(250, 249, 245));
+    }
+
+    #[test]
+    fn every_theme_has_distinct_control_and_selection_surfaces() {
+        for name in ["ops", "catppuccin", "gruvbox", "minimal"] {
+            let theme = from_name(name);
+            assert_ne!(
+                theme.control_bg, theme.selection_bg,
+                "{name} must distinguish idle and selected controls"
+            );
+        }
     }
 
     #[test]
@@ -265,7 +281,7 @@ mod tests {
     fn transparent_theme_keeps_ops_palette_but_resets_base_surfaces() {
         let theme = from_name("transparent");
         assert_eq!(theme.fg, Color::Rgb(250, 249, 245));
-        assert_eq!(theme.accent, Color::Rgb(217, 119, 87));
+        assert_eq!(theme.accent, Color::Rgb(240, 139, 101));
         assert_eq!(theme.bg, Color::Reset);
         assert_eq!(theme.bg_elevated, Color::Reset);
         assert_eq!(theme.bg_panel, Color::Reset);
