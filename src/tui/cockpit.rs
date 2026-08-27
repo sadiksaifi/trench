@@ -408,22 +408,36 @@ fn render_search(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &T
     } else {
         format!("{result_count} results")
     };
+    let value = if query.as_str().is_empty() {
+        Span::styled(
+            "Type to filter worktrees",
+            Style::default().fg(theme.fg_muted),
+        )
+    } else {
+        Span::styled(query.as_str().to_string(), Style::default().fg(theme.fg))
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_active))
+        .title(" Search · typing ")
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(theme.with_bg(Style::default(), theme.control_bg));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                "/ ",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(query.as_str().to_string(), Style::default().fg(theme.fg)),
+            Span::styled("> ", Style::default().fg(theme.accent)),
+            value,
+            Span::styled("▌", Style::default().fg(theme.accent)),
             Span::styled(
                 format!("  {result_label}"),
                 Style::default().fg(theme.fg_muted),
             ),
         ]))
-        .block(active_panel(Some(" Search ".to_string()), theme))
-        .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+        .block(block)
+        .style(theme.with_bg(Style::default().fg(theme.fg), theme.control_bg)),
         area,
     );
 }
@@ -1662,7 +1676,7 @@ mod tests {
         let output = text(&buffer);
         let footer = lines(&buffer).last().unwrap().trim_end().to_string();
         assert!(output.contains("Search"), "{output}");
-        assert!(output.contains("/ mai"), "{output}");
+        assert!(output.contains("> mai▌"), "{output}");
         assert!(output.contains("trench"), "{output}");
         assert!(!output.contains("feature-auth"), "{output}");
         assert!(footer.contains("Esc clear"), "{footer}");
@@ -1674,6 +1688,26 @@ mod tests {
         assert!(help.contains("Help · Search"), "{help}");
         assert!(!help.contains("c       create"), "{help}");
         assert!(!help.contains("r       refresh"), "{help}");
+    }
+
+    #[test]
+    fn empty_launcher_search_is_a_visible_focused_input() {
+        let mut state = sample_state();
+        let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('/')));
+
+        let buffer = render_buffer(&mut state, 100, 24, "ops");
+        let output = text(&buffer);
+        let theme = crate::tui::theme::from_name("ops");
+        let placeholder = find_text(&buffer, "Type to filter worktrees");
+
+        assert!(output.contains("Search · typing"), "{output}");
+        assert!(output.contains("> Type to filter worktrees▌"), "{output}");
+        assert!(output.contains("2 results"), "{output}");
+        assert_eq!(buffer.cell(placeholder).unwrap().bg, theme.control_bg);
+        assert!(buffer
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "│" && cell.fg == theme.border_active));
     }
 
     #[test]
