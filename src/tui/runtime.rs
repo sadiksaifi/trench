@@ -1639,7 +1639,7 @@ mod tests {
     }
 
     #[test]
-    fn create_form_routes_submit_and_ref_picker_without_leaking_into_cockpit_keys() {
+    fn create_steps_route_next_completion_and_submit_without_leaking_into_cockpit_keys() {
         let repository = init_repo();
         let root = repository.path().join("worktrees");
         let mut state = AppState::new(Vec::new());
@@ -1652,29 +1652,40 @@ mod tests {
         ));
         let repo_info = crate::git::discover_repo(repository.path()).unwrap();
         open_create_dialog(&mut state, &repo_info.name, &root, Some("main")).unwrap();
+        assert_eq!(
+            state.create_dialog.as_ref().unwrap().mode(),
+            crate::tui::create_flow::CreateMode::SelectBase
+        );
+        assert!(handle_create_input(
+            &mut state,
+            CreateKey::Enter,
+            repository.path(),
+            &root,
+            Some("main"),
+            None,
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            state.create_dialog.as_ref().unwrap().mode(),
+            crate::tui::create_flow::CreateMode::Name
+        );
         state
             .create_dialog
             .as_mut()
             .unwrap()
             .set_branch("feature/auth");
 
-        assert!(matches!(
-            handle_create_input(
-                &mut state,
-                CreateKey::Tab,
-                repository.path(),
-                &root,
-                Some("main"),
-                None,
-            )
-            .unwrap(),
-            Some(CreateInputEffect::RefreshOrigin)
-        ));
-        state
-            .create_dialog
-            .as_mut()
-            .unwrap()
-            .handle_key(CreateKey::Escape);
+        assert!(handle_create_input(
+            &mut state,
+            CreateKey::Tab,
+            repository.path(),
+            &root,
+            Some("main"),
+            None,
+        )
+        .unwrap()
+        .is_none());
         let start = handle_create_input(
             &mut state,
             CreateKey::Enter,
@@ -1798,12 +1809,10 @@ mod tests {
 
         return_to_create_form(&mut state, repository.path(), &root, Some("main"), None);
 
-        assert!(state
-            .create_dialog
-            .as_ref()
-            .unwrap()
-            .validation_error()
-            .is_some());
+        let dialog = state.create_dialog.as_ref().unwrap();
+        assert_eq!(dialog.mode(), crate::tui::create_flow::CreateMode::Name);
+        assert_eq!(dialog.branch(), "feature/auth");
+        assert!(dialog.validation_error().is_some());
     }
 
     #[test]
