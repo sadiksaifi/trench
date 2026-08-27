@@ -776,7 +776,7 @@ pub fn run() -> Result<TuiExit> {
             }
             state.operation_modal = operation.modal().cloned();
             mouse_capture
-                .set_active(state.create_dialog.is_some() || state.help_open)
+                .set_active(interactive_mouse_surface_visible(&state))
                 .context("failed to update mouse capture")?;
             let _ = app::reduce(&mut state, Event::NotificationTick(Instant::now()));
             let (width, height) = crossterm::terminal::size()?;
@@ -794,6 +794,9 @@ pub fn run() -> Result<TuiExit> {
             }
             let terminal_event = event::read()?;
             if let TerminalEvent::Mouse(mouse) = terminal_event {
+                if !interactive_mouse_surface_visible(&state) {
+                    continue;
+                }
                 if state.help_open {
                     if cockpit::help_close_hit(
                         Rect::new(0, 0, width, height),
@@ -803,8 +806,10 @@ pub fn run() -> Result<TuiExit> {
                     }
                     continue;
                 }
-                if let Some(dialog) = state.create_dialog.as_mut() {
-                    match route_create_mouse(dialog, mouse, Rect::new(0, 0, width, height)) {
+                if let Some(effect) =
+                    route_visible_create_mouse(&mut state, mouse, Rect::new(0, 0, width, height))
+                {
+                    match effect {
                         CreateMouseEffect::Key(key) => {
                             let effect = handle_create_input(
                                 &mut state,
@@ -1170,6 +1175,12 @@ fn visible_surface_key(state: &AppState, key: KeyEvent) -> Option<KeyEvent> {
     (!state.viewport.is_tiny() || key.code == KeyCode::Char('q')).then_some(key)
 }
 
+fn interactive_mouse_surface_visible(state: &AppState) -> bool {
+    !state.viewport.is_tiny()
+        && state.operation_modal.is_none()
+        && (state.create_dialog.is_some() || state.help_open)
+}
+
 fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Some(CreateKey::Down),
@@ -1199,6 +1210,20 @@ enum CreateMouseEffect {
     Help,
     Handled,
     Ignored,
+}
+
+fn route_visible_create_mouse(
+    state: &mut AppState,
+    mouse: MouseEvent,
+    area: Rect,
+) -> Option<CreateMouseEffect> {
+    if !interactive_mouse_surface_visible(state) || state.help_open {
+        return None;
+    }
+    state
+        .create_dialog
+        .as_mut()
+        .map(|dialog| route_create_mouse(dialog, mouse, area))
 }
 
 fn route_create_mouse(
@@ -1748,6 +1773,95 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes);
         assert_eq!(text.matches("\u{1b}[?1000h").count(), 2);
         assert_eq!(text.matches("\u{1b}[?1000l").count(), 2);
+    }
+
+    #[test]
+    fn mouse_capture_tracks_create_visibility_across_tiny_resizes() {
+        use std::io::{self, Write};
+
+        #[derive(Clone, Default)]
+        struct SharedWriter(Rc<RefCell<Vec<u8>>>);
+        impl Write for SharedWriter {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut state = AppState::new(Vec::new());
+        state.create_dialog = Some(CreateDialog::new(
+            "trench",
+            Path::new("/worktrees"),
+            refs,
+            [],
+        ));
+        let output = SharedWriter::default();
+        let mut capture = MouseCapture::new(output.clone());
+
+        for (width, height, expected) in [(59, 16, false), (60, 16, true), (60, 15, false)] {
+            let _ = app::reduce(&mut state, Event::ViewportChanged { width, height });
+            assert_eq!(interactive_mouse_surface_visible(&state), expected);
+            capture.set_active(expected).unwrap();
+        }
+        drop(capture);
+
+        let text = String::from_utf8_lossy(&output.0.borrow()).into_owned();
+        assert_eq!(text.matches("\u{1b}[?1000h").count(), 1);
+        assert_eq!(text.matches("\u{1b}[?1000l").count(), 1);
+        assert!(visible_surface_key(
+            &state,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn running_operation_hides_create_mouse_targets_and_prevents_a_second_submit() {
+        let refs = RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
+        dialog.handle_key(CreateKey::Enter);
+        dialog.set_branch("feature/auth");
+        let area = Rect::new(0, 0, 80, 20);
+        let old_cta = cockpit::create_hit_map(&dialog, area).cta;
+        let mut state = AppState::new(Vec::new());
+        state.create_dialog = Some(dialog);
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: area.width,
+                height: area.height,
+            },
+        );
+        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
+            crate::operation::OperationKind::Create,
+        ));
+        let before = state.operation_modal.clone();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: old_cta.x + old_cta.width / 2,
+            row: old_cta.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(!interactive_mouse_surface_visible(&state));
+        assert_eq!(route_visible_create_mouse(&mut state, click, area), None);
+        assert_eq!(state.operation_modal, before);
     }
 
     #[test]
