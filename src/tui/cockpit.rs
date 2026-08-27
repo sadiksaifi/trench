@@ -2652,6 +2652,30 @@ mod tests {
     }
 
     #[test]
+    fn create_base_step_highlights_the_configured_default_not_candidate_zero() {
+        use crate::{ref_catalog::RefSnapshot, tui::create_flow::CreateDialog};
+
+        let mut state = sample_state();
+        state.create_dialog = Some(CreateDialog::new_with_configured_base(
+            "trench",
+            Path::new("/worktrees"),
+            RefSnapshot::from_parts(
+                ["main", "release"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            Some("release"),
+            [],
+        ));
+
+        let output = text(&render_buffer(&mut state, 80, 20, "ops"));
+        assert!(output.contains("› release"), "{output}");
+        assert!(!output.contains("› main"), "{output}");
+    }
+
+    #[test]
     fn create_name_step_explains_each_branch_outcome_and_action() {
         use crate::{
             ref_catalog::RefSnapshot,

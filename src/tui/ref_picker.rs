@@ -38,12 +38,20 @@ pub enum OriginRefresh {
 impl RefPicker {
     pub fn new(refs: RefSnapshot, configured_base: Option<&str>) -> Self {
         let selected = refs.default_base(configured_base).ok();
+        let selection = selected
+            .as_deref()
+            .and_then(|selected| {
+                refs.candidates()
+                    .iter()
+                    .position(|candidate| candidate.name == selected)
+            })
+            .unwrap_or(0);
         Self {
             refs,
             configured_base: configured_base.map(ToOwned::to_owned),
             selected,
             query: LineInput::default(),
-            selection: 0,
+            selection,
             origin_refresh: OriginRefresh::Idle,
         }
     }
@@ -62,7 +70,15 @@ impl RefPicker {
 
     pub fn open(&mut self) {
         self.query = LineInput::default();
-        self.selection = 0;
+        self.selection = self
+            .selected
+            .as_deref()
+            .and_then(|selected| {
+                self.candidates()
+                    .iter()
+                    .position(|candidate| candidate.name == selected)
+            })
+            .unwrap_or(0);
     }
 
     pub fn query(&self) -> &str {
@@ -93,6 +109,10 @@ impl RefPicker {
     }
 
     pub fn update_refs(&mut self, refs: RefSnapshot) {
+        let highlighted = self
+            .candidates()
+            .get(self.selection)
+            .map(|candidate| candidate.name.clone());
         let selected_still_exists = self
             .selected
             .as_deref()
@@ -102,9 +122,16 @@ impl RefPicker {
             self.selected = refs.default_base(self.configured_base.as_deref()).ok();
         }
         self.refs = refs;
-        self.selection = self
-            .selection
-            .min(self.candidates().len().saturating_sub(1));
+        let candidates = self.candidates();
+        self.selection = highlighted
+            .as_deref()
+            .or(self.selected.as_deref())
+            .and_then(|highlighted| {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.name == highlighted)
+            })
+            .unwrap_or_else(|| self.selection.min(candidates.len().saturating_sub(1)));
     }
 
     pub fn origin_spinner_visible(&self) -> bool {
@@ -195,9 +222,10 @@ mod tests {
 
     #[test]
     fn picker_starts_at_the_configured_base_and_preserves_remote_only_refs() {
-        let picker = RefPicker::new(refs(), Some("release"));
+        let mut picker = RefPicker::new(refs(), Some("release"));
 
         assert_eq!(picker.selected(), Some("release"));
+        assert_eq!(picker.selection(), 1);
         assert_eq!(
             picker
                 .candidates()
@@ -205,6 +233,10 @@ mod tests {
                 .map(|candidate| candidate.name.as_str())
                 .collect::<Vec<_>>(),
             ["main", "release", "origin/topic/two"]
+        );
+        assert_eq!(
+            picker.handle_key(RefPickerKey::Enter),
+            Some(RefPickerEffect::Selected("release".to_string()))
         );
     }
 
