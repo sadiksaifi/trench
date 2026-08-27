@@ -452,6 +452,9 @@ fn run_create(
         Ok(operation::OperationOutcome::Remove(_)) => {
             unreachable!("create request returned a remove outcome")
         }
+        Ok(operation::OperationOutcome::Sync(_)) => {
+            unreachable!("create request returned a sync outcome")
+        }
         Err(failure) => {
             if json {
                 println!("{}", output::json::format_json_value(&failure)?);

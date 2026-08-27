@@ -135,6 +135,7 @@ where
         while self.receiver.try_recv().is_ok() {}
         let operation = match &request {
             OperationRequest::Create(_) => OperationKind::Create,
+            OperationRequest::Sync(_) => OperationKind::Sync,
             OperationRequest::Remove(_) => OperationKind::Remove,
         };
         let cancellation = CancellationToken::default();
@@ -215,6 +216,7 @@ mod tests {
         sync::mpsc,
         time::Duration,
     };
+    use tempfile::TempDir;
 
     use super::*;
     use crate::{
@@ -272,6 +274,69 @@ mod tests {
         })
     }
 
+    fn sync_request() -> (
+        TempDir,
+        OperationRequest,
+        crate::operation::OperationOutcome,
+    ) {
+        use crate::cli::commands::sync::stateless::{
+            HookPolicy as SyncHookPolicy, MutationState as SyncMutationState, SyncOutcome,
+            SyncPlanner, SyncStrategy,
+        };
+
+        let directory = TempDir::new().unwrap();
+        let repository = git2::Repository::init(directory.path()).unwrap();
+        repository.set_head("refs/heads/main").unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repository.index().unwrap().write_tree().unwrap();
+        let tree = repository.find_tree(tree_id).unwrap();
+        let commit_id = repository
+            .commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
+            .unwrap();
+        drop(tree);
+        let commit = repository.find_commit(commit_id).unwrap();
+        repository.branch("feature/auth", &commit, false).unwrap();
+        drop(commit);
+        let reference = repository
+            .find_reference("refs/heads/feature/auth")
+            .unwrap();
+        let worktree_path = directory.path().join("worktrees/feature-auth");
+        std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(&reference));
+        repository
+            .worktree("feature-auth", &worktree_path, Some(&options))
+            .unwrap();
+        drop(reference);
+        drop(repository);
+        let worktree_path = worktree_path.canonicalize().unwrap();
+        let plan = SyncPlanner::discover(directory.path(), Some("main"))
+            .unwrap()
+            .plan(
+                &worktree_path.to_string_lossy(),
+                Some("main"),
+                SyncStrategy::Rebase,
+                SyncHookPolicy::Run,
+            )
+            .unwrap();
+        let outcome = OperationOutcome::Sync(SyncOutcome {
+            target: plan.target.clone(),
+            branch: plan.branch.clone(),
+            path: plan.path.clone(),
+            base: plan.base.clone(),
+            strategy: plan.strategy,
+            before: plan.before.clone(),
+            after: plan.before.clone(),
+            mutation_state: SyncMutationState::Applied,
+            elapsed: Duration::from_millis(20),
+        });
+        (
+            directory,
+            OperationRequest::Sync(crate::operation::SyncRequest { plan, hooks: None }),
+            outcome,
+        )
+    }
+
     #[test]
     fn adapter_forwards_events_ticks_elapsed_and_delivers_typed_success() {
         let clock = FakeClock::default();
@@ -305,6 +370,7 @@ mod tests {
 
         let plan = match request() {
             OperationRequest::Create(request) => request.plan,
+            OperationRequest::Sync(_) => unreachable!("test request is create"),
             OperationRequest::Remove(_) => unreachable!("test request is create"),
         };
         sender
@@ -377,5 +443,45 @@ mod tests {
         assert!(!runtime.cancel());
         assert!(!token.is_cancelled());
         assert!(runtime.modal().is_some());
+    }
+
+    #[test]
+    fn sync_request_starts_non_cancellable_ticks_stages_and_delivers_typed_success() {
+        let (_directory, request, outcome) = sync_request();
+        let clock = FakeClock::default();
+        let launcher = FakeLauncher::default();
+        let channel = launcher.sender.clone();
+        let cancellation = launcher.cancellation.clone();
+        let mut runtime = OperationRuntime::new(launcher, clock.clone());
+
+        runtime.start(request);
+        assert_eq!(
+            runtime.modal().map(OperationModal::operation),
+            Some(OperationKind::Sync)
+        );
+        assert!(!runtime.cancel());
+        assert!(!cancellation.borrow().as_ref().unwrap().is_cancelled());
+
+        let sender = channel.borrow().clone().unwrap();
+        sender
+            .send(OperationMessage::Event(OperationEvent::StageStarted {
+                stage: OperationStage::Sync,
+            }))
+            .unwrap();
+        clock.0.set(Duration::from_millis(750));
+        assert!(runtime.tick().is_empty());
+        assert_eq!(
+            runtime.modal().unwrap().elapsed(),
+            Duration::from_millis(750)
+        );
+        assert_eq!(
+            runtime.modal().unwrap().current_stage(),
+            Some(OperationStage::Sync)
+        );
+
+        sender
+            .send(OperationMessage::Completed(Ok(outcome.clone())))
+            .unwrap();
+        assert_eq!(runtime.tick(), [OperationRuntimeEffect::Succeeded(outcome)]);
     }
 }

@@ -7,10 +7,11 @@ use anyhow::{Context, Result};
 use crossterm::event::{self, Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind};
 
 use crate::{
+    cli::commands::sync::stateless::{HookPolicy as SyncHookPolicy, SyncPlanner},
     config::{self, HooksConfig},
     create_plan::{CreateAction, CreatePlanner, HookPolicy},
     navigation::EditorCommand,
-    operation::{CreateRequest, OperationOutcome, OperationRequest},
+    operation::{CreateRequest, OperationOutcome, OperationRequest, SyncRequest},
     tui::{
         app::{self, AppState, Effect, Event, WorktreeId},
         cockpit,
@@ -25,6 +26,7 @@ use crate::{
         },
         refresh::RefreshPublication,
         refresh_runtime::RefreshRuntime,
+        sync_flow::{SyncDialog, SyncEffect, SyncKey, SyncSubmission},
         theme,
     },
 };
@@ -169,6 +171,12 @@ enum CreateInputEffect {
     Start(Box<OperationRequest>),
 }
 
+#[derive(Debug)]
+enum SyncInputEffect {
+    RefreshOrigin,
+    Start(Box<OperationRequest>),
+}
+
 trait PostOperationRefresh {
     fn request_post_operation(&mut self) -> Result<()>;
     fn apply_publications(&mut self, state: &mut AppState);
@@ -212,6 +220,27 @@ fn open_create_dialog(
     Ok(())
 }
 
+fn open_sync_dialog(
+    state: &mut AppState,
+    target: &WorktreeId,
+    configured_base: Option<&str>,
+) -> Result<()> {
+    let identity = state
+        .selected_visible()
+        .filter(|identity| &identity.id == target)
+        .cloned()
+        .context("selected worktree is no longer visible")?;
+    if let Some(reason) =
+        crate::tui::sync_flow::unavailable_reason(&identity, state.statuses.get(&identity.id))
+    {
+        anyhow::bail!(reason);
+    }
+    let refs = state.refs.clone().context("references are still loading")?;
+    state.help_open = false;
+    state.sync_dialog = Some(SyncDialog::new(&identity, refs, configured_base));
+    Ok(())
+}
+
 fn build_create_dispatch(
     submission: &CreateSubmission,
     cwd: &Path,
@@ -233,6 +262,22 @@ fn build_create_dispatch(
             hooks,
         },
     ))))
+}
+
+fn build_sync_request(
+    submission: &SyncSubmission,
+    cwd: &Path,
+    configured_base: Option<&str>,
+    hooks: Option<HooksConfig>,
+) -> Result<OperationRequest> {
+    let target = submission.target.as_path().to_string_lossy();
+    let plan = SyncPlanner::discover(cwd, configured_base)?.plan(
+        &target,
+        Some(&submission.base),
+        submission.strategy,
+        SyncHookPolicy::Run,
+    )?;
+    Ok(OperationRequest::Sync(SyncRequest { plan, hooks }))
 }
 
 fn handle_create_input(
@@ -299,6 +344,46 @@ fn handle_create_input(
     Ok(None)
 }
 
+fn handle_sync_input(
+    state: &mut AppState,
+    key: SyncKey,
+    cwd: &Path,
+    configured_base: Option<&str>,
+    hooks: Option<HooksConfig>,
+) -> Result<Option<SyncInputEffect>> {
+    match state
+        .sync_dialog
+        .as_mut()
+        .and_then(|dialog| dialog.handle_key(key))
+    {
+        Some(SyncEffect::Close) => {
+            state.sync_dialog = None;
+            state.help_open = false;
+        }
+        Some(SyncEffect::RefreshOrigin) => {
+            if let Some(dialog) = state.sync_dialog.as_mut() {
+                dialog.set_origin_refresh(OriginRefresh::Loading);
+            }
+            return Ok(Some(SyncInputEffect::RefreshOrigin));
+        }
+        Some(SyncEffect::Submit(submission)) => {
+            match build_sync_request(&submission, cwd, configured_base, hooks) {
+                Ok(request) => {
+                    state.help_open = false;
+                    return Ok(Some(SyncInputEffect::Start(Box::new(request))));
+                }
+                Err(error) => {
+                    if let Some(dialog) = state.sync_dialog.as_mut() {
+                        dialog.set_validation_error(Some(error.to_string()));
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+    Ok(None)
+}
+
 fn finish_create_success(
     state: &mut AppState,
     refresh: &mut impl PostOperationRefresh,
@@ -320,6 +405,39 @@ fn finish_create_success(
         state,
         Event::OperationSucceeded {
             select: Some(WorktreeId::new(outcome.plan.path)),
+            message,
+            shown_at,
+        },
+    );
+    if refresh_result.is_ok() {
+        refresh.apply_publications(state);
+    } else {
+        state.refresh.warning = warning;
+    }
+}
+
+fn finish_sync_success(
+    state: &mut AppState,
+    refresh: &mut impl PostOperationRefresh,
+    outcome: crate::cli::commands::sync::stateless::SyncOutcome,
+    shown_at: Instant,
+) {
+    let refresh_result = refresh.request_post_operation();
+    let summary = format!(
+        "Synced {} via {} onto {}",
+        outcome.target, outcome.strategy, outcome.base
+    );
+    let (message, warning) = match refresh_result.as_ref() {
+        Ok(()) => (summary, None),
+        Err(error) => {
+            let warning = format!("{summary}, but refresh failed; press r to refresh: {error}");
+            (warning.clone(), Some(warning))
+        }
+    };
+    let _ = app::reduce(
+        state,
+        Event::OperationSucceeded {
+            select: Some(WorktreeId::new(outcome.path)),
             message,
             shown_at,
         },
@@ -360,6 +478,25 @@ fn return_to_create_form(
     }
 }
 
+fn return_to_sync_form(
+    state: &mut AppState,
+    cwd: &Path,
+    configured_base: Option<&str>,
+    hooks: Option<HooksConfig>,
+) {
+    state.operation_modal = None;
+    state.help_open = false;
+    let Some(submission) = state.sync_dialog.as_ref().and_then(SyncDialog::submission) else {
+        return;
+    };
+    let validation_error = build_sync_request(&submission, cwd, configured_base, hooks)
+        .err()
+        .map(|error| error.to_string());
+    if let Some(dialog) = state.sync_dialog.as_mut() {
+        dialog.set_validation_error(validation_error);
+    }
+}
+
 pub fn run() -> Result<TuiExit> {
     let cwd = std::env::current_dir()?;
     let repo = crate::git::discover_repo(&cwd)?;
@@ -388,6 +525,10 @@ pub fn run() -> Result<TuiExit> {
                     OperationRuntimeEffect::Succeeded(OperationOutcome::Create(outcome)) => {
                         operation.dismiss();
                         finish_create_success(&mut state, &mut refresh, outcome, Instant::now());
+                    }
+                    OperationRuntimeEffect::Succeeded(OperationOutcome::Sync(outcome)) => {
+                        operation.dismiss();
+                        finish_sync_success(&mut state, &mut refresh, outcome, Instant::now());
                     }
                     OperationRuntimeEffect::Succeeded(OperationOutcome::Remove(_)) => {
                         operation.dismiss();
@@ -426,7 +567,10 @@ pub fn run() -> Result<TuiExit> {
                 break 'event_loop Ok(TuiExit::Quit);
             }
 
-            if (state.operation_modal.is_some() || state.create_dialog.is_some()) && state.help_open
+            if (state.operation_modal.is_some()
+                || state.create_dialog.is_some()
+                || state.sync_dialog.is_some())
+                && state.help_open
             {
                 if matches!(key.code, KeyCode::Char('?') | KeyCode::Esc) {
                     state.help_open = false;
@@ -457,16 +601,25 @@ pub fn run() -> Result<TuiExit> {
                     Some(ModalEffect::ReturnToForm) => {
                         operation.dismiss();
                         if let Err(error) = refresh.post_operation() {
-                            tracing::warn!(%error, "failed to refresh before create revalidation");
+                            tracing::warn!(%error, "failed to refresh before operation revalidation");
                         }
                         apply_refresh_publications(&mut refresh, &mut state);
-                        return_to_create_form(
-                            &mut state,
-                            &cwd,
-                            &resolved.worktrees.root,
-                            resolved.git.default_base.as_deref(),
-                            resolved.hooks.clone(),
-                        );
+                        if state.sync_dialog.is_some() {
+                            return_to_sync_form(
+                                &mut state,
+                                &cwd,
+                                resolved.git.default_base.as_deref(),
+                                resolved.hooks.clone(),
+                            );
+                        } else {
+                            return_to_create_form(
+                                &mut state,
+                                &cwd,
+                                &resolved.worktrees.root,
+                                resolved.git.default_base.as_deref(),
+                                resolved.hooks.clone(),
+                            );
+                        }
                     }
                     None => {}
                 }
@@ -530,6 +683,39 @@ pub fn run() -> Result<TuiExit> {
                 continue;
             }
 
+            if state.sync_dialog.is_some() {
+                if key.code == KeyCode::Char('?') {
+                    state.help_open = true;
+                    continue;
+                }
+                let Some(sync_key) = translate_sync_key(key) else {
+                    continue;
+                };
+                match handle_sync_input(
+                    &mut state,
+                    sync_key,
+                    &cwd,
+                    resolved.git.default_base.as_deref(),
+                    resolved.hooks.clone(),
+                )? {
+                    Some(SyncInputEffect::RefreshOrigin) => {
+                        if let Err(error) = refresh.ref_picker() {
+                            tracing::warn!(%error, "base picker origin refresh failed");
+                            if let Some(dialog) = state.sync_dialog.as_mut() {
+                                dialog.set_origin_refresh(OriginRefresh::Failed);
+                            }
+                        }
+                        apply_refresh_publications(&mut refresh, &mut state);
+                    }
+                    Some(SyncInputEffect::Start(request)) => {
+                        operation.start(*request);
+                        state.operation_modal = operation.modal().cloned();
+                    }
+                    None => {}
+                }
+                continue;
+            }
+
             let Some(key) = translate_key(key) else {
                 continue;
             };
@@ -569,14 +755,34 @@ pub fn run() -> Result<TuiExit> {
                             tracing::warn!(%error, "create dialog unavailable");
                         }
                     }
-                    Effect::OpenSync(id) => dialogs.register(DialogRequest::Sync(id)),
+                    Effect::OpenSync(id) => {
+                        if let Err(error) =
+                            open_sync_dialog(&mut state, &id, resolved.git.default_base.as_deref())
+                        {
+                            let _ = app::reduce(
+                                &mut state,
+                                Event::NotificationShown {
+                                    message: error.to_string(),
+                                    shown_at: Instant::now(),
+                                },
+                            );
+                        }
+                    }
                     Effect::OpenRemove(id) => dialogs.register(DialogRequest::Remove(id)),
                     Effect::Refresh => {
                         refresh.manual()?;
                         apply_refresh_publications(&mut refresh, &mut state);
                     }
                     Effect::Quit => break 'event_loop Ok(TuiExit::Quit),
-                    Effect::Unavailable { .. } => {}
+                    Effect::Unavailable { reason, .. } => {
+                        let _ = app::reduce(
+                            &mut state,
+                            Event::NotificationShown {
+                                message: reason,
+                                shown_at: Instant::now(),
+                            },
+                        );
+                    }
                 }
             }
 
@@ -607,6 +813,12 @@ fn apply_refresh_publication(state: &mut AppState, publication: RefreshPublicati
     };
     let _ = app::reduce(state, Event::RefreshPublished(publication));
     if let Some(dialog) = state.create_dialog.as_mut() {
+        if let Some(refs) = refs.clone() {
+            dialog.update_refs(refs);
+        }
+        dialog.set_origin_refresh(origin_refresh);
+    }
+    if let Some(dialog) = state.sync_dialog.as_mut() {
         if let Some(refs) = refs {
             dialog.update_refs(refs);
         }
@@ -635,6 +847,21 @@ fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
         KeyCode::Tab => Some(CreateKey::Tab),
         KeyCode::Backspace => Some(CreateKey::Backspace),
         KeyCode::Char(character) => Some(CreateKey::Character(character)),
+        _ => None,
+    }
+}
+
+fn translate_sync_key(key: KeyEvent) -> Option<SyncKey> {
+    match key.code {
+        KeyCode::Enter => Some(SyncKey::Enter),
+        KeyCode::Esc => Some(SyncKey::Escape),
+        KeyCode::Up => Some(SyncKey::Up),
+        KeyCode::Down => Some(SyncKey::Down),
+        KeyCode::Left => Some(SyncKey::Left),
+        KeyCode::Right => Some(SyncKey::Right),
+        KeyCode::Tab => Some(SyncKey::Tab),
+        KeyCode::Backspace => Some(SyncKey::Backspace),
+        KeyCode::Char(character) => Some(SyncKey::Character(character)),
         _ => None,
     }
 }
@@ -668,6 +895,7 @@ mod tests {
         tui::{
             app::WorktreeIdentity,
             create_flow::{CreateKey, CreateSubmission},
+            sync_flow::{SyncKey, SyncMode},
         },
     };
 
@@ -811,6 +1039,27 @@ mod tests {
     }
 
     #[test]
+    fn terminal_keys_translate_to_sync_form_vocabulary() {
+        let modifiers = crossterm::event::KeyModifiers::NONE;
+        assert_eq!(
+            translate_sync_key(KeyEvent::new(KeyCode::Left, modifiers)),
+            Some(SyncKey::Left)
+        );
+        assert_eq!(
+            translate_sync_key(KeyEvent::new(KeyCode::Right, modifiers)),
+            Some(SyncKey::Right)
+        );
+        assert_eq!(
+            translate_sync_key(KeyEvent::new(KeyCode::Tab, modifiers)),
+            Some(SyncKey::Tab)
+        );
+        assert_eq!(
+            translate_sync_key(KeyEvent::new(KeyCode::Char('x'), modifiers)),
+            Some(SyncKey::Character('x'))
+        );
+    }
+
+    #[test]
     fn open_create_request_builds_a_live_form_from_cockpit_state_and_config() {
         let checked_out = WorktreeIdentity {
             id: WorktreeId::new("/worktrees/trench/release"),
@@ -891,6 +1140,177 @@ mod tests {
         );
         assert_eq!(request.worktree_root, root);
         assert_eq!(request.hooks, Some(hooks));
+    }
+
+    #[test]
+    fn sync_submission_replans_the_exact_path_with_explicit_strategy_and_hooks() {
+        let repository = init_repo();
+        let target = repository.path().canonicalize().unwrap();
+        let hooks = HooksConfig {
+            pre_sync: Some(HookDef {
+                shell: Some("true".to_string()),
+                ..HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+        let submission = crate::tui::sync_flow::SyncSubmission {
+            target: WorktreeId::new(target.clone()),
+            base: "main".to_string(),
+            strategy: crate::cli::commands::sync::stateless::SyncStrategy::Merge,
+        };
+
+        let request = build_sync_request(
+            &submission,
+            repository.path(),
+            Some("main"),
+            Some(hooks.clone()),
+        )
+        .unwrap();
+
+        let OperationRequest::Sync(request) = request else {
+            panic!("sync submission should start a sync operation")
+        };
+        assert_eq!(request.plan.path, target);
+        assert_eq!(
+            request.plan.strategy,
+            crate::cli::commands::sync::stateless::SyncStrategy::Merge
+        );
+        assert_eq!(
+            request.plan.hook_policy,
+            crate::cli::commands::sync::stateless::HookPolicy::Run
+        );
+        assert_eq!(request.hooks, Some(hooks));
+    }
+
+    #[test]
+    fn sync_submission_preserves_a_remote_only_base() {
+        let repository = init_repo();
+        let git = git2::Repository::open(repository.path()).unwrap();
+        let head = git.head().unwrap().target().unwrap();
+        git.reference(
+            "refs/remotes/origin/release",
+            head,
+            true,
+            "test remote base",
+        )
+        .unwrap();
+        drop(git);
+        let target = repository.path().canonicalize().unwrap();
+
+        let request = build_sync_request(
+            &SyncSubmission {
+                target: WorktreeId::new(target),
+                base: "origin/release".to_string(),
+                strategy: crate::cli::commands::sync::stateless::SyncStrategy::Rebase,
+            },
+            repository.path(),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+
+        let OperationRequest::Sync(request) = request else {
+            panic!("sync submission should start a sync operation")
+        };
+        assert_eq!(request.plan.base, "origin/release");
+    }
+
+    #[test]
+    fn sync_dialog_opens_the_exact_visible_target_and_routes_picker_and_submit() {
+        let repository = init_repo();
+        let target = repository.path().canonicalize().unwrap();
+        let identity = WorktreeIdentity {
+            id: WorktreeId::new(target.clone()),
+            worktree: "main".to_string(),
+            branch: Some("main".to_string()),
+            path: target,
+            head: None,
+            is_main: true,
+            is_current: true,
+            detached: false,
+        };
+        let mut state = AppState::new(vec![identity.clone()]);
+        state
+            .statuses
+            .insert(identity.id.clone(), Default::default());
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        ));
+
+        open_sync_dialog(&mut state, &identity.id, Some("main")).unwrap();
+        let dialog = state.sync_dialog.as_ref().expect("sync form opened");
+        assert_eq!(dialog.target(), &identity.id);
+        assert_eq!(dialog.base(), Some("main"));
+
+        assert!(matches!(
+            handle_sync_input(
+                &mut state,
+                SyncKey::Tab,
+                repository.path(),
+                Some("main"),
+                None,
+            )
+            .unwrap(),
+            Some(SyncInputEffect::RefreshOrigin)
+        ));
+        assert_eq!(
+            state.sync_dialog.as_ref().unwrap().mode(),
+            SyncMode::BasePicker
+        );
+
+        apply_refresh_publication(
+            &mut state,
+            RefreshPublication {
+                identities: vec![identity],
+                refs: Some(RefSnapshot::from_parts(
+                    ["main"],
+                    ["origin/main", "origin/release"],
+                    Some("origin/main"),
+                    Some("main"),
+                    true,
+                )),
+                statuses: BTreeMap::from([(
+                    WorktreeId::new(repository.path()),
+                    Default::default(),
+                )]),
+                waiting_rows: BTreeSet::new(),
+                updating_refs: false,
+                warning: None,
+            },
+        );
+        assert!(state
+            .sync_dialog
+            .as_ref()
+            .unwrap()
+            .base_candidates()
+            .iter()
+            .any(|candidate| candidate.name == "origin/release"));
+
+        handle_sync_input(
+            &mut state,
+            SyncKey::Escape,
+            repository.path(),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        let effect = handle_sync_input(
+            &mut state,
+            SyncKey::Enter,
+            repository.path(),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            effect,
+            Some(SyncInputEffect::Start(request))
+                if matches!(*request, OperationRequest::Sync(_))
+        ));
     }
 
     #[test]
@@ -1248,6 +1668,181 @@ mod tests {
     }
 
     #[test]
+    fn sync_success_refreshes_comparisons_keeps_filtered_selection_and_notifies() {
+        let target = WorktreeIdentity {
+            id: WorktreeId::new("/worktrees/feature-auth"),
+            worktree: "feature-auth".to_string(),
+            branch: Some("feature/auth".to_string()),
+            path: PathBuf::from("/worktrees/feature-auth"),
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+        };
+        let refs = RefSnapshot::from_parts(
+            ["main", "feature/auth"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        );
+        let mut state = AppState::new(vec![target.clone()]);
+        state.statuses.insert(target.id.clone(), Default::default());
+        state.refs = Some(refs.clone());
+        let _ = app::reduce(&mut state, Event::Input(Key::Char('/')));
+        for character in "auth".chars() {
+            let _ = app::reduce(&mut state, Event::Input(Key::Char(character)));
+        }
+        state.sync_dialog = Some(SyncDialog::new(&target, refs.clone(), Some("main")));
+        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
+            crate::operation::OperationKind::Sync,
+        ));
+        let refreshed_status = crate::tui::app::WorktreeStatus {
+            ahead: Some(0),
+            behind: Some(0),
+            ..Default::default()
+        };
+        let publication = RefreshPublication {
+            identities: vec![target.clone()],
+            refs: Some(refs),
+            statuses: BTreeMap::from([(target.id.clone(), refreshed_status.clone())]),
+            waiting_rows: BTreeSet::new(),
+            updating_refs: false,
+            warning: None,
+        };
+        let mut refresh = SuccessfulPostOperationRefresh::new(publication);
+        let shown_at = Instant::now();
+
+        finish_sync_success(
+            &mut state,
+            &mut refresh,
+            crate::cli::commands::sync::stateless::SyncOutcome {
+                target: target.worktree.clone(),
+                branch: "feature/auth".to_string(),
+                path: target.path.clone(),
+                base: "main".to_string(),
+                strategy: crate::cli::commands::sync::stateless::SyncStrategy::Rebase,
+                before: crate::cli::commands::sync::stateless::AheadBehind {
+                    ahead: 1,
+                    behind: 2,
+                },
+                after: crate::cli::commands::sync::stateless::AheadBehind {
+                    ahead: 0,
+                    behind: 0,
+                },
+                mutation_state: crate::cli::commands::sync::stateless::MutationState::Applied,
+                elapsed: std::time::Duration::from_millis(12),
+            },
+            shown_at,
+        );
+
+        assert!(refresh.requested);
+        assert_eq!(state.statuses.get(&target.id), Some(&refreshed_status));
+        assert_eq!(
+            state.selected_visible().map(|row| &row.id),
+            Some(&target.id)
+        );
+        assert_eq!(
+            state.search.as_ref().map(|query| query.as_str()),
+            Some("auth")
+        );
+        assert!(state.sync_dialog.is_none());
+        assert!(state.operation_modal.is_none());
+        assert!(state
+            .notification
+            .as_ref()
+            .is_some_and(|notice| { notice.text == "Synced feature-auth via rebase onto main" }));
+    }
+
+    #[test]
+    fn failed_sync_enter_returns_to_form_and_revalidates_live_dirty_state() {
+        let repository = init_repo();
+        let worktree_path = repository.path().join("worktrees/feature-auth");
+        add_worktree(
+            repository.path(),
+            "feature/auth",
+            "feature-auth",
+            &worktree_path,
+        );
+        let target_path = worktree_path.canonicalize().unwrap();
+        let target = WorktreeIdentity {
+            id: WorktreeId::new(target_path.clone()),
+            worktree: "feature-auth".to_string(),
+            branch: Some("feature/auth".to_string()),
+            path: target_path,
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+        };
+        let mut state = AppState::new(vec![target.clone()]);
+        state.statuses.insert(target.id.clone(), Default::default());
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main", "feature/auth"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        ));
+        open_sync_dialog(&mut state, &target.id, Some("main")).unwrap();
+        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
+            crate::operation::OperationKind::Sync,
+        ));
+        std::fs::write(worktree_path.join("dirty.txt"), "dirty").unwrap();
+
+        return_to_sync_form(&mut state, repository.path(), Some("main"), None);
+
+        assert!(state.operation_modal.is_none());
+        let error = state
+            .sync_dialog
+            .as_ref()
+            .and_then(SyncDialog::validation_error)
+            .expect("live dirty target should fail revalidation");
+        assert!(error.to_lowercase().contains("uncommitted"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn temp_repo_sync_request_executes_through_the_shared_operation_adapter() {
+        let repository = init_repo();
+        let worktree_path = repository.path().join("worktrees/feature-auth");
+        add_worktree(
+            repository.path(),
+            "feature/auth",
+            "feature-auth",
+            &worktree_path,
+        );
+        let target_path = worktree_path.canonicalize().unwrap();
+        let request = build_sync_request(
+            &SyncSubmission {
+                target: WorktreeId::new(target_path.clone()),
+                base: "main".to_string(),
+                strategy: crate::cli::commands::sync::stateless::SyncStrategy::Rebase,
+            },
+            repository.path(),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        let emitter = crate::operation::RecordingEmitter::default();
+
+        let outcome = crate::operation::execute(request, &emitter).await.unwrap();
+
+        assert!(matches!(
+            outcome,
+            OperationOutcome::Sync(ref outcome) if outcome.path == target_path
+        ));
+        assert!(emitter
+            .events()
+            .contains(&crate::operation::OperationEvent::MutationStarted));
+        assert!(emitter.events().iter().any(|event| matches!(
+            event,
+            crate::operation::OperationEvent::StageStarted {
+                stage: crate::operation::OperationStage::Sync
+            }
+        )));
+    }
+
+    #[test]
     fn dialog_registry_is_a_replaceable_operation_seam() {
         let mut dialogs = DialogRegistry::default();
         dialogs.register(DialogRequest::Create);
@@ -1299,6 +1894,31 @@ mod tests {
     #[derive(Default)]
     struct FailingPostOperationRefresh {
         requested: bool,
+    }
+
+    struct SuccessfulPostOperationRefresh {
+        requested: bool,
+        publication: Option<RefreshPublication>,
+    }
+
+    impl SuccessfulPostOperationRefresh {
+        fn new(publication: RefreshPublication) -> Self {
+            Self {
+                requested: false,
+                publication: Some(publication),
+            }
+        }
+    }
+
+    impl PostOperationRefresh for SuccessfulPostOperationRefresh {
+        fn request_post_operation(&mut self) -> Result<()> {
+            self.requested = true;
+            Ok(())
+        }
+
+        fn apply_publications(&mut self, state: &mut AppState) {
+            apply_refresh_publication(state, self.publication.take().unwrap());
+        }
     }
 
     impl PostOperationRefresh for FailingPostOperationRefresh {

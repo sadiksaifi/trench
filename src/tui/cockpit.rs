@@ -13,6 +13,7 @@ use crate::tui::{
     create_flow::{CreateDialog, CreateMode},
     keymap::{self, Binding, Context},
     operation_modal::{ModalStatus, OperationModal},
+    sync_flow::{SyncDialog, SyncMode},
     theme::Theme,
 };
 
@@ -68,12 +69,133 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
         render_operation_modal(modal, frame, area, theme);
     } else if let Some(dialog) = state.create_dialog.as_ref() {
         render_create_dialog(dialog, state.refresh.spinner_tick, frame, area, theme);
+    } else if let Some(dialog) = state.sync_dialog.as_ref() {
+        render_sync_dialog(dialog, state.refresh.spinner_tick, frame, area, theme);
     }
     if state.help_open {
-        if state.operation_modal.is_some() || state.create_dialog.is_some() {
+        if state.operation_modal.is_some()
+            || state.create_dialog.is_some()
+            || state.sync_dialog.is_some()
+        {
             render_overlay_help(state, frame, area, theme);
         } else {
             render_help(&model, frame, theme);
+        }
+    }
+}
+
+fn render_sync_dialog(
+    dialog: &SyncDialog,
+    spinner_tick: u64,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+) {
+    let footer = Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    let content_area = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    match dialog.mode() {
+        SyncMode::Form => {
+            let modal = centered_rect(
+                content_area.width.saturating_sub(8).min(76),
+                12,
+                content_area,
+            );
+            frame.render_widget(Clear, modal);
+            let block = panel(Some(" Sync worktree ".to_string()), theme);
+            let inner = block.inner(modal);
+            frame.render_widget(block, modal);
+            let mut lines = vec![
+                metric_line("Worktree", dialog.worktree(), theme),
+                metric_line("Branch", dialog.branch().unwrap_or("detached"), theme),
+                Line::from(""),
+                metric_line("Base", dialog.base().unwrap_or("Select a base"), theme),
+                metric_line(
+                    "Strategy",
+                    match dialog.strategy() {
+                        crate::cli::commands::sync::stateless::SyncStrategy::Rebase => "Rebase",
+                        crate::cli::commands::sync::stateless::SyncStrategy::Merge => "Merge",
+                    },
+                    theme,
+                ),
+            ];
+            if let Some(error) = dialog.validation_error() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(format!("Changed: {error}")));
+            }
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: true })
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+                inner,
+            );
+            render_dialog_keybar(
+                frame,
+                footer,
+                theme,
+                &[
+                    ("Tab", "base"),
+                    ("←/→", "strategy"),
+                    ("Enter", "sync"),
+                    ("Esc", "close"),
+                    ("?", "help"),
+                ],
+            );
+        }
+        SyncMode::BasePicker => {
+            let modal = centered_rect(
+                content_area.width.saturating_sub(6).min(86),
+                content_area.height.saturating_sub(4).min(20),
+                content_area,
+            );
+            frame.render_widget(Clear, modal);
+            let block = panel(Some(" Sync worktree · Select base ".to_string()), theme);
+            let inner = block.inner(modal);
+            frame.render_widget(block, modal);
+            let mut lines = vec![metric_line("Search", dialog.base_query(), theme)];
+            if dialog.origin_spinner_visible() {
+                lines.push(Line::from(format!(
+                    "Updating origin {}",
+                    flux_frame(spinner_tick)
+                )));
+            }
+            if let Some(warning) = dialog.warning() {
+                lines.push(Line::from(warning));
+            }
+            lines.push(Line::from(""));
+            lines.extend(
+                dialog
+                    .base_candidates()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, candidate)| {
+                        let marker = if index == dialog.base_selection() {
+                            ">"
+                        } else {
+                            " "
+                        };
+                        Line::from(format!("{marker} {}", candidate.name))
+                    }),
+            );
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: true })
+                    .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel)),
+                inner,
+            );
+            render_dialog_keybar(
+                frame,
+                footer,
+                theme,
+                &[("Enter", "select"), ("Esc", "back"), ("?", "help")],
+            );
         }
     }
 }
@@ -363,6 +485,7 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
     frame.render_widget(Clear, dialog);
     let title = match modal.operation() {
         OperationKind::Create => " Create worktree ",
+        OperationKind::Sync => " Sync worktree ",
         OperationKind::Remove => " Remove worktree ",
     };
     let block = panel(Some(title.to_string()), theme);
@@ -385,7 +508,7 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
         };
         lines.push(Line::from(format!(
             "{marker} {}",
-            operation_stage_label(stage.stage)
+            operation_stage_label(modal.operation(), stage.stage)
         )));
     }
     let hook_height = usize::from(inner.height.saturating_sub(lines.len() as u16 + 3));
@@ -403,7 +526,7 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
         lines.push(Line::from(""));
         lines.push(Line::from(format!(
             "Failed at {}: {message}",
-            operation_stage_label(*stage)
+            operation_stage_label(modal.operation(), *stage)
         )));
     }
     frame.render_widget(
@@ -450,15 +573,25 @@ fn render_dialog_keybar(frame: &mut Frame, area: Rect, theme: &Theme, items: &[(
     );
 }
 
-fn operation_stage_label(stage: OperationStage) -> &'static str {
+fn operation_stage_label(operation: OperationKind, stage: OperationStage) -> &'static str {
     match stage {
+        OperationStage::Fetch => "Fetch origin",
         OperationStage::Revalidate => "Revalidate",
-        OperationStage::PreHook => "Pre-create hook",
+        OperationStage::PreHook => match operation {
+            OperationKind::Create => "Pre-create hook",
+            OperationKind::Sync => "Pre-sync hook",
+            OperationKind::Remove => "Pre-remove hook",
+        },
         OperationStage::CreateWorktree => "Create worktree",
+        OperationStage::Sync => "Sync worktree",
         OperationStage::RemoveWorktree => "Remove worktree",
         OperationStage::Prune => "Prune worktrees",
         OperationStage::DeleteBranch => "Delete branch",
-        OperationStage::PostHook => "Post-create hook",
+        OperationStage::PostHook => match operation {
+            OperationKind::Create => "Post-create hook",
+            OperationKind::Sync => "Post-sync hook",
+            OperationKind::Remove => "Post-remove hook",
+        },
         OperationStage::Rollback => "Rollback",
     }
 }
@@ -743,6 +876,32 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
                 }
             };
             (" Help · Operation ", items)
+        } else if state
+            .sync_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.mode() == SyncMode::BasePicker)
+        {
+            (
+                " Help · Sync worktree ",
+                &[
+                    ("type", "search bases"),
+                    ("↑/↓", "select base"),
+                    ("Enter", "select base"),
+                    ("Esc", "back"),
+                    ("?", "close help"),
+                ],
+            )
+        } else if state.sync_dialog.is_some() {
+            (
+                " Help · Sync worktree ",
+                &[
+                    ("Tab", "select base"),
+                    ("←/→", "select strategy"),
+                    ("Enter", "sync worktree"),
+                    ("Esc", "close"),
+                    ("?", "close help"),
+                ],
+            )
         } else if state
             .create_dialog
             .as_ref()
@@ -1295,6 +1454,86 @@ mod tests {
         assert!(help.contains("Help · Create worktree"), "{help}");
         assert!(help.contains("select base"), "{help}");
         assert!(!help.contains("Help · Worktrees"), "{help}");
+    }
+
+    #[test]
+    fn sync_form_picker_and_operation_are_contextual_and_end_with_help() {
+        use crate::{
+            hooks::{
+                types::{HookStep, OutputStream},
+                HookEvent,
+            },
+            operation::{OperationEvent, OperationKind, OperationStage},
+            ref_catalog::RefSnapshot,
+            tui::{
+                operation_modal::OperationModal,
+                sync_flow::{SyncDialog, SyncKey},
+            },
+        };
+
+        let mut state = sample_state();
+        let target = state.identities[1].clone();
+        let refs = RefSnapshot::from_parts(
+            ["main", "release"],
+            ["origin/main", "origin/topic"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        );
+        state.sync_dialog = Some(SyncDialog::new(&target, refs, Some("release")));
+
+        let form = text(&render_buffer(&mut state, 100, 24, "ops"));
+        for expected in [
+            "Sync worktree",
+            target.worktree.as_str(),
+            target.branch.as_deref().unwrap(),
+            "Base",
+            "release",
+            "Strategy",
+            "Rebase",
+        ] {
+            assert!(form.contains(expected), "missing {expected:?}\n{form}");
+        }
+        assert!(form.lines().last().unwrap().trim_end().ends_with("? help"));
+
+        state.sync_dialog.as_mut().unwrap().handle_key(SyncKey::Tab);
+        let picker = text(&render_buffer(&mut state, 100, 24, "ops"));
+        assert!(picker.contains("Sync worktree · Select base"), "{picker}");
+        assert!(picker.contains("origin/topic"), "{picker}");
+        assert!(picker
+            .lines()
+            .last()
+            .unwrap()
+            .trim_end()
+            .ends_with("? help"));
+
+        state.help_open = true;
+        let help = text(&render_buffer(&mut state, 100, 24, "ops"));
+        assert!(help.contains("Help · Sync worktree"), "{help}");
+        assert!(help.contains("select base"), "{help}");
+
+        let mut modal = OperationModal::new(OperationKind::Sync);
+        modal.apply(OperationEvent::StageStarted {
+            stage: OperationStage::PreHook,
+        });
+        modal.apply(OperationEvent::Output {
+            hook: HookEvent::PreSync,
+            step: HookStep::Run,
+            stream: OutputStream::Stdout,
+            line: "sync hook output".to_string(),
+        });
+        state.help_open = false;
+        state.operation_modal = Some(modal);
+        let operation = text(&render_buffer(&mut state, 100, 24, "ops"));
+        assert!(operation.contains("Pre-sync hook"), "{operation}");
+        assert!(operation.contains("sync hook output"), "{operation}");
+        assert!(!operation.lines().last().unwrap().contains("cancel"));
+        assert!(operation
+            .lines()
+            .last()
+            .unwrap()
+            .trim_end()
+            .ends_with("? help"));
     }
 
     #[test]

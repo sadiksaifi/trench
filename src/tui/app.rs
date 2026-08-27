@@ -10,6 +10,7 @@ use crate::{
         operation_modal::OperationModal,
         refresh::RefreshPublication,
         search::{self, QueryBuffer},
+        sync_flow::{self, SyncDialog},
     },
 };
 
@@ -62,6 +63,10 @@ pub enum Event {
         message: String,
         shown_at: Instant,
     },
+    NotificationShown {
+        message: String,
+        shown_at: Instant,
+    },
     NotificationTick(Instant),
     Select(WorktreeId),
     Input(Key),
@@ -95,6 +100,7 @@ pub struct AppState {
     pub inspector_override: Option<bool>,
     pub help_open: bool,
     pub create_dialog: Option<CreateDialog>,
+    pub sync_dialog: Option<SyncDialog>,
     pub operation_modal: Option<OperationModal>,
     pub notification: Option<Notification>,
     pending_selection: Option<WorktreeId>,
@@ -153,6 +159,7 @@ impl AppState {
             inspector_override: None,
             help_open: false,
             create_dialog: None,
+            sync_dialog: None,
             operation_modal: None,
             notification: None,
             pending_selection: None,
@@ -248,12 +255,19 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         } => {
             state.pending_selection = select;
             state.create_dialog = None;
+            state.sync_dialog = None;
             state.operation_modal = None;
             state.notification = Some(Notification {
                 text: message,
                 expires_at: shown_at + NOTIFICATION_DURATION,
             });
             return vec![Effect::Refresh];
+        }
+        Event::NotificationShown { message, shown_at } => {
+            state.notification = Some(Notification {
+                text: message,
+                expires_at: shown_at + NOTIFICATION_DURATION,
+            });
         }
         Event::NotificationTick(now) => {
             if state
@@ -309,19 +323,8 @@ pub fn unavailable_reason(state: &AppState, action: Action) -> Option<&'static s
         (Action::Switch | Action::Open | Action::Sync | Action::Remove, None) => {
             Some("No worktree selected")
         }
-        (Action::Sync, Some(identity)) if identity.detached => {
-            Some("Detached worktrees cannot be synced")
-        }
-        (Action::Sync, Some(identity)) if !state.statuses.contains_key(&identity.id) => {
-            Some("Git status is still loading")
-        }
-        (Action::Sync, Some(identity))
-            if state
-                .statuses
-                .get(&identity.id)
-                .is_some_and(|status| status.staged + status.modified + status.untracked > 0) =>
-        {
-            Some("Dirty worktrees cannot be synced")
+        (Action::Sync, Some(identity)) => {
+            sync_flow::unavailable_reason(identity, state.statuses.get(&identity.id))
         }
         (Action::DeleteBranch, Some(identity)) if identity.detached => {
             Some("Detached worktrees have no local branch to delete")
@@ -853,6 +856,34 @@ mod tests {
                 shown_at,
             },
         );
+        let _ = reduce(
+            &mut state,
+            Event::NotificationTick(shown_at + NOTIFICATION_DURATION),
+        );
+        assert!(state.notification.is_none());
+    }
+
+    #[test]
+    fn direct_explanations_use_the_shared_five_second_notice() {
+        let mut state = AppState::new(Vec::new());
+        let shown_at = Instant::now();
+
+        assert!(reduce(
+            &mut state,
+            Event::NotificationShown {
+                message: "Dirty worktrees cannot be synced".to_string(),
+                shown_at,
+            },
+        )
+        .is_empty());
+        assert_eq!(
+            state
+                .notification
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
+            Some("Dirty worktrees cannot be synced")
+        );
+
         let _ = reduce(
             &mut state,
             Event::NotificationTick(shown_at + NOTIFICATION_DURATION),
