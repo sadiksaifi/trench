@@ -1758,15 +1758,24 @@ fn render_inspector(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme:
     let title = identity.map_or_else(
         || pane_title("Inspector", area.width),
         |identity| {
-            let label = if model.state.row_is_waiting(&identity.id) {
-                format!(
-                    "{} {}",
-                    flux_frame(model.state.refresh.spinner_tick),
-                    identity.worktree
-                )
+            let prefix = if model.state.row_is_waiting(&identity.id) {
+                format!("{} ", flux_frame(model.state.refresh.spinner_tick))
             } else {
-                identity.worktree.clone()
+                String::new()
             };
+            let suffix = if identity.is_current {
+                " · current"
+            } else {
+                ""
+            };
+            let content_width = usize::from(area.width.saturating_sub(4));
+            let worktree_width = content_width
+                .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+                .saturating_sub(UnicodeWidthStr::width(suffix));
+            let label = format!(
+                "{prefix}{}{suffix}",
+                head_ellipsize(&identity.worktree, worktree_width)
+            );
             pane_title(&label, area.width)
         },
     );
@@ -1784,17 +1793,6 @@ fn render_inspector(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme:
     };
     let status = model.status_for(identity);
     let mut lines = Vec::new();
-    if identity.is_current {
-        lines.push(Line::from(Span::styled(
-            " current ",
-            theme.with_bg(
-                Style::default()
-                    .fg(theme.selection_fg)
-                    .add_modifier(Modifier::BOLD),
-                theme.accent_soft,
-            ),
-        )));
-    }
     if model.state.refresh.updating_refs {
         lines.push(Line::from(Span::styled(
             format!(
@@ -2445,6 +2443,60 @@ mod tests {
             assert_eq!(title_cell.fg, theme.accent);
             assert!(title_cell.modifier.contains(Modifier::BOLD));
         }
+    }
+
+    #[test]
+    fn current_worktree_moves_its_badge_into_the_centered_inspector_title() {
+        let current = identity("/repos/trench", "trench", Some("main"), true, true);
+        let current_id = current.id.clone();
+        let mut state = AppState::new(vec![current]);
+        let (_, inspector) = wide_panes(120, 24);
+
+        let idle = render_buffer(&mut state, 120, 24, "ops");
+        assert_title_centered(&idle, inspector, "trench · current");
+        assert_eq!(text(&idle).matches("current").count(), 1, "{}", text(&idle));
+        assert_eq!(find_text_in(&idle, inspector, "Branch").1, inspector.y + 2);
+
+        state.refresh.waiting_rows.insert(current_id);
+        state.refresh.spinner_tick = 1;
+        let waiting = render_buffer(&mut state, 120, 24, "ops");
+        assert_title_centered(
+            &waiting,
+            inspector,
+            &format!("{} trench · current", flux_frame(1)),
+        );
+        assert_eq!(
+            text(&waiting).matches("current").count(),
+            1,
+            "{}",
+            text(&waiting)
+        );
+
+        state.refresh.waiting_rows.clear();
+        state.refresh.updating_refs = true;
+        let updating = render_buffer(&mut state, 120, 24, "ops");
+        assert_title_centered(&updating, inspector, "trench · current");
+        assert_eq!(
+            find_text_in(&updating, inspector, "Updating refs").1,
+            inspector.y + 1
+        );
+        assert_eq!(
+            find_text_in(&updating, inspector, "Branch").1,
+            inspector.y + 3
+        );
+
+        let worktree = "工作树-🚀-非常长的名字-проект-さくら-長い名前-extra-segment";
+        state.refresh.updating_refs = false;
+        state.identities[0].worktree = worktree.to_string();
+        state.inspector_override = Some(true);
+        let narrow = render_buffer(&mut state, 60, 16, "ops");
+        let expected = format!("{} · current", head_ellipsize(worktree, 46));
+        assert_unicode_title_centered(&narrow, Rect::new(0, 0, 60, 15), &expected);
+        assert!(
+            lines(&narrow)[0].contains(" · current "),
+            "{}",
+            text(&narrow)
+        );
     }
 
     #[test]
