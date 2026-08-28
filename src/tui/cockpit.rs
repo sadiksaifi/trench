@@ -129,8 +129,12 @@ fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, th
         return;
     };
     frame.render_widget(Clear, layout.modal);
-    let block = active_panel(Some(" Remove worktree ".to_string()), theme)
-        .title_alignment(Alignment::Center);
+    let title = match dialog.mode() {
+        RemoveMode::ConfirmDirtyWorktree => " Remove worktree · Confirm changes ",
+        RemoveMode::ConfirmUnmergedBranch => " Remove worktree · Confirm branch ",
+        RemoveMode::Review | RemoveMode::Ready => " Remove worktree ",
+    };
+    let block = active_panel(Some(title.to_string()), theme).title_alignment(Alignment::Center);
     frame.render_widget(block, layout.modal);
     let target = dialog.target();
     let mut lines = vec![
@@ -162,21 +166,21 @@ fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, th
         }
         RemoveMode::ConfirmDirtyWorktree => {
             lines.push(Line::from(head_ellipsize(
-                "This worktree has uncommitted changes.",
+                "Uncommitted changes will be permanently lost.",
                 usize::from(layout.body.width),
             )));
             lines.push(Line::from(head_ellipsize(
-                "Review the risk, then confirm removal.",
+                "This cannot be undone.",
                 usize::from(layout.body.width),
             )));
         }
         RemoveMode::ConfirmUnmergedBranch => {
             lines.push(Line::from(head_ellipsize(
-                "This local branch is not merged.",
+                "Unmerged commits may be permanently lost.",
                 usize::from(layout.body.width),
             )));
             lines.push(Line::from(head_ellipsize(
-                "Review the risk, then confirm branch deletion.",
+                "Deleting this branch cannot be undone.",
                 usize::from(layout.body.width),
             )));
         }
@@ -246,7 +250,7 @@ fn remove_dialog_layout(dialog: &RemoveDialog, area: Rect) -> Option<RemoveDialo
         RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => 4,
     } + u16::from(dialog.validation_error().is_some());
     let modal = centered_rect(
-        content.width.saturating_sub(6).min(76),
+        content.width.saturating_sub(6).min(78),
         body_rows.saturating_add(3).max(9),
         content,
     );
@@ -1288,8 +1292,8 @@ fn strategy_line(rebase_selected: bool, theme: &Theme) -> Line<'static> {
 }
 
 fn focused_control_line(label: &str, width: u16, theme: &Theme) -> Line<'static> {
-    let content = format!("› {label}");
-    let padding = usize::from(width).saturating_sub(content.chars().count());
+    let content = head_ellipsize(&format!("› {label}"), usize::from(width));
+    let padding = usize::from(width).saturating_sub(UnicodeWidthStr::width(content.as_str()));
     Line::from(Span::styled(
         format!("{content}{}", " ".repeat(padding)),
         theme.with_bg(
@@ -2243,6 +2247,69 @@ mod tests {
             .draw(|frame| render(state, frame, frame.area(), &theme))
             .unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    fn remove_dialog_fixture(
+        name: &str,
+        dirty: bool,
+        unmerged: bool,
+    ) -> (tempfile::TempDir, RemoveDialog) {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = git2::Repository::init(directory.path()).unwrap();
+        repository.set_head("refs/heads/main").unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repository.index().unwrap().write_tree().unwrap();
+        let tree = repository.find_tree(tree_id).unwrap();
+        let commit_id = repository
+            .commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
+            .unwrap();
+        drop(tree);
+        let commit = repository.find_commit(commit_id).unwrap();
+        repository.branch(name, &commit, false).unwrap();
+        drop(commit);
+        let path = directory.path().join("worktrees").join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let reference = repository
+            .find_reference(&format!("refs/heads/{name}"))
+            .unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(&reference));
+        repository.worktree(name, &path, Some(&options)).unwrap();
+        if unmerged {
+            std::fs::write(path.join("feature.txt"), "feature\n").unwrap();
+            let worktree_repository = git2::Repository::open(&path).unwrap();
+            let mut index = worktree_repository.index().unwrap();
+            index.add_path(Path::new("feature.txt")).unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = worktree_repository.find_tree(tree_id).unwrap();
+            let parent = worktree_repository
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap();
+            worktree_repository
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    "feature",
+                    &tree,
+                    &[&parent],
+                )
+                .unwrap();
+        }
+        if dirty {
+            std::fs::write(path.join("dirty.txt"), "dirty\n").unwrap();
+        }
+        let assessment = crate::cli::commands::remove::stateless::RemovalAssessment::discover(
+            directory.path(),
+            path.to_str().unwrap(),
+            Some("main"),
+        )
+        .unwrap();
+        let dialog = RemoveDialog::new(WorktreeId::new(&path), assessment).unwrap();
+        (directory, dialog)
     }
 
     fn lines(buffer: &Buffer) -> Vec<String> {
@@ -3748,5 +3815,68 @@ mod tests {
         assert!(help.contains("toggle local branch deletion"), "{help}");
         assert!(help.contains("remove worktree"), "{help}");
         assert!(!help.contains("search branches"), "{help}");
+    }
+
+    #[test]
+    fn remove_confirmation_copy_names_irreversible_loss_and_risk_step() {
+        let (_directory, mut dialog) = remove_dialog_fixture("risk-copy", true, false);
+        dialog.handle_key(crate::tui::remove_flow::RemoveKey::Enter);
+        let mut state = sample_state();
+        state.remove_dialog = Some(dialog);
+
+        let output = text(&render_buffer(&mut state, 80, 20, "ops"));
+        assert!(
+            output.contains("Remove worktree · Confirm changes"),
+            "{output}"
+        );
+        assert!(
+            output.contains("Uncommitted changes will be permanently lost."),
+            "{output}"
+        );
+
+        let (_directory, mut dialog) = remove_dialog_fixture("branch-risk", false, true);
+        dialog.handle_key(crate::tui::remove_flow::RemoveKey::Space);
+        dialog.handle_key(crate::tui::remove_flow::RemoveKey::Enter);
+        if dialog.mode() == RemoveMode::ConfirmDirtyWorktree {
+            dialog.handle_key(crate::tui::remove_flow::RemoveKey::Enter);
+        }
+        let mut state = sample_state();
+        state.remove_dialog = Some(dialog);
+        let output = text(&render_buffer(&mut state, 60, 16, "ops"));
+        assert!(
+            output.contains("Remove worktree · Confirm branch"),
+            "{output}"
+        );
+        assert!(
+            output.contains("Unmerged commits may be permanently lost."),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn focused_remove_control_is_unicode_width_safe_and_shared_width_is_78() {
+        let theme = crate::tui::theme::from_name("ops");
+        let line = focused_control_line(
+            "[ ] Also delete local branch 界界界界界界界界界界界界界界界界界界界界",
+            30,
+            &theme,
+        );
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(UnicodeWidthStr::width(rendered.as_str()), 30);
+        assert!(rendered.ends_with('…'));
+
+        let (_directory, dialog) = remove_dialog_fixture("shared-width", false, false);
+        assert_eq!(
+            remove_dialog_layout(&dialog, Rect::new(0, 0, 120, 30))
+                .unwrap()
+                .modal
+                .width,
+            78
+        );
+        assert!(remove_dialog_layout(&dialog, Rect::new(0, 0, 60, 15)).is_none());
     }
 }
