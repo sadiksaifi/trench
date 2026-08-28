@@ -36,7 +36,7 @@ use crate::{
         refresh::RefreshPublication,
         refresh_runtime::RefreshRuntime,
         remove_flow::{RemoveDialog, RemoveEffect, RemoveKey},
-        sync_flow::{SyncDialog, SyncEffect, SyncKey, SyncSubmission},
+        sync_flow::{SyncDialog, SyncEffect, SyncKey, SyncMode, SyncSubmission},
         theme,
     },
 };
@@ -590,6 +590,30 @@ fn apply_create_input_effect(
     }
 }
 
+fn apply_sync_input_effect(
+    effect: Option<SyncInputEffect>,
+    state: &mut AppState,
+    refresh: &mut RefreshRuntime,
+    operation: &mut OperationRuntime<ThreadOperationLauncher, SystemRuntimeClock>,
+) {
+    match effect {
+        Some(SyncInputEffect::RefreshOrigin) => {
+            if let Err(error) = refresh.ref_picker() {
+                tracing::warn!(%error, "base picker origin refresh failed");
+                if let Some(dialog) = state.sync_dialog.as_mut() {
+                    dialog.set_origin_refresh(OriginRefresh::Failed);
+                }
+            }
+            apply_refresh_publications(refresh, state);
+        }
+        Some(SyncInputEffect::Start(request)) => {
+            operation.start(*request);
+            state.operation_modal = operation.modal().cloned();
+        }
+        None => {}
+    }
+}
+
 fn finish_sync_success(
     state: &mut AppState,
     refresh: &mut impl PostOperationRefresh,
@@ -731,6 +755,53 @@ fn return_to_remove_form(
     dialog.set_validation_error(validation_error);
 }
 
+fn operation_modal_effect(
+    operation: &mut OperationRuntime<ThreadOperationLauncher, SystemRuntimeClock>,
+    key: ModalKey,
+) -> Option<ModalEffect> {
+    if key == ModalKey::Escape {
+        operation.cancel().then_some(ModalEffect::Cancel)
+    } else {
+        operation
+            .modal_mut()
+            .and_then(|modal| modal.handle_key(key))
+    }
+}
+
+fn apply_operation_modal_effect(
+    effect: Option<ModalEffect>,
+    state: &mut AppState,
+    operation: &mut OperationRuntime<ThreadOperationLauncher, SystemRuntimeClock>,
+    refresh: &mut RefreshRuntime,
+    cwd: &Path,
+    worktree_root: &Path,
+    configured_base: Option<&str>,
+    hooks: Option<HooksConfig>,
+) {
+    match effect {
+        Some(ModalEffect::Cancel) => {
+            operation.dismiss();
+            state.operation_modal = None;
+        }
+        Some(ModalEffect::ReturnToForm) => {
+            operation.dismiss();
+            if let Err(error) = refresh.post_operation() {
+                tracing::warn!(%error, "failed to refresh before operation revalidation");
+            }
+            apply_refresh_publications(refresh, state);
+            if state.remove_dialog.is_some() {
+                return_to_remove_form(state, cwd, configured_base, hooks);
+            } else if state.sync_dialog.is_some() {
+                return_to_sync_form(state, cwd, configured_base, hooks);
+            } else {
+                return_to_create_form(state, cwd, worktree_root, configured_base, hooks);
+            }
+        }
+        None => {}
+    }
+    state.operation_modal = operation.modal().cloned();
+}
+
 pub fn run() -> Result<TuiExit> {
     let cwd = std::env::current_dir()?;
     let repo = crate::git::discover_repo(&cwd)?;
@@ -799,6 +870,28 @@ pub fn run() -> Result<TuiExit> {
                     continue;
                 }
                 if let Some(effect) =
+                    route_visible_operation_mouse(&state, mouse, Rect::new(0, 0, width, height))
+                {
+                    match effect {
+                        OperationMouseEffect::Key(key) => {
+                            let effect = operation_modal_effect(&mut operation, key);
+                            apply_operation_modal_effect(
+                                effect,
+                                &mut state,
+                                &mut operation,
+                                &mut refresh,
+                                &cwd,
+                                &resolved.worktrees.root,
+                                resolved.git.default_base.as_deref(),
+                                resolved.hooks.clone(),
+                            );
+                        }
+                        OperationMouseEffect::Help => state.help_open = true,
+                        OperationMouseEffect::Ignored => {}
+                    }
+                    continue;
+                }
+                if let Some(effect) =
                     route_visible_create_mouse(&mut state, mouse, Rect::new(0, 0, width, height))
                 {
                     match effect {
@@ -820,6 +913,29 @@ pub fn run() -> Result<TuiExit> {
                         }
                         CreateMouseEffect::Help => state.help_open = true,
                         CreateMouseEffect::Handled | CreateMouseEffect::Ignored => {}
+                    }
+                }
+                if let Some(effect) =
+                    route_visible_sync_mouse(&mut state, mouse, Rect::new(0, 0, width, height))
+                {
+                    match effect {
+                        SyncMouseEffect::Key(key) => {
+                            let effect = handle_sync_input(
+                                &mut state,
+                                key,
+                                &cwd,
+                                resolved.git.default_base.as_deref(),
+                                resolved.hooks.clone(),
+                            )?;
+                            apply_sync_input_effect(
+                                effect,
+                                &mut state,
+                                &mut refresh,
+                                &mut operation,
+                            );
+                        }
+                        SyncMouseEffect::Help => state.help_open = true,
+                        SyncMouseEffect::Handled | SyncMouseEffect::Ignored => {}
                     }
                 }
                 if let Some(effect) =
@@ -884,51 +1000,17 @@ pub fn run() -> Result<TuiExit> {
                 let Some(modal_key) = translate_modal_key(key) else {
                     continue;
                 };
-                let modal_effect = if modal_key == ModalKey::Escape {
-                    operation.cancel().then_some(ModalEffect::Cancel)
-                } else {
-                    operation
-                        .modal_mut()
-                        .and_then(|modal| modal.handle_key(modal_key))
-                };
-                match modal_effect {
-                    Some(ModalEffect::Cancel) => {
-                        operation.dismiss();
-                        state.operation_modal = None;
-                    }
-                    Some(ModalEffect::ReturnToForm) => {
-                        operation.dismiss();
-                        if let Err(error) = refresh.post_operation() {
-                            tracing::warn!(%error, "failed to refresh before operation revalidation");
-                        }
-                        apply_refresh_publications(&mut refresh, &mut state);
-                        if state.remove_dialog.is_some() {
-                            return_to_remove_form(
-                                &mut state,
-                                &cwd,
-                                resolved.git.default_base.as_deref(),
-                                resolved.hooks.clone(),
-                            );
-                        } else if state.sync_dialog.is_some() {
-                            return_to_sync_form(
-                                &mut state,
-                                &cwd,
-                                resolved.git.default_base.as_deref(),
-                                resolved.hooks.clone(),
-                            );
-                        } else {
-                            return_to_create_form(
-                                &mut state,
-                                &cwd,
-                                &resolved.worktrees.root,
-                                resolved.git.default_base.as_deref(),
-                                resolved.hooks.clone(),
-                            );
-                        }
-                    }
-                    None => {}
-                }
-                state.operation_modal = operation.modal().cloned();
+                let effect = operation_modal_effect(&mut operation, modal_key);
+                apply_operation_modal_effect(
+                    effect,
+                    &mut state,
+                    &mut operation,
+                    &mut refresh,
+                    &cwd,
+                    &resolved.worktrees.root,
+                    resolved.git.default_base.as_deref(),
+                    resolved.hooks.clone(),
+                );
                 continue;
             }
 
@@ -960,28 +1042,14 @@ pub fn run() -> Result<TuiExit> {
                 let Some(sync_key) = translate_sync_key(key) else {
                     continue;
                 };
-                match handle_sync_input(
+                let effect = handle_sync_input(
                     &mut state,
                     sync_key,
                     &cwd,
                     resolved.git.default_base.as_deref(),
                     resolved.hooks.clone(),
-                )? {
-                    Some(SyncInputEffect::RefreshOrigin) => {
-                        if let Err(error) = refresh.ref_picker() {
-                            tracing::warn!(%error, "base picker origin refresh failed");
-                            if let Some(dialog) = state.sync_dialog.as_mut() {
-                                dialog.set_origin_refresh(OriginRefresh::Failed);
-                            }
-                        }
-                        apply_refresh_publications(&mut refresh, &mut state);
-                    }
-                    Some(SyncInputEffect::Start(request)) => {
-                        operation.start(*request);
-                        state.operation_modal = operation.modal().cloned();
-                    }
-                    None => {}
-                }
+                )?;
+                apply_sync_input_effect(effect, &mut state, &mut refresh, &mut operation);
                 continue;
             }
 
@@ -1187,11 +1255,30 @@ fn visible_surface_key(state: &AppState, key: KeyEvent) -> Option<KeyEvent> {
     (!state.viewport.is_tiny() || key.code == KeyCode::Char('q')).then_some(key)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisibleDialog {
+    Operation,
+    Create,
+    Sync,
+    Remove,
+}
+
+fn visible_dialog(state: &AppState) -> Option<VisibleDialog> {
+    if state.operation_modal.is_some() {
+        Some(VisibleDialog::Operation)
+    } else if state.create_dialog.is_some() {
+        Some(VisibleDialog::Create)
+    } else if state.sync_dialog.is_some() {
+        Some(VisibleDialog::Sync)
+    } else if state.remove_dialog.is_some() {
+        Some(VisibleDialog::Remove)
+    } else {
+        None
+    }
+}
+
 fn interactive_mouse_surface_visible(state: &AppState) -> bool {
-    !state.viewport.is_tiny()
-        && (state.help_open
-            || (state.operation_modal.is_none()
-                && (state.create_dialog.is_some() || state.remove_dialog.is_some())))
+    !state.viewport.is_tiny() && (state.help_open || visible_dialog(state).is_some())
 }
 
 fn sync_mouse_capture_for_viewport<W: Write>(
@@ -1211,7 +1298,7 @@ fn route_visible_help_mouse(state: &mut AppState, mouse: MouseEvent, area: Rect)
         return false;
     }
     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-        && cockpit::help_close_hit(area, (mouse.column, mouse.row))
+        && cockpit::help_close_hit(state, area, (mouse.column, mouse.row))
     {
         state.help_open = false;
     }
@@ -1242,6 +1329,36 @@ fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperationMouseEffect {
+    Key(ModalKey),
+    Help,
+    Ignored,
+}
+
+fn route_visible_operation_mouse(
+    state: &AppState,
+    mouse: MouseEvent,
+    area: Rect,
+) -> Option<OperationMouseEffect> {
+    if !interactive_mouse_surface_visible(state)
+        || state.help_open
+        || visible_dialog(state) != Some(VisibleDialog::Operation)
+    {
+        return None;
+    }
+    state.operation_modal.as_ref().map(|modal| {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return OperationMouseEffect::Ignored;
+        }
+        match cockpit::operation_hit_map(modal, area).target_at((mouse.column, mouse.row)) {
+            Some(cockpit::OperationHitTarget::Cta(key)) => OperationMouseEffect::Key(key),
+            Some(cockpit::OperationHitTarget::Help) => OperationMouseEffect::Help,
+            None => OperationMouseEffect::Ignored,
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CreateMouseEffect {
     Key(CreateKey),
     Help,
@@ -1254,7 +1371,10 @@ fn route_visible_create_mouse(
     mouse: MouseEvent,
     area: Rect,
 ) -> Option<CreateMouseEffect> {
-    if !interactive_mouse_surface_visible(state) || state.help_open {
+    if !interactive_mouse_surface_visible(state)
+        || state.help_open
+        || visible_dialog(state) != Some(VisibleDialog::Create)
+    {
         return None;
     }
     state
@@ -1314,7 +1434,9 @@ fn route_visible_remove_mouse(
     mouse: MouseEvent,
     area: Rect,
 ) -> Option<RemoveMouseEffect> {
-    if !interactive_mouse_surface_visible(state) || state.help_open || state.create_dialog.is_some()
+    if !interactive_mouse_surface_visible(state)
+        || state.help_open
+        || visible_dialog(state) != Some(VisibleDialog::Remove)
     {
         return None;
     }
@@ -1330,6 +1452,69 @@ fn route_visible_remove_mouse(
             None => RemoveMouseEffect::Ignored,
         }
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncMouseEffect {
+    Key(SyncKey),
+    Help,
+    Handled,
+    Ignored,
+}
+
+fn route_visible_sync_mouse(
+    state: &mut AppState,
+    mouse: MouseEvent,
+    area: Rect,
+) -> Option<SyncMouseEffect> {
+    if !interactive_mouse_surface_visible(state)
+        || state.help_open
+        || visible_dialog(state) != Some(VisibleDialog::Sync)
+    {
+        return None;
+    }
+    state
+        .sync_dialog
+        .as_mut()
+        .map(|dialog| route_sync_mouse(dialog, mouse, area))
+}
+
+fn route_sync_mouse(dialog: &mut SyncDialog, mouse: MouseEvent, area: Rect) -> SyncMouseEffect {
+    let point = (mouse.column, mouse.row);
+    let hits = cockpit::sync_hit_map(dialog, area);
+    match mouse.kind {
+        MouseEventKind::ScrollUp if hits.options_contain(point) => {
+            SyncMouseEffect::Key(SyncKey::Up)
+        }
+        MouseEventKind::ScrollDown if hits.options_contain(point) => {
+            SyncMouseEffect::Key(SyncKey::Down)
+        }
+        MouseEventKind::Down(MouseButton::Left) => match hits.target_at(point) {
+            Some(cockpit::SyncHitTarget::Input) => SyncMouseEffect::Handled,
+            Some(cockpit::SyncHitTarget::Row(index)) => {
+                dialog.select_base_candidate(index);
+                SyncMouseEffect::Handled
+            }
+            Some(cockpit::SyncHitTarget::Base) => SyncMouseEffect::Key(SyncKey::Tab),
+            Some(cockpit::SyncHitTarget::Rebase) => SyncMouseEffect::Key(SyncKey::Left),
+            Some(cockpit::SyncHitTarget::Merge) => SyncMouseEffect::Key(SyncKey::Right),
+            Some(cockpit::SyncHitTarget::Cta) if sync_cta_enabled(dialog) => {
+                SyncMouseEffect::Key(SyncKey::Enter)
+            }
+            Some(cockpit::SyncHitTarget::Cta) => SyncMouseEffect::Handled,
+            Some(cockpit::SyncHitTarget::Back) => SyncMouseEffect::Key(SyncKey::Escape),
+            Some(cockpit::SyncHitTarget::Help) => SyncMouseEffect::Help,
+            None => SyncMouseEffect::Ignored,
+        },
+        _ => SyncMouseEffect::Ignored,
+    }
+}
+
+fn sync_cta_enabled(dialog: &SyncDialog) -> bool {
+    match dialog.mode() {
+        SyncMode::Form => dialog.submission().is_some(),
+        SyncMode::BasePicker => !dialog.base_candidates().is_empty(),
+    }
 }
 
 fn translate_sync_key(key: KeyEvent) -> Option<SyncKey> {
@@ -1706,8 +1891,6 @@ mod tests {
             route_create_mouse(&mut dialog, left_click(enabled.cta), area),
             CreateMouseEffect::Key(CreateKey::Enter)
         );
-        assert!(cockpit::help_close_hit(area, (1, area.bottom() - 1)));
-        assert!(!cockpit::help_close_hit(area, (1, 1)));
         assert_eq!(
             route_create_mouse(
                 &mut dialog,
@@ -1843,7 +2026,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_capture_tracks_create_visibility_across_tiny_resizes() {
+    fn mouse_capture_tracks_dialog_visibility_across_types_and_tiny_resizes() {
         use std::io::{self, Write};
 
         #[derive(Clone, Default)]
@@ -1898,6 +2081,19 @@ mod tests {
                 "capture and first-click routing must change in the same production step"
             );
         }
+        state.create_dialog = None;
+        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
+            crate::operation::OperationKind::Create,
+        ));
+        sync_mouse_capture_for_viewport(&mut state, &mut capture, 60, 16).unwrap();
+        assert!(interactive_mouse_surface_visible(&state));
+        state.operation_modal = None;
+        state.help_open = true;
+        sync_mouse_capture_for_viewport(&mut state, &mut capture, 60, 16).unwrap();
+        assert!(interactive_mouse_surface_visible(&state));
+        state.help_open = false;
+        sync_mouse_capture_for_viewport(&mut state, &mut capture, 60, 16).unwrap();
+        assert!(!interactive_mouse_surface_visible(&state));
         drop(capture);
 
         let text = String::from_utf8_lossy(&output.0.borrow()).into_owned();
@@ -1944,7 +2140,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
 
-        assert!(!interactive_mouse_surface_visible(&state));
+        assert!(interactive_mouse_surface_visible(&state));
         assert_eq!(route_visible_create_mouse(&mut state, click, area), None);
         assert_eq!(state.operation_modal, before);
     }
@@ -1966,7 +2162,7 @@ mod tests {
         ));
         let close = (0..area.height)
             .flat_map(|y| (0..area.width).map(move |x| (x, y)))
-            .find(|point| cockpit::help_close_hit(area, *point))
+            .find(|point| cockpit::help_close_hit(&state, area, *point))
             .expect("help close target");
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -1979,7 +2175,153 @@ mod tests {
         assert!(route_visible_help_mouse(&mut state, click, area));
         assert!(!state.help_open);
         assert!(state.operation_modal.is_some());
-        assert!(!interactive_mouse_surface_visible(&state));
+        assert!(interactive_mouse_surface_visible(&state));
+
+        state.operation_modal = None;
+        state.help_open = true;
+        let normal_close = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .find(|point| cockpit::help_close_hit(&state, area, *point))
+            .expect("normal help close target");
+        assert!(route_visible_help_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: normal_close.0,
+                row: normal_close.1,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        ));
+        assert!(!state.help_open);
+    }
+
+    #[test]
+    fn operation_mouse_routes_only_live_cancel_back_and_help_actions() {
+        use crate::operation::{
+            ErrorClass, MutationState, OperationEvent, OperationFailure, OperationKind,
+            OperationStage,
+        };
+
+        let area = Rect::new(0, 0, 80, 20);
+        let mut state = AppState::new(Vec::new());
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: area.width,
+                height: area.height,
+            },
+        );
+        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
+            OperationKind::Create,
+        ));
+        let click = |rect: Rect| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + rect.width / 2,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        let running = cockpit::operation_hit_map(state.operation_modal.as_ref().unwrap(), area);
+        assert_eq!(
+            route_visible_operation_mouse(&state, click(running.cta), area),
+            Some(OperationMouseEffect::Key(ModalKey::Escape))
+        );
+        assert_eq!(
+            route_visible_operation_mouse(&state, click(running.help), area),
+            Some(OperationMouseEffect::Help)
+        );
+
+        state
+            .operation_modal
+            .as_mut()
+            .unwrap()
+            .apply(OperationEvent::MutationStarted);
+        assert_eq!(
+            route_visible_operation_mouse(&state, click(running.cta), area),
+            Some(OperationMouseEffect::Ignored),
+            "the old cancel target must become inert at the mutation boundary"
+        );
+
+        state
+            .operation_modal
+            .as_mut()
+            .unwrap()
+            .fail(&OperationFailure {
+                stage: OperationStage::CreateWorktree,
+                mutation_state: MutationState::RolledBack,
+                class: ErrorClass::Git,
+                message: "rolled back".to_string(),
+                retained_quarantine: None,
+            });
+        let recoverable = cockpit::operation_hit_map(state.operation_modal.as_ref().unwrap(), area);
+        assert_eq!(
+            route_visible_operation_mouse(&state, click(recoverable.cta), area),
+            Some(OperationMouseEffect::Key(ModalKey::Enter))
+        );
+
+        state
+            .operation_modal
+            .as_mut()
+            .unwrap()
+            .fail(&OperationFailure {
+                stage: OperationStage::CreateWorktree,
+                mutation_state: MutationState::PartiallyApplied,
+                class: ErrorClass::Git,
+                message: "partial".to_string(),
+                retained_quarantine: None,
+            });
+        assert_eq!(
+            route_visible_operation_mouse(&state, click(recoverable.cta), area),
+            Some(OperationMouseEffect::Ignored)
+        );
+
+        state.operation_modal.as_mut().unwrap().succeed();
+        assert_eq!(
+            route_visible_operation_mouse(&state, click(recoverable.cta), area),
+            Some(OperationMouseEffect::Ignored)
+        );
+
+        let mut not_started =
+            crate::tui::operation_modal::OperationModal::new(OperationKind::Create);
+        not_started.fail(&OperationFailure {
+            stage: OperationStage::PreHook,
+            mutation_state: MutationState::NotStarted,
+            class: ErrorClass::Hook,
+            message: "pre-hook failed".to_string(),
+            retained_quarantine: None,
+        });
+        state.operation_modal = Some(not_started);
+        let retry = cockpit::operation_hit_map(state.operation_modal.as_ref().unwrap(), area);
+        assert_eq!(
+            route_visible_operation_mouse(&state, click(retry.cta), area),
+            Some(OperationMouseEffect::Key(ModalKey::Enter))
+        );
+
+        state
+            .operation_modal
+            .as_mut()
+            .unwrap()
+            .fail(&OperationFailure {
+                stage: OperationStage::PostHook,
+                mutation_state: MutationState::Applied,
+                class: ErrorClass::Hook,
+                message: "post-hook failed".to_string(),
+                retained_quarantine: None,
+            });
+        assert_eq!(
+            route_visible_operation_mouse(&state, click(retry.cta), area),
+            Some(OperationMouseEffect::Ignored)
+        );
+        for tiny in [Rect::new(0, 0, 59, 16), Rect::new(0, 0, 60, 15)] {
+            assert_eq!(
+                cockpit::operation_hit_map(state.operation_modal.as_ref().unwrap(), tiny),
+                cockpit::OperationHitMap::default()
+            );
+            state.help_open = true;
+            assert!(!cockpit::help_close_hit(&state, tiny, (0, 0)));
+            state.help_open = false;
+        }
     }
 
     #[test]
@@ -2001,6 +2343,144 @@ mod tests {
             translate_sync_key(KeyEvent::new(KeyCode::Char('x'), modifiers)),
             Some(SyncKey::Character('x'))
         );
+    }
+
+    #[test]
+    fn sync_mouse_routes_form_picker_actions_and_safe_no_ops() {
+        let target = WorktreeIdentity {
+            id: WorktreeId::new("/worktrees/feature"),
+            worktree: "feature".to_string(),
+            branch: Some("feature".to_string()),
+            path: PathBuf::from("/worktrees/feature"),
+            head: Some("1234567890abcdef".to_string()),
+            is_main: false,
+            is_current: true,
+            detached: false,
+        };
+        let mut state = AppState::new(vec![target.clone()]);
+        state.sync_dialog = Some(SyncDialog::new(
+            &target,
+            RefSnapshot::from_parts(
+                ["main", "release"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            Some("main"),
+        ));
+        let area = Rect::new(0, 0, 80, 20);
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: area.width,
+                height: area.height,
+            },
+        );
+        let click = |rect: Rect| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + rect.width / 2,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let hits = cockpit::sync_hit_map(state.sync_dialog.as_ref().unwrap(), area);
+        assert_eq!(
+            route_visible_sync_mouse(&mut state, click(hits.base), area),
+            Some(SyncMouseEffect::Key(SyncKey::Tab))
+        );
+        assert_eq!(
+            route_visible_sync_mouse(&mut state, click(hits.rebase), area),
+            Some(SyncMouseEffect::Key(SyncKey::Left))
+        );
+        assert_eq!(
+            route_visible_sync_mouse(&mut state, click(hits.merge), area),
+            Some(SyncMouseEffect::Key(SyncKey::Right))
+        );
+        assert_eq!(
+            route_visible_sync_mouse(&mut state, click(hits.cta), area),
+            Some(SyncMouseEffect::Key(SyncKey::Enter))
+        );
+
+        state.sync_dialog.as_mut().unwrap().handle_key(SyncKey::Tab);
+        let picker = cockpit::sync_hit_map(state.sync_dialog.as_ref().unwrap(), area);
+        assert_eq!(
+            route_visible_sync_mouse(&mut state, click(picker.rows[1]), area),
+            Some(SyncMouseEffect::Handled)
+        );
+        assert_eq!(state.sync_dialog.as_ref().unwrap().base_selection(), 1);
+        assert_eq!(
+            route_visible_sync_mouse(&mut state, click(picker.cta), area),
+            Some(SyncMouseEffect::Key(SyncKey::Enter))
+        );
+        assert_eq!(
+            route_visible_sync_mouse(&mut state, click(picker.back), area),
+            Some(SyncMouseEffect::Key(SyncKey::Escape))
+        );
+        assert_eq!(
+            route_visible_sync_mouse(&mut state, click(picker.help), area),
+            Some(SyncMouseEffect::Help)
+        );
+        assert_eq!(
+            route_visible_sync_mouse(
+                &mut state,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Right),
+                    column: picker.cta.x,
+                    row: picker.cta.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                area,
+            ),
+            Some(SyncMouseEffect::Ignored)
+        );
+        assert_eq!(
+            route_visible_sync_mouse(
+                &mut state,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                area,
+            ),
+            Some(SyncMouseEffect::Ignored)
+        );
+
+        state.sync_dialog = Some(SyncDialog::new(
+            &target,
+            RefSnapshot::from_parts(
+                std::iter::empty::<&str>(),
+                std::iter::empty::<&str>(),
+                None::<&str>,
+                None::<&str>,
+                false,
+            ),
+            None,
+        ));
+        let disabled = cockpit::sync_hit_map(state.sync_dialog.as_ref().unwrap(), area);
+        assert_eq!(
+            route_visible_sync_mouse(&mut state, click(disabled.cta), area),
+            Some(SyncMouseEffect::Handled),
+            "a disabled CTA must consume the click without submitting"
+        );
+        for tiny in [Rect::new(0, 0, 59, 16), Rect::new(0, 0, 60, 15)] {
+            let _ = app::reduce(
+                &mut state,
+                Event::ViewportChanged {
+                    width: tiny.width,
+                    height: tiny.height,
+                },
+            );
+            assert_eq!(
+                cockpit::sync_hit_map(state.sync_dialog.as_ref().unwrap(), tiny),
+                cockpit::SyncHitMap::default()
+            );
+            assert_eq!(
+                route_visible_sync_mouse(&mut state, click(disabled.cta), tiny),
+                None
+            );
+        }
     }
 
     #[test]
@@ -3017,7 +3497,7 @@ mod tests {
         state.help_open = true;
         let help_close = (0..area.height)
             .flat_map(|y| (0..area.width).map(move |x| (x, y)))
-            .find(|point| cockpit::help_close_hit(area, *point))
+            .find(|point| cockpit::help_close_hit(&state, area, *point))
             .unwrap();
         let help_click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -3037,6 +3517,24 @@ mod tests {
             route_visible_remove_mouse(&state, backdrop, area),
             Some(RemoveMouseEffect::Ignored)
         );
+        state.sync_dialog = Some(SyncDialog::new(
+            &target,
+            RefSnapshot::from_parts(
+                ["main"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            Some("main"),
+        ));
+        assert_eq!(visible_dialog(&state), Some(VisibleDialog::Sync));
+        assert_eq!(
+            route_visible_remove_mouse(&state, click(confirm_hits.cta), area),
+            None,
+            "a remove dialog covered by sync must not retain stale targets"
+        );
+        state.sync_dialog = None;
         let cta_key = route_visible_remove_mouse(&state, click(confirm_hits.cta), area);
         assert_eq!(cta_key, Some(RemoveMouseEffect::Key(RemoveKey::Enter)));
         let start = handle_remove_input(

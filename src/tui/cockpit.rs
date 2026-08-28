@@ -15,7 +15,7 @@ use crate::tui::{
     create_flow::{BranchKind, CreateDialog, CreateMode},
     keymap::{self, Binding, Context},
     line_input::LineInput,
-    operation_modal::{ModalStatus, OperationModal},
+    operation_modal::{ModalKey, ModalStatus, OperationModal},
     remove_flow::{RemoveDialog, RemoveMode},
     sync_flow::{SyncDialog, SyncMode},
     theme::Theme,
@@ -195,7 +195,15 @@ fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, th
         layout.body,
     );
     let (action, footer_action) = remove_action_details(dialog);
-    render_dialog_action(frame, layout.action, action, true, true, theme);
+    render_dialog_action(
+        frame,
+        layout.action,
+        "Enter",
+        action,
+        true,
+        KeyTone::Danger,
+        theme,
+    );
     let items = remove_key_hints(dialog, footer_action);
     render_dialog_keybar(frame, layout.footer, theme, &items);
 }
@@ -337,6 +345,109 @@ pub(crate) fn remove_hit_map(dialog: &RemoveDialog, area: Rect) -> RemoveHitMap 
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SyncDialogLayout {
+    footer: Rect,
+    modal: Rect,
+    body: Rect,
+    input: Rect,
+    options: Rect,
+    action: Rect,
+}
+
+fn sync_dialog_layout(dialog: &SyncDialog, area: Rect) -> Option<SyncDialogLayout> {
+    if area.width < Viewport::MIN_WIDTH || area.height < Viewport::MIN_HEIGHT {
+        return None;
+    }
+    let footer = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+    let content = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let modal = match dialog.mode() {
+        SyncMode::Form => centered_rect(content.width.saturating_sub(8).min(76), 12, content),
+        SyncMode::BasePicker => centered_rect(
+            content.width.saturating_sub(6).min(86),
+            content.height.saturating_sub(4).min(20),
+            content,
+        ),
+    };
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+    let (body, input, options, action) = match dialog.mode() {
+        SyncMode::Form => {
+            let [body, action] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+            (body, Rect::default(), Rect::default(), action)
+        }
+        SyncMode::BasePicker => {
+            let [input, options, action] = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
+            (Rect::default(), input, options, action)
+        }
+    };
+    Some(SyncDialogLayout {
+        footer,
+        modal,
+        body,
+        input,
+        options,
+        action,
+    })
+}
+
+fn sync_action_details(dialog: &SyncDialog) -> (&'static str, &'static str, bool) {
+    match dialog.mode() {
+        SyncMode::Form if dialog.submission().is_some() => ("Sync worktree", "sync", true),
+        SyncMode::Form => ("Sync unavailable", "sync unavailable", false),
+        SyncMode::BasePicker if !dialog.base_candidates().is_empty() => {
+            ("Select base", "select", true)
+        }
+        SyncMode::BasePicker => ("Select unavailable", "select unavailable", false),
+    }
+}
+
+fn sync_key_hints(dialog: &SyncDialog) -> Vec<KeyHint<'static>> {
+    let (_, footer_action, enabled) = sync_action_details(dialog);
+    match dialog.mode() {
+        SyncMode::Form => vec![
+            KeyHint::secondary("Tab", "base"),
+            KeyHint::secondary("←/→", "mode"),
+            if enabled {
+                KeyHint::primary("Enter", footer_action)
+            } else {
+                KeyHint::disabled("Enter", footer_action)
+            },
+            KeyHint::secondary("Esc", "close"),
+            KeyHint::secondary("?", "help"),
+        ],
+        SyncMode::BasePicker => vec![
+            if enabled {
+                KeyHint::primary("Enter", footer_action)
+            } else {
+                KeyHint::disabled("Enter", footer_action)
+            },
+            KeyHint::secondary("Esc", "back"),
+            KeyHint::secondary("?", "help"),
+        ],
+    }
+}
+
+fn sync_picker_prefix_rows(dialog: &SyncDialog) -> usize {
+    usize::from(dialog.origin_spinner_visible()) + usize::from(dialog.warning().is_some()) + 1
+}
+
+fn sync_picker_window(dialog: &SyncDialog, options: Rect) -> std::ops::Range<usize> {
+    selection_window(
+        dialog.base_candidates().len(),
+        dialog.base_selection(),
+        usize::from(options.height).saturating_sub(sync_picker_prefix_rows(dialog)),
+    )
+}
+
 fn render_sync_dialog(
     dialog: &SyncDialog,
     spinner_tick: u64,
@@ -344,32 +455,25 @@ fn render_sync_dialog(
     area: Rect,
     theme: &Theme,
 ) {
-    let footer = Rect {
-        x: area.x,
-        y: area.bottom().saturating_sub(1),
-        width: area.width,
-        height: 1,
+    let Some(layout) = sync_dialog_layout(dialog, area) else {
+        return;
     };
-    let content_area = Rect {
-        height: area.height.saturating_sub(1),
-        ..area
-    };
+    frame.render_widget(Clear, layout.modal);
     match dialog.mode() {
         SyncMode::Form => {
-            let modal = centered_rect(
-                content_area.width.saturating_sub(8).min(76),
-                12,
-                content_area,
-            );
-            frame.render_widget(Clear, modal);
-            let block = active_panel(Some(" Sync worktree ".to_string()), theme);
-            let inner = block.inner(modal);
-            frame.render_widget(block, modal);
+            let block = active_panel(Some(" Sync worktree ".to_string()), theme)
+                .title_alignment(Alignment::Center);
+            frame.render_widget(block, layout.modal);
             let mut lines = vec![
                 metric_line("Worktree", dialog.worktree(), theme),
                 metric_line("Branch", dialog.branch().unwrap_or("detached"), theme),
                 Line::from(""),
-                selector_line("Base", dialog.base().unwrap_or("Select a base"), theme),
+                selector_line(
+                    "Base",
+                    dialog.base().unwrap_or("Select a base"),
+                    layout.body.width,
+                    theme,
+                ),
                 strategy_line(
                     matches!(
                         dialog.strategy(),
@@ -386,41 +490,27 @@ fn render_sync_dialog(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
                     .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
-                inner,
+                layout.body,
             );
-            let submit = if dialog.submission().is_some() {
-                KeyHint::primary("Enter", "sync")
-            } else {
-                KeyHint::disabled("Enter", "sync (select a base)")
-            };
-            render_dialog_keybar(
+            let (action, _, enabled) = sync_action_details(dialog);
+            render_dialog_action(
                 frame,
-                footer,
+                layout.action,
+                "Enter",
+                action,
+                enabled,
+                KeyTone::Primary,
                 theme,
-                &[
-                    KeyHint::secondary("Tab", "base"),
-                    KeyHint::secondary("←/→", "mode"),
-                    submit,
-                    KeyHint::secondary("Esc", "close"),
-                    KeyHint::secondary("?", "help"),
-                ],
             );
+            render_dialog_keybar(frame, layout.footer, theme, &sync_key_hints(dialog));
         }
         SyncMode::BasePicker => {
-            let modal = centered_rect(
-                content_area.width.saturating_sub(6).min(86),
-                content_area.height.saturating_sub(4).min(20),
-                content_area,
-            );
-            frame.render_widget(Clear, modal);
-            let block = active_panel(Some(" Sync worktree · Select base ".to_string()), theme);
-            let inner = block.inner(modal);
-            frame.render_widget(block, modal);
-            let [search_input, options] =
-                Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
+            let block = active_panel(Some(" Sync worktree · Select base ".to_string()), theme)
+                .title_alignment(Alignment::Center);
+            frame.render_widget(block, layout.modal);
             render_text_input(
                 frame,
-                search_input,
+                layout.input,
                 "Search",
                 dialog.base_input(),
                 "Type to filter bases",
@@ -437,40 +527,168 @@ fn render_sync_dialog(
                 lines.push(Line::from(warning));
             }
             lines.push(Line::from(""));
-            lines.extend(
-                dialog
-                    .base_candidates()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, candidate)| {
-                        selectable_line(
-                            &candidate.name,
-                            index == dialog.base_selection(),
-                            inner.width,
-                            theme,
-                        )
-                    }),
-            );
+            lines.extend(sync_picker_window(dialog, layout.options).map(|index| {
+                let candidate = &dialog.base_candidates()[index];
+                selectable_line(
+                    &candidate.name,
+                    index == dialog.base_selection(),
+                    layout.options.width,
+                    theme,
+                )
+            }));
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
                     .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
-                options,
+                layout.options,
             );
-            render_dialog_keybar(
+            let (action, _, enabled) = sync_action_details(dialog);
+            render_dialog_action(
                 frame,
-                footer,
+                layout.action,
+                "Enter",
+                action,
+                enabled,
+                KeyTone::Primary,
                 theme,
-                &[
-                    if dialog.base_candidates().is_empty() {
-                        KeyHint::disabled("Enter", "select (no matches)")
-                    } else {
-                        KeyHint::primary("Enter", "select")
-                    },
-                    KeyHint::secondary("Esc", "back"),
-                    KeyHint::secondary("?", "help"),
-                ],
             );
+            render_dialog_keybar(frame, layout.footer, theme, &sync_key_hints(dialog));
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncHitTarget {
+    Input,
+    Row(usize),
+    Base,
+    Rebase,
+    Merge,
+    Back,
+    Cta,
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SyncHitMap {
+    pub(crate) input: Rect,
+    pub(crate) rows: Vec<Rect>,
+    row_indices: Vec<usize>,
+    pub(crate) base: Rect,
+    pub(crate) rebase: Rect,
+    pub(crate) merge: Rect,
+    pub(crate) back: Rect,
+    pub(crate) cta: Rect,
+    pub(crate) help: Rect,
+    options: Rect,
+}
+
+impl SyncHitMap {
+    pub(crate) fn target_at(&self, point: (u16, u16)) -> Option<SyncHitTarget> {
+        if rect_contains(self.input, point) {
+            return Some(SyncHitTarget::Input);
+        }
+        if let Some((local_index, _)) = self
+            .rows
+            .iter()
+            .enumerate()
+            .find(|(_, area)| rect_contains(**area, point))
+        {
+            return self
+                .row_indices
+                .get(local_index)
+                .copied()
+                .map(SyncHitTarget::Row);
+        }
+        [
+            (self.base, SyncHitTarget::Base),
+            (self.rebase, SyncHitTarget::Rebase),
+            (self.merge, SyncHitTarget::Merge),
+            (self.cta, SyncHitTarget::Cta),
+            (self.back, SyncHitTarget::Back),
+            (self.help, SyncHitTarget::Help),
+        ]
+        .into_iter()
+        .find_map(|(rect, target)| rect_contains(rect, point).then_some(target))
+    }
+
+    pub(crate) fn options_contain(&self, point: (u16, u16)) -> bool {
+        rect_contains(self.options, point)
+    }
+}
+
+pub(crate) fn sync_hit_map(dialog: &SyncDialog, area: Rect) -> SyncHitMap {
+    let Some(layout) = sync_dialog_layout(dialog, area) else {
+        return SyncHitMap::default();
+    };
+    let hints = sync_key_hints(dialog);
+    let footer_hits = keybar_hit_areas(layout.footer, &hints);
+    let footer_hit = |key: &str| {
+        footer_hits
+            .iter()
+            .find_map(|(index, rect)| (hints[*index].key == key).then_some(*rect))
+            .unwrap_or_default()
+    };
+    let (action, _, _) = sync_action_details(dialog);
+    let cta = dialog_action_rect(layout.action, "Enter", action);
+    match dialog.mode() {
+        SyncMode::Form => {
+            let base_label =
+                selector_control(dialog.base().unwrap_or("Select a base"), layout.body.width);
+            let base = Rect::new(
+                layout.body.x.saturating_add(14),
+                layout.body.y.saturating_add(3),
+                UnicodeWidthStr::width(base_label.as_str()) as u16,
+                1,
+            );
+            let rebase = Rect::new(
+                layout.body.x.saturating_add(14),
+                layout.body.y.saturating_add(4),
+                UnicodeWidthStr::width("[● Rebase]") as u16,
+                1,
+            );
+            let merge = Rect::new(
+                rebase.right().saturating_add(2),
+                rebase.y,
+                UnicodeWidthStr::width("[○ Merge]") as u16,
+                1,
+            );
+            SyncHitMap {
+                base,
+                rebase,
+                merge,
+                back: footer_hit("Esc"),
+                cta,
+                help: footer_hit("?"),
+                ..SyncHitMap::default()
+            }
+        }
+        SyncMode::BasePicker => {
+            let row_indices = sync_picker_window(dialog, layout.options).collect::<Vec<_>>();
+            let rows = row_indices
+                .iter()
+                .enumerate()
+                .map(|(local_index, _)| Rect {
+                    x: layout.options.x,
+                    y: layout
+                        .options
+                        .y
+                        .saturating_add(sync_picker_prefix_rows(dialog) as u16)
+                        .saturating_add(local_index as u16),
+                    width: layout.options.width,
+                    height: 1,
+                })
+                .collect();
+            SyncHitMap {
+                input: layout.input,
+                rows,
+                row_indices,
+                back: footer_hit("Esc"),
+                cta,
+                help: footer_hit("?"),
+                options: layout.options,
+                ..SyncHitMap::default()
+            }
         }
     }
 }
@@ -972,9 +1190,21 @@ fn selection_window(total: usize, selected: usize, capacity: usize) -> std::ops:
     start..start.saturating_add(capacity).min(total)
 }
 
-pub(crate) fn help_close_hit(area: Rect, point: (u16, u16)) -> bool {
+pub(crate) fn help_close_hit(state: &AppState, area: Rect, point: (u16, u16)) -> bool {
     if area.width < Viewport::MIN_WIDTH || area.height < Viewport::MIN_HEIGHT {
         return false;
+    }
+    let cta = if state.operation_modal.is_some()
+        || state.create_dialog.is_some()
+        || state.sync_dialog.is_some()
+        || state.remove_dialog.is_some()
+    {
+        overlay_help_layout(state, area).action
+    } else {
+        normal_help_layout(&ViewModel::new(state, area)).action
+    };
+    if rect_contains(dialog_action_rect(cta, "?", "Close help"), point) {
+        return true;
     }
     let footer = Rect {
         x: area.x,
@@ -1080,48 +1310,70 @@ fn render_create_input(
 }
 
 fn render_create_action(frame: &mut Frame, area: Rect, label: &str, enabled: bool, theme: &Theme) {
-    render_dialog_action(frame, area, label, enabled, false, theme);
+    render_dialog_action(
+        frame,
+        area,
+        "Enter",
+        label,
+        enabled,
+        KeyTone::Primary,
+        theme,
+    );
 }
 
 fn render_dialog_action(
     frame: &mut Frame,
     area: Rect,
+    key: &str,
     label: &str,
     enabled: bool,
-    danger: bool,
+    tone: KeyTone,
     theme: &Theme,
 ) {
-    let style = if enabled && danger {
-        theme.with_bg(
-            Style::default()
-                .fg(theme.danger_fg)
-                .add_modifier(Modifier::BOLD),
-            theme.danger_bg,
-        )
-    } else if enabled {
-        theme.with_bg(
+    let tone = if enabled { tone } else { KeyTone::Disabled };
+    let style = match tone {
+        KeyTone::Primary => theme.with_bg(
             Style::default()
                 .fg(theme.primary_fg)
                 .add_modifier(Modifier::BOLD),
             theme.primary_bg,
-        )
-    } else {
-        theme.with_bg(
+        ),
+        KeyTone::Danger => theme.with_bg(
+            Style::default()
+                .fg(theme.danger_fg)
+                .add_modifier(Modifier::BOLD),
+            theme.danger_bg,
+        ),
+        KeyTone::Secondary => theme.with_bg(
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            theme.control_bg,
+        ),
+        KeyTone::Disabled => theme.with_bg(
             Style::default()
                 .fg(theme.fg_muted)
                 .add_modifier(Modifier::BOLD),
             theme.control_bg,
-        )
+        ),
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            format!("[ Enter  {label} ]"),
+            format!("[ {key}  {label} ]"),
             style,
         )))
         .alignment(Alignment::Right)
         .style(theme.with_bg(Style::default(), theme.bg_elevated)),
         area,
     );
+}
+
+fn dialog_action_rect(area: Rect, key: &str, label: &str) -> Rect {
+    let width = UnicodeWidthStr::width(format!("[ {key}  {label} ]").as_str())
+        .min(usize::from(area.width)) as u16;
+    Rect {
+        x: area.right().saturating_sub(width),
+        width,
+        ..area
+    }
 }
 
 fn create_outcome_label(kind: &BranchKind) -> &'static str {
@@ -1236,7 +1488,8 @@ fn head_ellipsize(value: &str, width: usize) -> String {
     head
 }
 
-fn selector_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
+fn selector_line(label: &str, value: &str, width: u16, theme: &Theme) -> Line<'static> {
+    let control = selector_control(value, width);
     Line::from(vec![
         Span::styled(
             format!("{label:<14}"),
@@ -1245,13 +1498,18 @@ fn selector_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("[ {value}  ▾ ]"),
+            control,
             theme.with_bg(
                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
                 theme.control_bg,
             ),
         ),
     ])
+}
+
+fn selector_control(value: &str, width: u16) -> String {
+    let value = head_ellipsize(value, usize::from(width).saturating_sub(21));
+    format!("[ {value}  ▾ ]")
 }
 
 fn strategy_line(rebase_selected: bool, theme: &Theme) -> Line<'static> {
@@ -1323,7 +1581,18 @@ fn selectable_line(label: &str, selected: bool, width: u16, theme: &Theme) -> Li
     ))
 }
 
-fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &Theme) {
+#[derive(Debug, Clone, Copy)]
+struct OperationDialogLayout {
+    footer: Rect,
+    modal: Rect,
+    body: Rect,
+    action: Rect,
+}
+
+fn operation_dialog_layout(area: Rect) -> Option<OperationDialogLayout> {
+    if area.width < Viewport::MIN_WIDTH || area.height < Viewport::MIN_HEIGHT {
+        return None;
+    }
     let footer = Rect {
         x: area.x,
         y: area.bottom().saturating_sub(1),
@@ -1334,20 +1603,78 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
         height: area.height.saturating_sub(1),
         ..area
     };
-    let dialog = centered_rect(
+    let modal = centered_rect(
         content_area.width.saturating_sub(8).min(78),
         content_area.height.saturating_sub(4).min(18),
         content_area,
     );
-    frame.render_widget(Clear, dialog);
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+    let [body, action] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    Some(OperationDialogLayout {
+        footer,
+        modal,
+        body,
+        action,
+    })
+}
+
+fn operation_action_details(
+    modal: &OperationModal,
+) -> Option<(&'static str, &'static str, KeyTone, ModalKey)> {
+    match modal.status() {
+        ModalStatus::Running if !modal.mutation_started() => {
+            Some(("Esc", "Cancel", KeyTone::Secondary, ModalKey::Escape))
+        }
+        ModalStatus::Failed {
+            mutation_state:
+                crate::operation::MutationState::NotStarted
+                | crate::operation::MutationState::RolledBack,
+            ..
+        } => Some(("Enter", "Back to form", KeyTone::Primary, ModalKey::Enter)),
+        ModalStatus::Running | ModalStatus::Succeeded | ModalStatus::Failed { .. } => None,
+    }
+}
+
+fn operation_key_hints(modal: &OperationModal) -> Vec<KeyHint<'static>> {
+    match modal.status() {
+        ModalStatus::Failed {
+            mutation_state:
+                crate::operation::MutationState::NotStarted
+                | crate::operation::MutationState::RolledBack,
+            ..
+        } => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::primary("Enter", "back"),
+            KeyHint::secondary("?", "help"),
+        ],
+        ModalStatus::Failed { .. } => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::secondary("?", "help"),
+        ],
+        ModalStatus::Running if !modal.mutation_started() => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::secondary("Esc", "cancel"),
+            KeyHint::secondary("?", "help"),
+        ],
+        ModalStatus::Running | ModalStatus::Succeeded => vec![
+            KeyHint::secondary("↑/↓", "output"),
+            KeyHint::secondary("?", "help"),
+        ],
+    }
+}
+
+fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let Some(layout) = operation_dialog_layout(area) else {
+        return;
+    };
+    frame.render_widget(Clear, layout.modal);
     let title = match modal.operation() {
         OperationKind::Create => " Create worktree ",
         OperationKind::Sync => " Sync worktree ",
         OperationKind::Remove => " Remove worktree ",
     };
-    let block = active_panel(Some(title.to_string()), theme);
-    let inner = block.inner(dialog);
-    frame.render_widget(block, dialog);
+    let block = active_panel(Some(title.to_string()), theme).title_alignment(Alignment::Center);
+    frame.render_widget(block, layout.modal);
     let mut lines = vec![metric_line(
         "Elapsed",
         &format_elapsed(modal.elapsed()),
@@ -1395,7 +1722,7 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
                 .add_modifier(Modifier::BOLD),
         )));
     }
-    let hook_height = usize::from(inner.height.saturating_sub(lines.len() as u16 + 3));
+    let hook_height = usize::from(layout.body.height.saturating_sub(lines.len() as u16 + 3));
     if !modal.visible_hook_lines(hook_height).is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from("Hook output"));
@@ -1439,34 +1766,53 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
-        inner,
+        layout.body,
     );
-    let items = match modal.status() {
-        ModalStatus::Failed {
-            mutation_state:
-                crate::operation::MutationState::NotStarted
-                | crate::operation::MutationState::RolledBack,
-            ..
-        } => vec![
-            KeyHint::secondary("↑/↓", "output"),
-            KeyHint::primary("Enter", "back"),
-            KeyHint::secondary("?", "help"),
-        ],
-        ModalStatus::Failed { .. } => vec![
-            KeyHint::secondary("↑/↓", "output"),
-            KeyHint::secondary("?", "help"),
-        ],
-        ModalStatus::Running if !modal.mutation_started() => vec![
-            KeyHint::secondary("↑/↓", "output"),
-            KeyHint::secondary("Esc", "cancel"),
-            KeyHint::secondary("?", "help"),
-        ],
-        ModalStatus::Running | ModalStatus::Succeeded => vec![
-            KeyHint::secondary("↑/↓", "output"),
-            KeyHint::secondary("?", "help"),
-        ],
+    if let Some((key, label, tone, _)) = operation_action_details(modal) {
+        render_dialog_action(frame, layout.action, key, label, true, tone, theme);
+    }
+    render_dialog_keybar(frame, layout.footer, theme, &operation_key_hints(modal));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OperationHitTarget {
+    Cta(ModalKey),
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct OperationHitMap {
+    pub(crate) cta: Rect,
+    pub(crate) help: Rect,
+    cta_key: Option<ModalKey>,
+}
+
+impl OperationHitMap {
+    pub(crate) fn target_at(&self, point: (u16, u16)) -> Option<OperationHitTarget> {
+        if rect_contains(self.cta, point) {
+            return self.cta_key.map(OperationHitTarget::Cta);
+        }
+        rect_contains(self.help, point).then_some(OperationHitTarget::Help)
+    }
+}
+
+pub(crate) fn operation_hit_map(modal: &OperationModal, area: Rect) -> OperationHitMap {
+    let Some(layout) = operation_dialog_layout(area) else {
+        return OperationHitMap::default();
     };
-    render_dialog_keybar(frame, footer, theme, &items);
+    let action = operation_action_details(modal);
+    let (cta, cta_key) = action.map_or((Rect::default(), None), |(key, label, _, modal_key)| {
+        (
+            dialog_action_rect(layout.action, key, label),
+            Some(modal_key),
+        )
+    });
+    let hints = operation_key_hints(modal);
+    let help = keybar_hit_areas(layout.footer, &hints)
+        .into_iter()
+        .find_map(|(index, rect)| (hints[index].key == "?").then_some(rect))
+        .unwrap_or_default();
+    OperationHitMap { cta, help, cta_key }
 }
 
 fn mutation_state_label(state: crate::operation::MutationState) -> &'static str {
@@ -1875,12 +2221,25 @@ fn render_keybar(
     );
 }
 
-fn render_help(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
+#[derive(Debug, Clone, Copy)]
+struct HelpDialogLayout {
+    modal: Rect,
+    body: Rect,
+    action: Rect,
+    two_columns: bool,
+}
+
+fn normal_help_layout(model: &ViewModel<'_>) -> HelpDialogLayout {
     let context = model.state.context();
     let bindings = keymap::bindings(context);
-    let two_columns = model.is_wide();
+    let two_columns =
+        model.is_wide() || (bindings.len() as u16).saturating_add(5) > model.area.height;
     let width = if two_columns {
-        model.area.width.saturating_sub(8).min(96)
+        model
+            .area
+            .width
+            .saturating_sub(if model.is_wide() { 8 } else { 4 })
+            .min(96)
     } else {
         model.area.width.saturating_sub(4).min(54)
     };
@@ -1890,121 +2249,161 @@ fn render_help(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
         bindings.len()
     };
     let height = (rows as u16 + 4).min(model.area.height.saturating_sub(2));
-    let dialog = centered_rect(width, height, model.area);
-    frame.render_widget(Clear, dialog);
+    let modal = centered_rect(width, height, model.area);
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+    let [body, action] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    HelpDialogLayout {
+        modal,
+        body,
+        action,
+        two_columns,
+    }
+}
+
+fn render_help(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
+    let context = model.state.context();
+    let bindings = keymap::bindings(context);
+    let layout = normal_help_layout(model);
+    frame.render_widget(Clear, layout.modal);
     let title = match context {
         Context::Cockpit => " Help · Worktrees ",
         Context::Search => " Help · Search ",
         Context::Resize => " Help · Resize ",
     };
-    let block = active_panel(Some(title.to_string()), theme);
-    let inner = block.inner(dialog);
-    frame.render_widget(block, dialog);
-    if two_columns {
+    let block = active_panel(Some(title.to_string()), theme).title_alignment(Alignment::Center);
+    frame.render_widget(block, layout.modal);
+    if layout.two_columns {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .areas(inner);
+                .areas(layout.body);
         let split = bindings.len().div_ceil(2);
         render_help_column(model.state, frame, left, theme, &bindings[..split]);
         render_help_column(model.state, frame, right, theme, &bindings[split..]);
     } else {
-        render_help_column(model.state, frame, inner, theme, bindings);
+        render_help_column(model.state, frame, layout.body, theme, bindings);
     }
+    render_dialog_action(
+        frame,
+        layout.action,
+        "?",
+        "Close help",
+        true,
+        KeyTone::Secondary,
+        theme,
+    );
 }
 
-fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
-    let remove_items;
-    let (title, items): (&str, &[(&str, &str)]) =
-        if let Some(modal) = state.operation_modal.as_ref() {
-            let items = match modal.status() {
-                ModalStatus::Failed {
-                    mutation_state:
-                        crate::operation::MutationState::NotStarted
-                        | crate::operation::MutationState::RolledBack,
-                    ..
-                } => &[
-                    ("↑/↓", "scroll output"),
-                    ("Enter", "return to form"),
-                    ("?", "close help"),
-                ][..],
-                ModalStatus::Failed { .. } => &[("↑/↓", "scroll output"), ("?", "close help")][..],
-                ModalStatus::Running if !modal.mutation_started() => &[
-                    ("↑/↓", "scroll output"),
-                    ("Esc", "cancel"),
-                    ("?", "close help"),
-                ][..],
-                ModalStatus::Running | ModalStatus::Succeeded => {
-                    &[("↑/↓", "scroll output"), ("?", "close help")][..]
-                }
-            };
-            (" Help · Operation ", items)
-        } else if state
-            .sync_dialog
-            .as_ref()
-            .is_some_and(|dialog| dialog.mode() == SyncMode::BasePicker)
-        {
-            (
-                " Help · Sync worktree ",
-                &[
-                    ("type", "search bases"),
-                    ("↑/↓", "select base"),
-                    ("Enter", "select base"),
-                    ("Esc", "back"),
-                    ("?", "close help"),
-                ],
-            )
-        } else if state.sync_dialog.is_some() {
-            (
-                " Help · Sync worktree ",
-                &[
-                    ("Tab", "select base"),
-                    ("←/→", "select strategy"),
-                    ("Enter", "sync worktree"),
-                    ("Esc", "close"),
-                    ("?", "close help"),
-                ],
-            )
-        } else if let Some(dialog) = state.remove_dialog.as_ref() {
-            remove_items = dialog.help_entries();
-            (" Help · Remove worktree ", &remove_items)
-        } else if state
-            .create_dialog
-            .as_ref()
-            .is_some_and(|dialog| dialog.mode() == CreateMode::SelectBase)
-        {
-            (
-                " Help · Create worktree ",
-                &[
-                    ("type", "search bases"),
-                    ("↑/↓", "select base"),
-                    ("Tab", "complete base match"),
-                    ("Enter", "continue to branch name"),
-                    ("Esc", "cancel"),
-                    ("?", "close help"),
-                ],
-            )
-        } else {
-            (
-                " Help · Create worktree ",
-                &[
-                    ("type", "search branches"),
-                    ("↑/↓", "select suggestion"),
-                    ("Tab", "complete branch match"),
-                    ("Enter", "create, add, or open"),
-                    ("Esc", "back to base"),
-                    ("?", "close help"),
-                ],
-            )
+fn overlay_help_content(state: &AppState) -> (&'static str, Vec<(&'static str, &'static str)>) {
+    let (title, items) = if let Some(modal) = state.operation_modal.as_ref() {
+        let items = match modal.status() {
+            ModalStatus::Failed {
+                mutation_state:
+                    crate::operation::MutationState::NotStarted
+                    | crate::operation::MutationState::RolledBack,
+                ..
+            } => vec![
+                ("↑/↓", "scroll output"),
+                ("Enter", "return to form"),
+                ("?", "close help"),
+            ],
+            ModalStatus::Failed { .. } => {
+                vec![("↑/↓", "scroll output"), ("?", "close help")]
+            }
+            ModalStatus::Running if !modal.mutation_started() => vec![
+                ("↑/↓", "scroll output"),
+                ("Esc", "cancel"),
+                ("?", "close help"),
+            ],
+            ModalStatus::Running | ModalStatus::Succeeded => {
+                vec![("↑/↓", "scroll output"), ("?", "close help")]
+            }
         };
-    let dialog = centered_rect(
+        (" Help · Operation ", items)
+    } else if state
+        .create_dialog
+        .as_ref()
+        .is_some_and(|dialog| dialog.mode() == CreateMode::SelectBase)
+    {
+        (
+            " Help · Create worktree ",
+            vec![
+                ("type", "search bases"),
+                ("↑/↓", "select base"),
+                ("Tab", "complete base match"),
+                ("Enter", "continue to branch name"),
+                ("Esc", "cancel"),
+                ("?", "close help"),
+            ],
+        )
+    } else if state.create_dialog.is_some() {
+        (
+            " Help · Create worktree ",
+            vec![
+                ("type", "search branches"),
+                ("↑/↓", "select suggestion"),
+                ("Tab", "complete branch match"),
+                ("Enter", "create, add, or open"),
+                ("Esc", "back to base"),
+                ("?", "close help"),
+            ],
+        )
+    } else if state
+        .sync_dialog
+        .as_ref()
+        .is_some_and(|dialog| dialog.mode() == SyncMode::BasePicker)
+    {
+        (
+            " Help · Sync worktree ",
+            vec![
+                ("type", "search bases"),
+                ("↑/↓", "select base"),
+                ("Enter", "select base"),
+                ("Esc", "back"),
+                ("?", "close help"),
+            ],
+        )
+    } else if state.sync_dialog.is_some() {
+        (
+            " Help · Sync worktree ",
+            vec![
+                ("Tab", "select base"),
+                ("←/→", "select strategy"),
+                ("Enter", "sync worktree"),
+                ("Esc", "close"),
+                ("?", "close help"),
+            ],
+        )
+    } else if let Some(dialog) = state.remove_dialog.as_ref() {
+        (" Help · Remove worktree ", dialog.help_entries())
+    } else {
+        (" Help ", vec![("?", "close help")])
+    };
+    (title, items)
+}
+
+fn overlay_help_layout(state: &AppState, area: Rect) -> HelpDialogLayout {
+    let (_, items) = overlay_help_content(state);
+    let modal = centered_rect(
         52.min(area.width.saturating_sub(4)),
         items.len() as u16 + 4,
         area,
     );
-    frame.render_widget(Clear, dialog);
-    let block = active_panel(Some(title.to_string()), theme);
-    let inner = block.inner(dialog);
-    frame.render_widget(block, dialog);
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+    let [body, action] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    HelpDialogLayout {
+        modal,
+        body,
+        action,
+        two_columns: false,
+    }
+}
+
+fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let (title, items) = overlay_help_content(state);
+    let layout = overlay_help_layout(state, area);
+    frame.render_widget(Clear, layout.modal);
+    let block = active_panel(Some(title.to_string()), theme).title_alignment(Alignment::Center);
+    frame.render_widget(block, layout.modal);
     let lines = items.iter().map(|(key, description)| {
         Line::from(vec![
             Span::styled(
@@ -2020,7 +2419,16 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
         Paragraph::new(lines.collect::<Vec<_>>())
             .wrap(Wrap { trim: true })
             .style(theme.with_bg(Style::default(), theme.bg_elevated)),
-        inner,
+        layout.body,
+    );
+    render_dialog_action(
+        frame,
+        layout.action,
+        "?",
+        "Close help",
+        true,
+        KeyTone::Secondary,
+        theme,
     );
 }
 
@@ -2663,6 +3071,65 @@ mod tests {
 
         assert_eq!(footer, "[?] close help");
         assert_eq!(buffer.cell((0, 0)).unwrap().fg, theme.disabled_fg);
+    }
+
+    #[test]
+    fn normal_and_contextual_help_render_bottom_right_close_actions() {
+        use crate::{
+            operation::OperationKind,
+            ref_catalog::RefSnapshot,
+            tui::{
+                create_flow::CreateDialog, operation_modal::OperationModal, sync_flow::SyncDialog,
+            },
+        };
+
+        for (width, height) in [(120, 30), (80, 20), (60, 16)] {
+            let mut state = sample_state();
+            state.help_open = true;
+            let normal = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(
+                normal.contains("[ ?  Close help ]"),
+                "{width}x{height}\n{normal}"
+            );
+
+            state.create_dialog = Some(CreateDialog::new(
+                "trench",
+                Path::new("/worktrees"),
+                RefSnapshot::from_parts(
+                    ["main"],
+                    ["origin/main"],
+                    Some("origin/main"),
+                    Some("main"),
+                    true,
+                ),
+                [],
+            ));
+            let contextual = text(&render_buffer(&mut state, width, height, "transparent"));
+            assert!(
+                contextual.contains("[ ?  Close help ]"),
+                "{width}x{height}\n{contextual}"
+            );
+
+            let target = state.identities[1].clone();
+            state.sync_dialog = Some(SyncDialog::new(
+                &target,
+                RefSnapshot::from_parts(
+                    ["main"],
+                    ["origin/main"],
+                    Some("origin/main"),
+                    Some("main"),
+                    true,
+                ),
+                Some("main"),
+            ));
+            let create_priority = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(create_priority.contains("Help · Create worktree"));
+            assert!(!create_priority.contains("Help · Sync worktree"));
+
+            state.operation_modal = Some(OperationModal::new(OperationKind::Create));
+            let operation_priority = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(operation_priority.contains("Help · Operation"));
+        }
     }
 
     #[test]
@@ -3658,7 +4125,7 @@ mod tests {
             None,
         ));
         let disabled_sync = render_buffer(&mut state, 100, 24, "ops");
-        let disabled = find_text(&disabled_sync, "[Enter] sync (select a base)");
+        let disabled = find_text(&disabled_sync, "[Enter] sync unavailable");
         assert_eq!(disabled_sync.cell(disabled).unwrap().fg, theme.disabled_fg);
 
         state
@@ -3667,7 +4134,7 @@ mod tests {
             .unwrap()
             .handle_key(crate::tui::sync_flow::SyncKey::Tab);
         let empty_picker = render_buffer(&mut state, 100, 24, "ops");
-        let disabled = find_text(&empty_picker, "[Enter] select (no matches)");
+        let disabled = find_text(&empty_picker, "[Enter] select unavailable");
         assert_eq!(empty_picker.cell(disabled).unwrap().fg, theme.disabled_fg);
     }
 
@@ -3849,6 +4316,62 @@ mod tests {
     }
 
     #[test]
+    fn sync_modes_render_truthful_bottom_right_dialog_actions_at_supported_sizes() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::sync_flow::{SyncDialog, SyncKey},
+        };
+
+        for (width, height) in [(120, 30), (80, 20), (60, 16)] {
+            let mut state = sample_state();
+            let target = state.identities[1].clone();
+            state.sync_dialog = Some(SyncDialog::new(
+                &target,
+                RefSnapshot::from_parts(
+                    ["main", "release"],
+                    ["origin/main"],
+                    Some("origin/main"),
+                    Some("main"),
+                    true,
+                ),
+                Some("main"),
+            ));
+
+            let form = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(
+                form.contains("[ Enter  Sync worktree ]"),
+                "{width}x{height}\n{form}"
+            );
+
+            state.sync_dialog.as_mut().unwrap().handle_key(SyncKey::Tab);
+            let picker = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(
+                picker.contains("[ Enter  Select base ]"),
+                "{width}x{height}\n{picker}"
+            );
+        }
+
+        for (width, height) in [(59, 16), (60, 15)] {
+            let mut state = sample_state();
+            let target = state.identities[1].clone();
+            state.sync_dialog = Some(SyncDialog::new(
+                &target,
+                RefSnapshot::from_parts(
+                    ["main"],
+                    ["origin/main"],
+                    Some("origin/main"),
+                    Some("main"),
+                    true,
+                ),
+                Some("main"),
+            ));
+            let output = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(!output.contains("[ Enter  Sync worktree ]"), "{output}");
+            assert!(output.contains("Resize terminal"), "{output}");
+        }
+    }
+
+    #[test]
     fn sync_base_strategy_and_picker_search_render_as_controls() {
         use crate::{
             ref_catalog::RefSnapshot,
@@ -3975,6 +4498,66 @@ mod tests {
         assert_eq!(buffer.cell(success).unwrap().fg, theme.success);
         assert_eq!(buffer.cell(failure).unwrap().fg, theme.error);
         assert_eq!(buffer.cell(warning).unwrap().fg, theme.warning);
+    }
+
+    #[test]
+    fn operation_modal_renders_only_the_action_permitted_by_its_live_status() {
+        use crate::{
+            operation::{
+                ErrorClass, MutationState, OperationEvent, OperationFailure, OperationKind,
+                OperationStage,
+            },
+            tui::operation_modal::OperationModal,
+        };
+
+        for (width, height) in [(120, 30), (80, 20), (60, 16)] {
+            let mut state = sample_state();
+            state.operation_modal = Some(OperationModal::new(OperationKind::Create));
+            let cancellable = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(
+                cancellable.contains("[ Esc  Cancel ]"),
+                "{width}x{height}\n{cancellable}"
+            );
+
+            state
+                .operation_modal
+                .as_mut()
+                .unwrap()
+                .apply(OperationEvent::MutationStarted);
+            let locked = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(!locked.contains("[ Esc  Cancel ]"), "{locked}");
+
+            state
+                .operation_modal
+                .as_mut()
+                .unwrap()
+                .fail(&OperationFailure {
+                    stage: OperationStage::CreateWorktree,
+                    mutation_state: MutationState::RolledBack,
+                    class: ErrorClass::Git,
+                    message: "rolled back safely".to_string(),
+                    retained_quarantine: None,
+                });
+            let recoverable = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(
+                recoverable.contains("[ Enter  Back to form ]"),
+                "{recoverable}"
+            );
+
+            state
+                .operation_modal
+                .as_mut()
+                .unwrap()
+                .fail(&OperationFailure {
+                    stage: OperationStage::CreateWorktree,
+                    mutation_state: MutationState::PartiallyApplied,
+                    class: ErrorClass::Git,
+                    message: "manual recovery required".to_string(),
+                    retained_quarantine: None,
+                });
+            let partial = text(&render_buffer(&mut state, width, height, "ops"));
+            assert!(!partial.contains("[ Enter  Back to form ]"), "{partial}");
+        }
     }
 
     #[test]

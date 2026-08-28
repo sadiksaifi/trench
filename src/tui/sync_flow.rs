@@ -114,6 +114,10 @@ impl SyncDialog {
         self.base_picker.selection()
     }
 
+    pub fn select_base_candidate(&mut self, index: usize) {
+        self.base_picker.select(index);
+    }
+
     pub fn set_origin_refresh(&mut self, refresh: crate::tui::ref_picker::OriginRefresh) {
         self.base_picker.set_origin_refresh(refresh);
     }
