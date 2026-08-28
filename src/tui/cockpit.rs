@@ -204,12 +204,14 @@ fn remove_key_hints(dialog: &RemoveDialog, footer_action: &'static str) -> Vec<K
             KeyHint::secondary("Esc", "close"),
             KeyHint::secondary("?", "help"),
         ],
-        RemoveMode::Review | RemoveMode::Ready => vec![
+        RemoveMode::Review => vec![
             KeyHint::danger("Enter", footer_action),
             KeyHint::secondary("Esc", "close"),
             KeyHint::secondary("?", "help"),
         ],
-        RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => vec![
+        RemoveMode::Ready
+        | RemoveMode::ConfirmDirtyWorktree
+        | RemoveMode::ConfirmUnmergedBranch => vec![
             KeyHint::danger("Enter", footer_action),
             KeyHint::secondary("Esc", "back"),
             KeyHint::secondary("?", "help"),
@@ -1907,6 +1909,7 @@ fn render_help(model: &ViewModel<'_>, frame: &mut Frame, theme: &Theme) {
 }
 
 fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let remove_items;
     let (title, items): (&str, &[(&str, &str)]) =
         if let Some(modal) = state.operation_modal.as_ref() {
             let items = match modal.status() {
@@ -1958,25 +1961,8 @@ fn render_overlay_help(state: &AppState, frame: &mut Frame, area: Rect, theme: &
                 ],
             )
         } else if let Some(dialog) = state.remove_dialog.as_ref() {
-            let items = match dialog.mode() {
-                RemoveMode::Review | RemoveMode::Ready if dialog.can_delete_branch() => &[
-                    ("Space", "toggle local branch deletion"),
-                    ("Enter", "remove worktree"),
-                    ("Esc", "close"),
-                    ("?", "close help"),
-                ][..],
-                RemoveMode::Review | RemoveMode::Ready => &[
-                    ("Enter", "remove worktree"),
-                    ("Esc", "close"),
-                    ("?", "close help"),
-                ][..],
-                RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => &[
-                    ("Enter", "confirm removal"),
-                    ("Esc", "back"),
-                    ("?", "close help"),
-                ][..],
-            };
-            (" Help · Remove worktree ", items)
+            remove_items = dialog.help_entries();
+            (" Help · Remove worktree ", &remove_items)
         } else if state
             .create_dialog
             .as_ref()

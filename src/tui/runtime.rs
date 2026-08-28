@@ -3037,6 +3037,17 @@ mod tests {
             route_visible_remove_mouse(&state, backdrop, area),
             Some(RemoveMouseEffect::Ignored)
         );
+        let cta_key = route_visible_remove_mouse(&state, click(confirm_hits.cta), area);
+        assert_eq!(cta_key, Some(RemoveMouseEffect::Key(RemoveKey::Enter)));
+        let start = handle_remove_input(
+            &mut state,
+            RemoveKey::Enter,
+            repository.path(),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(start, Some(RemoveInputEffect::Start(_))));
         state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
             crate::operation::OperationKind::Remove,
         ));
@@ -3054,6 +3065,17 @@ mod tests {
         );
         assert_eq!(
             route_visible_remove_mouse(&state, click(confirm_hits.cta), Rect::new(0, 0, 59, 16)),
+            None
+        );
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: 60,
+                height: 15,
+            },
+        );
+        assert_eq!(
+            route_visible_remove_mouse(&state, click(confirm_hits.cta), Rect::new(0, 0, 60, 15)),
             None
         );
         assert!(

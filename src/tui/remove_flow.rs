@@ -148,6 +148,24 @@ impl RemoveDialog {
         }
     }
 
+    pub(crate) fn help_entries(&self) -> Vec<(&'static str, &'static str)> {
+        let mut entries = Vec::new();
+        if self.mode == RemoveMode::Review && self.can_delete_branch() {
+            entries.push(("Space", "toggle local branch deletion"));
+        }
+        entries.push(("Enter", self.action_labels().1));
+        entries.push((
+            "Esc",
+            if self.mode == RemoveMode::Review {
+                "close"
+            } else {
+                "back"
+            },
+        ));
+        entries.push(("?", "close help"));
+        entries
+    }
+
     pub fn toggle_delete_branch(&mut self) {
         if self.can_delete_branch() {
             self.delete_branch = !self.delete_branch;
@@ -551,19 +569,37 @@ mod tests {
             dialog.action_labels(),
             ("Remove worktree", "remove worktree")
         );
+        assert_eq!(
+            dialog.help_entries(),
+            vec![
+                ("Space", "toggle local branch deletion"),
+                ("Enter", "remove worktree"),
+                ("Esc", "close"),
+                ("?", "close help")
+            ]
+        );
         dialog.handle_key(RemoveKey::Space);
         assert_eq!(
             dialog.action_labels(),
             ("Remove worktree and branch", "remove worktree and branch")
         );
+        assert_eq!(
+            dialog.help_entries()[1],
+            ("Enter", "remove worktree and branch")
+        );
         assert_eq!(dialog.handle_key(RemoveKey::Enter), None);
         assert_eq!(dialog.mode(), RemoveMode::ConfirmDirtyWorktree);
         assert_eq!(dialog.action_labels(), ("Continue", "continue"));
+        assert_eq!(dialog.help_entries()[0], ("Enter", "continue"));
         assert_eq!(dialog.handle_key(RemoveKey::Enter), None);
         assert_eq!(dialog.mode(), RemoveMode::ConfirmUnmergedBranch);
         assert_eq!(
             dialog.action_labels(),
             ("Remove worktree and branch", "remove worktree and branch")
+        );
+        assert_eq!(
+            dialog.help_entries()[0],
+            ("Enter", "remove worktree and branch")
         );
         assert_eq!(
             dialog.handle_key(RemoveKey::Enter),
@@ -574,5 +610,26 @@ mod tests {
             dialog.action_labels(),
             ("Remove worktree and branch", "remove worktree and branch")
         );
+        assert!(!dialog.help_entries().iter().any(|(key, _)| *key == "Space"));
+        assert_eq!(dialog.help_entries()[1], ("Esc", "back"));
+    }
+
+    #[test]
+    fn dirty_confirmation_help_names_the_final_remove_when_no_unmerged_step_follows() {
+        let fixture = Fixture::new("dirty-help");
+        std::fs::write(fixture.worktree_path.join("dirty.txt"), "dirty\n").unwrap();
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+
+        assert_eq!(dialog.handle_key(RemoveKey::Enter), None);
+        assert_eq!(dialog.mode(), RemoveMode::ConfirmDirtyWorktree);
+        assert_eq!(
+            dialog.action_labels(),
+            ("Remove worktree", "remove worktree")
+        );
+        assert_eq!(dialog.help_entries()[0], ("Enter", "remove worktree"));
     }
 }
