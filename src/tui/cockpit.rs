@@ -465,8 +465,13 @@ fn render_sync_dialog(
                 .title_alignment(Alignment::Center);
             frame.render_widget(block, layout.modal);
             let mut lines = vec![
-                metric_line("Worktree", dialog.worktree(), theme),
-                metric_line("Branch", dialog.branch().unwrap_or("detached"), theme),
+                create_metric_line("Worktree", dialog.worktree(), layout.body.width, theme),
+                create_metric_line(
+                    "Branch",
+                    dialog.branch().unwrap_or("detached"),
+                    layout.body.width,
+                    theme,
+                ),
                 Line::from(""),
                 selector_line(
                     "Base",
@@ -524,7 +529,10 @@ fn render_sync_dialog(
                 )));
             }
             if let Some(warning) = dialog.warning() {
-                lines.push(Line::from(warning));
+                lines.push(Line::from(head_ellipsize(
+                    warning,
+                    usize::from(layout.options.width),
+                )));
             }
             lines.push(Line::from(""));
             lines.extend(sync_picker_window(dialog, layout.options).map(|index| {
@@ -1675,11 +1683,44 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
     };
     let block = active_panel(Some(title.to_string()), theme).title_alignment(Alignment::Center);
     frame.render_widget(block, layout.modal);
-    let mut lines = vec![metric_line(
+    let mut lines = Vec::new();
+    if let ModalStatus::Failed {
+        stage,
+        mutation_state,
+        message,
+        retained_quarantine,
+    } = modal.status()
+    {
+        lines.push(Line::from(Span::styled(
+            head_ellipsize(
+                &format!(
+                    "Error: Failed at {}: {message}",
+                    operation_stage_label(modal.operation(), *stage)
+                ),
+                usize::from(layout.body.width),
+            ),
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(head_ellipsize(
+            &format!("Mutation: {}", mutation_state_label(*mutation_state)),
+            usize::from(layout.body.width),
+        )));
+        if let Some(path) = retained_quarantine {
+            lines.push(Line::from(head_ellipsize(
+                &format!("Retained quarantine: {}", path.display()),
+                usize::from(layout.body.width),
+            )));
+            lines.push(Line::from("Recovery is required before retrying."));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(metric_line(
         "Elapsed",
         &format_elapsed(modal.elapsed()),
         theme,
-    )];
+    ));
     for stage in modal.stages() {
         let (marker, style) =
             if modal.current_stage() == Some(stage.stage) && modal.spinner_visible() {
@@ -1732,35 +1773,6 @@ fn render_operation_modal(modal: &OperationModal, frame: &mut Frame, area: Rect,
                 .into_iter()
                 .map(|line| Line::from(format!("  {line}"))),
         );
-    }
-    if let ModalStatus::Failed {
-        stage,
-        mutation_state,
-        message,
-        retained_quarantine,
-    } = modal.status()
-    {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "Error: Failed at {}: {message}",
-                operation_stage_label(modal.operation(), *stage)
-            ),
-            Style::default()
-                .fg(theme.error)
-                .add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(format!(
-            "Mutation: {}",
-            mutation_state_label(*mutation_state)
-        )));
-        if let Some(path) = retained_quarantine {
-            lines.push(Line::from(format!(
-                "Retained quarantine: {}",
-                path.display()
-            )));
-            lines.push(Line::from("Recovery is required before retrying."));
-        }
     }
     frame.render_widget(
         Paragraph::new(lines)
@@ -4372,6 +4384,66 @@ mod tests {
     }
 
     #[test]
+    fn sync_minimum_size_keeps_long_unicode_form_and_failed_picker_hits_on_visible_controls() {
+        use crate::{
+            ref_catalog::RefSnapshot,
+            tui::{
+                app::WorktreeIdentity,
+                ref_picker::OriginRefresh,
+                sync_flow::{SyncDialog, SyncKey},
+            },
+        };
+
+        let target = WorktreeIdentity {
+            id: WorktreeId::new("/worktrees/unicode"),
+            worktree: "工作树🚀".repeat(12),
+            branch: Some("功能/非常长的分支🚀".repeat(10)),
+            path: PathBuf::from("/worktrees/unicode"),
+            head: Some("1234567890abcdef".to_string()),
+            is_main: false,
+            is_current: true,
+            detached: false,
+        };
+        let refs = RefSnapshot::from_parts(
+            ["主要分支🚀", "发布分支"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("主要分支🚀"),
+            true,
+        );
+        let area = Rect::new(0, 0, 60, 16);
+        let mut state = AppState::new(vec![target.clone()]);
+        state.sync_dialog = Some(SyncDialog::new(&target, refs, Some("主要分支🚀")));
+
+        let form = render_buffer(&mut state, area.width, area.height, "ops");
+        let form_hits = sync_hit_map(state.sync_dialog.as_ref().unwrap(), area);
+        for (rect, target) in [
+            (form_hits.base, SyncHitTarget::Base),
+            (form_hits.rebase, SyncHitTarget::Rebase),
+            (form_hits.merge, SyncHitTarget::Merge),
+        ] {
+            assert_eq!(form.cell((rect.x, rect.y)).unwrap().symbol(), "[");
+            assert_eq!(form_hits.target_at(center(rect)), Some(target));
+        }
+
+        let dialog = state.sync_dialog.as_mut().unwrap();
+        dialog.handle_key(SyncKey::Tab);
+        dialog.set_origin_refresh(OriginRefresh::Failed);
+        let picker = render_buffer(&mut state, area.width, area.height, "ops");
+        let picker_hits = sync_hit_map(state.sync_dialog.as_ref().unwrap(), area);
+        let first = picker_hits
+            .rows
+            .first()
+            .copied()
+            .expect("visible candidate");
+        assert_eq!(picker.cell((first.x, first.y)).unwrap().symbol(), "›");
+        assert!(matches!(
+            picker_hits.target_at(center(first)),
+            Some(SyncHitTarget::Row(_))
+        ));
+    }
+
+    #[test]
     fn sync_base_strategy_and_picker_search_render_as_controls() {
         use crate::{
             ref_catalog::RefSnapshot,
@@ -4558,6 +4630,81 @@ mod tests {
             let partial = text(&render_buffer(&mut state, width, height, "ops"));
             assert!(!partial.contains("[ Enter  Back to form ]"), "{partial}");
         }
+    }
+
+    #[test]
+    fn operation_failures_prioritize_safety_copy_over_six_stage_history_at_minimum_size() {
+        use std::time::Duration;
+
+        use crate::{
+            operation::{
+                ErrorClass, MutationState, OperationEvent, OperationFailure, OperationKind,
+                OperationStage,
+            },
+            tui::operation_modal::OperationModal,
+        };
+
+        let failed_modal = |mutation_state, retained_quarantine: Option<PathBuf>| {
+            let mut modal = OperationModal::new(OperationKind::Create);
+            for stage in [
+                OperationStage::Fetch,
+                OperationStage::Revalidate,
+                OperationStage::PreHook,
+                OperationStage::CreateWorktree,
+                OperationStage::PostHook,
+                OperationStage::Rollback,
+            ] {
+                modal.apply(OperationEvent::StageStarted { stage });
+                modal.apply(OperationEvent::StageFinished {
+                    stage,
+                    duration: Duration::from_millis(10),
+                    success: stage != OperationStage::CreateWorktree,
+                });
+            }
+            modal.fail(&OperationFailure {
+                stage: OperationStage::CreateWorktree,
+                mutation_state,
+                class: ErrorClass::Git,
+                message: "creation failed".to_string(),
+                retained_quarantine,
+            });
+            modal
+        };
+
+        let mut state = sample_state();
+        state.operation_modal = Some(failed_modal(MutationState::RolledBack, None));
+        let recoverable = text(&render_buffer(&mut state, 60, 16, "ops"));
+        assert!(
+            recoverable.contains("Error: Failed at Create worktree"),
+            "{recoverable}"
+        );
+        assert!(
+            recoverable.contains("Mutation: rolled back"),
+            "{recoverable}"
+        );
+        assert!(
+            recoverable.contains("[ Enter  Back to form ]"),
+            "{recoverable}"
+        );
+
+        state.operation_modal = Some(failed_modal(
+            MutationState::PartiallyApplied,
+            Some(PathBuf::from("/tmp/trench-quarantine")),
+        ));
+        let retained = text(&render_buffer(&mut state, 60, 16, "ops"));
+        assert!(
+            retained.contains("Mutation: partially applied"),
+            "{retained}"
+        );
+        assert!(
+            retained.contains("Retained quarantine: /tmp/trench-quarantine"),
+            "{retained}"
+        );
+        assert!(
+            retained.contains("Recovery is required before retrying."),
+            "{retained}"
+        );
+        assert!(!retained.contains("[ Enter  Back to form ]"), "{retained}");
     }
 
     #[test]
