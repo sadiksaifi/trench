@@ -822,6 +822,26 @@ pub fn run() -> Result<TuiExit> {
                         CreateMouseEffect::Handled | CreateMouseEffect::Ignored => {}
                     }
                 }
+                if let Some(effect) =
+                    route_visible_remove_mouse(&state, mouse, Rect::new(0, 0, width, height))
+                {
+                    match effect {
+                        RemoveMouseEffect::Key(key) => {
+                            if let Some(RemoveInputEffect::Start(request)) = handle_remove_input(
+                                &mut state,
+                                key,
+                                &cwd,
+                                resolved.git.default_base.as_deref(),
+                                resolved.hooks.clone(),
+                            )? {
+                                operation.start(*request);
+                                state.operation_modal = operation.modal().cloned();
+                            }
+                        }
+                        RemoveMouseEffect::Help => state.help_open = true,
+                        RemoveMouseEffect::Ignored => {}
+                    }
+                }
                 continue;
             }
             let TerminalEvent::Key(key) = terminal_event else {
@@ -1169,7 +1189,9 @@ fn visible_surface_key(state: &AppState, key: KeyEvent) -> Option<KeyEvent> {
 
 fn interactive_mouse_surface_visible(state: &AppState) -> bool {
     !state.viewport.is_tiny()
-        && (state.help_open || (state.operation_modal.is_none() && state.create_dialog.is_some()))
+        && (state.help_open
+            || (state.operation_modal.is_none()
+                && (state.create_dialog.is_some() || state.remove_dialog.is_some())))
 }
 
 fn sync_mouse_capture_for_viewport<W: Write>(
@@ -1278,6 +1300,36 @@ fn create_cta_enabled(dialog: &CreateDialog) -> bool {
         crate::tui::create_flow::CreateMode::SelectBase => !dialog.base_candidates().is_empty(),
         crate::tui::create_flow::CreateMode::Name => dialog.preview().is_some(),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoveMouseEffect {
+    Key(RemoveKey),
+    Help,
+    Ignored,
+}
+
+fn route_visible_remove_mouse(
+    state: &AppState,
+    mouse: MouseEvent,
+    area: Rect,
+) -> Option<RemoveMouseEffect> {
+    if !interactive_mouse_surface_visible(state) || state.help_open || state.create_dialog.is_some()
+    {
+        return None;
+    }
+    state.remove_dialog.as_ref().map(|dialog| {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return RemoveMouseEffect::Ignored;
+        }
+        match cockpit::remove_hit_map(dialog, area).target_at((mouse.column, mouse.row)) {
+            Some(cockpit::RemoveHitTarget::Checkbox) => RemoveMouseEffect::Key(RemoveKey::Space),
+            Some(cockpit::RemoveHitTarget::Cta) => RemoveMouseEffect::Key(RemoveKey::Enter),
+            Some(cockpit::RemoveHitTarget::Back) => RemoveMouseEffect::Key(RemoveKey::Escape),
+            Some(cockpit::RemoveHitTarget::Help) => RemoveMouseEffect::Help,
+            None => RemoveMouseEffect::Ignored,
+        }
+    })
 }
 
 fn translate_sync_key(key: KeyEvent) -> Option<SyncKey> {
@@ -2888,6 +2940,125 @@ mod tests {
         assert_eq!(
             state.remove_dialog.as_ref().unwrap().mode(),
             crate::tui::remove_flow::RemoveMode::ConfirmDirtyWorktree
+        );
+    }
+
+    #[test]
+    fn remove_mouse_routes_visible_controls_and_blocks_hidden_surfaces_without_mutation() {
+        let repository = init_repo();
+        let target_path = repository.path().join("worktrees").join("mouse-remove");
+        add_worktree(
+            repository.path(),
+            "mouse-remove",
+            "mouse-remove",
+            &target_path,
+        );
+        std::fs::write(target_path.join("dirty.txt"), "dirty\n").unwrap();
+        let target = WorktreeIdentity {
+            id: WorktreeId::new(&target_path),
+            worktree: "mouse-remove".to_string(),
+            branch: Some("mouse-remove".to_string()),
+            path: target_path,
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+        };
+        let area = Rect::new(0, 0, 60, 16);
+        let mut state = AppState::new(vec![target.clone()]);
+        open_remove_dialog(&mut state, repository.path(), &target.id, Some("main")).unwrap();
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: 60,
+                height: 16,
+            },
+        );
+        let hits = cockpit::remove_hit_map(state.remove_dialog.as_ref().unwrap(), area);
+        let click = |rect: Rect| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + rect.width / 2,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert_eq!(
+            route_visible_remove_mouse(&state, click(hits.checkbox), area),
+            Some(RemoveMouseEffect::Key(RemoveKey::Space))
+        );
+        state
+            .remove_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(RemoveKey::Space);
+        assert!(state.remove_dialog.as_ref().unwrap().delete_branch());
+        assert_eq!(
+            route_visible_remove_mouse(&state, click(hits.cta), area),
+            Some(RemoveMouseEffect::Key(RemoveKey::Enter))
+        );
+        state
+            .remove_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(RemoveKey::Enter);
+        assert_eq!(
+            state.remove_dialog.as_ref().unwrap().mode(),
+            crate::tui::remove_flow::RemoveMode::ConfirmDirtyWorktree
+        );
+        let confirm_hits = cockpit::remove_hit_map(state.remove_dialog.as_ref().unwrap(), area);
+        assert_eq!(
+            route_visible_remove_mouse(&state, click(confirm_hits.back), area),
+            Some(RemoveMouseEffect::Key(RemoveKey::Escape))
+        );
+        assert_eq!(
+            route_visible_remove_mouse(&state, click(confirm_hits.help), area),
+            Some(RemoveMouseEffect::Help)
+        );
+        state.help_open = true;
+        let help_close = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .find(|point| cockpit::help_close_hit(area, *point))
+            .unwrap();
+        let help_click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: help_close.0,
+            row: help_close.1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(route_visible_help_mouse(&mut state, help_click, area));
+        assert!(!state.help_open);
+
+        let backdrop = MouseEvent {
+            column: 0,
+            row: 0,
+            ..click(Rect::new(0, 0, 1, 1))
+        };
+        assert_eq!(
+            route_visible_remove_mouse(&state, backdrop, area),
+            Some(RemoveMouseEffect::Ignored)
+        );
+        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
+            crate::operation::OperationKind::Remove,
+        ));
+        assert_eq!(
+            route_visible_remove_mouse(&state, click(confirm_hits.cta), area),
+            None
+        );
+        state.operation_modal = None;
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: 59,
+                height: 16,
+            },
+        );
+        assert_eq!(
+            route_visible_remove_mouse(&state, click(confirm_hits.cta), Rect::new(0, 0, 59, 16)),
+            None
+        );
+        assert!(
+            target.id.as_path().exists(),
+            "routing tests must not remove the worktree"
         );
     }
 
