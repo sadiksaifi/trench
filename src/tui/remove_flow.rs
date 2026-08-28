@@ -128,6 +128,44 @@ impl RemoveDialog {
         !self.target.detached && self.target.branch.is_some()
     }
 
+    pub(crate) fn action_labels(&self) -> (&'static str, &'static str) {
+        let final_action = if self.delete_branch {
+            ("Remove worktree and branch", "remove worktree and branch")
+        } else {
+            ("Remove worktree", "remove worktree")
+        };
+        match self.mode {
+            RemoveMode::ConfirmDirtyWorktree
+                if self.delete_branch && self.target.merged == Some(false) =>
+            {
+                ("Continue", "continue")
+            }
+            RemoveMode::ConfirmDirtyWorktree => final_action,
+            RemoveMode::ConfirmUnmergedBranch => {
+                ("Remove worktree and branch", "remove worktree and branch")
+            }
+            RemoveMode::Review | RemoveMode::Ready => final_action,
+        }
+    }
+
+    pub(crate) fn help_entries(&self) -> Vec<(&'static str, &'static str)> {
+        let mut entries = Vec::new();
+        if self.mode == RemoveMode::Review && self.can_delete_branch() {
+            entries.push(("Space", "toggle local branch deletion"));
+        }
+        entries.push(("Enter", self.action_labels().1));
+        entries.push((
+            "Esc",
+            if self.mode == RemoveMode::Review {
+                "close"
+            } else {
+                "back"
+            },
+        ));
+        entries.push(("?", "close help"));
+        entries
+    }
+
     pub fn toggle_delete_branch(&mut self) {
         if self.can_delete_branch() {
             self.delete_branch = !self.delete_branch;
@@ -512,5 +550,86 @@ mod tests {
         assert_eq!(dialog.handle_key(RemoveKey::Escape), None);
         assert_eq!(dialog.mode(), RemoveMode::Review);
         assert!(dialog.delete_branch());
+    }
+
+    #[test]
+    fn action_labels_truthfully_follow_review_and_confirmation_sequence() {
+        let fixture = Fixture::new("action-labels");
+        std::fs::write(fixture.worktree_path.join("feature.txt"), "feature\n").unwrap();
+        git(&fixture.worktree_path, &["add", "feature.txt"]);
+        git(&fixture.worktree_path, &["commit", "-m", "feature"]);
+        std::fs::write(fixture.worktree_path.join("dirty.txt"), "dirty\n").unwrap();
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            dialog.action_labels(),
+            ("Remove worktree", "remove worktree")
+        );
+        assert_eq!(
+            dialog.help_entries(),
+            vec![
+                ("Space", "toggle local branch deletion"),
+                ("Enter", "remove worktree"),
+                ("Esc", "close"),
+                ("?", "close help")
+            ]
+        );
+        dialog.handle_key(RemoveKey::Space);
+        assert_eq!(
+            dialog.action_labels(),
+            ("Remove worktree and branch", "remove worktree and branch")
+        );
+        assert_eq!(
+            dialog.help_entries()[1],
+            ("Enter", "remove worktree and branch")
+        );
+        assert_eq!(dialog.handle_key(RemoveKey::Enter), None);
+        assert_eq!(dialog.mode(), RemoveMode::ConfirmDirtyWorktree);
+        assert_eq!(dialog.action_labels(), ("Continue", "continue"));
+        assert_eq!(dialog.help_entries()[0], ("Enter", "continue"));
+        assert_eq!(dialog.handle_key(RemoveKey::Enter), None);
+        assert_eq!(dialog.mode(), RemoveMode::ConfirmUnmergedBranch);
+        assert_eq!(
+            dialog.action_labels(),
+            ("Remove worktree and branch", "remove worktree and branch")
+        );
+        assert_eq!(
+            dialog.help_entries()[0],
+            ("Enter", "remove worktree and branch")
+        );
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Enter),
+            Some(RemoveEffect::Submit)
+        );
+        assert_eq!(dialog.mode(), RemoveMode::Ready);
+        assert_eq!(
+            dialog.action_labels(),
+            ("Remove worktree and branch", "remove worktree and branch")
+        );
+        assert!(!dialog.help_entries().iter().any(|(key, _)| *key == "Space"));
+        assert_eq!(dialog.help_entries()[1], ("Esc", "back"));
+    }
+
+    #[test]
+    fn dirty_confirmation_help_names_the_final_remove_when_no_unmerged_step_follows() {
+        let fixture = Fixture::new("dirty-help");
+        std::fs::write(fixture.worktree_path.join("dirty.txt"), "dirty\n").unwrap();
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+
+        assert_eq!(dialog.handle_key(RemoveKey::Enter), None);
+        assert_eq!(dialog.mode(), RemoveMode::ConfirmDirtyWorktree);
+        assert_eq!(
+            dialog.action_labels(),
+            ("Remove worktree", "remove worktree")
+        );
+        assert_eq!(dialog.help_entries()[0], ("Enter", "remove worktree"));
     }
 }
