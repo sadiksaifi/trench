@@ -3873,10 +3873,81 @@ mod tests {
         assert_eq!(
             remove_dialog_layout(&dialog, Rect::new(0, 0, 120, 30))
                 .unwrap()
-                .modal
-                .width,
-            78
+                .modal,
+            Rect::new(21, 10, 78, 9)
+        );
+        assert_eq!(
+            remove_dialog_layout(&dialog, Rect::new(0, 0, 80, 20))
+                .unwrap()
+                .modal,
+            Rect::new(3, 5, 74, 9)
+        );
+        assert_eq!(
+            remove_dialog_layout(&dialog, Rect::new(0, 0, 60, 16))
+                .unwrap()
+                .modal,
+            Rect::new(3, 3, 54, 9)
         );
         assert!(remove_dialog_layout(&dialog, Rect::new(0, 0, 60, 15)).is_none());
+    }
+
+    #[test]
+    fn unicode_remove_modes_keep_render_and_mouse_geometry_at_minimum_size() {
+        let branch = format!("feature-{}", "界".repeat(18));
+        let (_directory, mut dialog) = remove_dialog_fixture(&branch, true, true);
+        dialog.set_validation_error(Some(format!("{}", "错误".repeat(30))));
+        let area = Rect::new(0, 0, 60, 16);
+
+        let review_hits = remove_hit_map(&dialog, area);
+        assert_eq!(
+            review_hits.target_at((review_hits.checkbox.x, review_hits.checkbox.y)),
+            Some(RemoveHitTarget::Checkbox)
+        );
+        assert_eq!(
+            review_hits.target_at((review_hits.cta.x, review_hits.cta.y)),
+            Some(RemoveHitTarget::Cta)
+        );
+        for theme in ["default", "transparent"] {
+            let mut state = sample_state();
+            state.remove_dialog = Some(dialog.clone());
+            let output = text(&render_buffer(&mut state, 60, 16, theme));
+            assert!(
+                output.contains("Also delete local branch"),
+                "{theme}\n{output}"
+            );
+            assert!(output.contains('…'), "{theme}\n{output}");
+            assert!(output.contains("Error:"), "{theme}\n{output}");
+        }
+
+        dialog.handle_key(crate::tui::remove_flow::RemoveKey::Space);
+        dialog.handle_key(crate::tui::remove_flow::RemoveKey::Enter);
+        let mut state = sample_state();
+        state.remove_dialog = Some(dialog.clone());
+        let dirty = text(&render_buffer(&mut state, 60, 16, "transparent"));
+        assert!(dirty.contains("Confirm changes"), "{dirty}");
+        assert!(dirty.contains("[ Enter  Continue ]"), "{dirty}");
+
+        dialog.handle_key(crate::tui::remove_flow::RemoveKey::Enter);
+        let mut state = sample_state();
+        state.remove_dialog = Some(dialog.clone());
+        let unmerged = text(&render_buffer(&mut state, 60, 16, "default"));
+        assert!(unmerged.contains("Confirm branch"), "{unmerged}");
+        assert!(
+            unmerged.contains("Remove worktree and branch"),
+            "{unmerged}"
+        );
+
+        dialog.handle_key(crate::tui::remove_flow::RemoveKey::Enter);
+        let ready_hits = remove_hit_map(&dialog, area);
+        assert_eq!(
+            ready_hits.target_at((ready_hits.cta.x, ready_hits.cta.y)),
+            Some(RemoveHitTarget::Cta)
+        );
+        assert_eq!(ready_hits.checkbox, Rect::default());
+        let mut state = sample_state();
+        state.remove_dialog = Some(dialog);
+        let ready = text(&render_buffer(&mut state, 60, 16, "transparent"));
+        assert!(ready.contains("[Esc] back"), "{ready}");
+        assert!(!ready.contains("[Space]"), "{ready}");
     }
 }
