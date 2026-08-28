@@ -1659,12 +1659,12 @@ fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &The
     let result_count = visible.len();
     let title = if model.state.refresh.updating_refs {
         format!(
-            " Worktrees · {} · Updating refs {} ",
+            "Worktrees · {} · Updating refs {}",
             result_count,
             flux_frame(model.state.refresh.spinner_tick)
         )
     } else {
-        format!(" Worktrees · {result_count} ")
+        format!("Worktrees · {result_count}")
     };
     let header = Row::new(["Worktree", "Branch", "Git"])
         .style(
@@ -1696,7 +1696,7 @@ fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &The
         ],
     )
     .header(header)
-    .block(panel(Some(title), theme))
+    .block(panel(Some(pane_title(&title, area.width)), theme).title_alignment(Alignment::Center))
     .row_highlight_style(
         theme.with_bg(
             Style::default()
@@ -1754,10 +1754,26 @@ fn flux_frame(tick: u64) -> char {
 }
 
 fn render_inspector(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &Theme) {
-    let block = panel(None, theme);
+    let identity = model.selected();
+    let title = identity.map_or_else(
+        || pane_title("Inspector", area.width),
+        |identity| {
+            let label = if model.state.row_is_waiting(&identity.id) {
+                format!(
+                    "{} {}",
+                    flux_frame(model.state.refresh.spinner_tick),
+                    identity.worktree
+                )
+            } else {
+                identity.worktree.clone()
+            };
+            pane_title(&label, area.width)
+        },
+    );
+    let block = panel(Some(title), theme).title_alignment(Alignment::Center);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let Some(identity) = model.selected() else {
+    let Some(identity) = identity else {
         frame.render_widget(
             Paragraph::new("No worktree selected")
                 .alignment(Alignment::Center)
@@ -1767,21 +1783,7 @@ fn render_inspector(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme:
         return;
     };
     let status = model.status_for(identity);
-    let identity_label = if model.state.row_is_waiting(&identity.id) {
-        format!(
-            "{} {}",
-            flux_frame(model.state.refresh.spinner_tick),
-            identity.worktree
-        )
-    } else {
-        identity.worktree.clone()
-    };
-    let mut lines = vec![Line::from(Span::styled(
-        identity_label,
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    ))];
+    let mut lines = Vec::new();
     if identity.is_current {
         lines.push(Line::from(Span::styled(
             " current ",
@@ -1802,8 +1804,8 @@ fn render_inspector(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme:
             Style::default().fg(theme.fg_muted),
         )));
     }
+    lines.push(Line::from(""));
     lines.extend([
-        Line::from(""),
         metric_line(
             "Branch",
             identity.branch.as_deref().unwrap_or("detached"),
@@ -2080,6 +2082,16 @@ fn panel(title: Option<String>, theme: &Theme) -> Block<'static> {
     }
 }
 
+fn pane_title(title: &str, pane_width: u16) -> String {
+    let content_width = usize::from(pane_width.saturating_sub(4));
+    let title = head_ellipsize(title, content_width);
+    if title.is_empty() {
+        String::new()
+    } else {
+        format!(" {title} ")
+    }
+}
+
 fn active_panel(title: Option<String>, theme: &Theme) -> Block<'static> {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2328,9 +2340,13 @@ mod tests {
     }
 
     fn find_text(buffer: &Buffer, needle: &str) -> (u16, u16) {
+        find_text_in(buffer, buffer.area, needle)
+    }
+
+    fn find_text_in(buffer: &Buffer, area: Rect, needle: &str) -> (u16, u16) {
         let width = u16::try_from(needle.chars().count()).expect("test text fits in u16");
-        for y in buffer.area.y..buffer.area.bottom() {
-            for x in buffer.area.x..buffer.area.right().saturating_sub(width) {
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right().saturating_sub(width) {
                 let candidate = (x..x + width)
                     .map(|column| buffer.cell((column, y)).unwrap().symbol())
                     .collect::<String>();
@@ -2342,6 +2358,200 @@ mod tests {
         panic!("missing {needle:?}\n{}", text(buffer));
     }
 
+    fn assert_title_centered(buffer: &Buffer, area: Rect, title: &str) {
+        let (x, y) = find_text_in(buffer, area, title);
+        let title_width = u16::try_from(UnicodeWidthStr::width(title)).unwrap();
+        let expected_x = area
+            .x
+            .saturating_add(area.width.saturating_sub(title_width) / 2);
+
+        assert_eq!(
+            y,
+            area.y,
+            "title must live in the pane border\n{}",
+            text(buffer)
+        );
+        assert_eq!(
+            x,
+            expected_x,
+            "{title:?} starts at {x}, expected {expected_x}\n{}",
+            text(buffer)
+        );
+    }
+
+    fn assert_unicode_title_centered(buffer: &Buffer, area: Rect, title: &str) {
+        let padded_title_x = (area.x + 1..area.right() - 1)
+            .find(|x| buffer.cell((*x, area.y)).unwrap().symbol() != "─")
+            .expect("pane title");
+        let title_x = padded_title_x + 1;
+        let title_width = u16::try_from(UnicodeWidthStr::width(title)).unwrap();
+        let expected_x = area
+            .x
+            .saturating_add(area.width.saturating_sub(title_width) / 2);
+
+        assert_eq!(title_x, expected_x, "{}", text(buffer));
+    }
+
+    fn wide_panes(width: u16, height: u16) -> (Rect, Rect) {
+        let [body, _keybar] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
+            .areas(Rect::new(0, 0, width, height));
+        let [list, inspector] =
+            Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
+                .areas(body);
+        (list, inspector)
+    }
+
+    #[test]
+    fn wide_pane_titles_are_centered_and_inspector_metadata_reclaims_the_first_row() {
+        for theme_name in ["ops", "catppuccin"] {
+            let main = identity("/repos/trench", "trench", Some("main"), true, false);
+            let feature = identity(
+                "/worktrees/feature-auth",
+                "feature-auth",
+                Some("feature/auth"),
+                false,
+                false,
+            );
+            let mut state = AppState::new(vec![feature, main]);
+            let buffer = render_buffer(&mut state, 120, 24, theme_name);
+            let (list, inspector) = wide_panes(120, 24);
+
+            assert_title_centered(&buffer, list, "Worktrees · 2");
+            assert_title_centered(&buffer, inspector, "feature-auth");
+            let list_body = Rect::new(
+                list.x,
+                list.y + 1,
+                list.width,
+                list.height.saturating_sub(1),
+            );
+            assert_eq!(find_text_in(&buffer, list_body, "Worktree").1, list.y + 1);
+            assert_eq!(
+                find_text_in(&buffer, inspector, "Branch").1,
+                inspector.y + 2
+            );
+            assert!(
+                (inspector.x + 1..inspector.right() - 1).all(|x| buffer
+                    .cell((x, inspector.y + 1))
+                    .unwrap()
+                    .symbol()
+                    == " "),
+                "{}",
+                text(&buffer)
+            );
+            let theme = crate::tui::theme::from_name(theme_name);
+            let title_cell = buffer
+                .cell(find_text_in(&buffer, inspector, "feature-auth"))
+                .unwrap();
+            assert_eq!(title_cell.fg, theme.accent);
+            assert!(title_cell.modifier.contains(Modifier::BOLD));
+        }
+    }
+
+    #[test]
+    fn pane_titles_follow_result_count_and_selected_worktree() {
+        let first = identity("/worktrees/first", "first", Some("first"), false, false);
+        let second = identity("/worktrees/second", "second", Some("second"), false, false);
+        let second_id = second.id.clone();
+        let mut state = AppState::new(vec![first, second]);
+        let initial = render_buffer(&mut state, 120, 24, "ops");
+        let (list, inspector) = wide_panes(120, 24);
+
+        assert_title_centered(&initial, list, "Worktrees · 2");
+        assert_title_centered(&initial, inspector, "first");
+
+        state.identities.push(identity(
+            "/worktrees/third",
+            "third",
+            Some("third"),
+            false,
+            false,
+        ));
+        state.selected = Some(second_id);
+        let updated = render_buffer(&mut state, 120, 24, "ops");
+
+        assert_title_centered(&updated, list, "Worktrees · 3");
+        assert_title_centered(&updated, inspector, "second");
+    }
+
+    #[test]
+    fn long_unicode_inspector_titles_are_ellipsized_without_corrupting_borders() {
+        let worktree = "工作树-🚀-非常长的名字-проект-さくら-長い名前-extra-segment-extra-segment";
+        let selected = identity(
+            "/worktrees/unicode",
+            worktree,
+            Some("feature/unicode"),
+            false,
+            false,
+        );
+        let mut state = AppState::new(vec![selected]);
+
+        let wide = render_buffer(&mut state, 100, 20, "ops");
+        let (_, inspector) = wide_panes(100, 20);
+        let wide_top = &lines(&wide)[usize::from(inspector.y)];
+        assert_eq!(wide.cell((inspector.x, inspector.y)).unwrap().symbol(), "┌");
+        assert_eq!(
+            wide.cell((inspector.right() - 1, inspector.y))
+                .unwrap()
+                .symbol(),
+            "┐"
+        );
+        assert!(wide_top.contains('…'), "{wide_top}");
+        assert!(!wide_top.contains(worktree), "{wide_top}");
+        let wide_title = head_ellipsize(worktree, usize::from(inspector.width - 4));
+        assert_unicode_title_centered(&wide, inspector, &wide_title);
+
+        state.inspector_override = Some(true);
+        let narrow = render_buffer(&mut state, 60, 16, "catppuccin");
+        let narrow_top = &lines(&narrow)[0];
+        assert_eq!(narrow.cell((0, 0)).unwrap().symbol(), "┌");
+        assert_eq!(narrow.cell((59, 0)).unwrap().symbol(), "┐");
+        assert!(narrow_top.contains('…'), "{narrow_top}");
+        let narrow_title = head_ellipsize(worktree, 56);
+        assert_unicode_title_centered(&narrow, Rect::new(0, 0, 60, 15), &narrow_title);
+        assert_eq!(
+            find_text_in(&narrow, Rect::new(0, 0, 60, 15), "Branch").1,
+            2
+        );
+    }
+
+    #[test]
+    fn pane_titles_cover_normal_narrow_waiting_and_empty_inspector_states() {
+        let selected = identity(
+            "/worktrees/feature-auth",
+            "feature-auth",
+            Some("feature/auth"),
+            false,
+            false,
+        );
+        let selected_id = selected.id.clone();
+        let mut state = AppState::new(vec![selected]);
+
+        let normal = render_buffer(&mut state, 80, 20, "ops");
+        assert_title_centered(&normal, Rect::new(0, 0, 80, 19), "Worktrees · 1");
+
+        state.inspector_override = Some(true);
+        let narrow = render_buffer(&mut state, 60, 16, "ops");
+        assert_title_centered(&narrow, Rect::new(0, 0, 60, 15), "feature-auth");
+
+        state.refresh.waiting_rows.insert(selected_id);
+        state.refresh.spinner_tick = 1;
+        let waiting = render_buffer(&mut state, 60, 16, "ops");
+        assert_title_centered(
+            &waiting,
+            Rect::new(0, 0, 60, 15),
+            &format!("{} feature-auth", flux_frame(1)),
+        );
+
+        state.selected = None;
+        let empty = render_buffer(&mut state, 60, 16, "ops");
+        assert_title_centered(&empty, Rect::new(0, 0, 60, 15), "Inspector");
+        assert!(
+            text(&empty).contains("No worktree selected"),
+            "{}",
+            text(&empty)
+        );
+    }
+
     #[test]
     fn resize_view_uses_strict_60_by_16_boundary() {
         let mut state = sample_state();
@@ -2350,6 +2560,8 @@ mod tests {
         let exact_minimum = text(&render_buffer(&mut state, 60, 16, "ops"));
 
         assert!(width_tiny.contains("Resize terminal"), "{width_tiny}");
+        assert!(!width_tiny.contains("Worktrees ·"), "{width_tiny}");
+        assert!(!width_tiny.contains("Inspector"), "{width_tiny}");
         assert!(width_tiny.contains("Current       59×16"), "{width_tiny}");
         assert!(width_tiny.contains("Minimum       60×16"), "{width_tiny}");
         assert!(width_tiny.lines().last().unwrap().contains("[q] quit"));
