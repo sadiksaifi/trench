@@ -125,93 +125,210 @@ fn dim_background(frame: &mut Frame, area: Rect, theme: &Theme) {
 }
 
 fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, theme: &Theme) {
-    let footer = Rect {
-        x: area.x,
-        y: area.bottom().saturating_sub(1),
-        width: area.width,
-        height: 1,
+    let Some(layout) = remove_dialog_layout(dialog, area) else {
+        return;
     };
-    let content_area = Rect {
-        height: area.height.saturating_sub(1),
-        ..area
-    };
-    let modal = centered_rect(
-        content_area.width.saturating_sub(8).min(76),
-        13,
-        content_area,
-    );
-    frame.render_widget(Clear, modal);
-    let title = match dialog.mode() {
-        RemoveMode::Review | RemoveMode::Ready => " Remove worktree ",
-        RemoveMode::ConfirmDirtyWorktree => " Confirm dirty worktree removal ",
-        RemoveMode::ConfirmUnmergedBranch => " Confirm unmerged branch deletion ",
-    };
-    let block = active_panel(Some(title.to_string()), theme);
-    let inner = block.inner(modal);
-    frame.render_widget(block, modal);
+    frame.render_widget(Clear, layout.modal);
+    let block = active_panel(Some(" Remove worktree ".to_string()), theme)
+        .title_alignment(Alignment::Center);
+    frame.render_widget(block, layout.modal);
     let target = dialog.target();
     let mut lines = vec![
-        metric_line("Worktree", &target.worktree, theme),
-        metric_line(
+        create_metric_line("Worktree", &target.worktree, layout.body.width, theme),
+        create_metric_line(
             "Branch",
             target.branch.as_deref().unwrap_or("detached"),
+            layout.body.width,
             theme,
         ),
-        Line::from(""),
     ];
     match dialog.mode() {
         RemoveMode::Review | RemoveMode::Ready => {
-            lines.push(Line::from("The worktree directory will be removed."));
-            if dialog.can_delete_branch() {
+            lines.push(Line::from(head_ellipsize(
+                "The worktree directory will be removed.",
+                usize::from(layout.body.width),
+            )));
+            if dialog.mode() == RemoveMode::Review && dialog.can_delete_branch() {
                 let marker = if dialog.delete_branch() { "[x]" } else { "[ ]" };
                 lines.push(focused_control_line(
                     &format!(
                         "{marker} Also delete local branch {}",
                         target.branch.as_deref().unwrap_or_default()
                     ),
-                    inner.width,
+                    layout.body.width,
                     theme,
                 ));
             }
         }
         RemoveMode::ConfirmDirtyWorktree => {
-            lines.push(Line::from("This worktree has uncommitted changes."));
-            lines.push(Line::from("Press Enter to remove those changes."));
+            lines.push(Line::from(head_ellipsize(
+                "This worktree has uncommitted changes.",
+                usize::from(layout.body.width),
+            )));
+            lines.push(Line::from(head_ellipsize(
+                "Review the risk, then confirm removal.",
+                usize::from(layout.body.width),
+            )));
         }
         RemoveMode::ConfirmUnmergedBranch => {
-            lines.push(Line::from("This local branch is not merged."));
-            lines.push(Line::from("Press Enter to force branch deletion."));
+            lines.push(Line::from(head_ellipsize(
+                "This local branch is not merged.",
+                usize::from(layout.body.width),
+            )));
+            lines.push(Line::from(head_ellipsize(
+                "Review the risk, then confirm branch deletion.",
+                usize::from(layout.body.width),
+            )));
         }
     }
     if let Some(error) = dialog.validation_error() {
-        lines.push(Line::from(""));
-        lines.push(error_line(error, theme));
+        lines.push(create_error_line(error, layout.body.width, theme));
     }
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
             .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_elevated)),
-        inner,
+        layout.body,
     );
-    let items = match dialog.mode() {
-        RemoveMode::Review | RemoveMode::Ready if dialog.can_delete_branch() => vec![
+    let (action, footer_action) = remove_action_details(dialog);
+    render_dialog_action(frame, layout.action, action, true, true, theme);
+    let items = remove_key_hints(dialog, footer_action);
+    render_dialog_keybar(frame, layout.footer, theme, &items);
+}
+
+fn remove_key_hints(dialog: &RemoveDialog, footer_action: &'static str) -> Vec<KeyHint<'static>> {
+    match dialog.mode() {
+        RemoveMode::Review if dialog.can_delete_branch() => vec![
             KeyHint::secondary("Space", "branch"),
-            KeyHint::danger("Enter", "remove"),
+            KeyHint::danger("Enter", footer_action),
             KeyHint::secondary("Esc", "close"),
             KeyHint::secondary("?", "help"),
         ],
         RemoveMode::Review | RemoveMode::Ready => vec![
-            KeyHint::danger("Enter", "remove"),
+            KeyHint::danger("Enter", footer_action),
             KeyHint::secondary("Esc", "close"),
             KeyHint::secondary("?", "help"),
         ],
         RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => vec![
-            KeyHint::danger("Enter", "confirm"),
+            KeyHint::danger("Enter", footer_action),
             KeyHint::secondary("Esc", "back"),
             KeyHint::secondary("?", "help"),
         ],
+    }
+}
+
+fn remove_action_details(dialog: &RemoveDialog) -> (&'static str, &'static str) {
+    dialog.action_labels()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RemoveDialogLayout {
+    footer: Rect,
+    modal: Rect,
+    body: Rect,
+    action: Rect,
+}
+
+fn remove_dialog_layout(dialog: &RemoveDialog, area: Rect) -> Option<RemoveDialogLayout> {
+    if area.width < Viewport::MIN_WIDTH || area.height < Viewport::MIN_HEIGHT {
+        return None;
+    }
+    let footer = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+    let content = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
     };
-    render_dialog_keybar(frame, footer, theme, &items);
+    let body_rows = match dialog.mode() {
+        RemoveMode::Review => 3 + u16::from(dialog.can_delete_branch()),
+        RemoveMode::Ready => 3,
+        RemoveMode::ConfirmDirtyWorktree | RemoveMode::ConfirmUnmergedBranch => 4,
+    } + u16::from(dialog.validation_error().is_some());
+    let modal = centered_rect(
+        content.width.saturating_sub(6).min(76),
+        body_rows.saturating_add(3).max(9),
+        content,
+    );
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+    let [body, action] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    Some(RemoveDialogLayout {
+        footer,
+        modal,
+        body,
+        action,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoveHitTarget {
+    Checkbox,
+    Back,
+    Cta,
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct RemoveHitMap {
+    pub(crate) checkbox: Rect,
+    pub(crate) back: Rect,
+    pub(crate) cta: Rect,
+    pub(crate) help: Rect,
+}
+
+impl RemoveHitMap {
+    pub(crate) fn target_at(&self, point: (u16, u16)) -> Option<RemoveHitTarget> {
+        [
+            (self.checkbox, RemoveHitTarget::Checkbox),
+            (self.cta, RemoveHitTarget::Cta),
+            (self.back, RemoveHitTarget::Back),
+            (self.help, RemoveHitTarget::Help),
+        ]
+        .into_iter()
+        .find_map(|(rect, target)| rect_contains(rect, point).then_some(target))
+    }
+}
+
+pub(crate) fn remove_hit_map(dialog: &RemoveDialog, area: Rect) -> RemoveHitMap {
+    let Some(layout) = remove_dialog_layout(dialog, area) else {
+        return RemoveHitMap::default();
+    };
+    let checkbox = if dialog.mode() == RemoveMode::Review && dialog.can_delete_branch() {
+        Rect::new(
+            layout.body.x,
+            layout.body.y.saturating_add(3),
+            layout.body.width,
+            1,
+        )
+    } else {
+        Rect::default()
+    };
+    let (action, footer_action) = remove_action_details(dialog);
+    let cta_width = u16::try_from(format!("[ Enter  {action} ]").chars().count())
+        .unwrap_or(layout.action.width)
+        .min(layout.action.width);
+    let cta = Rect::new(
+        layout.action.right().saturating_sub(cta_width),
+        layout.action.y,
+        cta_width,
+        1,
+    );
+    let hints = remove_key_hints(dialog, footer_action);
+    let hits = keybar_hit_areas(layout.footer, &hints);
+    let back = hits
+        .iter()
+        .find(|(index, _)| hints[*index].key == "Esc")
+        .map(|(_, rect)| *rect)
+        .unwrap_or_default();
+    let help = hits
+        .iter()
+        .find(|(index, _)| hints[*index].key == "?")
+        .map(|(_, rect)| *rect)
+        .unwrap_or_default();
+    RemoveHitMap {
+        checkbox,
+        back,
+        cta,
+        help,
+    }
 }
 
 fn render_sync_dialog(
@@ -957,7 +1074,25 @@ fn render_create_input(
 }
 
 fn render_create_action(frame: &mut Frame, area: Rect, label: &str, enabled: bool, theme: &Theme) {
-    let style = if enabled {
+    render_dialog_action(frame, area, label, enabled, false, theme);
+}
+
+fn render_dialog_action(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    enabled: bool,
+    danger: bool,
+    theme: &Theme,
+) {
+    let style = if enabled && danger {
+        theme.with_bg(
+            Style::default()
+                .fg(theme.danger_fg)
+                .add_modifier(Modifier::BOLD),
+            theme.danger_bg,
+        )
+    } else if enabled {
         theme.with_bg(
             Style::default()
                 .fg(theme.primary_fg)
@@ -3578,9 +3713,12 @@ mod tests {
         );
         let checkbox = find_text(&buffer, "› [ ] Also delete local branch feature");
         assert_eq!(buffer.cell(checkbox).unwrap().bg, theme.control_bg);
-        let destructive = find_text(&buffer, "[Enter] remove");
+        let destructive = find_text(&buffer, "[Enter] remove worktree");
         assert_eq!(buffer.cell(destructive).unwrap().bg, theme.danger_bg);
         assert_eq!(buffer.cell(destructive).unwrap().fg, theme.danger_fg);
+        let modal_action = find_text(&buffer, "[ Enter  Remove worktree ]");
+        assert_eq!(buffer.cell(modal_action).unwrap().bg, theme.danger_bg);
+        assert_eq!(buffer.cell(modal_action).unwrap().fg, theme.danger_fg);
         assert!(!output.to_lowercase().contains("remote branch"), "{output}");
         assert!(output
             .lines()
@@ -3593,12 +3731,26 @@ mod tests {
             .remove_dialog
             .as_mut()
             .unwrap()
+            .handle_key(crate::tui::remove_flow::RemoveKey::Enter);
+        let ready = text(&render_buffer(&mut state, 100, 24, "ops"));
+        assert!(ready.contains("[ Enter  Remove worktree ]"), "{ready}");
+        assert!(!ready.contains("[Space] branch"), "{ready}");
+        assert!(!ready.contains("Also delete local branch"), "{ready}");
+        state
+            .remove_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key(crate::tui::remove_flow::RemoveKey::Escape);
+        state
+            .remove_dialog
+            .as_mut()
+            .unwrap()
             .handle_key(crate::tui::remove_flow::RemoveKey::Space);
         let minimum = text(&render_buffer(&mut state, 60, 16, "ops"));
         for visible in [
             "Remove worktree",
             "› [x] Also delete local branch feature",
-            "[Enter] remove",
+            "[Enter] remove worktree and branch",
             "[Esc] close",
         ] {
             assert!(minimum.contains(visible), "missing {visible:?}\n{minimum}");
