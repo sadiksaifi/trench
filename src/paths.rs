@@ -18,7 +18,7 @@ fn home_dir_path() -> Result<PathBuf> {
 fn env_dir_path(env_var: &str) -> Option<PathBuf> {
     std::env::var_os(env_var).and_then(|value| {
         let path = PathBuf::from(value);
-        (!path.as_os_str().is_empty()).then_some(path)
+        path.is_absolute().then_some(path)
     })
 }
 
@@ -156,6 +156,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[serial]
+    fn relative_xdg_home_values_are_ignored() {
+        let home = TempDir::new().unwrap();
+        let _guard = EnvironmentGuard::capture(&[
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+        ]);
+        std::env::set_var("HOME", home.path());
+        for name in XDG_ENV_VARS {
+            std::env::set_var(name, "relative/path");
+        }
+
+        assert_eq!(
+            config_dir_path().unwrap(),
+            home.path().join(".config/trench")
+        );
+        assert_eq!(
+            data_dir_path().unwrap(),
+            home.path().join(".local/share/trench")
+        );
+        assert_eq!(
+            state_dir_path().unwrap(),
+            home.path().join(".local/state/trench")
+        );
+        assert_eq!(cache_dir_path().unwrap(), home.path().join(".cache/trench"));
     }
 
     #[test]
