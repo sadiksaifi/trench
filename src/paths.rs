@@ -160,6 +160,30 @@ mod tests {
 
     #[test]
     #[serial]
+    fn absolute_xdg_home_values_override_defaults() {
+        let root = TempDir::new().unwrap();
+        let _guard = EnvironmentGuard::capture(&[
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+        ]);
+        std::env::set_var("XDG_CONFIG_HOME", root.path().join("config"));
+        std::env::set_var("XDG_DATA_HOME", root.path().join("data"));
+        std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
+        std::env::set_var("XDG_CACHE_HOME", root.path().join("cache"));
+
+        assert_eq!(
+            config_dir_path().unwrap(),
+            root.path().join("config/trench")
+        );
+        assert_eq!(data_dir_path().unwrap(), root.path().join("data/trench"));
+        assert_eq!(state_dir_path().unwrap(), root.path().join("state/trench"));
+        assert_eq!(cache_dir_path().unwrap(), root.path().join("cache/trench"));
+    }
+
+    #[test]
+    #[serial]
     fn relative_xdg_home_values_are_ignored() {
         let home = TempDir::new().unwrap();
         let _guard = EnvironmentGuard::capture(&[
