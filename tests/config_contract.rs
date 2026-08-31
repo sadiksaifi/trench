@@ -49,6 +49,34 @@ fn global_config_path(xdg_root: &Path) -> PathBuf {
 }
 
 #[test]
+fn global_config_defaults_to_home_dot_config_when_xdg_home_is_unset() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+
+    let config_path = home.path().join(".config/trench/config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, "[git]\nauto_prune = true\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_trench"))
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env("XDG_STATE_HOME", home.path().join(".local/state"))
+        .args(["list", "--json"])
+        .output()
+        .expect("trench should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(6), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&config_path.display().to_string()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("auto_prune"), "{stderr}");
+}
+
+#[test]
 fn valid_minimal_global_and_project_configs_are_accepted() {
     let repo = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();

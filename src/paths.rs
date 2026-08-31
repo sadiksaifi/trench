@@ -17,18 +17,23 @@ fn env_dir_path(env_var: &str) -> Option<PathBuf> {
     })
 }
 
+fn xdg_home(env_var: &str, default: &str) -> Result<PathBuf> {
+    match env_dir_path(env_var) {
+        Some(path) => Ok(path),
+        None => Ok(home_dir_path()?.join(default)),
+    }
+}
+
 pub fn config_file_path() -> Result<PathBuf> {
-    let base = env_dir_path("XDG_CONFIG_HOME")
-        .or_else(dirs::config_dir)
-        .unwrap_or(home_dir_path()?.join(".config"));
-    Ok(base.join(APP_NAME).join(CONFIG_FILENAME))
+    Ok(xdg_home("XDG_CONFIG_HOME", ".config")?
+        .join(APP_NAME)
+        .join(CONFIG_FILENAME))
 }
 
 pub fn log_file_path() -> Result<PathBuf> {
-    let base = env_dir_path("XDG_STATE_HOME")
-        .or_else(dirs::state_dir)
-        .unwrap_or(home_dir_path()?.join(".local/state"));
-    Ok(base.join(APP_NAME).join(LOG_FILENAME))
+    Ok(xdg_home("XDG_STATE_HOME", ".local/state")?
+        .join(APP_NAME)
+        .join(LOG_FILENAME))
 }
 
 pub fn expand_tilde(path: &str) -> String {
