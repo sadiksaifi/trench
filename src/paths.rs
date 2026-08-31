@@ -1,3 +1,9 @@
+//! Central filesystem path policy for trench.
+//!
+//! Writable application directories follow the XDG Base Directory specification
+//! on every supported platform. Consumers should use this module instead of
+//! reading XDG environment variables or joining application paths directly.
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -6,10 +12,28 @@ const APP_NAME: &str = "trench";
 const CONFIG_FILENAME: &str = "config.toml";
 const LOG_FILENAME: &str = "trench.log";
 
-const XDG_CONFIG_HOME: (&str, &str) = ("XDG_CONFIG_HOME", ".config");
-const XDG_DATA_HOME: (&str, &str) = ("XDG_DATA_HOME", ".local/share");
-const XDG_STATE_HOME: (&str, &str) = ("XDG_STATE_HOME", ".local/state");
-const XDG_CACHE_HOME: (&str, &str) = ("XDG_CACHE_HOME", ".cache");
+#[derive(Clone, Copy)]
+struct XdgHome {
+    env_var: &'static str,
+    default: &'static str,
+}
+
+const XDG_CONFIG_HOME: XdgHome = XdgHome {
+    env_var: "XDG_CONFIG_HOME",
+    default: ".config",
+};
+const XDG_DATA_HOME: XdgHome = XdgHome {
+    env_var: "XDG_DATA_HOME",
+    default: ".local/share",
+};
+const XDG_STATE_HOME: XdgHome = XdgHome {
+    env_var: "XDG_STATE_HOME",
+    default: ".local/state",
+};
+const XDG_CACHE_HOME: XdgHome = XdgHome {
+    env_var: "XDG_CACHE_HOME",
+    default: ".cache",
+};
 
 fn home_dir_path() -> Result<PathBuf> {
     std::env::var_os("HOME")
@@ -32,8 +56,8 @@ fn xdg_home(env_var: &str, default: &str) -> Result<PathBuf> {
     }
 }
 
-fn app_dir_path((env_var, default): (&str, &str)) -> Result<PathBuf> {
-    Ok(xdg_home(env_var, default)?.join(APP_NAME))
+fn app_dir_path(xdg: XdgHome) -> Result<PathBuf> {
+    Ok(xdg_home(xdg.env_var, xdg.default)?.join(APP_NAME))
 }
 
 /// Return the application config directory without creating it.
