@@ -6,6 +6,11 @@ const APP_NAME: &str = "trench";
 const CONFIG_FILENAME: &str = "config.toml";
 const LOG_FILENAME: &str = "trench.log";
 
+const XDG_CONFIG_HOME: (&str, &str) = ("XDG_CONFIG_HOME", ".config");
+const XDG_DATA_HOME: (&str, &str) = ("XDG_DATA_HOME", ".local/share");
+const XDG_STATE_HOME: (&str, &str) = ("XDG_STATE_HOME", ".local/state");
+const XDG_CACHE_HOME: (&str, &str) = ("XDG_CACHE_HOME", ".cache");
+
 fn home_dir_path() -> Result<PathBuf> {
     dirs::home_dir().context("could not determine home directory")
 }
@@ -24,16 +29,38 @@ fn xdg_home(env_var: &str, default: &str) -> Result<PathBuf> {
     }
 }
 
+fn app_dir_path((env_var, default): (&str, &str)) -> Result<PathBuf> {
+    Ok(xdg_home(env_var, default)?.join(APP_NAME))
+}
+
+/// Return the application config directory without creating it.
+pub fn config_dir_path() -> Result<PathBuf> {
+    app_dir_path(XDG_CONFIG_HOME)
+}
+
+/// Return the application data directory without creating it.
+#[allow(dead_code)] // Trench is stateless today; keep the XDG contract centralized for future data.
+pub fn data_dir_path() -> Result<PathBuf> {
+    app_dir_path(XDG_DATA_HOME)
+}
+
+/// Return the application state directory without creating it.
+pub fn state_dir_path() -> Result<PathBuf> {
+    app_dir_path(XDG_STATE_HOME)
+}
+
+/// Return the application cache directory without creating it.
+#[allow(dead_code)] // Trench has no cache today; keep the XDG contract centralized for future cache.
+pub fn cache_dir_path() -> Result<PathBuf> {
+    app_dir_path(XDG_CACHE_HOME)
+}
+
 pub fn config_file_path() -> Result<PathBuf> {
-    Ok(xdg_home("XDG_CONFIG_HOME", ".config")?
-        .join(APP_NAME)
-        .join(CONFIG_FILENAME))
+    Ok(config_dir_path()?.join(CONFIG_FILENAME))
 }
 
 pub fn log_file_path() -> Result<PathBuf> {
-    Ok(xdg_home("XDG_STATE_HOME", ".local/state")?
-        .join(APP_NAME)
-        .join(LOG_FILENAME))
+    Ok(state_dir_path()?.join(LOG_FILENAME))
 }
 
 pub fn expand_tilde(path: &str) -> String {
@@ -89,4 +116,76 @@ pub fn validate_branch_name(name: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use serial_test::serial;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    const XDG_ENV_VARS: [&str; 4] = [
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+    ];
+
+    struct EnvironmentGuard(Vec<(&'static str, Option<OsString>)>);
+
+    impl EnvironmentGuard {
+        fn capture(names: &[&'static str]) -> Self {
+            Self(
+                names
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn xdg_app_directories_use_standard_home_defaults() {
+        let home = TempDir::new().unwrap();
+        let _guard = EnvironmentGuard::capture(&[
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+        ]);
+        std::env::set_var("HOME", home.path());
+        for name in XDG_ENV_VARS {
+            std::env::remove_var(name);
+        }
+
+        assert_eq!(
+            config_dir_path().unwrap(),
+            home.path().join(".config/trench")
+        );
+        assert_eq!(
+            data_dir_path().unwrap(),
+            home.path().join(".local/share/trench")
+        );
+        assert_eq!(
+            state_dir_path().unwrap(),
+            home.path().join(".local/state/trench")
+        );
+        assert_eq!(cache_dir_path().unwrap(), home.path().join(".cache/trench"));
+    }
 }
