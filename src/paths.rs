@@ -12,7 +12,10 @@ const XDG_STATE_HOME: (&str, &str) = ("XDG_STATE_HOME", ".local/state");
 const XDG_CACHE_HOME: (&str, &str) = ("XDG_CACHE_HOME", ".cache");
 
 fn home_dir_path() -> Result<PathBuf> {
-    dirs::home_dir().context("could not determine home directory")
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .context("HOME must be set to an absolute path")
 }
 
 fn env_dir_path(env_var: &str) -> Option<PathBuf> {
@@ -156,6 +159,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[serial]
+    fn xdg_defaults_require_home() {
+        let _guard = EnvironmentGuard::capture(&[
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+        ]);
+        std::env::remove_var("HOME");
+        for name in XDG_ENV_VARS {
+            std::env::remove_var(name);
+        }
+
+        assert!(config_dir_path().is_err());
+        assert!(data_dir_path().is_err());
+        assert!(state_dir_path().is_err());
+        assert!(cache_dir_path().is_err());
     }
 
     #[test]
