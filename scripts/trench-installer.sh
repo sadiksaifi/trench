@@ -289,27 +289,15 @@ configure_shell() {
   else
     config_path_line=$path_line
   fi
-  need_path=1
-  if [ -f "$config_file" ] && grep -F "$config_path_line" "$config_file" >/dev/null 2>&1; then
-    need_path=1
-  elif path_is_first; then
-    need_path=0
-    path_already_present=1
-  elif path_is_present; then
-    need_path=1
-    path_precedence_added=1
+  managed_path_present=0
+  if [ -f "$config_file" ] && awk -v expected="$config_path_line" '
+      $0 == "# >>> trench >>>" { managed = 1; next }
+      $0 == "# <<< trench <<<" { managed = 0; next }
+      managed && $0 == expected { found = 1 }
+      END { exit !found }
+  ' "$config_file"; then
+    managed_path_present=1
   fi
-
-  block_file=$temp_dir/shell-block
-  {
-    printf '%s\n' '# >>> trench >>>'
-    if [ "$need_path" -eq 1 ]; then
-      printf '%s\n' "$config_path_line"
-    fi
-    printf '%s\n' "$shell_init"
-    printf '%s\n' '# <<< trench <<<'
-  } >"$block_file"
-
   stripped_file=$temp_dir/shell-config-stripped
   if [ -f "$config_file" ]; then
     awk '
@@ -324,6 +312,29 @@ configure_shell() {
     sed '$d' "$stripped_file" >"$stripped_file.next"
     mv "$stripped_file.next" "$stripped_file"
   done
+
+  need_path=1
+  if grep -F "$config_path_line" "$stripped_file" >/dev/null 2>&1; then
+    need_path=0
+    path_already_present=1
+  elif [ "$managed_path_present" -eq 1 ]; then
+    need_path=1
+  elif path_is_first; then
+    need_path=0
+    path_already_present=1
+  elif path_is_present; then
+    path_precedence_added=1
+  fi
+
+  block_file=$temp_dir/shell-block
+  {
+    printf '%s\n' '# >>> trench >>>'
+    if [ "$need_path" -eq 1 ]; then
+      printf '%s\n' "$config_path_line"
+    fi
+    printf '%s\n' "$shell_init"
+    printf '%s\n' '# <<< trench <<<'
+  } >"$block_file"
 
   desired_file=$temp_dir/shell-config-desired
   if [ -s "$stripped_file" ]; then

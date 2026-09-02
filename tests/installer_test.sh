@@ -596,6 +596,27 @@ test_existing_path_entry_is_not_duplicated() {
   printf 'ok %d - existing PATH entry is not duplicated\n' "$tests_run"
 }
 
+test_existing_config_path_declaration_is_not_duplicated() {
+  tests_run=$((tests_run + 1))
+  sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
+  trap 'rm -rf "$sandbox"' RETURN
+  mkdir -p "$sandbox/home" "$sandbox/release" "$sandbox/install/bin"
+  write_mock_commands "$sandbox/mock-bin"
+  make_release "$sandbox/release" \
+    trench-aarch64-apple-darwin.tar.gz \
+    aarch64-apple-darwin
+  canonical_install_dir=$(CDPATH='' cd -P -- "$sandbox/install/bin" && pwd -P)
+  path_line="export PATH='$canonical_install_dir':\"\$PATH\""
+  printf '%s\n' "$path_line" >"$sandbox/home/.zshrc"
+
+  output=$(run_installer_with_shell "$sandbox" /bin/zsh) || fail "installation failed: $output"
+
+  [ "$(grep -Fxc "$path_line" "$sandbox/home/.zshrc")" = 1 ] ||
+    fail 'installer duplicated a PATH declaration already present in shell configuration'
+  assert_contains "$output" "PATH: $canonical_install_dir was already present; no PATH entry was added"
+  printf 'ok %d - existing config PATH declaration is not duplicated\n' "$tests_run"
+}
+
 test_install_directory_is_prepended_when_present_later_in_path() {
   tests_run=$((tests_run + 1))
   sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
@@ -831,6 +852,7 @@ test_inherited_zdotdir_is_preferred
 test_bash_and_fish_use_native_login_configuration
 test_rerun_leaves_managed_shell_block_unchanged
 test_existing_path_entry_is_not_duplicated
+test_existing_config_path_declaration_is_not_duplicated
 test_install_directory_is_prepended_when_present_later_in_path
 test_managed_block_is_replaced_without_touching_other_content
 test_symlinked_shell_configuration_updates_its_target
