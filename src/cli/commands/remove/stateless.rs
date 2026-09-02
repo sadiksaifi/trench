@@ -2279,7 +2279,9 @@ mod tests {
     }
 
     fn init_repo(path: &Path) -> git2::Repository {
-        let repo = git2::Repository::init(path).unwrap();
+        let mut options = git2::RepositoryInitOptions::new();
+        options.initial_head("main");
+        let repo = git2::Repository::init_opts(path, &options).unwrap();
         let signature = git2::Signature::now("Test", "test@example.com").unwrap();
         let tree_oid = repo.index().unwrap().write_tree().unwrap();
         {

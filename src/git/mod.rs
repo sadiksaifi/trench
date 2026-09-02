@@ -1005,6 +1005,7 @@ mod tests {
 
         let remote_dir = tempfile::tempdir().unwrap();
         let remote_repo = git2::Repository::init_bare(remote_dir.path()).unwrap();
+        remote_repo.set_head("refs/heads/main").unwrap();
         {
             // Need an initial commit in the bare repo — build tree + commit directly
             let sig = git2::Signature::now("Test", "test@test.com").unwrap();
