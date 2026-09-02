@@ -74,11 +74,10 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
         "trench-release.json",
         "trench-installer.sh",
         "actions/attest@v4",
-        "--draft",
-        "draft=false",
-        "trench-release-workflow:v1",
+        "gh release view \"$RELEASE_TAG\"",
+        "gh release create \"$RELEASE_TAG\"",
         "scripts/release-make-latest.sh",
-        "-f make_latest=\"$make_latest\"",
+        "--latest=\"$make_latest\"",
     ] {
         assert!(workflow.contains(required), "missing `{required}`");
     }
@@ -111,13 +110,21 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
     assert!(!workflow.contains("tagsmith@latest tag"));
     assert!(!workflow.contains("git push refs/tags"));
     assert!(
+        !workflow.contains("--draft") && !workflow.contains("draft=false"),
+        "an intentional release tag must publish directly"
+    );
+    assert!(
+        !workflow.contains("releases/tags/$RELEASE_TAG"),
+        "the REST tag lookup cannot resolve draft releases"
+    );
+    assert!(
         workflow
-            .find("Reject mutation of a published release")
+            .find("Reject an existing release")
             .unwrap()
             < workflow
                 .find("Attest every published release asset")
                 .unwrap(),
-        "release ownership must be checked before publishing attestations"
+        "an existing release must be rejected before publishing attestations"
     );
     for required in [
         "Verify release tag still points to validated commit",
@@ -141,9 +148,16 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
             .find("Reverify release tag before publication")
             .unwrap()
             < workflow
-                .find("Publish only after all assets and attestations succeed")
+                .find("Publish complete release")
                 .unwrap(),
-        "the remote tag must be revalidated after staging and before publication"
+        "the remote tag must be revalidated immediately before publication"
+    );
+    assert!(
+        workflow
+            .find("Reverify release tag before publication")
+            .unwrap()
+            < workflow.find("gh release create").unwrap(),
+        "release creation must publish only after final tag verification"
     );
 }
 

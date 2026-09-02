@@ -148,9 +148,7 @@ jobs:
           tool: git-cliff
 
       - name: Generate transient release notes
-        run: |
-          git cliff --config cliff.toml --current --output "$RUNNER_TEMP/release-notes.md"
-          printf '\n<!-- trench-release-workflow:v1 -->\n' >> "$RUNNER_TEMP/release-notes.md"
+        run: git cliff --config cliff.toml --current --output "$RUNNER_TEMP/release-notes.md"
 
       - name: Assemble manifest and checksums
         run: |
@@ -161,19 +159,11 @@ jobs:
             "$RELEASE_COMMIT" \
             scripts/trench-installer.sh
 
-      - name: Reject mutation of a published release
+      - name: Reject an existing release
         run: |
-          if release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>/dev/null)"; then
-            if test "$(printf '%s' "$release" | jq -r .draft)" = false; then
-              echo "release $RELEASE_TAG is already published; refusing to mutate it" >&2
-              exit 1
-            fi
-            if ! printf '%s' "$release" | jq -e '.body | contains("<!-- trench-release-workflow:v1 -->")' >/dev/null; then
-              echo "draft release $RELEASE_TAG is not owned by this workflow; refusing to mutate it" >&2
-              exit 1
-            fi
-            echo "removing incomplete workflow-owned draft for safe retry"
-            gh release delete "$RELEASE_TAG" --yes
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG already exists; refusing to replace it" >&2
+            exit 1
           fi
 
       - name: Verify release tag still points to validated commit
@@ -187,26 +177,13 @@ jobs:
         with:
           subject-path: dist/*
 
-      - name: Stage complete draft release
-        run: |
-          gh release create "$RELEASE_TAG" \
-            --draft \
-            --verify-tag \
-            --title "Trench $RELEASE_VERSION" \
-            --notes-file "$RUNNER_TEMP/release-notes.md" \
-            dist/trench-aarch64-apple-darwin.tar.gz \
-            dist/trench-x86_64-apple-darwin.tar.gz \
-            dist/trench-checksums.txt \
-            dist/trench-release.json \
-            dist/trench-installer.sh
-
       - name: Reverify release tag before publication
         run: |
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
           test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
 
-      - name: Publish only after all assets and attestations succeed
+      - name: Publish complete release
         run: |
           if latest_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null); then
             make_latest=$(scripts/release-make-latest.sh "$RELEASE_TAG" "$latest_tag")
@@ -220,8 +197,13 @@ jobs:
             make_latest=true
           fi
 
-          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
-            -F draft=false \
-            -f make_latest="$make_latest" \
-            >/dev/null
+          gh release create "$RELEASE_TAG" \
+            --verify-tag \
+            --latest="$make_latest" \
+            --title "Trench $RELEASE_VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            dist/trench-aarch64-apple-darwin.tar.gz \
+            dist/trench-x86_64-apple-darwin.tar.gz \
+            dist/trench-checksums.txt \
+            dist/trench-release.json \
+            dist/trench-installer.sh
