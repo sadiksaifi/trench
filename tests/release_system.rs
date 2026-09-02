@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -49,6 +50,7 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
     for required in [
         "tags: [\"v*\"]",
         "cancel-in-progress: false",
+        "group: release-publish-${{ github.repository }}",
         "uses: ./.github/workflows/ci.yml",
         "fetch-depth: 0",
         "pnpm dlx tagsmith@latest validate",
@@ -62,8 +64,10 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
         "trench-installer.sh",
         "actions/attest@v4",
         "--draft",
-        "--draft=false",
+        "draft=false",
         "trench-release-workflow:v1",
+        "scripts/release-make-latest.sh",
+        "-f make_latest=\"$make_latest\"",
     ] {
         assert!(workflow.contains(required), "missing `{required}`");
     }
@@ -138,6 +142,29 @@ fn shared_ci_uses_current_floating_action_majors() {
         .expect("repository should contain the shared CI workflow");
 
     assert!(workflow.contains("actions/checkout@v7"));
+}
+
+#[test]
+fn release_latest_decision_uses_numeric_semver_ordering() {
+    let script = repository_root().join("scripts/release-make-latest.sh");
+    let decision = |candidate: &str, current: &str| {
+        Command::new(&script)
+            .args([candidate, current])
+            .output()
+            .expect("release latest decision script should run")
+    };
+
+    let newer = decision("v1.10.0", "v1.9.99");
+    assert!(newer.status.success());
+    assert_eq!(String::from_utf8(newer.stdout).unwrap().trim(), "true");
+
+    for (candidate, current) in [("v1.2.3", "v1.2.3"), ("v1.2.2", "v1.2.3")] {
+        let older = decision(candidate, current);
+        assert!(older.status.success());
+        assert_eq!(String::from_utf8(older.stdout).unwrap().trim(), "false");
+    }
+
+    assert!(!decision("v1.2", "v1.1.0").status.success());
 }
 
 #[test]

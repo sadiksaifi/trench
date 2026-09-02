@@ -113,6 +113,9 @@ jobs:
   publish:
     name: Attest and publish complete release
     needs: [validate, gates, build]
+    concurrency:
+      group: release-publish-${{ github.repository }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -204,4 +207,21 @@ jobs:
           test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
 
       - name: Publish only after all assets and attestations succeed
-        run: gh release edit "$RELEASE_TAG" --draft=false --latest
+        run: |
+          if latest_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null); then
+            make_latest=$(scripts/release-make-latest.sh "$RELEASE_TAG" "$latest_tag")
+          else
+            published_stable_count=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '[.[] | select(.draft == false and .prerelease == false)] | length')
+            if test "$published_stable_count" -ne 0; then
+              echo 'could not resolve the current latest stable release; refusing to publish' >&2
+              exit 1
+            fi
+            make_latest=true
+          fi
+
+          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            -F draft=false \
+            -f make_latest="$make_latest" \
+            >/dev/null
