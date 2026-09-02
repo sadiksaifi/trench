@@ -173,6 +173,12 @@ jobs:
             gh release delete "$RELEASE_TAG" --yes
           fi
 
+      - name: Verify release tag still points to validated commit
+        run: |
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+
       - name: Attest every published release asset
         uses: actions/attest-build-provenance@v3
         with:
@@ -190,6 +196,12 @@ jobs:
             dist/trench-checksums.txt \
             dist/trench-release.json \
             dist/trench-installer.sh
+
+      - name: Reverify release tag before publication
+        run: |
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
 
       - name: Publish only after all assets and attestations succeed
         run: gh release edit "$RELEASE_TAG" --draft=false --latest

@@ -93,6 +93,32 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
                 .unwrap(),
         "release ownership must be checked before publishing attestations"
     );
+    for required in [
+        "Verify release tag still points to validated commit",
+        "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG",
+        "git cat-file -t \"refs/tags/$RELEASE_TAG\"",
+        "git rev-parse \"refs/tags/$RELEASE_TAG^{commit}\"",
+    ] {
+        assert!(workflow.contains(required), "missing `{required}`");
+    }
+    assert!(
+        workflow
+            .find("Verify release tag still points to validated commit")
+            .unwrap()
+            < workflow
+                .find("Attest every published release asset")
+                .unwrap(),
+        "the remote tag must be revalidated before attestation"
+    );
+    assert!(
+        workflow
+            .find("Reverify release tag before publication")
+            .unwrap()
+            < workflow
+                .find("Publish only after all assets and attestations succeed")
+                .unwrap(),
+        "the remote tag must be revalidated after staging and before publication"
+    );
 }
 
 #[test]
