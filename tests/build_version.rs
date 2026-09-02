@@ -45,6 +45,42 @@ fn repository() -> TempDir {
     repo
 }
 
+fn write_probe_crate(root: &Path) {
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::create_dir(root.join("build")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"version-probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "fn main() { println!(\"{}\", env!(\"TRENCH_BUILD_VERSION\")); }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("build.rs"), include_str!("../build.rs")).unwrap();
+    std::fs::write(
+        root.join("build/version.rs"),
+        include_str!("../build/version.rs"),
+    )
+    .unwrap();
+    std::fs::write(root.join(".gitignore"), "/target\n/Cargo.lock\n").unwrap();
+}
+
+fn run_probe(root: &Path) -> String {
+    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["run", "--quiet"])
+        .current_dir(root)
+        .output()
+        .expect("version probe crate should build");
+    assert!(
+        output.status.success(),
+        "probe build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
 #[test]
 fn official_build_uses_the_exact_annotated_release_tag() {
     let repo = repository();
@@ -160,4 +196,38 @@ fn dirty_untagged_build_reports_the_exact_development_version() {
     let info = build_version::derive(repo.path(), false).expect("dirty untagged build");
 
     assert_eq!(info.version, format!("0.0.0-dev.g{commit}.dirty"));
+}
+
+#[test]
+fn cargo_rebuild_detects_a_new_top_level_untracked_file() {
+    let repo = repository();
+    write_probe_crate(repo.path());
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "--quiet", "-m", "probe crate"]);
+    let commit = short_commit(repo.path());
+
+    assert_eq!(run_probe(repo.path()), format!("0.0.0-dev.g{commit}"));
+    assert_eq!(run_probe(repo.path()), format!("0.0.0-dev.g{commit}"));
+
+    std::fs::write(repo.path().join("new-untracked-file"), "dirty\n").unwrap();
+
+    assert_eq!(run_probe(repo.path()), format!("0.0.0-dev.g{commit}.dirty"));
+}
+
+#[test]
+fn cargo_rebuild_detects_git_initialized_after_a_metadata_free_build() {
+    let root = TempDir::new().unwrap();
+    write_probe_crate(root.path());
+
+    assert_eq!(run_probe(root.path()), "0.0.0-dev.unknown");
+    assert_eq!(run_probe(root.path()), "0.0.0-dev.unknown");
+
+    git(root.path(), &["init", "--quiet"]);
+    git(root.path(), &["config", "user.name", "Trench Tests"]);
+    git(root.path(), &["config", "user.email", "trench@example.com"]);
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "--quiet", "-m", "initialize"]);
+    let commit = short_commit(root.path());
+
+    assert_eq!(run_probe(root.path()), format!("0.0.0-dev.g{commit}"));
 }

@@ -44,6 +44,13 @@ fn main() -> Result<(), String> {
 fn emit_rerun_triggers(root: &Path) {
     println!("cargo:rerun-if-env-changed={RELEASE_BUILD_ENV}");
 
+    let dot_git = root.join(".git");
+    if !dot_git.exists() {
+        // Cargo must notice when a source archive becomes a Git checkout.
+        // Watching the missing path reruns metadata derivation until then.
+        println!("cargo:rerun-if-changed={}", dot_git.display());
+    }
+
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
             let name = entry.file_name();
