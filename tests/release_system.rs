@@ -43,6 +43,17 @@ fn shared_ci_runs_every_required_make_gate_for_prs_main_and_releases() {
 }
 
 #[test]
+fn make_test_runs_git_repository_tests_serially() {
+    let makefile = fs::read_to_string(repository_root().join("Makefile"))
+        .expect("repository should contain the Makefile");
+
+    assert!(
+        makefile.contains("$(CARGO) test -- --test-threads=1"),
+        "parallel repository tests can deadlock inside libgit2"
+    );
+}
+
+#[test]
 fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() {
     let workflow = fs::read_to_string(repository_root().join(".github/workflows/release.yml"))
         .expect("repository should contain the release workflow");
