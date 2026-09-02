@@ -6,22 +6,22 @@ fn trench_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_trench"))
 }
 
-fn version_with_state_home(state_home: &Path) -> Output {
+fn startup_with_state_home(state_home: &Path) -> Output {
     Command::new(trench_bin())
-        .arg("--version")
+        .args(["completions", "bash"])
         .env("XDG_STATE_HOME", state_home)
         .output()
-        .expect("failed to run trench --version")
+        .expect("failed to run trench completions bash")
 }
 
-fn spawn_version_with_state_home(state_home: &Path) -> Child {
+fn spawn_startup_with_state_home(state_home: &Path) -> Child {
     Command::new(trench_bin())
-        .arg("--version")
+        .args(["completions", "bash"])
         .env("XDG_STATE_HOME", state_home)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("failed to spawn trench --version")
+        .expect("failed to spawn trench completions bash")
 }
 
 fn diagnostic_log_names(log_dir: &Path) -> Vec<String> {
@@ -48,7 +48,7 @@ fn linux_and_macos_style_xdg_state_homes_hold_diagnostics() {
     ];
 
     for state_home in state_homes {
-        let output = version_with_state_home(&state_home);
+        let output = startup_with_state_home(&state_home);
 
         assert!(output.status.success());
         let log_path = state_home.join("trench/trench.log");
@@ -65,8 +65,8 @@ fn unavailable_state_path_does_not_change_command_results_or_exit_status() {
     let blocked_state_home = dir.path().join("not-a-directory");
     std::fs::write(&blocked_state_home, "blocks directory creation").unwrap();
 
-    let baseline = version_with_state_home(&usable_state_home);
-    let unavailable = version_with_state_home(&blocked_state_home);
+    let baseline = startup_with_state_home(&usable_state_home);
+    let unavailable = startup_with_state_home(&blocked_state_home);
 
     assert_eq!(unavailable.status.code(), baseline.status.code());
     assert_eq!(unavailable.stdout, baseline.stdout);
@@ -88,7 +88,7 @@ fn startup_rotates_one_mibibyte_logs_and_caps_retention_at_five_files() {
         .unwrap();
     }
 
-    let output = version_with_state_home(&state_home);
+    let output = startup_with_state_home(&state_home);
 
     assert!(output.status.success());
     let names = diagnostic_log_names(&log_dir);
@@ -134,7 +134,7 @@ fn concurrent_process_startup_keeps_diagnostic_retention_bounded() {
         .unwrap();
     process_lock.lock().unwrap();
     let mut children = (0..12)
-        .map(|_| spawn_version_with_state_home(&state_home))
+        .map(|_| spawn_startup_with_state_home(&state_home))
         .collect::<Vec<_>>();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -163,7 +163,7 @@ fn concurrent_process_startup_keeps_diagnostic_retention_bounded() {
         "diagnostic lock contention delayed a product process"
     );
 
-    let recovery = version_with_state_home(&state_home);
+    let recovery = startup_with_state_home(&state_home);
     assert!(recovery.status.success());
     assert_eq!(
         diagnostic_log_names(&log_dir),
