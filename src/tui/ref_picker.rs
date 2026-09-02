@@ -16,7 +16,6 @@ pub struct RefPicker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefPickerKey {
     Character(char),
-    Backspace,
     Edit(LineEdit),
     Up,
     Down,
@@ -80,6 +79,7 @@ impl RefPicker {
             .unwrap_or(0);
     }
 
+    #[cfg(test)]
     pub fn query(&self) -> &str {
         self.query.value()
     }
@@ -146,10 +146,6 @@ impl RefPicker {
         match key {
             RefPickerKey::Character(character) => {
                 self.edit_query(LineEdit::Insert(character));
-                None
-            }
-            RefPickerKey::Backspace => {
-                self.edit_query(LineEdit::DeletePreviousCharacter);
                 None
             }
             RefPickerKey::Edit(edit) => {

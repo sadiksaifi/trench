@@ -5,12 +5,14 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitCode {
     /// 0 — Success
+    #[cfg(test)]
     Success,
     /// 1 — General error
     GeneralError,
     /// 2 — Not found
     NotFound,
     /// 3 — Branch exists
+    #[cfg(test)]
     BranchExists,
     /// 4 — Hook failed
     HookFailed,
@@ -30,9 +32,11 @@ impl ExitCode {
     /// Return the numeric exit code for this variant.
     pub fn code(self) -> i32 {
         match self {
+            #[cfg(test)]
             Self::Success => 0,
             Self::GeneralError => 1,
             Self::NotFound => 2,
+            #[cfg(test)]
             Self::BranchExists => 3,
             Self::HookFailed => 4,
             Self::GitError => 5,
@@ -52,9 +56,11 @@ impl ExitCode {
 impl std::fmt::Display for ExitCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let desc = match self {
+            #[cfg(test)]
             Self::Success => "success",
             Self::GeneralError => "general error",
             Self::NotFound => "not found",
+            #[cfg(test)]
             Self::BranchExists => "branch exists",
             Self::HookFailed => "hook failed",
             Self::GitError => "git error",

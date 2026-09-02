@@ -17,7 +17,6 @@ pub enum SyncMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncKey {
     Character(char),
-    Backspace,
     Edit(LineEdit),
     Tab,
     Enter,
@@ -70,6 +69,7 @@ impl SyncDialog {
         }
     }
 
+    #[cfg(test)]
     pub fn target(&self) -> &WorktreeId {
         &self.target
     }
@@ -90,6 +90,7 @@ impl SyncDialog {
         self.strategy
     }
 
+    #[cfg(test)]
     pub fn set_strategy(&mut self, strategy: SyncStrategy) {
         self.strategy = strategy;
     }
@@ -102,6 +103,7 @@ impl SyncDialog {
         self.base_picker.candidates()
     }
 
+    #[cfg(test)]
     pub fn base_query(&self) -> &str {
         self.base_picker.query()
     }
@@ -176,11 +178,7 @@ impl SyncDialog {
             }
             SyncKey::Enter => self.submission().map(SyncEffect::Submit),
             SyncKey::Escape => Some(SyncEffect::Close),
-            SyncKey::Character(_)
-            | SyncKey::Backspace
-            | SyncKey::Edit(_)
-            | SyncKey::Up
-            | SyncKey::Down => None,
+            SyncKey::Character(_) | SyncKey::Edit(_) | SyncKey::Up | SyncKey::Down => None,
         }
     }
 
@@ -189,9 +187,6 @@ impl SyncDialog {
             SyncKey::Character(character) => {
                 self.base_picker
                     .handle_key(RefPickerKey::Character(character));
-            }
-            SyncKey::Backspace => {
-                self.base_picker.handle_key(RefPickerKey::Backspace);
             }
             SyncKey::Edit(edit) => {
                 self.base_picker.handle_key(RefPickerKey::Edit(edit));

@@ -4,19 +4,25 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result};
 
-use super::stream::{stream_and_collect, stream_child_with_deadline, wait_child_with_deadline};
+#[cfg(test)]
+use super::stream::stream_and_collect;
+use super::stream::{stream_child_with_deadline, wait_child_with_deadline};
 use super::types::{HookEmitter, HookStep, HookStreamEvent};
 
 /// Output from executing the shell step.
 #[derive(Debug, Clone)]
 pub struct ShellOutput {
     /// The script that was executed.
+    #[cfg(test)]
     pub script: String,
     /// Captured stdout.
+    #[cfg(test)]
     pub stdout: String,
     /// Captured stderr.
+    #[cfg(test)]
     pub stderr: String,
     /// Process exit code.
+    #[cfg(test)]
     pub exit_code: i32,
 }
 
@@ -33,6 +39,7 @@ pub struct ShellStepError {
 /// The script runs with cwd set to `cwd` and TRENCH_* env vars from `env_vars`.
 /// stdout/stderr stream to the terminal in real time and are captured for logging.
 /// Returns error on non-zero exit (FR-20).
+#[cfg(test)]
 pub async fn execute_shell_step(
     script: &str,
     cwd: &Path,
@@ -51,7 +58,7 @@ pub async fn execute_shell_step(
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
 
-    let (stdout_buf, stderr_buf) = stream_and_collect(stdout, stderr).await?;
+    let (_stdout_buf, _stderr_buf) = stream_and_collect(stdout, stderr).await?;
 
     let status = child
         .wait()
@@ -61,9 +68,13 @@ pub async fn execute_shell_step(
     let exit_code = status.code().unwrap_or(-1);
 
     let output = ShellOutput {
+        #[cfg(test)]
         script: script.to_string(),
-        stdout: stdout_buf,
-        stderr: stderr_buf,
+        #[cfg(test)]
+        stdout: _stdout_buf,
+        #[cfg(test)]
+        stderr: _stderr_buf,
+        #[cfg(test)]
         exit_code,
     };
 
@@ -96,7 +107,7 @@ pub async fn execute_shell_step_streaming(
     let mut child = command.spawn().context("failed to spawn shell script")?;
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
-    let (stdout_buf, stderr_buf) = stream_child_with_deadline(
+    let (_stdout_buf, _stderr_buf) = stream_child_with_deadline(
         &mut child,
         stdout,
         stderr,
@@ -116,9 +127,13 @@ pub async fn execute_shell_step_streaming(
         .context("failed to wait for shell script")?;
     let exit_code = status.code().unwrap_or(-1);
     let output = ShellOutput {
+        #[cfg(test)]
         script: script.to_string(),
-        stdout: stdout_buf,
-        stderr: stderr_buf,
+        #[cfg(test)]
+        stdout: _stdout_buf,
+        #[cfg(test)]
+        stderr: _stderr_buf,
+        #[cfg(test)]
         exit_code,
     };
     if !status.success() {

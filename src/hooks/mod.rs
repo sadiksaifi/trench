@@ -8,9 +8,12 @@ pub mod types;
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::config::{HookDef, HooksConfig};
+use crate::config::HookDef;
+#[cfg(test)]
+use crate::config::HooksConfig;
 
 /// How a hook failure should be treated by the calling operation (FR-24).
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureSeverity {
     /// Operation must be cancelled (pre_create, pre_sync, pre_remove, post_create).
@@ -51,6 +54,7 @@ impl HookEvent {
 
 impl HookEvent {
     /// Return the failure severity for this hook event per FR-24.
+    #[cfg(test)]
     pub fn failure_severity(&self) -> FailureSeverity {
         match self {
             Self::PreCreate | Self::PreSync | Self::PreRemove | Self::PostCreate => {
@@ -80,6 +84,7 @@ pub struct HookEnvContext {
 }
 
 /// Retrieve the HookConfig for a specific lifecycle event from HooksConfig.
+#[cfg(test)]
 pub fn get_hook_config<'a>(hooks: &'a HooksConfig, event: &HookEvent) -> Option<&'a HookConfig> {
     match event {
         HookEvent::PreCreate => hooks.pre_create.as_ref(),

@@ -1,0 +1,195 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.tagsmith.outputs.tag }}
+      version: ${{ steps.tagsmith.outputs.version }}
+      commit: ${{ steps.tagsmith.outputs.commit }}
+    steps:
+      - name: Checkout complete repository history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch complete tag namespace
+        run: git fetch --force --tags origin main
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Validate canonical annotated release tag
+        id: tagsmith
+        run: pnpm dlx tagsmith@latest validate --tag "$GITHUB_REF_NAME" --target trench --channel stable --github-output
+
+      - name: Verify the tag commit is clean and based on main
+        env:
+          RELEASE_COMMIT: ${{ steps.tagsmith.outputs.commit }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
+
+  gates:
+    name: Shared release gates
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [validate, gates]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            host_arch: arm64
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            host_arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      TRENCH_RELEASE_BUILD: "true"
+    steps:
+      - name: Checkout validated release commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Verify native runner architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.host_arch }}
+        run: test "$(uname -m)" = "$EXPECTED_ARCH"
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build official release binary
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Verify portability and package stable versionless archive
+        env:
+          TRENCH_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          file "target/$TARGET/release/trench"
+          scripts/package-release.sh "$TARGET" "target/$TARGET/release/trench" .
+
+      - name: Upload architecture archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: trench-${{ matrix.target }}
+          path: trench-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Attest and publish complete release
+    needs: [validate, gates, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+    steps:
+      - name: Checkout validated release commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Download both native archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: trench-*-apple-darwin
+          path: dist
+          merge-multiple: true
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: Generate transient release notes
+        run: |
+          git cliff --config cliff.toml --current --output "$RUNNER_TEMP/release-notes.md"
+          printf '\n<!-- trench-release-workflow:v1 -->\n' >> "$RUNNER_TEMP/release-notes.md"
+
+      - name: Assemble manifest and checksums
+        run: |
+          scripts/assemble-release.sh \
+            dist \
+            "$RELEASE_TAG" \
+            "$RELEASE_VERSION" \
+            "$RELEASE_COMMIT" \
+            scripts/trench-installer.sh
+
+      - name: Reject mutation of a published release
+        run: |
+          if release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>/dev/null)"; then
+            if test "$(printf '%s' "$release" | jq -r .draft)" = false; then
+              echo "release $RELEASE_TAG is already published; refusing to mutate it" >&2
+              exit 1
+            fi
+            if ! printf '%s' "$release" | jq -e '.body | contains("<!-- trench-release-workflow:v1 -->")' >/dev/null; then
+              echo "draft release $RELEASE_TAG is not owned by this workflow; refusing to mutate it" >&2
+              exit 1
+            fi
+            echo "removing incomplete workflow-owned draft for safe retry"
+            gh release delete "$RELEASE_TAG" --yes
+          fi
+
+      - name: Attest every published release asset
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/*
+
+      - name: Stage complete draft release
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --draft \
+            --verify-tag \
+            --title "Trench $RELEASE_VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            dist/trench-aarch64-apple-darwin.tar.gz \
+            dist/trench-x86_64-apple-darwin.tar.gz \
+            dist/trench-checksums.txt \
+            dist/trench-release.json \
+            dist/trench-installer.sh
+
+      - name: Publish only after all assets and attestations succeed
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest

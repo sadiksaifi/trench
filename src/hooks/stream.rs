@@ -8,6 +8,7 @@ use super::types::OutputStream;
 
 /// Stream stdout/stderr from a child process to the terminal in real time,
 /// capturing both into buffers. Returns `(stdout, stderr)` strings.
+#[cfg(test)]
 pub async fn stream_and_collect(
     stdout: ChildStdout,
     stderr: ChildStderr,

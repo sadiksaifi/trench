@@ -1,9 +1,11 @@
+pub mod build_info;
 mod cli;
 mod config;
 mod create_plan;
 mod exit_code;
 mod git;
 mod hooks;
+mod installation;
 mod logging;
 mod navigation;
 mod operation;
@@ -11,6 +13,7 @@ mod output;
 mod paths;
 mod ref_catalog;
 mod tui;
+mod upgrade;
 mod worktree_catalog;
 mod worktree_policy;
 
@@ -25,7 +28,7 @@ const TUI_SWITCH_PATH_FILE_ENV: &str = "TRENCH_TUI_SWITCH_PATH_FILE";
 #[derive(Parser, Debug)]
 #[command(
     name = "trench",
-    version,
+    version = build_info::VERSION,
     about = "A fast, ergonomic, headless-first Git worktree manager",
     disable_help_subcommand = true
 )]
@@ -140,6 +143,8 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Upgrade trench using its owning installation manager
+    Upgrade,
     /// Initialize .trench.toml in current directory
     Init {
         /// Overwrite existing .trench.toml
@@ -234,8 +239,8 @@ fn main() -> anyhow::Result<()> {
             no_hooks,
             dry_run,
             json,
-        }) => run_remove(
-            &branch,
+        }) => run_remove(RemoveCliRequest {
+            identifier: &branch,
             yes,
             force_worktree,
             delete_branch,
@@ -243,7 +248,7 @@ fn main() -> anyhow::Result<()> {
             no_hooks,
             dry_run,
             json,
-        ),
+        }),
         Some(Commands::Switch { branch, print_path }) => run_switch(&branch, print_path),
         Some(Commands::Open { branch }) => run_open(&branch),
         Some(Commands::List { json, porcelain }) => run_list(json, porcelain),
@@ -264,6 +269,7 @@ fn main() -> anyhow::Result<()> {
             dry_run,
             json,
         }) => run_sync(&branch, strategy, base.as_deref(), json, dry_run, no_hooks),
+        Some(Commands::Upgrade) => run_upgrade(),
         None => {
             anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
         }
@@ -297,6 +303,22 @@ fn main() -> anyhow::Result<()> {
     }
 
     result
+}
+
+fn run_upgrade() -> anyhow::Result<()> {
+    match upgrade::execute()? {
+        upgrade::UpgradeOutcome::Updated { from, to } => {
+            println!("Upgraded trench from {from} to {to}");
+        }
+        upgrade::UpgradeOutcome::AlreadyCurrent { version } => {
+            println!("trench {version} is already up to date");
+        }
+        upgrade::UpgradeOutcome::Homebrew(status) if !status.success() => {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        upgrade::UpgradeOutcome::Homebrew(_) => {}
+    }
+    Ok(())
 }
 
 fn write_tui_switch_path(path: &std::path::Path) -> anyhow::Result<()> {
@@ -404,8 +426,8 @@ fn run_create(
     }
 }
 
-fn run_remove(
-    identifier: &str,
+struct RemoveCliRequest<'a> {
+    identifier: &'a str,
     yes: bool,
     force_worktree: bool,
     delete_branch: bool,
@@ -413,7 +435,9 @@ fn run_remove(
     no_hooks: bool,
     dry_run: bool,
     json: bool,
-) -> anyhow::Result<()> {
+}
+
+fn run_remove(request: RemoveCliRequest<'_>) -> anyhow::Result<()> {
     use cli::commands::remove::stateless::{
         InteractiveTerminal, RemovalAssessment, RemovalAuthorizationError, RemoveOptions,
     };
@@ -424,27 +448,27 @@ fn run_remove(
     let global_config = config::load_global_config()?;
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
     let configured_base = resolved.git.default_base.clone();
-    let hooks_config = (!no_hooks).then_some(resolved.hooks).flatten();
-    let assessment = match RemovalAssessment::discover(&cwd, identifier, configured_base.as_deref())
-    {
-        Ok(assessment) => assessment,
-        Err(error) => {
-            eprintln!("error: {error}");
-            if error.to_string().contains("not found") {
-                ExitCode::NotFound.exit();
+    let hooks_config = (!request.no_hooks).then_some(resolved.hooks).flatten();
+    let assessment =
+        match RemovalAssessment::discover(&cwd, request.identifier, configured_base.as_deref()) {
+            Ok(assessment) => assessment,
+            Err(error) => {
+                eprintln!("error: {error}");
+                if error.to_string().contains("not found") {
+                    ExitCode::NotFound.exit();
+                }
+                ExitCode::GeneralError.exit();
             }
-            ExitCode::GeneralError.exit();
-        }
-    };
+        };
     let options = RemoveOptions {
-        yes,
-        force_worktree,
-        delete_branch,
-        force_branch,
-        no_hooks,
-        dry_run,
+        yes: request.yes,
+        force_worktree: request.force_worktree,
+        delete_branch: request.delete_branch,
+        force_branch: request.force_branch,
+        no_hooks: request.no_hooks,
+        dry_run: request.dry_run,
     };
-    let plan = if dry_run || yes {
+    let plan = if request.dry_run || request.yes {
         assessment.authorize(options)
     } else if let Some(terminal) = InteractiveTerminal::detect() {
         let prompt = format!(
@@ -479,8 +503,8 @@ fn run_remove(
             }
         }
     };
-    if dry_run {
-        if json {
+    if request.dry_run {
+        if request.json {
             println!("{}", output::json::format_json_value(&plan)?);
         } else {
             println!("{plan}");
@@ -497,7 +521,7 @@ fn run_remove(
         &operation::TerminalEmitter,
     )) {
         Ok(operation::OperationOutcome::Remove(outcome)) => {
-            if json {
+            if request.json {
                 println!("{}", output::json::format_json_value(&outcome)?);
             } else {
                 eprintln!("{outcome}");
@@ -506,7 +530,7 @@ fn run_remove(
         }
         Ok(_) => unreachable!("remove request returned a create outcome"),
         Err(failure) => {
-            if json {
+            if request.json {
                 println!("{}", output::json::format_json_value(&failure)?);
             } else {
                 eprintln!("error: {failure}");

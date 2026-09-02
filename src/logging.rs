@@ -31,12 +31,17 @@ impl DiagnosticFilter {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Operation {
+    #[cfg(test)]
     List,
     Create,
+    #[cfg(test)]
     Switch,
+    #[cfg(test)]
     Open,
     Sync,
+    #[cfg(test)]
     Remove,
+    #[cfg(test)]
     Tui,
     Watch,
 }
@@ -44,12 +49,17 @@ pub enum Operation {
 impl Operation {
     fn as_str(self) -> &'static str {
         match self {
+            #[cfg(test)]
             Self::List => "list",
             Self::Create => "create",
+            #[cfg(test)]
             Self::Switch => "switch",
+            #[cfg(test)]
             Self::Open => "open",
             Self::Sync => "sync",
+            #[cfg(test)]
             Self::Remove => "remove",
+            #[cfg(test)]
             Self::Tui => "tui",
             Self::Watch => "watch",
         }
@@ -62,6 +72,7 @@ pub enum Stage {
     Validate,
     Hook,
     Git,
+    #[cfg(test)]
     Render,
     Complete,
     Initialize,
@@ -76,6 +87,7 @@ impl Stage {
             Self::Validate => "validate",
             Self::Hook => "hook",
             Self::Git => "git",
+            #[cfg(test)]
             Self::Render => "render",
             Self::Complete => "complete",
             Self::Initialize => "initialize",
@@ -88,12 +100,10 @@ impl Stage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticError {
     Io,
-    PermissionDenied,
     NotFound,
     InvalidInput,
     Git,
     Hook,
-    Config,
     Internal,
 }
 
@@ -101,12 +111,10 @@ impl DiagnosticError {
     fn as_str(self) -> &'static str {
         match self {
             Self::Io => "io",
-            Self::PermissionDenied => "permission_denied",
             Self::NotFound => "not_found",
             Self::InvalidInput => "invalid_input",
             Self::Git => "git",
             Self::Hook => "hook",
-            Self::Config => "config",
             Self::Internal => "internal",
         }
     }

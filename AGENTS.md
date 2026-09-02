@@ -43,3 +43,12 @@
 - Structured and preview flags are command-local: create/remove/sync support `--json` and `--dry-run`; list supports `--json` and `--porcelain`
 - Branch sanitization folds `/`, space, `@`, `..` into `-`
 - Startup logging writes to XDG state dir immediately; `TRENCH_LOG` controls filter
+
+## Release Governance
+
+- Git tags are the sole release-version source of truth; static package versions remain `0.0.0`
+- Canonical releases use annotated tags matching exactly `v<major>.<minor>.<patch>`
+- Create and push release tags exclusively with `pnpm dlx tagsmith@latest`; Raw or manual `git tag` commands and manual release-tag pushes are prohibited
+- CI validates release tags but never creates them
+- Generated changelogs and release notes are not committed; `cliff.toml` is the only release-note configuration state
+- Never create or push `v0.1.0` or another release tag while implementing release-system changes; a maintainer tags separately after review and merge

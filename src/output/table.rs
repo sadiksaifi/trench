@@ -214,7 +214,6 @@ mod tests {
         assert_eq!(lines.len(), 3, "expected header + 2 data rows");
 
         // All lines should have the same length (padded)
-        let widths: Vec<usize> = lines.iter().map(|l| l.trim_end().len()).collect();
         // Check that columns are aligned by verifying "Name" and "Branch" appear at same column offsets
         let header = lines[0];
         let row1 = lines[1];

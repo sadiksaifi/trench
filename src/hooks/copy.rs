@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSetBuilder};
@@ -7,10 +9,13 @@ use globset::{Glob, GlobSetBuilder};
 #[derive(Debug, Clone)]
 pub struct CopiedFile {
     /// File name (relative path from source root).
+    #[cfg(test)]
     pub name: String,
     /// Source path (absolute if `source_dir` is absolute).
+    #[cfg(test)]
     pub source: PathBuf,
     /// Destination path (absolute if `dest_dir` is absolute).
+    #[cfg(test)]
     pub destination: PathBuf,
 }
 
@@ -18,6 +23,7 @@ pub struct CopiedFile {
 #[derive(Debug, Clone)]
 pub struct CopyResult {
     /// Files that were copied.
+    #[cfg(test)]
     pub copied: Vec<CopiedFile>,
 }
 
@@ -64,7 +70,10 @@ pub fn execute_copy_step(
         &mut copied,
     )?;
 
-    Ok(CopyResult { copied })
+    Ok(CopyResult {
+        #[cfg(test)]
+        copied,
+    })
 }
 
 fn collect_matching_files(
@@ -117,8 +126,11 @@ fn collect_matching_files(
             })?;
 
             copied.push(CopiedFile {
+                #[cfg(test)]
                 name: relative.to_string_lossy().into_owned(),
+                #[cfg(test)]
                 source: path,
+                #[cfg(test)]
                 destination: dest_path,
             });
         }

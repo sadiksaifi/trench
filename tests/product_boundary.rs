@@ -97,6 +97,7 @@ fn help_exposes_exactly_the_supported_commands() {
             "open",
             "list",
             "sync",
+            "upgrade",
             "init",
             "shell-init",
             "completions",
@@ -130,7 +131,14 @@ fn structured_and_preview_flags_are_scoped_to_supported_commands() {
     assert!(list.contains("--porcelain"), "{list}");
     assert!(!list.contains("--dry-run"), "{list}");
 
-    for command in ["switch", "open", "init", "shell-init", "completions"] {
+    for command in [
+        "switch",
+        "open",
+        "upgrade",
+        "init",
+        "shell-init",
+        "completions",
+    ] {
         let command_help = help(command);
         for unsupported in ["--json", "--porcelain", "--dry-run"] {
             assert!(
@@ -171,6 +179,7 @@ fn completions_expose_only_supported_commands() {
         "open",
         "list",
         "sync",
+        "upgrade",
         "init",
         "shell-init",
         "completions",

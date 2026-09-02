@@ -6,7 +6,6 @@ pub enum Key {
     Escape,
     Up,
     Down,
-    Backspace,
     Edit(LineEdit),
     Char(char),
 }
@@ -18,7 +17,6 @@ pub enum Action {
     Create,
     Sync,
     Remove,
-    DeleteBranch,
     Search,
     CloseSearch,
     Refresh,
@@ -268,7 +266,6 @@ mod tests {
             Key::Char('j'),
             Key::Char('k'),
             Key::Char('?'),
-            Key::Backspace,
         ] {
             assert_eq!(action_for(Context::Search, editable), None);
         }
