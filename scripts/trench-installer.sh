@@ -112,6 +112,20 @@ resolve_shell_configuration() {
   esac
 }
 
+resolve_shell_configuration_target() {
+  link_hops=0
+  while [ -L "$config_file" ]; do
+    link_hops=$((link_hops + 1))
+    [ "$link_hops" -le 40 ] || die "shell configuration has too many symbolic links: $config_file"
+    link_target=$(readlink "$config_file") || die "could not resolve shell configuration link: $config_file"
+    [ -n "$link_target" ] || die "shell configuration link has an empty target: $config_file"
+    case "$link_target" in
+      /*) config_file=$link_target ;;
+      *) config_file=${config_file%/*}/$link_target ;;
+    esac
+  done
+}
+
 validate_managed_block() {
   [ -f "$config_file" ] || return 0
   awk '
@@ -132,6 +146,7 @@ validate_managed_block() {
 
 if [ "$modify_shell" -eq 1 ]; then
   resolve_shell_configuration
+  resolve_shell_configuration_target
   validate_managed_block
 fi
 

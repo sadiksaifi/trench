@@ -649,6 +649,30 @@ EOF
   printf 'ok %d - managed block replacement preserves unrelated content\n' "$tests_run"
 }
 
+test_symlinked_shell_configuration_updates_its_target() {
+  tests_run=$((tests_run + 1))
+  sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
+  trap 'rm -rf "$sandbox"' RETURN
+  mkdir -p "$sandbox/home/dotfiles" "$sandbox/release"
+  write_mock_commands "$sandbox/mock-bin"
+  make_release "$sandbox/release" \
+    trench-aarch64-apple-darwin.tar.gz \
+    aarch64-apple-darwin
+  printf '%s\n' '# managed by dotfiles' >"$sandbox/home/dotfiles/zshrc"
+  ln -s dotfiles/zshrc "$sandbox/home/.zshrc"
+
+  output=$(run_installer_with_shell "$sandbox" /bin/zsh) || fail "symlinked configuration failed: $output"
+
+  [ -L "$sandbox/home/.zshrc" ] || fail 'installer replaced the shell configuration symlink'
+  config=$(cat "$sandbox/home/dotfiles/zshrc")
+  assert_contains "$config" '# managed by dotfiles'
+  assert_contains "$config" 'trench shell-init zsh'
+  backup=$(printf '%s\n' "$sandbox"/home/dotfiles/zshrc.trench.bak.*)
+  [ "$(cat "$backup")" = '# managed by dotfiles' ] || fail 'symlink target backup is incorrect'
+  assert_contains "$output" "Modified shell configuration: $sandbox/home/dotfiles/zshrc"
+  printf 'ok %d - symlinked shell configuration updates its target\n' "$tests_run"
+}
+
 test_no_modify_shell_and_quarantine_summaries_are_factual() {
   tests_run=$((tests_run + 1))
   sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
@@ -809,6 +833,7 @@ test_rerun_leaves_managed_shell_block_unchanged
 test_existing_path_entry_is_not_duplicated
 test_install_directory_is_prepended_when_present_later_in_path
 test_managed_block_is_replaced_without_touching_other_content
+test_symlinked_shell_configuration_updates_its_target
 test_no_modify_shell_and_quarantine_summaries_are_factual
 test_rejects_unbalanced_managed_shell_markers_without_modifying_config
 test_rejects_archive_with_unexpected_layout_before_extraction
