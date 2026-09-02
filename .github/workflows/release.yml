@@ -22,7 +22,7 @@ jobs:
       commit: ${{ steps.tagsmith.outputs.commit }}
     steps:
       - name: Checkout complete repository history
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -30,7 +30,7 @@ jobs:
         run: git fetch --force --tags origin main
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
 
@@ -71,7 +71,7 @@ jobs:
       TRENCH_RELEASE_BUILD: "true"
     steps:
       - name: Checkout validated release commit
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.commit }}
           fetch-depth: 0
@@ -103,7 +103,7 @@ jobs:
           scripts/package-release.sh "$TARGET" "target/$TARGET/release/trench" .
 
       - name: Upload architecture archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trench-${{ matrix.target }}
           path: trench-${{ matrix.target }}.tar.gz
@@ -127,13 +127,13 @@ jobs:
       RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
     steps:
       - name: Checkout validated release commit
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.commit }}
           fetch-depth: 0
 
       - name: Download both native archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: trench-*-apple-darwin
           path: dist
@@ -180,7 +180,7 @@ jobs:
           test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
 
       - name: Attest every published release asset
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest@v4
         with:
           subject-path: dist/*
 

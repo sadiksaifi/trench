@@ -60,7 +60,7 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
         "trench-checksums.txt",
         "trench-release.json",
         "trench-installer.sh",
-        "actions/attest-build-provenance@",
+        "actions/attest@v4",
         "--draft",
         "--draft=false",
         "trench-release-workflow:v1",
@@ -68,6 +68,17 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
         assert!(workflow.contains(required), "missing `{required}`");
     }
     assert!(workflow.contains("scripts/package-release.sh"));
+    for required_action in [
+        "actions/checkout@v7",
+        "pnpm/action-setup@v6",
+        "actions/upload-artifact@v7",
+        "actions/download-artifact@v8",
+    ] {
+        assert!(
+            workflow.contains(required_action),
+            "missing `{required_action}`"
+        );
+    }
     assert!(workflow.contains("permissions:\n  contents: read"));
     assert!(workflow.contains("contents: write"));
     assert!(workflow.contains("id-token: write"));
@@ -119,6 +130,14 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
                 .unwrap(),
         "the remote tag must be revalidated after staging and before publication"
     );
+}
+
+#[test]
+fn shared_ci_uses_current_floating_action_majors() {
+    let workflow = fs::read_to_string(repository_root().join(".github/workflows/ci.yml"))
+        .expect("repository should contain the shared CI workflow");
+
+    assert!(workflow.contains("actions/checkout@v7"));
 }
 
 #[test]
