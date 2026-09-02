@@ -118,9 +118,7 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
         "the REST tag lookup cannot resolve draft releases"
     );
     assert!(
-        workflow
-            .find("Reject an existing release")
-            .unwrap()
+        workflow.find("Reject an existing release").unwrap()
             < workflow
                 .find("Attest every published release asset")
                 .unwrap(),
@@ -147,9 +145,7 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
         workflow
             .find("Reverify release tag before publication")
             .unwrap()
-            < workflow
-                .find("Publish complete release")
-                .unwrap(),
+            < workflow.find("Publish complete release").unwrap(),
         "the remote tag must be revalidated immediately before publication"
     );
     assert!(
