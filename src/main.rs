@@ -200,7 +200,8 @@ impl Cli {
 }
 
 fn main() -> anyhow::Result<()> {
-    let read_only_startup = std::env::args_os().any(|argument| argument == "--dry-run");
+    let read_only_startup = std::env::args_os()
+        .any(|argument| argument == "--dry-run" || argument == "--version" || argument == "-V");
     if !read_only_startup {
         logging::init();
     }
