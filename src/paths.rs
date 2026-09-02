@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 const APP_NAME: &str = "trench";
 const CONFIG_FILENAME: &str = "config.toml";
 const LOG_FILENAME: &str = "trench.log";
+const INSTALL_RECEIPT_FILENAME: &str = "install-receipt.json";
 
 #[derive(Clone, Copy)]
 struct XdgHome {
@@ -69,6 +70,11 @@ pub fn config_dir_path() -> Result<PathBuf> {
 #[allow(dead_code)] // Trench is stateless today; keep the XDG contract centralized for future data.
 pub fn data_dir_path() -> Result<PathBuf> {
     app_dir_path(XDG_DATA_HOME)
+}
+
+/// Return the standalone installation ownership receipt path without creating it.
+pub fn install_receipt_path() -> Result<PathBuf> {
+    Ok(data_dir_path()?.join(INSTALL_RECEIPT_FILENAME))
 }
 
 /// Return the application state directory without creating it.
@@ -226,6 +232,10 @@ mod tests {
             root.path().join("config/trench")
         );
         assert_eq!(data_dir_path().unwrap(), root.path().join("data/trench"));
+        assert_eq!(
+            install_receipt_path().unwrap(),
+            root.path().join("data/trench/install-receipt.json")
+        );
         assert_eq!(state_dir_path().unwrap(), root.path().join("state/trench"));
         assert_eq!(cache_dir_path().unwrap(), root.path().join("cache/trench"));
     }
@@ -290,5 +300,9 @@ mod tests {
             home.path().join(".local/state/trench")
         );
         assert_eq!(cache_dir_path().unwrap(), home.path().join(".cache/trench"));
+        assert_eq!(
+            install_receipt_path().unwrap(),
+            home.path().join(".local/share/trench/install-receipt.json")
+        );
     }
 }

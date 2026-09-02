@@ -25,6 +25,7 @@ impl QueryBuffer {
         self.edit(LineEdit::Insert(character))
     }
 
+    #[cfg(test)]
     pub fn backspace(&mut self) -> bool {
         self.edit(LineEdit::DeletePreviousCharacter)
     }

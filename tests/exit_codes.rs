@@ -60,20 +60,6 @@ fn init_git_repo(dir: &std::path::Path) {
         .expect("git commit failed");
 }
 
-fn git(dir: &std::path::Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git command failed");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 #[test]
 fn clap_exit_2_rejects_removed_sync_all_without_strategy() {
     let tmp = tempfile::tempdir().unwrap();

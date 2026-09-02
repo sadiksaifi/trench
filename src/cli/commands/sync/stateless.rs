@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -159,16 +160,20 @@ pub trait SyncEmitter: Send + Sync {
     fn emit(&self, event: SyncEvent);
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub struct NoopSyncEmitter;
 
+#[cfg(test)]
 impl SyncEmitter for NoopSyncEmitter {
     fn emit(&self, _event: SyncEvent) {}
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct RecordingSyncEmitter(Arc<Mutex<Vec<SyncEvent>>>);
 
+#[cfg(test)]
 impl RecordingSyncEmitter {
     pub fn events(&self) -> Vec<SyncEvent> {
         self.0
@@ -178,6 +183,7 @@ impl RecordingSyncEmitter {
     }
 }
 
+#[cfg(test)]
 impl SyncEmitter for RecordingSyncEmitter {
     fn emit(&self, event: SyncEvent) {
         if let Ok(mut events) = self.0.lock() {

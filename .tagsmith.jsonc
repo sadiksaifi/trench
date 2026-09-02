@@ -1,0 +1,22 @@
+{
+  "$schema": "https://tagsmith.site/schema/v1.json",
+  "configVersion": 1,
+
+  "git": {
+    "remote": "origin",
+    "baseBranch": "main",
+  },
+
+  "defaults": {
+    "tagPattern": "v{version}",
+    "tagMessage": "Release {version}",
+    "initialVersion": "0.0.0",
+  },
+
+  "targets": {
+    "trench": {
+      "path": ".",
+      "channels": [{ "name": "stable", "strategy": "stable" }],
+    },
+  },
+}

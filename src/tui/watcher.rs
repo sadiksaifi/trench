@@ -217,11 +217,6 @@ impl DebounceState {
     fn take_cause(&mut self) -> Option<RefreshCause> {
         self.take_refresh().then_some(RefreshCause::Watcher)
     }
-
-    #[cfg(test)]
-    fn has_pending_refresh(&self) -> bool {
-        self.pending_refresh
-    }
 }
 
 pub struct DebouncedWatcher {
@@ -230,11 +225,6 @@ pub struct DebouncedWatcher {
 }
 
 impl DebouncedWatcher {
-    /// Create a debounced watcher monitoring the given paths.
-    pub fn new(paths: &[&Path]) -> Result<Self> {
-        Self::from_file_watcher(FileWatcher::new(paths)?, DEBOUNCE_DURATION)
-    }
-
     /// Create with a custom debounce duration (for testing).
     #[cfg(test)]
     pub fn with_debounce(paths: &[&Path], debounce: Duration) -> Result<Self> {
@@ -275,11 +265,6 @@ impl DebouncedWatcher {
         })
     }
 
-    #[cfg(test)]
-    pub fn has_pending_refresh(&self) -> bool {
-        self.state.has_pending_refresh()
-    }
-
     /// Drain pending filesystem events and update internal state.
     ///
     /// Call this every frame to keep the event queue clear. Does NOT
@@ -296,6 +281,7 @@ impl DebouncedWatcher {
     /// Returns `true` once after the debounce window expires following
     /// detected events. Clears the pending state so subsequent calls
     /// return `false` until new events arrive.
+    #[cfg(test)]
     pub fn should_refresh(&mut self) -> bool {
         self.refresh_cause().is_some()
     }

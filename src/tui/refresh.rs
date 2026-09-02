@@ -81,14 +81,6 @@ pub enum RefreshTask {
     },
 }
 
-impl RefreshTask {
-    pub fn token(&self) -> TaskToken {
-        match self {
-            Self::Row { token, .. } | Self::FetchOrigin { token } => *token,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchOutcome {
     Updated(RefSnapshot),
@@ -462,10 +454,12 @@ impl RefreshCoordinator {
         }
     }
 
+    #[cfg(test)]
     pub fn generation(&self) -> u64 {
         self.generation
     }
 
+    #[cfg(test)]
     pub fn ref_revision(&self) -> u64 {
         self.ref_revision
     }

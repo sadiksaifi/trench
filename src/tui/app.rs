@@ -52,7 +52,9 @@ pub struct WorktreeStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    #[cfg(test)]
     IdentitiesLoaded(Vec<WorktreeIdentity>),
+    #[cfg(test)]
     StatusLoaded {
         id: WorktreeId,
         status: WorktreeStatus,
@@ -209,6 +211,7 @@ impl AppState {
 
 pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
     match event {
+        #[cfg(test)]
         Event::IdentitiesLoaded(identities) => {
             state
                 .statuses
@@ -216,6 +219,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             state.identities = identities;
             reconcile_visible_selection(state);
         }
+        #[cfg(test)]
         Event::StatusLoaded { id, status } => {
             if state.identities.iter().any(|row| row.id == id) {
                 state.statuses.insert(id, status);
@@ -289,7 +293,6 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             let Some(action) = keymap::action_for(state.context(), key) else {
                 if let Some(query) = state.search.as_mut() {
                     let changed = match key {
-                        Key::Backspace => query.backspace(),
                         Key::Edit(edit) => query.edit(edit),
                         Key::Char(character) => query.insert(character),
                         _ => false,
@@ -327,9 +330,6 @@ pub fn unavailable_reason(state: &AppState, action: Action) -> Option<&'static s
         (Action::Sync, Some(identity)) => {
             sync_flow::unavailable_reason(identity, state.statuses.get(&identity.id))
         }
-        (Action::DeleteBranch, Some(identity)) if identity.detached => {
-            Some("Detached worktrees have no local branch to delete")
-        }
         (Action::Remove, Some(identity)) if identity.is_main => {
             Some("The main worktree cannot be removed")
         }
@@ -351,7 +351,6 @@ fn reduce_action(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::Create => vec![Effect::OpenCreate],
         Action::Sync => vec![Effect::OpenSync(selected())],
         Action::Remove => vec![Effect::OpenRemove(selected())],
-        Action::DeleteBranch => Vec::new(),
         Action::Search => {
             state.search = Some(QueryBuffer::default());
             reconcile_visible_selection(state);
@@ -516,10 +515,6 @@ mod tests {
             reduce(&mut state, Event::Input(Key::Char('d'))),
             vec![Effect::OpenRemove(id)]
         );
-        assert_eq!(
-            unavailable_reason(&state, Action::DeleteBranch),
-            Some("Detached worktrees have no local branch to delete")
-        );
     }
 
     #[test]
@@ -672,7 +667,13 @@ mod tests {
         assert_eq!(state.search.as_ref().unwrap().as_str(), "b");
         assert_eq!(state.selected_visible().unwrap().id, beta.id);
 
-        assert!(reduce(&mut state, Event::Input(Key::Backspace)).is_empty());
+        assert!(reduce(
+            &mut state,
+            Event::Input(Key::Edit(
+                crate::tui::line_input::LineEdit::DeletePreviousCharacter,
+            ))
+        )
+        .is_empty());
         assert_eq!(state.search.as_ref().unwrap().as_str(), "");
         assert_eq!(state.selected_visible().unwrap().id, beta.id);
 

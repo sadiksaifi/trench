@@ -180,32 +180,6 @@ impl EditorLauncher for ProcessEditorLauncher {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DialogRequest {
-    Create,
-    Sync(WorktreeId),
-    Remove(WorktreeId),
-}
-
-#[derive(Debug, Default)]
-pub struct DialogRegistry {
-    pending: Option<DialogRequest>,
-}
-
-impl DialogRegistry {
-    pub fn pending(&self) -> Option<&DialogRequest> {
-        self.pending.as_ref()
-    }
-
-    pub fn take(&mut self) -> Option<DialogRequest> {
-        self.pending.take()
-    }
-
-    pub fn register(&mut self, request: DialogRequest) {
-        self.pending = Some(request);
-    }
-}
-
 struct RuntimeRefreshDriver<'a> {
     runtime: &'a mut RefreshRuntime,
     state: &'a mut AppState,
@@ -228,7 +202,6 @@ enum CreateDispatch {
 
 #[derive(Debug)]
 enum CreateInputEffect {
-    RefreshOrigin,
     Navigate(WorktreeId),
     Start(Box<OperationRequest>),
 }
@@ -385,12 +358,6 @@ fn handle_create_input(
         Some(CreateEffect::Close) => {
             state.create_dialog = None;
             state.help_open = false;
-        }
-        Some(CreateEffect::RefreshOrigin) => {
-            if let Some(dialog) = state.create_dialog.as_mut() {
-                dialog.set_origin_refresh(OriginRefresh::Loading);
-            }
-            return Ok(Some(CreateInputEffect::RefreshOrigin));
         }
         Some(CreateEffect::Navigate(_)) | Some(CreateEffect::Submit(_)) => {
             let submission = match effect {
@@ -552,15 +519,6 @@ fn apply_create_input_effect(
     operation: &mut OperationRuntime<ThreadOperationLauncher, SystemRuntimeClock>,
 ) {
     match effect {
-        Some(CreateInputEffect::RefreshOrigin) => {
-            if let Err(error) = refresh.ref_picker() {
-                tracing::warn!(%error, "base picker origin refresh failed");
-                if let Some(dialog) = state.create_dialog.as_mut() {
-                    dialog.set_origin_refresh(OriginRefresh::Failed);
-                }
-            }
-            apply_refresh_publications(refresh, state);
-        }
         Some(CreateInputEffect::Navigate(id)) => match refresh.post_operation() {
             Ok(()) => {
                 apply_refresh_publications(refresh, state);
@@ -768,15 +726,19 @@ fn operation_modal_effect(
     }
 }
 
+struct OperationFormContext<'a> {
+    cwd: &'a Path,
+    worktree_root: &'a Path,
+    configured_base: Option<&'a str>,
+    hooks: Option<HooksConfig>,
+}
+
 fn apply_operation_modal_effect(
     effect: Option<ModalEffect>,
     state: &mut AppState,
     operation: &mut OperationRuntime<ThreadOperationLauncher, SystemRuntimeClock>,
     refresh: &mut RefreshRuntime,
-    cwd: &Path,
-    worktree_root: &Path,
-    configured_base: Option<&str>,
-    hooks: Option<HooksConfig>,
+    context: OperationFormContext<'_>,
 ) {
     match effect {
         Some(ModalEffect::Cancel) => {
@@ -790,11 +752,17 @@ fn apply_operation_modal_effect(
             }
             apply_refresh_publications(refresh, state);
             if state.remove_dialog.is_some() {
-                return_to_remove_form(state, cwd, configured_base, hooks);
+                return_to_remove_form(state, context.cwd, context.configured_base, context.hooks);
             } else if state.sync_dialog.is_some() {
-                return_to_sync_form(state, cwd, configured_base, hooks);
+                return_to_sync_form(state, context.cwd, context.configured_base, context.hooks);
             } else {
-                return_to_create_form(state, cwd, worktree_root, configured_base, hooks);
+                return_to_create_form(
+                    state,
+                    context.cwd,
+                    context.worktree_root,
+                    context.configured_base,
+                    context.hooks,
+                );
             }
         }
         None => {}
@@ -817,7 +785,6 @@ pub fn run() -> Result<TuiExit> {
     let mut state = AppState::new(Vec::new());
     apply_refresh_publications(&mut refresh, &mut state);
     let selected_theme = theme::from_name(&resolved.ui.theme);
-    let dialogs = DialogRegistry::default();
     let mut operation =
         OperationRuntime::new(ThreadOperationLauncher, SystemRuntimeClock::default());
 
@@ -880,10 +847,12 @@ pub fn run() -> Result<TuiExit> {
                                 &mut state,
                                 &mut operation,
                                 &mut refresh,
-                                &cwd,
-                                &resolved.worktrees.root,
-                                resolved.git.default_base.as_deref(),
-                                resolved.hooks.clone(),
+                                OperationFormContext {
+                                    cwd: &cwd,
+                                    worktree_root: &resolved.worktrees.root,
+                                    configured_base: resolved.git.default_base.as_deref(),
+                                    hooks: resolved.hooks.clone(),
+                                },
                             );
                         }
                         OperationMouseEffect::Help => state.help_open = true,
@@ -1006,10 +975,12 @@ pub fn run() -> Result<TuiExit> {
                     &mut state,
                     &mut operation,
                     &mut refresh,
-                    &cwd,
-                    &resolved.worktrees.root,
-                    resolved.git.default_base.as_deref(),
-                    resolved.hooks.clone(),
+                    OperationFormContext {
+                        cwd: &cwd,
+                        worktree_root: &resolved.worktrees.root,
+                        configured_base: resolved.git.default_base.as_deref(),
+                        hooks: resolved.hooks.clone(),
+                    },
                 );
                 continue;
             }
@@ -1159,9 +1130,6 @@ pub fn run() -> Result<TuiExit> {
                     }
                 }
             }
-
-            // Sync and remove layers consume their typed requests independently.
-            let _ = dialogs.pending();
         }
     })();
 
@@ -3273,15 +3241,6 @@ mod tests {
                 stage: crate::operation::OperationStage::Sync
             }
         )));
-    }
-
-    #[test]
-    fn dialog_registry_is_a_replaceable_operation_seam() {
-        let mut dialogs = DialogRegistry::default();
-        dialogs.register(DialogRequest::Create);
-        assert_eq!(dialogs.pending(), Some(&DialogRequest::Create));
-        assert_eq!(dialogs.take(), Some(DialogRequest::Create));
-        assert_eq!(dialogs.pending(), None);
     }
 
     #[tokio::test]

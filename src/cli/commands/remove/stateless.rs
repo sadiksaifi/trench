@@ -2,6 +2,7 @@ use std::fmt;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -204,10 +205,6 @@ impl RemovalAssessment {
 
     pub fn dirty(&self) -> bool {
         self.dirty
-    }
-
-    pub fn base(&self) -> Option<&str> {
-        self.base.as_deref()
     }
 
     pub fn merged(&self) -> Option<bool> {
@@ -520,8 +517,10 @@ pub trait RemovalMutationGuard: Send + Sync {
     fn try_begin_mutation(&self) -> bool;
 }
 
+#[cfg(test)]
 struct AlwaysBeginMutation;
 
+#[cfg(test)]
 impl RemovalMutationGuard for AlwaysBeginMutation {
     fn try_begin_mutation(&self) -> bool {
         true
@@ -559,18 +558,22 @@ pub trait RemovalEventSink: Send + Sync {
     fn emit(&self, event: RemovalEvent);
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct NoopRemovalEventSink;
 
+#[cfg(test)]
 impl RemovalEventSink for NoopRemovalEventSink {
     fn emit(&self, _event: RemovalEvent) {}
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct RecordingRemovalEventSink {
     events: Arc<Mutex<Vec<RemovalEvent>>>,
 }
 
+#[cfg(test)]
 impl RecordingRemovalEventSink {
     pub fn events(&self) -> Vec<RemovalEvent> {
         self.events
@@ -580,6 +583,7 @@ impl RecordingRemovalEventSink {
     }
 }
 
+#[cfg(test)]
 impl RemovalEventSink for RecordingRemovalEventSink {
     fn emit(&self, event: RemovalEvent) {
         if let Ok(mut events) = self.events.lock() {
@@ -750,6 +754,7 @@ pub struct RemovalFailure {
 ///
 /// A dry-run plan returns without revalidation, hooks, Git mutation, logging,
 /// database access, directory creation, or network access.
+#[cfg(test)]
 pub async fn execute(
     plan: RemovalPlan,
     hooks_config: Option<&HooksConfig>,
@@ -1602,6 +1607,7 @@ fn renameat_noreplace(
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn remove_exact_worktree(
     assessment: &RemovalAssessment,
     allow_dirty: bool,
@@ -1643,6 +1649,7 @@ struct ProductionRemovalBoundary;
 impl RemovalMutationBoundary for ProductionRemovalBoundary {}
 
 #[cfg(unix)]
+#[cfg(test)]
 fn remove_exact_worktree_with_boundary(
     assessment: &RemovalAssessment,
     allow_dirty: bool,
@@ -2272,7 +2279,9 @@ mod tests {
     }
 
     fn init_repo(path: &Path) -> git2::Repository {
-        let repo = git2::Repository::init(path).unwrap();
+        let mut options = git2::RepositoryInitOptions::new();
+        options.initial_head("main");
+        let repo = git2::Repository::init_opts(path, &options).unwrap();
         let signature = git2::Signature::now("Test", "test@example.com").unwrap();
         let tree_oid = repo.index().unwrap().write_tree().unwrap();
         {

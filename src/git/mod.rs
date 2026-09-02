@@ -19,6 +19,7 @@ pub struct RepoInfo {
 /// Opens the repository at `worktree_path` and counts all files with
 /// non-clean status (modified, new, deleted, renamed, typechanged).
 /// Returns 0 for a clean worktree.
+#[cfg(test)]
 pub fn dirty_count(worktree_path: &Path) -> Result<usize, GitError> {
     let repo =
         git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
@@ -32,105 +33,11 @@ pub fn dirty_count(worktree_path: &Path) -> Result<usize, GitError> {
     Ok(statuses.len())
 }
 
-/// A file with changed status in a worktree.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChangedFile {
-    pub path: String,
-    pub status: &'static str,
-}
-
-/// List changed files in a worktree with their status labels.
-///
-/// Returns files that are modified, staged, new, deleted, renamed, or
-/// typechanged. Each entry includes the file path and a human-readable
-/// status string.
-pub fn changed_files(worktree_path: &Path) -> Result<Vec<ChangedFile>, GitError> {
-    let repo =
-        git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
-
-    let statuses = repo.statuses(Some(
-        git2::StatusOptions::new()
-            .include_untracked(true)
-            .recurse_untracked_dirs(true),
-    ))?;
-
-    let mut files = Vec::with_capacity(statuses.len());
-    for entry in statuses.iter() {
-        let path = entry.path().unwrap_or("(unknown)").to_string();
-        let s = entry.status();
-        let label = if s.is_index_new() || s.is_wt_new() {
-            "new"
-        } else if s.is_index_deleted() || s.is_wt_deleted() {
-            "deleted"
-        } else if s.is_index_renamed() || s.is_wt_renamed() {
-            "renamed"
-        } else if s.is_index_modified() || s.is_wt_modified() {
-            "modified"
-        } else if s.is_index_typechange() || s.is_wt_typechange() {
-            "typechange"
-        } else {
-            "unknown"
-        };
-        files.push(ChangedFile {
-            path,
-            status: label,
-        });
-    }
-
-    Ok(files)
-}
-
-/// A recent commit entry.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CommitInfo {
-    pub hash: String,
-    pub message: String,
-}
-
-/// List recent commits on a branch, most recent first.
-///
-/// Opens the repository at `worktree_path` and walks HEAD to collect
-/// up to `limit` commits.
-pub fn recent_commits(worktree_path: &Path, limit: usize) -> Result<Vec<CommitInfo>, GitError> {
-    let repo =
-        git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
-
-    let head = match repo.head() {
-        Ok(h) => h,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let oid = match head.target() {
-        Some(oid) => oid,
-        None => return Ok(Vec::new()),
-    };
-
-    let mut revwalk = repo.revwalk()?;
-    revwalk.push(oid)?;
-    revwalk.set_sorting(git2::Sort::TIME)?;
-
-    let mut commits = Vec::new();
-    for (i, rev_oid) in revwalk.enumerate() {
-        if i >= limit {
-            break;
-        }
-        let rev_oid = rev_oid?;
-        let commit = repo.find_commit(rev_oid)?;
-        let oid_str = rev_oid.to_string();
-        let short_hash = &oid_str[..oid_str.len().min(7)];
-        let message = commit.summary().unwrap_or("(no message)").to_string();
-        commits.push(CommitInfo {
-            hash: short_hash.to_string(),
-            message,
-        });
-    }
-
-    Ok(commits)
-}
-
 /// Calculate commits ahead/behind for a branch relative to its upstream.
 ///
 /// Checks for an upstream tracking branch first, then falls back to
 /// `base_branch`. Returns `None` if no reference point can be found.
+#[cfg(test)]
 pub fn ahead_behind(
     repo_path: &Path,
     branch: &str,
@@ -194,68 +101,11 @@ pub fn fetch_remote(repo_path: &Path) -> Result<(), GitError> {
     Ok(())
 }
 
-/// Rebase a worktree branch onto its base branch.
-///
-/// Opens the repository at `worktree_path` and rebases the current branch
-/// onto `origin/<base_branch>` (or local `<base_branch>` if no remote ref).
-pub fn sync_rebase(worktree_path: &Path, branch: &str, base_branch: &str) -> Result<(), GitError> {
-    let repo =
-        git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
-
-    let upstream_oid = resolve_upstream_oid(&repo, base_branch)?;
-    let branch_oid = repo
-        .find_branch(branch, git2::BranchType::Local)
-        .map_err(|_| GitError::WorktreeNotFound {
-            name: branch.to_string(),
-        })?
-        .get()
-        .target()
-        .ok_or_else(|| GitError::WorktreeNotFound {
-            name: branch.to_string(),
-        })?;
-
-    let upstream_annotated = repo.find_annotated_commit(upstream_oid)?;
-    let branch_annotated = repo.find_annotated_commit(branch_oid)?;
-
-    let mut rebase = repo.rebase(
-        Some(&branch_annotated),
-        Some(&upstream_annotated),
-        None,
-        None,
-    )?;
-
-    let sig = repo.signature()?;
-
-    let mut last_commit_oid = None;
-    while let Some(op) = rebase.next() {
-        let _op = op?;
-        // Check for conflicts
-        let index = repo.index()?;
-        if index.has_conflicts() {
-            rebase.abort()?;
-            return Err(GitError::MergeConflict {
-                branch: branch.to_string(),
-            });
-        }
-        last_commit_oid = Some(rebase.commit(None, &sig, None)?);
-    }
-
-    rebase.finish(None)?;
-
-    // Explicitly update the branch ref to point to the rebased HEAD
-    if let Some(oid) = last_commit_oid {
-        let ref_name = format!("refs/heads/{branch}");
-        repo.reference(&ref_name, oid, true, "trench sync: rebase")?;
-        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
-    }
-
-    Ok(())
-}
-
 /// Merge the base branch into a worktree branch.
 ///
 /// Opens the repository at `worktree_path` and merges
 /// `origin/<base_branch>` (or local `<base_branch>`) into the current branch.
+#[cfg(test)]
 pub fn sync_merge(worktree_path: &Path, branch: &str, base_branch: &str) -> Result<(), GitError> {
     let repo =
         git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
@@ -314,6 +164,7 @@ pub fn sync_merge(worktree_path: &Path, branch: &str, base_branch: &str) -> Resu
 }
 
 /// Resolve the OID for a base branch, preferring origin/<base> over local.
+#[cfg(test)]
 fn resolve_upstream_oid(repo: &git2::Repository, base_branch: &str) -> Result<git2::Oid, GitError> {
     let remote_ref = format!("origin/{base_branch}");
     match repo.find_branch(&remote_ref, git2::BranchType::Remote) {
@@ -340,6 +191,7 @@ fn resolve_upstream_oid(repo: &git2::Repository, base_branch: &str) -> Result<gi
 }
 
 /// A worktree discovered via git (includes both main and additional worktrees).
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct GitWorktreeEntry {
     pub name: String,
@@ -348,6 +200,7 @@ pub struct GitWorktreeEntry {
     pub is_main: bool,
 }
 
+#[cfg(test)]
 fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -361,21 +214,25 @@ pub enum GitError {
     #[error("branch already exists: {branch}")]
     BranchAlreadyExists { branch: String },
 
+    #[cfg(test)]
     #[error("Branch '{branch}' already exists on {remote}. Use a different name.")]
     RemoteBranchAlreadyExists { branch: String, remote: String },
 
     #[error("base branch not found: {base}")]
     BaseBranchNotFound { base: String },
 
+    #[cfg(test)]
     #[error("worktree not found: {name}")]
     WorktreeNotFound { name: String },
 
     #[error("local branch not found: {branch}")]
     LocalBranchNotFound { branch: String },
 
+    #[cfg(test)]
     #[error("branch '{branch}' is not fully merged")]
     BranchNotFullyMerged { branch: String },
 
+    #[cfg(test)]
     #[error("branch '{branch}' could not be deleted: {message}")]
     BranchDeleteBlocked { branch: String, message: String },
 
@@ -388,6 +245,7 @@ pub enum GitError {
     #[error("Git preconditions changed after planning")]
     PreconditionsChanged,
 
+    #[cfg(test)]
     #[error("merge conflict while syncing '{branch}': resolve conflicts manually")]
     MergeConflict { branch: String },
 
@@ -473,22 +331,6 @@ pub fn discover_repo(path: &Path) -> Result<RepoInfo, GitError> {
     })
 }
 
-/// Resolve the current worktree root for `path`.
-///
-/// Unlike [`discover_repo`], this returns the active checkout root for the
-/// discovered repository, not the primary checkout.
-pub fn current_worktree_root(path: &Path) -> Result<PathBuf, GitError> {
-    let repo = git2::Repository::discover(path).map_err(|e| map_repo_open_error(e, path))?;
-    repo.workdir()
-        .ok_or_else(|| GitError::NotAGitRepo {
-            path: path.to_path_buf(),
-        })?
-        .canonicalize()
-        .map_err(|_| GitError::NotAGitRepo {
-            path: path.to_path_buf(),
-        })
-}
-
 /// Create a new git worktree at `target_path` for the given branch.
 ///
 /// Opens the repository at `repo_path`, resolves `base` as a local branch
@@ -499,6 +341,7 @@ pub fn current_worktree_root(path: &Path) -> Result<PathBuf, GitError> {
 /// Returns `GitError::BranchAlreadyExists` if the branch already exists.
 /// Returns `GitError::BaseBranchNotFound` if `base` is not found locally
 /// or as `origin/<base>`.
+#[cfg(test)]
 pub fn create_worktree(
     repo_path: &Path,
     branch: &str,
@@ -575,6 +418,7 @@ pub fn create_worktree(
 ///
 /// Safe deletion refuses to remove branches that are not fully merged.
 /// Force deletion removes the ref directly.
+#[cfg(test)]
 pub fn delete_local_branch(repo_path: &Path, branch: &str, force: bool) -> Result<(), GitError> {
     let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
     let local = repo
@@ -636,6 +480,7 @@ pub fn delete_local_branch(repo_path: &Path, branch: &str, force: bool) -> Resul
 }
 
 /// List all local branch names in a repository, sorted alphabetically.
+#[cfg(test)]
 pub fn list_local_branches(repo_path: &Path) -> Result<Vec<String>, GitError> {
     let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
     let mut names = Vec::new();
@@ -654,6 +499,7 @@ pub fn list_local_branches(repo_path: &Path) -> Result<Vec<String>, GitError> {
 /// Opens the repository at `repo_path` and discovers all worktrees: the main
 /// working directory plus any additional worktrees created via `git worktree add`.
 /// Returns each worktree's name, path, current branch, and whether it is the main worktree.
+#[cfg(test)]
 pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeEntry>, GitError> {
     let repo = git2::Repository::open(repo_path).map_err(|e| map_repo_open_error(e, repo_path))?;
     let mut entries = Vec::new();
@@ -719,38 +565,6 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeEntry>, GitErro
     }
 
     Ok(entries)
-}
-
-/// Return the short upstream branch name for a local branch in a worktree.
-///
-/// Examples:
-/// - local upstream `main` -> `Some("main")`
-/// - remote upstream `origin/main` -> `Some("main")`
-pub fn upstream_branch_name(
-    worktree_path: &Path,
-    branch: &str,
-) -> Result<Option<String>, GitError> {
-    let repo =
-        git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;
-
-    let local = match repo.find_branch(branch, git2::BranchType::Local) {
-        Ok(branch) => branch,
-        Err(_) => return Ok(None),
-    };
-
-    let upstream = match local.upstream() {
-        Ok(upstream) => upstream,
-        Err(_) => return Ok(None),
-    };
-
-    let name = match upstream.name()? {
-        Some(name) => name,
-        None => return Ok(None),
-    };
-
-    Ok(Some(
-        name.strip_prefix("origin/").unwrap_or(name).to_string(),
-    ))
 }
 
 #[cfg(test)]
@@ -1191,6 +1005,7 @@ mod tests {
 
         let remote_dir = tempfile::tempdir().unwrap();
         let remote_repo = git2::Repository::init_bare(remote_dir.path()).unwrap();
+        remote_repo.set_head("refs/heads/main").unwrap();
         {
             // Need an initial commit in the bare repo — build tree + commit directly
             let sig = git2::Signature::now("Test", "test@test.com").unwrap();

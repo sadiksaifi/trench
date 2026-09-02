@@ -1,0 +1,50 @@
+[changelog]
+header = """
+## Install
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \\
+  https://github.com/sadiksaifi/trench/releases/latest/download/trench-installer.sh |
+  sh && exec "${SHELL:-/bin/zsh}" -l
+```
+
+"""
+body = """
+{% if version %}## {{ version | trim_start_matches(pat="v") }}
+{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | upper_first }} ([`{{ commit.id | truncate(length=7, end="") }}`](https://github.com/sadiksaifi/trench/commit/{{ commit.id }}))
+{% endfor %}
+{% endfor %}
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+protect_breaking_commits = true
+split_commits = false
+tag_pattern = '^v[0-9]+\.[0-9]+\.[0-9]+$'
+sort_commits = "oldest"
+commit_preprocessors = [
+  { pattern = '^fix/tui ', replace = '' },
+  { pattern = '\(#([0-9]+)\)', replace = '([#${1}](https://github.com/sadiksaifi/trench/pull/${1}))' },
+]
+commit_parsers = [
+  { footer = '^BREAKING[ -]CHANGE:', group = "<!-- 0 -->Breaking Changes" },
+  { message = '^[a-z]+(?:\([^)]*\))?!:', group = "<!-- 0 -->Breaking Changes" },
+  { message = '^feat(?:\([^)]*\))?:', group = "<!-- 1 -->Features" },
+  { message = '^fix(?:\([^)]*\))?:', group = "<!-- 2 -->Fixes" },
+  { message = '^fix/tui remove dialog actions', group = "<!-- 2 -->Fixes" },
+  { message = '^remove dialog actions', group = "<!-- 2 -->Fixes" },
+  { message = '^perf(?:\([^)]*\))?:', group = "<!-- 3 -->Performance" },
+  { message = '.*', skip = true },
+]
+
+[remote.github]
+owner = "sadiksaifi"
+repo = "trench"

@@ -4889,7 +4889,7 @@ mod tests {
     fn unicode_remove_modes_keep_render_and_mouse_geometry_at_minimum_size() {
         let branch = format!("feature-{}", "界".repeat(18));
         let (_directory, mut dialog) = remove_dialog_fixture(&branch, true, true);
-        dialog.set_validation_error(Some(format!("{}", "错误".repeat(30))));
+        dialog.set_validation_error(Some("错误".repeat(30)));
         let area = Rect::new(0, 0, 60, 16);
 
         let review_hits = remove_hit_map(&dialog, area);

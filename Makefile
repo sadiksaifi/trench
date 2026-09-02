@@ -14,6 +14,7 @@ CLIPPY_COMPAT_ALLOW ?= -A clippy::approx_constant
 	build \
 	check \
 	test \
+	test-installer \
 	run \
 	fmt \
 	fmt-check \
@@ -41,6 +42,10 @@ check: ## Run baseline-safe compile checks across all targets
 
 test: ## Run the test suite
 	$(CARGO) test
+	./tests/installer_test.sh
+
+test-installer: ## Run the isolated macOS installer tests
+	./tests/installer_test.sh
 
 run: ## Run `trench` with optional `ARGS="..."`
 	$(CARGO) run -- $(ARGS)

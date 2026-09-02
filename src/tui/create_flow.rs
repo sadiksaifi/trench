@@ -71,7 +71,6 @@ pub enum CreateMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateKey {
     Character(char),
-    Backspace,
     Edit(LineEdit),
     Tab,
     Enter,
@@ -89,7 +88,6 @@ pub struct CreateSubmission {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateEffect {
     Close,
-    RefreshOrigin,
     Navigate(WorktreeId),
     Submit(CreateSubmission),
 }
@@ -108,6 +106,7 @@ pub struct CreateDialog {
 }
 
 impl CreateDialog {
+    #[cfg(test)]
     pub fn new<I>(
         repository: impl Into<String>,
         worktree_root: &Path,
@@ -143,6 +142,7 @@ impl CreateDialog {
         }
     }
 
+    #[cfg(test)]
     pub fn set_branch(&mut self, branch: impl Into<String>) {
         let branch = branch.into();
         self.branch = LineInput::from(branch.as_str());
@@ -257,6 +257,7 @@ impl CreateDialog {
         suggestions
     }
 
+    #[cfg(test)]
     pub fn open_base_picker(&mut self) {
         self.base_picker.open();
         self.mode = CreateMode::SelectBase;
@@ -270,6 +271,7 @@ impl CreateDialog {
         self.mode
     }
 
+    #[cfg(test)]
     pub fn branch(&self) -> &str {
         self.branch.value()
     }
@@ -282,6 +284,7 @@ impl CreateDialog {
         self.branch_selection
     }
 
+    #[cfg(test)]
     pub fn base_query(&self) -> &str {
         self.base_picker.query()
     }
@@ -385,11 +388,6 @@ impl CreateDialog {
                 self.branch_selection = 0;
                 self.validation_error = None;
             }
-            CreateKey::Backspace => {
-                self.branch.edit(LineEdit::DeletePreviousCharacter);
-                self.branch_selection = 0;
-                self.validation_error = None;
-            }
             CreateKey::Edit(edit) => {
                 self.branch.edit(edit);
                 self.branch_selection = 0;
@@ -445,9 +443,6 @@ impl CreateDialog {
             CreateKey::Character(character) => {
                 self.base_picker
                     .handle_key(RefPickerKey::Character(character));
-            }
-            CreateKey::Backspace => {
-                self.base_picker.handle_key(RefPickerKey::Backspace);
             }
             CreateKey::Edit(edit) => {
                 self.base_picker.handle_key(RefPickerKey::Edit(edit));

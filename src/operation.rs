@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::ser::{Serialize, SerializeStruct, Serializer};
@@ -114,9 +116,11 @@ pub trait Emitter: Send + Sync {
     fn emit(&self, event: OperationEvent);
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct NoopEmitter;
 
+#[cfg(test)]
 impl Emitter for NoopEmitter {
     fn emit(&self, _event: OperationEvent) {}
 }
@@ -132,11 +136,13 @@ impl Emitter for TerminalEmitter {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct RecordingEmitter {
     events: Arc<Mutex<Vec<OperationEvent>>>,
 }
 
+#[cfg(test)]
 impl RecordingEmitter {
     pub fn events(&self) -> Vec<OperationEvent> {
         self.events
@@ -146,28 +152,12 @@ impl RecordingEmitter {
     }
 }
 
+#[cfg(test)]
 impl Emitter for RecordingEmitter {
     fn emit(&self, event: OperationEvent) {
         if let Ok(mut events) = self.events.lock() {
             events.push(event);
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelEmitter {
-    sender: mpsc::Sender<OperationEvent>,
-}
-
-impl ChannelEmitter {
-    pub fn new(sender: mpsc::Sender<OperationEvent>) -> Self {
-        Self { sender }
-    }
-}
-
-impl Emitter for ChannelEmitter {
-    fn emit(&self, event: OperationEvent) {
-        let _ = self.sender.send(event);
     }
 }
 

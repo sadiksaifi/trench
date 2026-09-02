@@ -15,11 +15,6 @@ pub struct HookTimeoutError {
     pub timeout_secs: u64,
 }
 
-#[derive(Debug)]
-pub struct HookResult {
-    pub duration: Duration,
-}
-
 /// Execute one lifecycle hook in copy → run → shell order.
 ///
 /// Output is emitted only to the current caller. The runner has no database,
@@ -31,8 +26,7 @@ pub async fn execute_hook(
     source_dir: &Path,
     work_dir: &Path,
     emitter: &dyn HookEmitter,
-) -> Result<HookResult> {
-    let started = Instant::now();
+) -> Result<()> {
     let environment = build_env(env_ctx, event);
     let timeout_secs = config.timeout_secs.unwrap_or(120);
 
@@ -91,9 +85,7 @@ pub async fn execute_hook(
         }
     }
 
-    Ok(HookResult {
-        duration: started.elapsed(),
-    })
+    Ok(())
 }
 
 fn execute_step(
