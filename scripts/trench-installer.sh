@@ -186,8 +186,15 @@ awk '
         if (trench != 1 || license != 1 || readme != 1) exit 1
     }
 ' "$archive_listing" || die 'archive contains an unsafe or unexpected layout'
+archive_details=$temp_dir/archive-details
+LC_ALL=C tar -tvzf "$temp_dir/$archive" >"$archive_details" || die "failed to inspect $archive"
+awk '
+    substr($1, 1, 1) != "-" { exit 1 }
+    END { if (NR != 3) exit 1 }
+' "$archive_details" || die 'archive contains an unsafe or unexpected layout'
 tar -xzf "$temp_dir/$archive" -C "$temp_dir/extracted" || die "failed to extract $archive"
-[ -f "$temp_dir/extracted/trench" ] || die 'archive does not contain trench'
+[ -f "$temp_dir/extracted/trench" ] && [ ! -L "$temp_dir/extracted/trench" ] ||
+  die 'archive contains an unsafe or unexpected layout'
 chmod 755 "$temp_dir/extracted/trench" || die 'could not make trench executable'
 candidate_version=$("$temp_dir/extracted/trench" --version 2>/dev/null) || die 'downloaded trench failed its smoke test'
 [ "$candidate_version" = "trench $manifest_version" ] ||

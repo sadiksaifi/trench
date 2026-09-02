@@ -685,6 +685,42 @@ test_rejects_archive_with_unexpected_layout_before_extraction() {
   printf 'ok %d - rejects archive with unexpected layout before extraction\n' "$tests_run"
 }
 
+test_rejects_archive_with_a_linked_executable() {
+  tests_run=$((tests_run + 1))
+  sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
+  trap 'rm -rf "$sandbox"' RETURN
+  mkdir -p "$sandbox/home" "$sandbox/release"
+  write_mock_commands "$sandbox/mock-bin"
+  make_release "$sandbox/release" \
+    trench-aarch64-apple-darwin.tar.gz \
+    aarch64-apple-darwin
+  cat >"$sandbox/outside-trench" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'trench 0.1.0'
+EOF
+  chmod +x "$sandbox/outside-trench"
+  unlink "$sandbox/release/staging/trench"
+  ln -s "$sandbox/outside-trench" "$sandbox/release/staging/trench"
+  tar -C "$sandbox/release/staging" -czf "$sandbox/release/trench-aarch64-apple-darwin.tar.gz" \
+    trench LICENSE README.md
+  archive_sha=$(shasum -a 256 "$sandbox/release/trench-aarch64-apple-darwin.tar.gz" | awk '{print $1}')
+  sed -E "s/[0123456789abcdef]{64}/$archive_sha/" "$sandbox/release/trench-release.json" >"$sandbox/release/manifest.next"
+  mv "$sandbox/release/manifest.next" "$sandbox/release/trench-release.json"
+  manifest_sha=$(shasum -a 256 "$sandbox/release/trench-release.json" | awk '{print $1}')
+  printf '%s  %s\n%s  %s\n' \
+    "$archive_sha" trench-aarch64-apple-darwin.tar.gz \
+    "$manifest_sha" trench-release.json \
+    >"$sandbox/release/trench-checksums.txt"
+
+  if output=$(run_installer "$sandbox" 2>&1); then
+    fail 'installer accepted an archive containing a linked executable'
+  fi
+
+  assert_contains "$output" 'archive contains an unsafe or unexpected layout'
+  [ ! -e "$sandbox/install/bin/trench" ] || fail 'linked executable was installed'
+  printf 'ok %d - rejects archive with a linked executable\n' "$tests_run"
+}
+
 test_relative_xdg_directories_fall_back_to_home() {
   tests_run=$((tests_run + 1))
   sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
@@ -733,4 +769,5 @@ test_managed_block_is_replaced_without_touching_other_content
 test_no_modify_shell_and_quarantine_summaries_are_factual
 test_rejects_unbalanced_managed_shell_markers_without_modifying_config
 test_rejects_archive_with_unexpected_layout_before_extraction
+test_rejects_archive_with_a_linked_executable
 test_relative_xdg_directories_fall_back_to_home

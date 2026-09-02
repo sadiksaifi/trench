@@ -318,6 +318,24 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<()> {
         bail!("upgrade archive contains an unsafe or unexpected layout");
     }
 
+    let details = Command::new("tar")
+        .env("LC_ALL", "C")
+        .args(["-tvzf"])
+        .arg(archive)
+        .output()
+        .context("could not inspect upgrade archive entry types")?;
+    if !details.status.success() {
+        bail!(
+            "failed to inspect upgrade archive entry types: {}",
+            String::from_utf8_lossy(&details.stderr).trim()
+        );
+    }
+    let entry_types = String::from_utf8(details.stdout)?;
+    if entry_types.lines().count() != 3 || entry_types.lines().any(|entry| !entry.starts_with('-'))
+    {
+        bail!("upgrade archive contains an unsafe or unexpected layout");
+    }
+
     let output = Command::new("tar")
         .args(["-xzf"])
         .arg(archive)
@@ -704,6 +722,37 @@ mod tests {
 
         let error = extract_archive(&archive, &destination)
             .expect_err("unexpected archive entries must be refused");
+        assert!(error.to_string().contains("unsafe or unexpected layout"));
+        assert!(fs::read_dir(&destination).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_extraction_refuses_a_linked_executable() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let payload = root.path().join("payload");
+        let destination = root.path().join("destination");
+        let archive = root.path().join("release.tar.gz");
+        fs::create_dir(&payload).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(root.path().join("outside-trench"), "outside").unwrap();
+        symlink(root.path().join("outside-trench"), payload.join("trench")).unwrap();
+        fs::write(payload.join("LICENSE"), "license").unwrap();
+        fs::write(payload.join("README.md"), "readme").unwrap();
+        assert!(Command::new("tar")
+            .args(["-czf"])
+            .arg(&archive)
+            .arg("-C")
+            .arg(&payload)
+            .args(["trench", "LICENSE", "README.md"])
+            .status()
+            .unwrap()
+            .success());
+
+        let error = extract_archive(&archive, &destination)
+            .expect_err("linked archive entries must be refused");
         assert!(error.to_string().contains("unsafe or unexpected layout"));
         assert!(fs::read_dir(&destination).unwrap().next().is_none());
     }
