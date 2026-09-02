@@ -316,6 +316,69 @@ test_checksum_failure_preserves_existing_installation() {
   printf 'ok %d - checksum failure preserves existing installation\n' "$tests_run"
 }
 
+test_refuses_to_replace_an_unowned_existing_executable() {
+  tests_run=$((tests_run + 1))
+  sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
+  trap 'rm -rf "$sandbox"' RETURN
+  mkdir -p "$sandbox/home" "$sandbox/release" "$sandbox/install/bin"
+  write_mock_commands "$sandbox/mock-bin"
+  make_release "$sandbox/release" \
+    trench-aarch64-apple-darwin.tar.gz \
+    aarch64-apple-darwin
+  printf '%s\n' 'manual trench' >"$sandbox/install/bin/trench"
+
+  if output=$(run_installer "$sandbox" 2>&1); then
+    fail 'installer replaced an unowned existing executable'
+  fi
+
+  assert_contains "$output" 'refusing to replace an existing executable without a matching standalone installation receipt'
+  [ "$(cat "$sandbox/install/bin/trench")" = 'manual trench' ] || fail 'unowned executable was modified'
+  printf 'ok %d - refuses to replace an unowned existing executable\n' "$tests_run"
+}
+
+test_refuses_to_replace_an_executable_with_a_stale_receipt() {
+  tests_run=$((tests_run + 1))
+  sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
+  trap 'rm -rf "$sandbox"' RETURN
+  mkdir -p "$sandbox/home" "$sandbox/release" "$sandbox/install/bin" "$sandbox/data/trench"
+  write_mock_commands "$sandbox/mock-bin"
+  make_release "$sandbox/release" \
+    trench-aarch64-apple-darwin.tar.gz \
+    aarch64-apple-darwin
+  printf '%s\n' 'manual trench' >"$sandbox/install/bin/trench"
+  printf '%s\n' '{"schema":1,"manager":"standalone","executable":"/different/trench"}' \
+    >"$sandbox/data/trench/install-receipt.json"
+
+  if output=$(run_installer "$sandbox" 2>&1); then
+    fail 'installer accepted a stale ownership receipt'
+  fi
+
+  assert_contains "$output" 'refusing to replace an existing executable without a matching standalone installation receipt'
+  [ "$(cat "$sandbox/install/bin/trench")" = 'manual trench' ] || fail 'stale receipt authorized replacement'
+  printf 'ok %d - refuses to replace an executable with a stale receipt\n' "$tests_run"
+}
+
+test_matching_receipt_authorizes_a_standalone_reinstall() {
+  tests_run=$((tests_run + 1))
+  sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
+  trap 'rm -rf "$sandbox"' RETURN
+  mkdir -p "$sandbox/home" "$sandbox/release" "$sandbox/install/bin" "$sandbox/data/trench"
+  write_mock_commands "$sandbox/mock-bin"
+  make_release "$sandbox/release" \
+    trench-aarch64-apple-darwin.tar.gz \
+    aarch64-apple-darwin
+  printf '%s\n' 'old standalone trench' >"$sandbox/install/bin/trench"
+  canonical_executable=$(CDPATH='' cd -P -- "$sandbox/install/bin" && printf '%s/trench' "$(pwd -P)")
+  printf '{"schema":1,"manager":"standalone","executable":"%s"}\n' "$canonical_executable" \
+    >"$sandbox/data/trench/install-receipt.json"
+
+  output=$(run_installer "$sandbox") || fail "matching receipt did not authorize reinstall: $output"
+
+  [ -x "$sandbox/install/bin/trench" ] || fail 'reinstalled executable is missing'
+  [ "$("$sandbox/install/bin/trench" --version)" = 'trench 0.1.0' ] || fail 'standalone executable was not replaced'
+  printf 'ok %d - matching receipt authorizes a standalone reinstall\n' "$tests_run"
+}
+
 test_default_install_writes_minimal_xdg_fallback_receipt() {
   tests_run=$((tests_run + 1))
   sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
@@ -638,7 +701,8 @@ test_relative_xdg_directories_fall_back_to_home() {
     fail 'relative XDG_DATA_HOME did not fall back to HOME'
   [ ! -e relative/data/trench/install-receipt.json ] || fail 'relative XDG_DATA_HOME was used'
 
-  XDG_CONFIG_HOME=relative/config run_installer_with_shell "$sandbox" /usr/local/bin/fish >/dev/null ||
+  XDG_CONFIG_HOME=relative/config TEST_XDG_DATA_HOME=relative/data \
+    run_installer_with_shell "$sandbox" /usr/local/bin/fish >/dev/null ||
     fail 'fish installation with relative XDG_CONFIG_HOME failed'
   [ -f "$sandbox/home/.config/fish/config.fish" ] || fail 'relative XDG_CONFIG_HOME did not fall back to HOME'
   [ ! -e relative/config/fish/config.fish ] || fail 'relative XDG_CONFIG_HOME was used'
@@ -653,6 +717,9 @@ test_x86_64_selects_intel_archive
 test_rejects_unsupported_platforms
 test_failed_download_cleans_temporary_files
 test_checksum_failure_preserves_existing_installation
+test_refuses_to_replace_an_unowned_existing_executable
+test_refuses_to_replace_an_executable_with_a_stale_receipt
+test_matching_receipt_authorizes_a_standalone_reinstall
 test_default_install_writes_minimal_xdg_fallback_receipt
 test_zshenv_discovered_zdotdir_is_respected
 test_invalid_inherited_zdotdir_fails_before_installing

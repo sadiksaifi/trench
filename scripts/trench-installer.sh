@@ -197,19 +197,30 @@ mkdir -p "$install_dir" || die "could not create installation directory: $instal
 canonical_install_dir=$(CDPATH='' cd -P -- "$install_dir" && pwd -P) ||
   die "could not resolve installation directory: $install_dir"
 installed_executable=$canonical_install_dir/trench
+
+data_home=$(xdg_dir_or_default "${XDG_DATA_HOME-}" "$HOME/.local/share")
+receipt_dir=$data_home/trench
+receipt=$receipt_dir/install-receipt.json
+escaped_executable=$(printf '%s' "$installed_executable" | sed 's/\\/\\\\/g; s/"/\\"/g')
+expected_receipt=$(printf '{"schema":1,"manager":"standalone","executable":"%s"}' "$escaped_executable")
+
+if [ -e "$installed_executable" ] || [ -L "$installed_executable" ]; then
+  if [ ! -f "$installed_executable" ] || [ -L "$installed_executable" ] ||
+    [ ! -f "$receipt" ] || [ -L "$receipt" ] ||
+    [ "$(cat "$receipt")" != "$expected_receipt" ]; then
+    die "refusing to replace an existing executable without a matching standalone installation receipt: $installed_executable"
+  fi
+fi
+
+mkdir -p "$receipt_dir" || die "could not create receipt directory: $receipt_dir"
 atomic_candidate=$canonical_install_dir/.trench.install.$$
 cp "$temp_dir/extracted/trench" "$atomic_candidate" || die 'could not stage trench for installation'
 chmod 755 "$atomic_candidate" || die 'could not set executable permissions'
 mv -f "$atomic_candidate" "$installed_executable" || die 'could not install trench atomically'
 atomic_candidate=
 
-data_home=$(xdg_dir_or_default "${XDG_DATA_HOME-}" "$HOME/.local/share")
-receipt_dir=$data_home/trench
-mkdir -p "$receipt_dir" || die "could not create receipt directory: $receipt_dir"
-receipt=$receipt_dir/install-receipt.json
-escaped_executable=$(printf '%s' "$installed_executable" | sed 's/\\/\\\\/g; s/"/\\"/g')
 receipt_temp=$receipt_dir/.install-receipt.$$.json
-printf '{"schema":1,"manager":"standalone","executable":"%s"}\n' "$escaped_executable" >"$receipt_temp" ||
+printf '%s\n' "$expected_receipt" >"$receipt_temp" ||
   die 'could not write installation receipt'
 mv -f "$receipt_temp" "$receipt" || die 'could not install ownership receipt'
 
