@@ -8,6 +8,7 @@ install_dir=${TRENCH_INSTALL_DIR:-$HOME/.local/bin}
 modify_shell=1
 temp_dir=
 atomic_candidate=
+receipt_temp=
 
 xdg_dir_or_default() {
   candidate=$1
@@ -26,6 +27,9 @@ die() {
 cleanup() {
   if [ -n "$atomic_candidate" ] && [ -e "$atomic_candidate" ]; then
     rm -f "$atomic_candidate"
+  fi
+  if [ -n "$receipt_temp" ] && [ -e "$receipt_temp" ]; then
+    rm -f "$receipt_temp"
   fi
   if [ -n "$temp_dir" ] && [ -d "$temp_dir" ]; then
     rm -rf "$temp_dir"
@@ -211,25 +215,30 @@ receipt=$receipt_dir/install-receipt.json
 escaped_executable=$(printf '%s' "$installed_executable" | sed 's/\\/\\\\/g; s/"/\\"/g')
 expected_receipt=$(printf '{"schema":1,"manager":"standalone","executable":"%s"}' "$escaped_executable")
 
+if { [ -e "$receipt" ] || [ -L "$receipt" ]; } &&
+  { [ ! -f "$receipt" ] || [ -L "$receipt" ]; }; then
+  die "ownership receipt target is not a regular file: $receipt"
+fi
+
 if [ -e "$installed_executable" ] || [ -L "$installed_executable" ]; then
   if [ ! -f "$installed_executable" ] || [ -L "$installed_executable" ] ||
-    [ ! -f "$receipt" ] || [ -L "$receipt" ] ||
-    [ "$(cat "$receipt")" != "$expected_receipt" ]; then
+    [ ! -f "$receipt" ] || [ "$(cat "$receipt")" != "$expected_receipt" ]; then
     die "refusing to replace an existing executable without a matching standalone installation receipt: $installed_executable"
   fi
 fi
 
 mkdir -p "$receipt_dir" || die "could not create receipt directory: $receipt_dir"
+receipt_temp=$receipt_dir/.install-receipt.$$.json
+printf '%s\n' "$expected_receipt" >"$receipt_temp" ||
+  die 'could not write installation receipt'
+mv -f "$receipt_temp" "$receipt" || die 'could not install ownership receipt'
+receipt_temp=
+
 atomic_candidate=$canonical_install_dir/.trench.install.$$
 cp "$temp_dir/extracted/trench" "$atomic_candidate" || die 'could not stage trench for installation'
 chmod 755 "$atomic_candidate" || die 'could not set executable permissions'
 mv -f "$atomic_candidate" "$installed_executable" || die 'could not install trench atomically'
 atomic_candidate=
-
-receipt_temp=$receipt_dir/.install-receipt.$$.json
-printf '%s\n' "$expected_receipt" >"$receipt_temp" ||
-  die 'could not write installation receipt'
-mv -f "$receipt_temp" "$receipt" || die 'could not install ownership receipt'
 
 modified_config=
 config_backup=

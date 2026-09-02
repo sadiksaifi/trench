@@ -379,6 +379,47 @@ test_matching_receipt_authorizes_a_standalone_reinstall() {
   printf 'ok %d - matching receipt authorizes a standalone reinstall\n' "$tests_run"
 }
 
+test_invalid_receipt_target_fails_before_installing() {
+  tests_run=$((tests_run + 1))
+  sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
+  trap 'rm -rf "$sandbox"' RETURN
+  mkdir -p "$sandbox/home" "$sandbox/release" "$sandbox/data/trench/install-receipt.json"
+  write_mock_commands "$sandbox/mock-bin"
+  make_release "$sandbox/release" \
+    trench-aarch64-apple-darwin.tar.gz \
+    aarch64-apple-darwin
+
+  if output=$(run_installer "$sandbox" 2>&1); then
+    fail 'installer accepted a directory as the ownership receipt'
+  fi
+
+  assert_contains "$output" 'ownership receipt target is not a regular file'
+  [ ! -e "$sandbox/install/bin/trench" ] || fail 'invalid receipt target was rejected after installation'
+  printf 'ok %d - invalid receipt target fails before installing\n' "$tests_run"
+}
+
+test_receipt_staging_failure_preserves_a_fresh_destination() {
+  tests_run=$((tests_run + 1))
+  sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
+  trap 'rm -rf "$sandbox"' RETURN
+  mkdir -p "$sandbox/home" "$sandbox/release" "$sandbox/data/trench"
+  write_mock_commands "$sandbox/mock-bin"
+  make_release "$sandbox/release" \
+    trench-aarch64-apple-darwin.tar.gz \
+    aarch64-apple-darwin
+  chmod 500 "$sandbox/data/trench"
+
+  if output=$(run_installer "$sandbox" 2>&1); then
+    chmod 700 "$sandbox/data/trench"
+    fail 'installer succeeded without staging its ownership receipt'
+  fi
+  chmod 700 "$sandbox/data/trench"
+
+  assert_contains "$output" 'could not write installation receipt'
+  [ ! -e "$sandbox/install/bin/trench" ] || fail 'receipt staging failed after installation'
+  printf 'ok %d - receipt staging failure preserves a fresh destination\n' "$tests_run"
+}
+
 test_default_install_writes_minimal_xdg_fallback_receipt() {
   tests_run=$((tests_run + 1))
   sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
@@ -756,6 +797,8 @@ test_checksum_failure_preserves_existing_installation
 test_refuses_to_replace_an_unowned_existing_executable
 test_refuses_to_replace_an_executable_with_a_stale_receipt
 test_matching_receipt_authorizes_a_standalone_reinstall
+test_invalid_receipt_target_fails_before_installing
+test_receipt_staging_failure_preserves_a_fresh_destination
 test_default_install_writes_minimal_xdg_fallback_receipt
 test_zshenv_discovered_zdotdir_is_respected
 test_invalid_inherited_zdotdir_fails_before_installing
