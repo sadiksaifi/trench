@@ -41,7 +41,7 @@ check: ## Run baseline-safe compile checks across all targets
 	$(CARGO) check --all-targets
 
 test: ## Run the test suite
-	$(CARGO) test
+	$(CARGO) test -- --test-threads=1
 	./tests/installer_test.sh
 
 test-installer: ## Run the isolated macOS installer tests

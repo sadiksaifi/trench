@@ -43,6 +43,17 @@ fn shared_ci_runs_every_required_make_gate_for_prs_main_and_releases() {
 }
 
 #[test]
+fn make_test_runs_git_repository_tests_serially() {
+    let makefile = fs::read_to_string(repository_root().join("Makefile"))
+        .expect("repository should contain the Makefile");
+
+    assert!(
+        makefile.contains("$(CARGO) test -- --test-threads=1"),
+        "parallel repository tests can deadlock inside libgit2"
+    );
+}
+
+#[test]
 fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() {
     let workflow = fs::read_to_string(repository_root().join(".github/workflows/release.yml"))
         .expect("repository should contain the release workflow");
@@ -63,11 +74,10 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
         "trench-release.json",
         "trench-installer.sh",
         "actions/attest@v4",
-        "--draft",
-        "draft=false",
-        "trench-release-workflow:v1",
+        "gh release view \"$RELEASE_TAG\"",
+        "gh release create \"$RELEASE_TAG\"",
         "scripts/release-make-latest.sh",
-        "-f make_latest=\"$make_latest\"",
+        "--latest=\"$make_latest\"",
     ] {
         assert!(workflow.contains(required), "missing `{required}`");
     }
@@ -100,13 +110,19 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
     assert!(!workflow.contains("tagsmith@latest tag"));
     assert!(!workflow.contains("git push refs/tags"));
     assert!(
-        workflow
-            .find("Reject mutation of a published release")
-            .unwrap()
+        !workflow.contains("--draft") && !workflow.contains("draft=false"),
+        "an intentional release tag must publish directly"
+    );
+    assert!(
+        !workflow.contains("releases/tags/$RELEASE_TAG"),
+        "the REST tag lookup cannot resolve draft releases"
+    );
+    assert!(
+        workflow.find("Reject an existing release").unwrap()
             < workflow
                 .find("Attest every published release asset")
                 .unwrap(),
-        "release ownership must be checked before publishing attestations"
+        "an existing release must be rejected before publishing attestations"
     );
     for required in [
         "Verify release tag still points to validated commit",
@@ -129,10 +145,15 @@ fn release_workflow_validates_builds_attests_and_publishes_both_macos_targets() 
         workflow
             .find("Reverify release tag before publication")
             .unwrap()
-            < workflow
-                .find("Publish only after all assets and attestations succeed")
-                .unwrap(),
-        "the remote tag must be revalidated after staging and before publication"
+            < workflow.find("Publish complete release").unwrap(),
+        "the remote tag must be revalidated immediately before publication"
+    );
+    assert!(
+        workflow
+            .find("Reverify release tag before publication")
+            .unwrap()
+            < workflow.find("gh release create").unwrap(),
+        "release creation must publish only after final tag verification"
     );
 }
 
