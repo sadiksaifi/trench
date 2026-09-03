@@ -21,3 +21,13 @@ target
 #.idea/
 
 .DS_Store
+
+# ai slop addition
+
+.codex
+.pi
+.claude
+.opencode
+.agents
+!.agents/skills
+.snap

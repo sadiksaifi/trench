@@ -259,14 +259,6 @@ modified_config=
 config_backup=
 shell_unchanged=
 path_already_present=0
-path_precedence_added=0
-
-path_is_first() {
-  case "${PATH-}" in
-    "$canonical_install_dir" | "$canonical_install_dir":*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
 
 path_is_present() {
   case ":${PATH-}:" in
@@ -319,11 +311,9 @@ configure_shell() {
     path_already_present=1
   elif [ "$managed_path_present" -eq 1 ]; then
     need_path=1
-  elif path_is_first; then
+  elif path_is_present; then
     need_path=0
     path_already_present=1
-  elif path_is_present; then
-    path_precedence_added=1
   fi
 
   block_file=$temp_dir/shell-block
@@ -389,9 +379,6 @@ if [ -n "$shell_unchanged" ]; then
 fi
 if [ "$path_already_present" -eq 1 ]; then
   printf '  PATH: %s was already present; no PATH entry was added\n' "$canonical_install_dir"
-fi
-if [ "$path_precedence_added" -eq 1 ]; then
-  printf '  PATH: %s was present but not first; configured Trench to take precedence\n' "$canonical_install_dir"
 fi
 if [ "$quarantine_removed" -eq 1 ]; then
   printf '  Quarantine: removed from %s\n' "$installed_executable"
