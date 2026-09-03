@@ -617,7 +617,7 @@ test_existing_config_path_declaration_is_not_duplicated() {
   printf 'ok %d - existing config PATH declaration is not duplicated\n' "$tests_run"
 }
 
-test_install_directory_is_prepended_when_present_later_in_path() {
+test_install_directory_later_in_path_is_not_duplicated() {
   tests_run=$((tests_run + 1))
   sandbox=$(mktemp -d "${TMPDIR:-/tmp}/trench-installer-test.XXXXXX")
   trap 'rm -rf "$sandbox"' RETURN
@@ -632,9 +632,12 @@ test_install_directory_is_prepended_when_present_later_in_path() {
   output=$(TEST_PATH="$later_path" run_installer_with_shell "$sandbox" /bin/zsh) || fail 'installation failed'
 
   config=$(cat "$sandbox/home/.zshrc")
-  assert_contains "$config" "export PATH='$canonical_install_dir':\"\$PATH\""
-  assert_contains "$output" "PATH: $canonical_install_dir was present but not first; configured Trench to take precedence"
-  printf 'ok %d - install directory is prepended when present later in PATH\n' "$tests_run"
+  assert_contains "$config" 'trench shell-init zsh'
+  case "$config" in
+    *'export PATH='*) fail 'installer duplicated an existing PATH entry' ;;
+  esac
+  assert_contains "$output" "PATH: $canonical_install_dir was already present; no PATH entry was added"
+  printf 'ok %d - install directory later in PATH is not duplicated\n' "$tests_run"
 }
 
 test_managed_block_is_replaced_without_touching_other_content() {
@@ -853,7 +856,7 @@ test_bash_and_fish_use_native_login_configuration
 test_rerun_leaves_managed_shell_block_unchanged
 test_existing_path_entry_is_not_duplicated
 test_existing_config_path_declaration_is_not_duplicated
-test_install_directory_is_prepended_when_present_later_in_path
+test_install_directory_later_in_path_is_not_duplicated
 test_managed_block_is_replaced_without_touching_other_content
 test_symlinked_shell_configuration_updates_its_target
 test_no_modify_shell_and_quarantine_summaries_are_factual
