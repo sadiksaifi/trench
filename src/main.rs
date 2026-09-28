@@ -78,7 +78,7 @@ enum Commands {
         #[arg(long)]
         delete_branch: bool,
 
-        /// Force deletion of an unmerged local branch
+        /// Force deletion when the local branch is unmerged or merge status is unavailable
         #[arg(long)]
         force_branch: bool,
 

@@ -466,6 +466,149 @@ fn remove_live_json_with_delete_branch_outputs_json() {
 }
 
 #[test]
+fn remove_worktree_after_its_local_branch_was_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "missing-local-branch");
+    let path = worktree_path(tmp.path(), "missing-local-branch");
+    let deleted = Command::new("git")
+        .args(["update-ref", "-d", "refs/heads/missing-local-branch"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(deleted.status.success());
+
+    let list = trench_cmd(tmp.path())
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let records: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    assert!(records
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|record| { record["branch"] == "missing-local-branch" && record["ahead"].is_null() }));
+
+    let preview = trench_cmd(tmp.path())
+        .args([
+            "remove",
+            "missing-local-branch",
+            "--dry-run",
+            "--force-worktree",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(plan["branch"], "missing-local-branch");
+    assert_eq!(plan["merged"], serde_json::Value::Null);
+    assert_eq!(plan["branch_present"], false);
+    assert!(path.exists());
+
+    let without_dirty_override = trench_cmd(tmp.path())
+        .args(["remove", "missing-local-branch", "--yes"])
+        .output()
+        .unwrap();
+    assert!(!without_dirty_override.status.success());
+    assert!(path.exists());
+    let without_branch = trench_cmd(tmp.path())
+        .args([
+            "remove",
+            "missing-local-branch",
+            "--yes",
+            "--force-worktree",
+            "--delete-branch",
+        ])
+        .output()
+        .unwrap();
+    assert!(!without_branch.status.success());
+    assert!(String::from_utf8_lossy(&without_branch.stderr).contains("omit --delete-branch"));
+    assert!(path.exists());
+
+    let removed = trench_cmd(tmp.path())
+        .args([
+            "remove",
+            "missing-local-branch",
+            "--yes",
+            "--force-worktree",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let outcome: serde_json::Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(outcome["branch_deleted"], false);
+    assert!(!path.exists());
+}
+
+#[test]
+fn missing_remote_base_requires_force_to_delete_local_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "missing-remote-base");
+    let path = worktree_path(tmp.path(), "missing-remote-base");
+    std::fs::write(
+        tmp.path().join(".trench.toml"),
+        "[git]\ndefault_base = \"origin/main\"\n",
+    )
+    .unwrap();
+
+    let refused = trench_cmd(tmp.path())
+        .args(["remove", "missing-remote-base", "--yes", "--delete-branch"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(path.exists());
+
+    let removed = trench_cmd(tmp.path())
+        .args([
+            "remove",
+            "missing-remote-base",
+            "--yes",
+            "--delete-branch",
+            "--force-branch",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let outcome: serde_json::Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(outcome["merged"], serde_json::Value::Null);
+    assert_eq!(outcome["force_branch_applied"], true);
+    assert_eq!(outcome["branch_deleted"], true);
+    assert!(!path.exists());
+    let branch = Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/missing-remote-base",
+        ])
+        .current_dir(tmp.path())
+        .status()
+        .unwrap();
+    assert!(!branch.success());
+}
+
+#[test]
 fn exit_code_8_remove_without_yes_outside_interactive_terminal() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());

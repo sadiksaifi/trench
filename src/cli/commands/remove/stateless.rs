@@ -143,7 +143,7 @@ pub struct RemovalAssessment {
     #[serde(skip)]
     repo_path: PathBuf,
     #[serde(skip)]
-    head_oid: git2::Oid,
+    head_oid: Option<git2::Oid>,
     #[serde(skip)]
     branch_oid: Option<git2::Oid>,
     #[serde(skip)]
@@ -211,6 +211,10 @@ impl RemovalAssessment {
         self.merged
     }
 
+    pub fn branch_present(&self) -> bool {
+        self.branch_oid.is_some()
+    }
+
     /// Resolve a target from live Git state without fetching, writing state, or
     /// creating directories.
     pub fn discover(
@@ -254,9 +258,7 @@ impl RemovalAssessment {
             .head
             .as_deref()
             .and_then(|head| git2::Oid::from_str(head).ok())
-            .ok_or_else(|| RemovalAssessmentError::MissingHead {
-                path: identity.path.clone(),
-            })?;
+            .filter(|oid| !oid.is_zero());
         let repo = git2::Repository::open(&identity.path).map_err(|source| {
             RemovalAssessmentError::RepositoryIdentity {
                 path: identity.path.clone(),
@@ -269,14 +271,30 @@ impl RemovalAssessment {
                 source,
             }
         })?;
-        let branch_oid = identity
-            .branch
-            .as_deref()
-            .map(|branch| local_branch_oid(&repo, branch))
-            .transpose()?;
-        if identity.branch.is_some() && branch_oid != Some(head_oid) {
-            return Err(RemovalAssessmentError::BranchHeadChanged {
-                branch: identity.branch.clone().expect("checked above"),
+        let branch_oid = match identity.branch.as_deref() {
+            Some(branch) => match local_branch_oid(&repo, branch) {
+                Ok(oid) => Some(oid),
+                Err(git::GitError::LocalBranchNotFound { .. })
+                    if head_oid.is_none() && !identity.is_main =>
+                {
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            },
+            None => None,
+        };
+        if (identity.branch.is_some() && branch_oid != head_oid)
+            || (head_oid.is_none() && branch_oid.is_some())
+            || (head_oid.is_none() && identity.branch.is_none())
+        {
+            return Err(if head_oid.is_none() {
+                RemovalAssessmentError::MissingHead {
+                    path: identity.path.clone(),
+                }
+            } else {
+                RemovalAssessmentError::BranchHeadChanged {
+                    branch: identity.branch.clone().expect("checked above"),
+                }
             });
         }
         let resolved_base = base
@@ -379,6 +397,11 @@ impl RemovalAssessment {
         if options.delete_branch && self.detached {
             return Err(RemovalAuthorizationError::DetachedHasNoLocalBranch);
         }
+        if options.delete_branch && !self.branch_present() {
+            return Err(RemovalAuthorizationError::MissingLocalBranch {
+                branch: self.branch.clone().expect("attached target has a branch"),
+            });
+        }
         let confirmation = match (options.dry_run, options.yes, receipt) {
             (true, _, None) => RemovalConfirmation::DryRun,
             (false, true, None) => RemovalConfirmation::Flag,
@@ -405,7 +428,9 @@ impl RemovalAssessment {
                         branch: self.branch.clone().expect("attached target has a branch"),
                     });
                 }
-                None => return Err(RemovalAuthorizationError::MergeStatusUnavailable),
+                None if !options.force_branch => {
+                    return Err(RemovalAuthorizationError::MergeStatusUnavailable);
+                }
                 _ => {}
             }
         }
@@ -418,6 +443,7 @@ impl RemovalAssessment {
             detached: self.detached,
             dirty: self.dirty,
             merged: self.merged,
+            branch_present: self.branch_present(),
             yes: options.yes,
             confirmation,
             force_worktree: options.force_worktree,
@@ -425,7 +451,7 @@ impl RemovalAssessment {
             delete_branch: options.delete_branch,
             force_branch: options.force_branch,
             force_branch_applied: options.delete_branch
-                && self.merged == Some(false)
+                && self.merged != Some(true)
                 && options.force_branch,
             no_hooks: options.no_hooks,
             hook_policy: if options.no_hooks {
@@ -454,6 +480,10 @@ pub enum RemovalAuthorizationError {
     ForceBranchRequiresDeleteBranch,
     #[error("detached worktrees have no local branch to delete")]
     DetachedHasNoLocalBranch,
+    #[error(
+        "local branch '{branch}' no longer exists; omit --delete-branch to remove the worktree"
+    )]
+    MissingLocalBranch { branch: String },
     #[error("branch '{branch}' is not merged; pass --force-branch with --delete-branch")]
     UnmergedBranch { branch: String },
     #[error("branch merge status is unavailable; local branch deletion was not authorized")]
@@ -470,6 +500,7 @@ pub struct RemovalPlan {
     detached: bool,
     dirty: bool,
     merged: Option<bool>,
+    branch_present: bool,
     yes: bool,
     confirmation: RemovalConfirmation,
     force_worktree: bool,
@@ -610,6 +641,7 @@ pub struct RemovalOutcome {
     pub detached: bool,
     pub dirty: bool,
     pub merged: Option<bool>,
+    pub branch_present: bool,
     pub yes: bool,
     pub confirmation: RemovalConfirmation,
     pub force_worktree: bool,
@@ -640,6 +672,7 @@ impl RemovalOutcome {
             detached: plan.detached,
             dirty: plan.dirty,
             merged: plan.merged,
+            branch_present: plan.branch_present,
             yes: plan.yes,
             confirmation: plan.confirmation,
             force_worktree: plan.force_worktree,
@@ -676,6 +709,9 @@ impl fmt::Display for RemovalOutcome {
             self.path.display()
         )?;
         match (&self.branch, self.delete_branch, self.branch_deleted) {
+            (Some(branch), _, _) if !self.branch_present => {
+                write!(formatter, "; local branch '{branch}' already absent")?
+            }
             (Some(branch), true, true) => write!(formatter, "; deleted local branch '{branch}'")?,
             (Some(branch), true, false) => {
                 write!(formatter, "; local branch '{branch}' selected for deletion")?
@@ -716,6 +752,9 @@ fn write_human_outcome(
         plan.path.display()
     )?;
     match (&plan.branch, plan.delete_branch, branch_deleted) {
+        (Some(branch), _, _) if !plan.branch_present => {
+            write!(formatter, "; local branch '{branch}' already absent")?
+        }
         (Some(branch), true, true) => write!(formatter, "; deleted local branch '{branch}'")?,
         (Some(branch), true, false) => write!(formatter, "; would delete local branch '{branch}'")?,
         (Some(branch), false, _) => write!(formatter, "; would keep local branch '{branch}'")?,

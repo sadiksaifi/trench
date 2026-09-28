@@ -61,6 +61,11 @@ pub fn ahead_behind(
     let repo = git2::Repository::open(worktree_path)
         .map_err(|error| super::map_repo_open_error(error, worktree_path))?;
     let head = git2::Oid::from_str(head)?;
+    // Git reports a null HEAD for a linked worktree whose local branch ref
+    // was deleted. There is no commit to compare with the base.
+    if head.is_zero() {
+        return Ok(None);
+    }
     let base = resolve_base(&repo, base)?;
     Ok(base
         .map(|base| repo.graph_ahead_behind(head, base))

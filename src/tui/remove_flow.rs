@@ -125,7 +125,7 @@ impl RemoveDialog {
     }
 
     pub fn can_delete_branch(&self) -> bool {
-        !self.target.detached && self.target.branch.is_some()
+        !self.target.detached && self.assessment.branch_present()
     }
 
     pub(crate) fn action_labels(&self) -> (&'static str, &'static str) {
@@ -136,7 +136,7 @@ impl RemoveDialog {
         };
         match self.mode {
             RemoveMode::ConfirmDirtyWorktree
-                if self.delete_branch && self.target.merged == Some(false) =>
+                if self.delete_branch && self.target.merged != Some(true) =>
             {
                 ("Continue", "continue")
             }
@@ -178,9 +178,7 @@ impl RemoveDialog {
     pub fn begin_submit(&mut self) -> RemoveMode {
         self.mode = if self.target.dirty && !self.dirty_confirmed {
             RemoveMode::ConfirmDirtyWorktree
-        } else if self.delete_branch
-            && self.target.merged == Some(false)
-            && !self.unmerged_confirmed
+        } else if self.delete_branch && self.target.merged != Some(true) && !self.unmerged_confirmed
         {
             RemoveMode::ConfirmUnmergedBranch
         } else {
@@ -271,7 +269,7 @@ impl RemoveDialog {
             force_worktree: self.target.dirty && self.dirty_confirmed,
             delete_branch: self.delete_branch,
             force_branch: self.delete_branch
-                && self.target.merged == Some(false)
+                && self.target.merged != Some(true)
                 && self.unmerged_confirmed,
             no_hooks: false,
             dry_run: false,
@@ -430,6 +428,22 @@ mod tests {
     }
 
     #[test]
+    fn missing_local_branch_has_no_branch_deletion_control() {
+        let fixture = Fixture::new("missing-local");
+        git(
+            fixture.root.path(),
+            &["update-ref", "-d", "refs/heads/missing-local"],
+        );
+        let assessment = fixture.assessment();
+        let mut dialog =
+            RemoveDialog::new(WorktreeId::new(&fixture.worktree_path), assessment).unwrap();
+        assert_eq!(dialog.target().branch.as_deref(), Some("missing-local"));
+        assert!(!dialog.can_delete_branch());
+        dialog.toggle_delete_branch();
+        assert!(!dialog.delete_branch());
+    }
+
+    #[test]
     fn dirty_and_unmerged_branch_risks_require_independent_confirmations() {
         let fixture = Fixture::new("risky");
         std::fs::write(fixture.worktree_path.join("dirty.txt"), "dirty\n").unwrap();
@@ -466,6 +480,32 @@ mod tests {
             .revalidate_request(fixture.root.path(), Some("main"), None)
             .unwrap();
         assert!(matches!(request, OperationRequest::Remove(_)));
+    }
+
+    #[test]
+    fn missing_remote_base_needs_branch_deletion_confirmation() {
+        let fixture = Fixture::new("missing-base");
+        let assessment = RemovalAssessment::discover(
+            fixture.root.path(),
+            fixture.worktree_path.to_str().unwrap(),
+            Some("origin/main"),
+        )
+        .unwrap();
+        let mut dialog =
+            RemoveDialog::new(WorktreeId::new(&fixture.worktree_path), assessment).unwrap();
+        dialog.toggle_delete_branch();
+        assert_eq!(dialog.begin_submit(), RemoveMode::ConfirmUnmergedBranch);
+        assert_eq!(dialog.confirm_current_risk(), RemoveMode::Ready);
+        let OperationRequest::Remove(request) = dialog
+            .revalidate_request(fixture.root.path(), Some("origin/main"), None)
+            .unwrap()
+        else {
+            panic!("expected remove request")
+        };
+        let plan = serde_json::to_value(request.plan).unwrap();
+        assert_eq!(plan["merged"], serde_json::Value::Null);
+        assert_eq!(plan["force_branch"], true);
+        assert_eq!(plan["force_branch_applied"], true);
     }
 
     #[test]
