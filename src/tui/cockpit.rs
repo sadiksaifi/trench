@@ -176,7 +176,11 @@ fn render_remove_dialog(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, th
         }
         RemoveMode::ConfirmUnmergedBranch => {
             lines.push(Line::from(head_ellipsize(
-                "Unmerged commits may be permanently lost.",
+                if target.merged.is_none() {
+                    "Merge status is unavailable; branch commits may be lost."
+                } else {
+                    "Unmerged commits may be permanently lost."
+                },
                 usize::from(layout.body.width),
             )));
             lines.push(Line::from(head_ellipsize(
