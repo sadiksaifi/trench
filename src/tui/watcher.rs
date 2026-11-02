@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -38,10 +38,16 @@ impl ActiveWatcher {
 
 /// Handle a notify watch event: forward successful events to the channel,
 /// log errors at warn level.
-fn handle_watch_event(res: notify::Result<Event>, tx: &mpsc::Sender<()>) {
+fn handle_watch_event(
+    res: notify::Result<Event>,
+    tx: &mpsc::Sender<()>,
+    git_roots: Option<&[PathBuf]>,
+) {
     match res {
-        Ok(_) => {
-            let _ = tx.send(());
+        Ok(event) => {
+            if git_roots.is_none_or(|roots| git_event_matters(&event, roots)) {
+                let _ = tx.send(());
+            }
         }
         Err(_) => {
             crate::logging::record(crate::logging::DiagnosticEvent::warning(
@@ -54,10 +60,40 @@ fn handle_watch_event(res: notify::Result<Event>, tx: &mpsc::Sender<()>) {
     }
 }
 
+fn git_event_matters(event: &Event, roots: &[PathBuf]) -> bool {
+    if matches!(event.kind, notify::EventKind::Access(_)) {
+        return false;
+    }
+    event.paths.iter().any(|path| {
+        roots.iter().any(|root| {
+            let Ok(relative) = path.strip_prefix(root) else {
+                return false;
+            };
+            let parts: Vec<_> = relative.iter().filter_map(|part| part.to_str()).collect();
+            match parts.as_slice() {
+                ["HEAD" | "packed-refs" | "config"] => true,
+                ["refs", ..] => {
+                    !path.is_dir() && !path.extension().is_some_and(|ext| ext == "lock")
+                }
+                ["worktrees"] | ["worktrees", _] => {
+                    matches!(
+                        event.kind,
+                        notify::EventKind::Create(_)
+                            | notify::EventKind::Remove(_)
+                            | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                    )
+                }
+                ["worktrees", _, "HEAD" | "gitdir" | "commondir" | "locked"] => true,
+                _ => false,
+            }
+        })
+    })
+}
+
 /// Watches filesystem paths for changes and signals when a TUI refresh is needed.
 ///
-/// Uses the `notify` crate to monitor worktree directories and `.git` directories
-/// for changes. Events are coalesced — callers should debounce before refreshing.
+/// Uses the `notify` crate to monitor filesystem paths.
+/// Callers debounce events before refreshing.
 pub struct FileWatcher {
     _watcher: ActiveWatcher,
     event_rx: mpsc::Receiver<()>,
@@ -69,8 +105,13 @@ impl FileWatcher {
     /// Each path is watched recursively. A non-blocking `event_rx` signals
     /// when changes are detected. Returns an error if the watcher cannot
     /// be initialized.
+    #[cfg(test)]
     pub fn new(paths: &[&Path]) -> Result<Self> {
-        match Self::new_with_backend(paths, WatchBackend::Recommended) {
+        Self::with_fallback(paths, false)
+    }
+
+    fn with_fallback(paths: &[&Path], metadata_only: bool) -> Result<Self> {
+        match Self::new_with_backend(paths, WatchBackend::Recommended, metadata_only) {
             Ok(watcher) => Ok(watcher),
             Err(_) => {
                 crate::logging::record(crate::logging::DiagnosticEvent::warning(
@@ -85,6 +126,7 @@ impl FileWatcher {
                         interval: FALLBACK_POLL_INTERVAL,
                         compare_contents: true,
                     },
+                    metadata_only,
                 )
             }
         }
@@ -98,18 +140,43 @@ impl FileWatcher {
                 interval,
                 compare_contents: true,
             },
+            false,
         )
     }
 
-    fn new_with_backend(paths: &[&Path], backend: WatchBackend) -> Result<Self> {
+    fn new_with_backend(
+        paths: &[&Path],
+        backend: WatchBackend,
+        metadata_only: bool,
+    ) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
-        let mut watcher = Self::build_watcher(backend, tx)?;
+        let roots = metadata_only.then(|| paths.iter().map(|path| path.to_path_buf()).collect());
+        let mut watcher = Self::build_watcher(backend, tx, roots)?;
+        let mut registrations = Vec::new();
+        for path in paths {
+            registrations.push((
+                path.to_path_buf(),
+                if metadata_only {
+                    notify::RecursiveMode::NonRecursive
+                } else {
+                    notify::RecursiveMode::Recursive
+                },
+            ));
+            if metadata_only {
+                for subdir in ["refs", "worktrees"] {
+                    let child = path.join(subdir);
+                    if child.is_dir() {
+                        registrations.push((child, notify::RecursiveMode::Recursive));
+                    }
+                }
+            }
+        }
 
         let mut watched = 0;
         let mut watch_errors = 0;
-        for path in paths {
+        for (path, mode) in registrations {
             if path.exists() {
-                match watcher.watch(path, notify::RecursiveMode::Recursive) {
+                match watcher.watch(&path, mode) {
                     Ok(()) => watched += 1,
                     Err(_) => {
                         crate::logging::record(crate::logging::DiagnosticEvent::warning(
@@ -141,11 +208,15 @@ impl FileWatcher {
         })
     }
 
-    fn build_watcher(backend: WatchBackend, tx: mpsc::Sender<()>) -> notify::Result<ActiveWatcher> {
+    fn build_watcher(
+        backend: WatchBackend,
+        tx: mpsc::Sender<()>,
+        roots: Option<Vec<PathBuf>>,
+    ) -> notify::Result<ActiveWatcher> {
         match backend {
             WatchBackend::Recommended => {
                 let watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-                    handle_watch_event(res, &tx);
+                    handle_watch_event(res, &tx, roots.as_deref());
                 })?;
                 Ok(ActiveWatcher::Recommended(watcher))
             }
@@ -155,7 +226,7 @@ impl FileWatcher {
             } => {
                 let watcher = PollWatcher::new(
                     move |res: notify::Result<Event>| {
-                        handle_watch_event(res, &tx);
+                        handle_watch_event(res, &tx, roots.as_deref());
                     },
                     Config::default()
                         .with_poll_interval(interval)
@@ -236,12 +307,11 @@ impl DebouncedWatcher {
 
     /// Create a debounced watcher from worktree paths, auto-discovering `.git` dirs.
     ///
-    /// For each worktree path, also watches the `.git` directory (if it exists)
-    /// so that ref changes (commits, fetches, branch switches) trigger refresh.
+    /// Watches shared Git metadata only, including linked worktree HEAD files.
     pub fn from_worktree_paths(worktree_paths: &[&Path], debounce: Duration) -> Result<Self> {
         let all_paths = collect_watch_paths(worktree_paths);
         let path_refs: Vec<&Path> = all_paths.iter().map(|p| p.as_path()).collect();
-        Self::from_file_watcher(FileWatcher::new(&path_refs)?, debounce)
+        Self::from_file_watcher(FileWatcher::with_fallback(&path_refs, true)?, debounce)
     }
 
     #[cfg(test)]
@@ -253,7 +323,14 @@ impl DebouncedWatcher {
         let all_paths = collect_watch_paths(worktree_paths);
         let path_refs: Vec<&Path> = all_paths.iter().map(|p| p.as_path()).collect();
         Self::from_file_watcher(
-            FileWatcher::with_polling(&path_refs, poll_interval)?,
+            FileWatcher::new_with_backend(
+                &path_refs,
+                WatchBackend::Poll {
+                    interval: poll_interval,
+                    compare_contents: true,
+                },
+                true,
+            )?,
             debounce,
         )
     }
@@ -296,33 +373,29 @@ impl DebouncedWatcher {
     }
 }
 
-fn collect_watch_paths(worktree_paths: &[&Path]) -> Vec<std::path::PathBuf> {
-    let mut all_paths: Vec<std::path::PathBuf> = Vec::new();
-
+fn collect_watch_paths(worktree_paths: &[&Path]) -> Vec<PathBuf> {
+    let mut roots = std::collections::BTreeSet::new();
     for path in worktree_paths {
-        all_paths.push(path.to_path_buf());
-
-        let git_dir = path.join(".git");
-        if git_dir.is_dir() {
-            all_paths.push(git_dir);
-        } else if git_dir.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&git_dir) {
-                if let Some(gitdir) = content.strip_prefix("gitdir: ") {
-                    let gitdir_path = Path::new(gitdir.trim());
-                    let real_git_dir = if gitdir_path.is_relative() {
-                        path.join(gitdir_path)
-                    } else {
-                        gitdir_path.to_path_buf()
-                    };
-                    if real_git_dir.is_dir() {
-                        all_paths.push(real_git_dir);
-                    }
-                }
-            }
+        let dot_git = path.join(".git");
+        let git_dir = if dot_git.is_dir() {
+            dot_git
+        } else {
+            let Ok(content) = std::fs::read_to_string(&dot_git) else {
+                continue;
+            };
+            let Some(gitdir) = content.strip_prefix("gitdir: ") else {
+                continue;
+            };
+            path.join(gitdir.trim())
+        };
+        let common = std::fs::read_to_string(git_dir.join("commondir"))
+            .map(|common| git_dir.join(common.trim()))
+            .unwrap_or(git_dir);
+        if let Ok(common) = common.canonicalize() {
+            roots.insert(common);
         }
     }
-
-    all_paths
+    roots.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -355,6 +428,81 @@ mod tests {
         wait_until(Duration::from_secs(2), TEST_POLL_INTERVAL, || {
             watcher.should_refresh()
         })
+    }
+
+    #[test]
+    fn worktree_watcher_ignores_content_and_tracks_shared_and_linked_refs() {
+        let root = TempDir::new().unwrap();
+        let main = root.path().join("main");
+        let linked = root.path().join("linked");
+        let repo = git2::Repository::init(&main).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let branch = repo
+            .branch("linked", &repo.find_commit(oid).unwrap(), false)
+            .unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(branch.get()));
+        repo.worktree("linked", &linked, Some(&options)).unwrap();
+        let git_dir = main.join(".git");
+        let mut watcher = DebouncedWatcher::from_worktree_paths_with_polling(
+            &[linked.as_path()],
+            Duration::from_millis(30),
+            TEST_POLL_INTERVAL,
+        )
+        .unwrap();
+        watcher.should_refresh();
+        fs::write(linked.join("source.rs"), "source").unwrap();
+        fs::create_dir_all(linked.join("target")).unwrap();
+        fs::write(linked.join("target/build"), "output").unwrap();
+        fs::write(git_dir.join("objects/ignored-object"), "object").unwrap();
+        fs::write(git_dir.join("logs/HEAD"), "reflog").unwrap();
+        fs::write(git_dir.join("worktrees/linked/index"), "index").unwrap();
+        fs::write(git_dir.join("worktrees/linked/index.lock"), "lock").unwrap();
+        assert!(
+            !wait_until(
+                Duration::from_millis(300),
+                Duration::from_millis(10),
+                || watcher.should_refresh()
+            ),
+            "content changes must not refresh"
+        );
+        fs::write(git_dir.join("refs/heads/new-branch"), format!("{oid}\n")).unwrap();
+        assert!(
+            wait_for_refresh(&mut watcher),
+            "linked-only watcher must observe shared refs"
+        );
+        fs::write(git_dir.join("worktrees/linked/HEAD"), format!("{oid}\n")).unwrap();
+        assert!(
+            wait_for_refresh(&mut watcher),
+            "linked HEAD changes must refresh"
+        );
+        let added = root.path().join("added");
+        repo.worktree("added", &added, None).unwrap();
+        assert!(
+            wait_for_refresh(&mut watcher),
+            "worktree creation must refresh"
+        );
+        let removal = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(["worktree", "remove"])
+            .arg(&added)
+            .output()
+            .unwrap();
+        assert!(
+            removal.status.success(),
+            "{}",
+            String::from_utf8_lossy(&removal.stderr)
+        );
+        assert!(
+            wait_for_refresh(&mut watcher),
+            "worktree removal must refresh"
+        );
     }
 
     #[test]
@@ -538,12 +686,9 @@ mod tests {
         }
 
         // Use the constructor that takes worktree paths and auto-discovers .git dirs
-        let mut dw = DebouncedWatcher::from_worktree_paths_with_polling(
-            &[dir.path()],
-            Duration::from_millis(50),
-            TEST_POLL_INTERVAL,
-        )
-        .unwrap();
+        let mut dw =
+            DebouncedWatcher::from_worktree_paths(&[dir.path()], Duration::from_millis(50))
+                .unwrap();
         dw.should_refresh();
 
         // Simulate a ref change inside .git
@@ -692,7 +837,7 @@ mod tests {
                 .unwrap();
         let (tx, _rx) = mpsc::channel();
         let error_canary = "token-error-canary";
-        handle_watch_event(Err(notify::Error::generic(error_canary)), &tx);
+        handle_watch_event(Err(notify::Error::generic(error_canary)), &tx, None);
 
         let contents = std::fs::read_to_string(log_path).unwrap();
 
