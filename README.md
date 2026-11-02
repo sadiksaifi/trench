@@ -41,6 +41,12 @@ never overwritten automatically.
 
 Trench exposes ten commands: `create`, `remove`, `switch`, `open`, `list`, `sync`, `init`, `shell-init`, `completions`, and `upgrade`. Run `trench <command> --help` for command-specific options.
 
+`trench list` shows worktree names, branches and paths. JSON records contain
+`worktree`, `branch`, `path`, `is_main`, `is_current` and `detached`; porcelain
+contains name, branch and path. The TUI inspector also shows HEAD. Displays do
+not scan file status or compute ahead/behind counts. Sync and remove check the
+selected worktree when you act.
+
 Structured and preview flags are local to the commands that support them:
 
 - `create`, `remove`, and `sync`: `--json`, `--dry-run`

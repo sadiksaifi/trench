@@ -2,7 +2,7 @@ use crate::{
     cli::commands::sync::stateless::SyncStrategy,
     ref_catalog::RefSnapshot,
     tui::{
-        app::{WorktreeId, WorktreeIdentity, WorktreeStatus},
+        app::{WorktreeId, WorktreeIdentity},
         line_input::{LineEdit, LineInput},
         ref_picker::{RefPicker, RefPickerEffect, RefPickerKey},
     },
@@ -221,18 +221,10 @@ impl SyncDialog {
     }
 }
 
-pub fn unavailable_reason(
-    identity: &WorktreeIdentity,
-    status: Option<&WorktreeStatus>,
-) -> Option<&'static str> {
-    if identity.detached {
-        return Some("Detached worktrees cannot be synced");
-    }
-    let Some(status) = status else {
-        return Some("Git status is still loading");
-    };
-    (status.staged + status.modified + status.untracked > 0)
-        .then_some("Dirty worktrees cannot be synced")
+pub fn unavailable_reason(identity: &WorktreeIdentity) -> Option<&'static str> {
+    identity
+        .detached
+        .then_some("Detached worktrees cannot be synced")
 }
 
 #[cfg(test)]
@@ -241,9 +233,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        cli::commands::sync::stateless::SyncStrategy,
-        ref_catalog::RefSnapshot,
-        tui::app::{WorktreeIdentity, WorktreeStatus},
+        cli::commands::sync::stateless::SyncStrategy, ref_catalog::RefSnapshot,
+        tui::app::WorktreeIdentity,
     };
 
     fn identity(branch: Option<&str>, is_main: bool) -> WorktreeIdentity {
@@ -284,32 +275,6 @@ mod tests {
                 base: "release".to_string(),
                 strategy: SyncStrategy::Merge,
             })
-        );
-    }
-
-    #[test]
-    fn eligibility_rejects_loading_dirty_and_detached_rows_but_allows_main() {
-        let clean = WorktreeStatus::default();
-        let dirty = WorktreeStatus {
-            modified: 1,
-            ..WorktreeStatus::default()
-        };
-
-        assert_eq!(
-            unavailable_reason(&identity(Some("main"), true), Some(&clean)),
-            None
-        );
-        assert_eq!(
-            unavailable_reason(&identity(Some("feature/auth"), false), None),
-            Some("Git status is still loading")
-        );
-        assert_eq!(
-            unavailable_reason(&identity(Some("feature/auth"), false), Some(&dirty)),
-            Some("Dirty worktrees cannot be synced")
-        );
-        assert_eq!(
-            unavailable_reason(&identity(None, false), Some(&clean)),
-            Some("Detached worktrees cannot be synced")
         );
     }
 

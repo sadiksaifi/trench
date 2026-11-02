@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::operation::{OperationKind, OperationStage};
 use crate::tui::{
-    app::{unavailable_reason, AppState, Viewport, WorktreeIdentity, WorktreeStatus},
+    app::{unavailable_reason, AppState, Viewport, WorktreeIdentity},
     create_flow::{BranchKind, CreateDialog, CreateMode},
     keymap::{self, Binding, Context},
     line_input::LineInput,
@@ -51,10 +51,6 @@ impl<'a> ViewModel<'a> {
 
     pub fn visible(&self) -> Vec<&'a WorktreeIdentity> {
         self.state.visible_identities()
-    }
-
-    pub fn status_for(&self, identity: &WorktreeIdentity) -> Option<&'a WorktreeStatus> {
-        self.state.statuses.get(&identity.id)
     }
 }
 
@@ -2028,7 +2024,7 @@ fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &The
     } else {
         format!("Worktrees · {result_count}")
     };
-    let header = Row::new(["Worktree", "Branch", "Git"])
+    let header = Row::new(["Worktree", "Branch"])
         .style(
             Style::default()
                 .fg(theme.accent)
@@ -2045,17 +2041,12 @@ fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &The
                     .clone()
                     .unwrap_or_else(|| "detached".to_string()),
             ),
-            Cell::from(row_git(model, identity)),
         ])
         .style(theme.with_bg(Style::default().fg(theme.fg), theme.bg_panel))
     });
     let table = Table::new(
         rows,
-        [
-            Constraint::Percentage(31),
-            Constraint::Percentage(34),
-            Constraint::Percentage(35),
-        ],
+        [Constraint::Percentage(50), Constraint::Percentage(50)],
     )
     .header(header)
     .block(panel(Some(pane_title(&title, area.width)), theme).title_alignment(Alignment::Center))
@@ -2093,21 +2084,6 @@ fn render_list(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme: &The
     }
 }
 
-fn row_git(model: &ViewModel<'_>, identity: &WorktreeIdentity) -> String {
-    let status = model.status_for(identity);
-    if model.state.row_is_waiting(&identity.id) {
-        return match status {
-            Some(status) => format!(
-                "{} {}",
-                flux_frame(model.state.refresh.spinner_tick),
-                compact_git(status)
-            ),
-            None => format!("{} Updating", flux_frame(model.state.refresh.spinner_tick)),
-        };
-    }
-    status.map(compact_git).unwrap_or_else(|| "—".to_string())
-}
-
 fn flux_frame(tick: u64) -> char {
     let frames = FluxFrames::BRAILLE;
     let frame_count = u64::try_from(frames.len()).expect("Flux frames fit in u64");
@@ -2120,22 +2096,15 @@ fn render_inspector(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme:
     let title = identity.map_or_else(
         || pane_title("Inspector", area.width),
         |identity| {
-            let prefix = if model.state.row_is_waiting(&identity.id) {
-                format!("{} ", flux_frame(model.state.refresh.spinner_tick))
-            } else {
-                String::new()
-            };
             let suffix = if identity.is_current {
                 " · current"
             } else {
                 ""
             };
             let content_width = usize::from(area.width.saturating_sub(4));
-            let worktree_width = content_width
-                .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
-                .saturating_sub(UnicodeWidthStr::width(suffix));
+            let worktree_width = content_width.saturating_sub(UnicodeWidthStr::width(suffix));
             let label = format!(
-                "{prefix}{}{suffix}",
+                "{}{suffix}",
                 head_ellipsize(&identity.worktree, worktree_width)
             );
             pane_title(&label, area.width)
@@ -2153,7 +2122,6 @@ fn render_inspector(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme:
         );
         return;
     };
-    let status = model.status_for(identity);
     let mut lines = Vec::new();
     if model.state.refresh.updating_refs {
         lines.push(Line::from(Span::styled(
@@ -2181,18 +2149,6 @@ fn render_inspector(model: &ViewModel<'_>, frame: &mut Frame, area: Rect, theme:
                 .unwrap_or_else(|| "—".to_string()),
             theme,
         ),
-        metric_line("Staged", &count(status.map(|value| value.staged)), theme),
-        metric_line(
-            "Modified",
-            &count(status.map(|value| value.modified)),
-            theme,
-        ),
-        metric_line(
-            "Untracked",
-            &count(status.map(|value| value.untracked)),
-            theme,
-        ),
-        compare_line(status, theme),
     ]);
     frame.render_widget(
         Paragraph::new(lines)
@@ -2540,35 +2496,6 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     area
 }
 
-fn compact_git(status: &WorktreeStatus) -> String {
-    let changed = status.staged + status.modified + status.untracked;
-    format!(
-        "{changed} changed · ↑{} ↓{}",
-        optional_number(status.ahead),
-        optional_number(status.behind)
-    )
-}
-
-fn compare_line(status: Option<&WorktreeStatus>, theme: &Theme) -> Line<'static> {
-    let base = status
-        .and_then(|value| value.base.as_deref())
-        .unwrap_or("—");
-    let value = format!(
-        "↑{} ↓{}",
-        optional_number(status.and_then(|value| value.ahead)),
-        optional_number(status.and_then(|value| value.behind))
-    );
-    metric_line(&format!("Compare {base}"), &value, theme)
-}
-
-fn optional_number(value: Option<usize>) -> String {
-    value.map_or_else(|| "—".to_string(), |value| value.to_string())
-}
-
-fn count(value: Option<u32>) -> String {
-    value.map_or_else(|| "—".to_string(), |value| value.to_string())
-}
-
 fn short_head(head: &str) -> String {
     head.chars().take(7).collect()
 }
@@ -2657,19 +2584,7 @@ mod tests {
             true,
         );
         let main = identity("/repos/trench", "trench", Some("main"), true, false);
-        let mut state = AppState::new(vec![current.clone(), main]);
-        state.statuses.insert(
-            current.id,
-            WorktreeStatus {
-                base: Some("main".to_string()),
-                staged: 1,
-                modified: 1,
-                untracked: 1,
-                ahead: Some(2),
-                behind: Some(1),
-            },
-        );
-        state
+        AppState::new(vec![current, main])
     }
 
     fn render_buffer(state: &mut AppState, width: u16, height: u16, theme_name: &str) -> Buffer {
@@ -2824,6 +2739,24 @@ mod tests {
     }
 
     #[test]
+    fn cockpit_displays_identity_without_git_status() {
+        let mut state = sample_state();
+        let output = text(&render_buffer(&mut state, 120, 24, "ops"));
+        for absent in [
+            "Git",
+            "Staged",
+            "Modified",
+            "Untracked",
+            "Compare",
+            "changed",
+        ] {
+            assert!(!output.contains(absent), "{output}");
+        }
+        assert!(output.contains("HEAD"), "{output}");
+        assert!(output.contains("feature/auth"), "{output}");
+    }
+
+    #[test]
     fn wide_pane_titles_are_centered_and_inspector_metadata_reclaims_the_first_row() {
         for theme_name in ["ops", "catppuccin"] {
             let main = identity("/repos/trench", "trench", Some("main"), true, false);
@@ -2872,7 +2805,6 @@ mod tests {
     #[test]
     fn current_worktree_moves_its_badge_into_the_centered_inspector_title() {
         let current = identity("/repos/trench", "trench", Some("main"), true, true);
-        let current_id = current.id.clone();
         let mut state = AppState::new(vec![current]);
         let (_, inspector) = wide_panes(120, 24);
 
@@ -2881,22 +2813,6 @@ mod tests {
         assert_eq!(text(&idle).matches("current").count(), 1, "{}", text(&idle));
         assert_eq!(find_text_in(&idle, inspector, "Branch").1, inspector.y + 2);
 
-        state.refresh.waiting_rows.insert(current_id);
-        state.refresh.spinner_tick = 1;
-        let waiting = render_buffer(&mut state, 120, 24, "ops");
-        assert_title_centered(
-            &waiting,
-            inspector,
-            &format!("{} trench · current", flux_frame(1)),
-        );
-        assert_eq!(
-            text(&waiting).matches("current").count(),
-            1,
-            "{}",
-            text(&waiting)
-        );
-
-        state.refresh.waiting_rows.clear();
         state.refresh.updating_refs = true;
         let updating = render_buffer(&mut state, 120, 24, "ops");
         assert_title_centered(&updating, inspector, "trench · current");
@@ -2991,7 +2907,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_titles_cover_normal_narrow_waiting_and_empty_inspector_states() {
+    fn pane_titles_cover_normal_narrow_and_empty_inspector_states() {
         let selected = identity(
             "/worktrees/feature-auth",
             "feature-auth",
@@ -2999,7 +2915,6 @@ mod tests {
             false,
             false,
         );
-        let selected_id = selected.id.clone();
         let mut state = AppState::new(vec![selected]);
 
         let normal = render_buffer(&mut state, 80, 20, "ops");
@@ -3008,15 +2923,6 @@ mod tests {
         state.inspector_override = Some(true);
         let narrow = render_buffer(&mut state, 60, 16, "ops");
         assert_title_centered(&narrow, Rect::new(0, 0, 60, 15), "feature-auth");
-
-        state.refresh.waiting_rows.insert(selected_id);
-        state.refresh.spinner_tick = 1;
-        let waiting = render_buffer(&mut state, 60, 16, "ops");
-        assert_title_centered(
-            &waiting,
-            Rect::new(0, 0, 60, 15),
-            &format!("{} feature-auth", flux_frame(1)),
-        );
 
         state.selected = None;
         let empty = render_buffer(&mut state, 60, 16, "ops");
@@ -3151,9 +3057,7 @@ mod tests {
     #[test]
     fn unavailable_help_binding_mutes_both_the_key_and_reason() {
         let main = identity("/repos/trench", "trench", Some("main"), true, true);
-        let id = main.id.clone();
         let mut state = AppState::new(vec![main]);
-        state.statuses.insert(id, WorktreeStatus::default());
         state.help_open = true;
         let theme = crate::tui::theme::from_name("ops");
 
@@ -3176,17 +3080,11 @@ mod tests {
             "Worktrees · 2",
             "Worktree",
             "Branch",
-            "Git",
             "feature-auth",
             "feature/auth",
-            "3 changed · ↑2 ↓1",
             "Path",
             "/worktrees/feature-auth",
             "HEAD          1234567",
-            "Staged        1",
-            "Modified      1",
-            "Untracked     1",
-            "Compare main  ↑2 ↓1",
             "current",
         ] {
             assert!(output.contains(expected), "missing {expected:?}\n{output}");
@@ -3218,9 +3116,7 @@ mod tests {
     #[test]
     fn keybars_end_in_help_and_only_expose_eligible_row_actions() {
         let main = identity("/repos/trench", "trench", Some("main"), true, true);
-        let id = main.id.clone();
         let mut state = AppState::new(vec![main]);
-        state.statuses.insert(id, WorktreeStatus::default());
         let buffer = render_buffer(&mut state, 120, 20, "ops");
         let footer = lines(&buffer).last().unwrap().trim_end().to_string();
 
@@ -3327,46 +3223,21 @@ mod tests {
     }
 
     #[test]
-    fn stale_row_values_and_ref_activity_remain_visible_during_refresh() {
+    fn ref_activity_remains_visible_during_refresh() {
         let mut state = sample_state();
-        let id = state.identities[0].id.clone();
-        state.refresh.waiting_rows.insert(id);
         state.refresh.updating_refs = true;
         state.refresh.spinner_tick = 2;
 
         let output = text(&render_buffer(&mut state, 120, 24, "ops"));
 
         assert!(output.contains("Worktrees · 2 · Updating refs"), "{output}");
-        assert!(output.contains("3 changed · ↑2 ↓1"), "{output}");
+        assert!(output.contains("feature/auth"), "{output}");
         assert!(output.contains(flux_frame(2)), "{output}");
-    }
-
-    #[test]
-    fn identity_renders_with_inline_flux_motion_before_first_status() {
-        let row = identity(
-            "/worktrees/feature-auth",
-            "feature-auth",
-            Some("feature/auth"),
-            false,
-            true,
-        );
-        let id = row.id.clone();
-        let mut state = AppState::new(vec![row]);
-        state.refresh.waiting_rows.insert(id);
-        state.refresh.spinner_tick = 1;
-
-        let output = text(&render_buffer(&mut state, 80, 20, "ops"));
-
-        assert!(output.contains("feature-auth"), "{output}");
-        assert!(output.contains("Updating"), "{output}");
-        assert!(output.contains(flux_frame(1)), "{output}");
     }
 
     #[test]
     fn launcher_search_keeps_the_filtered_cockpit_and_input_keybar_visible() {
         let mut state = sample_state();
-        let main_id = state.identities[1].id.clone();
-        state.statuses.insert(main_id, WorktreeStatus::default());
         let _ = reduce(&mut state, Event::Input(crate::tui::keymap::Key::Char('/')));
         for character in "mai".chars() {
             let _ = reduce(
@@ -3535,11 +3406,11 @@ mod tests {
     }
 
     #[test]
-    fn completed_rows_stop_spinner_without_blanking_their_values() {
+    fn idle_cockpit_has_no_fetch_spinner() {
         let mut state = sample_state();
         let output = text(&render_buffer(&mut state, 120, 24, "ops"));
 
-        assert!(output.contains("3 changed · ↑2 ↓1"), "{output}");
+        assert!(output.contains("feature/auth"), "{output}");
         assert!(!output.contains("Updating refs"), "{output}");
         for glyph in FluxFrames::BRAILLE {
             assert!(
@@ -3560,7 +3431,7 @@ mod tests {
             output.contains("Could not update origin; showing local refs"),
             "{output}"
         );
-        assert!(output.contains("3 changed · ↑2 ↓1"), "{output}");
+        assert!(output.contains("feature/auth"), "{output}");
     }
 
     #[test]

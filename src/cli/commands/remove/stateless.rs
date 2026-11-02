@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::config::HooksConfig;
 use crate::hooks::{HookEnvContext, HookEvent};
-use crate::worktree_catalog::{CatalogError, WorktreeCatalog, WorktreeIdentity};
+use crate::worktree_catalog::{CatalogError, WorktreeCatalog};
 use crate::{git, hooks};
 
 /// The independent user choices accepted by worktree removal.
@@ -231,29 +231,8 @@ impl RemovalAssessment {
         selector: &str,
         configured_base: Option<&str>,
     ) -> Result<Self, RemovalAssessmentError> {
-        let catalog = WorktreeCatalog::discover(repo_path)?.with_base(configured_base);
+        let catalog = WorktreeCatalog::discover(repo_path)?;
         let identity = catalog.resolve(selector)?.clone();
-        let status = catalog.status(&identity.path)?;
-        Self::from_live(
-            repo_path,
-            &identity,
-            status.base,
-            status.staged,
-            status.modified,
-            status.untracked,
-            status.conflicted,
-        )
-    }
-
-    fn from_live(
-        repo_path: &Path,
-        identity: &WorktreeIdentity,
-        base: Option<String>,
-        staged: u32,
-        modified: u32,
-        untracked: u32,
-        conflicted: u32,
-    ) -> Result<Self, RemovalAssessmentError> {
         let head_oid = identity
             .head
             .as_deref()
@@ -265,6 +244,27 @@ impl RemovalAssessment {
                 source,
             }
         })?;
+        let base = match configured_base {
+            Some(base) => Some(base.to_string()),
+            None => {
+                let origin_head = match repo.find_reference("refs/remotes/origin/HEAD") {
+                    Ok(reference) => reference
+                        .symbolic_target()
+                        .and_then(|target| target.strip_prefix("refs/remotes/"))
+                        .map(ToOwned::to_owned),
+                    Err(error) if error.code() == git2::ErrorCode::NotFound => None,
+                    Err(error) => return Err(git::GitError::Git(error).into()),
+                };
+                origin_head.or_else(|| {
+                    catalog
+                        .identities()
+                        .iter()
+                        .find(|identity| identity.is_main)
+                        .and_then(|identity| identity.branch.clone())
+                })
+            }
+        };
+        let dirty = git::dirty_count(&identity.path)? > 0;
         let admin_dir = repo.path().canonicalize().map_err(|source| {
             RemovalAssessmentError::TargetUnavailable {
                 path: repo.path().to_path_buf(),
@@ -321,7 +321,7 @@ impl RemovalAssessment {
             path: identity.path.clone(),
             is_main: identity.is_main,
             detached: identity.detached,
-            dirty: staged > 0 || modified > 0 || untracked > 0 || conflicted > 0,
+            dirty,
             base,
             merged,
             repo_path: repo_path.to_path_buf(),
@@ -1769,8 +1769,8 @@ fn prepare_exact_worktree_removal_with_boundary(
         ));
     }
     if !allow_dirty {
-        let counts = match git::status::counts(&quarantine.path) {
-            Ok(counts) => counts,
+        let dirty = match git::dirty_count(&quarantine.path) {
+            Ok(dirty) => dirty,
             Err(error) => {
                 return Err(recover_or_retain(
                     error,
@@ -1781,8 +1781,7 @@ fn prepare_exact_worktree_removal_with_boundary(
                 ));
             }
         };
-        if counts.staged > 0 || counts.modified > 0 || counts.untracked > 0 || counts.conflicted > 0
-        {
+        if dirty > 0 {
             return Err(recover_or_retain(
                 git::GitError::PreconditionsChanged,
                 &target,

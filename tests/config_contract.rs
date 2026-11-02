@@ -116,7 +116,11 @@ shell = "true"
     )
     .unwrap();
 
-    let output = trench(repo.path(), xdg.path(), &["create", "feature/config", "--dry-run", "--json"]);
+    let output = trench(
+        repo.path(),
+        xdg.path(),
+        &["create", "feature/config", "--dry-run", "--json"],
+    );
 
     assert!(
         output.status.success(),
@@ -135,7 +139,11 @@ fn unknown_global_key_exits_with_config_error_and_exact_diagnostic() {
     std::fs::create_dir_all(global_path.parent().unwrap()).unwrap();
     std::fs::write(&global_path, "[git]\nauto_prune = true\n").unwrap();
 
-    let output = trench(repo.path(), xdg.path(), &["create", "feature/config", "--dry-run", "--json"]);
+    let output = trench(
+        repo.path(),
+        xdg.path(),
+        &["create", "feature/config", "--dry-run", "--json"],
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert_eq!(output.status.code(), Some(6), "stderr: {stderr}");
@@ -161,7 +169,11 @@ root = "{{ repo }}/{{ branch | sanitize }}"
     )
     .unwrap();
 
-    let output = trench(repo.path(), xdg.path(), &["create", "feature/config", "--dry-run", "--json"]);
+    let output = trench(
+        repo.path(),
+        xdg.path(),
+        &["create", "feature/config", "--dry-run", "--json"],
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert_eq!(output.status.code(), Some(6), "stderr: {stderr}");
