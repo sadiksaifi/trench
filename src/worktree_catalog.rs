@@ -35,12 +35,6 @@ pub struct WorktreeRecord {
     pub is_main: bool,
     pub is_current: bool,
     pub detached: bool,
-    pub base: Option<String>,
-    pub staged: u32,
-    pub modified: u32,
-    pub untracked: u32,
-    pub ahead: Option<usize>,
-    pub behind: Option<usize>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -168,25 +162,16 @@ impl WorktreeCatalog {
         })
     }
 
-    pub fn records(&self) -> Result<Vec<WorktreeRecord>, CatalogError> {
+    pub fn records(&self) -> Vec<WorktreeRecord> {
         self.identities
             .iter()
-            .map(|identity| {
-                let status = self.status(&identity.path)?;
-                Ok(WorktreeRecord {
-                    worktree: identity.worktree.clone(),
-                    branch: identity.branch.clone(),
-                    path: identity.path.to_string_lossy().into_owned(),
-                    is_main: identity.is_main,
-                    is_current: identity.is_current,
-                    detached: identity.detached,
-                    base: status.base,
-                    staged: status.staged,
-                    modified: status.modified,
-                    untracked: status.untracked,
-                    ahead: status.ahead,
-                    behind: status.behind,
-                })
+            .map(|identity| WorktreeRecord {
+                worktree: identity.worktree.clone(),
+                branch: identity.branch.clone(),
+                path: identity.path.to_string_lossy().into_owned(),
+                is_main: identity.is_main,
+                is_current: identity.is_current,
+                detached: identity.detached,
             })
             .collect()
     }

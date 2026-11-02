@@ -91,7 +91,6 @@ fn list_json_uses_live_git_worktrees_without_creating_a_database() {
         canonical(&linked).to_string_lossy().as_ref()
     );
     assert_eq!(records[0]["is_current"], true);
-    assert_eq!(records[0]["base"], "main");
     assert_eq!(
         records[1]["path"],
         canonical(&repo).to_string_lossy().as_ref()
@@ -100,7 +99,7 @@ fn list_json_uses_live_git_worktrees_without_creating_a_database() {
 }
 
 #[test]
-fn list_json_reports_exact_raw_status_and_base_fields() {
+fn list_json_reports_only_identity_fields() {
     let root = tempfile::tempdir().unwrap();
     let repo = root.path().join("status-repo");
     let linked = root.path().join("feature-status");
@@ -139,28 +138,16 @@ fn list_json_reports_exact_raw_status_and_base_fields() {
         .find(|record| record["worktree"] == "feature-status")
         .unwrap();
     let expected_keys = [
-        "ahead",
-        "base",
-        "behind",
         "branch",
         "detached",
         "is_current",
         "is_main",
-        "modified",
         "path",
-        "staged",
-        "untracked",
         "worktree",
     ];
     let mut actual_keys: Vec<_> = linked_record.as_object().unwrap().keys().cloned().collect();
     actual_keys.sort();
     assert_eq!(actual_keys, expected_keys);
-    assert_eq!(linked_record["base"], "main");
-    assert_eq!(linked_record["staged"], 1);
-    assert_eq!(linked_record["modified"], 1);
-    assert_eq!(linked_record["untracked"], 1);
-    assert_eq!(linked_record["ahead"], 1);
-    assert_eq!(linked_record["behind"], 0);
 }
 
 #[test]
@@ -204,7 +191,7 @@ fn list_reports_detached_worktree_with_stable_identity_and_porcelain_shape() {
     assert!(porcelain.status.success());
     let stdout = String::from_utf8(porcelain.stdout).unwrap();
     let line = stdout.lines().next().unwrap();
-    assert_eq!(line.split(':').count(), 7);
+    assert_eq!(line.split(':').count(), 3);
     assert!(
         line.starts_with(&format!("detached@{head}:(detached):")),
         "{line}"
@@ -225,4 +212,28 @@ fn list_outside_repository_has_direct_error_and_actionable_hint() {
         "{stderr}"
     );
     assert!(!stderr.contains("select"), "{stderr}");
+}
+
+#[test]
+fn list_ignores_invalid_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("repo");
+    let xdg = root.path().join("xdg");
+    std::fs::create_dir(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join(".trench.toml"), "invalid = [").unwrap();
+    std::fs::create_dir_all(xdg.join("config/trench")).unwrap();
+    std::fs::write(xdg.join("config/trench/config.toml"), "invalid = [").unwrap();
+    for args in [
+        vec!["list"],
+        vec!["list", "--json"],
+        vec!["list", "--porcelain"],
+    ] {
+        let output = trench(&repo, &xdg, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
