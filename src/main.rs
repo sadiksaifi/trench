@@ -605,18 +605,12 @@ fn run_open(identifier: &str) -> anyhow::Result<()> {
 
 fn run_list(json: bool, porcelain: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let repo_info = git::discover_repo(&cwd)?;
-    let project_config = config::load_project_config(&repo_info.path)?;
-    let global_config = config::load_global_config()?;
-    let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
-    let default_base = resolved.git.default_base.as_deref();
-
     let output = if json {
-        cli::commands::list::execute_json(&cwd, default_base)?
+        cli::commands::list::execute_json(&cwd)?
     } else if porcelain {
-        cli::commands::list::execute_porcelain(&cwd, default_base)?
+        cli::commands::list::execute_porcelain(&cwd)?
     } else {
-        cli::commands::list::execute(&cwd, default_base)?
+        cli::commands::list::execute(&cwd)?
     };
     if output.ends_with('\n') {
         print!("{output}");

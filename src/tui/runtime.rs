@@ -270,10 +270,11 @@ fn open_sync_dialog(
         .filter(|identity| &identity.id == target)
         .cloned()
         .context("selected worktree is no longer visible")?;
-    if let Some(reason) =
-        crate::tui::sync_flow::unavailable_reason(&identity, state.statuses.get(&identity.id))
-    {
+    if let Some(reason) = crate::tui::sync_flow::unavailable_reason(&identity) {
         anyhow::bail!(reason);
+    }
+    if crate::git::dirty_count(&identity.path)? > 0 {
+        anyhow::bail!("Dirty worktrees cannot be synced");
     }
     let refs = state.refs.clone().context("references are still loading")?;
     state.help_open = false;
@@ -776,11 +777,7 @@ pub fn run() -> Result<TuiExit> {
     let global = config::load_global_config()?;
     let project = config::load_project_config(&repo.path)?;
     let resolved = config::resolve_config(None, project.as_ref(), &global);
-    let mut refresh = RefreshRuntime::new(
-        cwd.clone(),
-        repo.path.clone(),
-        resolved.git.default_base.clone(),
-    );
+    let mut refresh = RefreshRuntime::new(cwd.clone(), repo.path.clone());
     refresh.launch()?;
     let mut state = AppState::new(Vec::new());
     apply_refresh_publications(&mut refresh, &mut state);
@@ -1532,11 +1529,7 @@ fn translate_modal_key(key: KeyEvent) -> Option<ModalKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        cell::RefCell,
-        collections::{BTreeMap, BTreeSet},
-        rc::Rc,
-    };
+    use std::{cell::RefCell, rc::Rc};
 
     use tempfile::TempDir;
 
@@ -2608,6 +2601,39 @@ mod tests {
     }
 
     #[test]
+    fn sync_dialog_rechecks_selected_worktree_before_opening() {
+        let repository = init_repo();
+        let path = repository.path().canonicalize().unwrap();
+        let identity = WorktreeIdentity {
+            id: WorktreeId::new(path.clone()),
+            worktree: "main".into(),
+            branch: Some("main".into()),
+            path: path.clone(),
+            head: None,
+            is_main: true,
+            is_current: true,
+            detached: false,
+        };
+        let mut state = AppState::new(vec![identity.clone()]);
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        ));
+        std::fs::write(path.join("untracked.txt"), "dirty").unwrap();
+        let error = open_sync_dialog(&mut state, &identity.id, None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Dirty worktrees cannot be synced"),
+            "{error}"
+        );
+        assert!(state.sync_dialog.is_none());
+    }
+
+    #[test]
     fn sync_dialog_opens_the_exact_visible_target_and_routes_picker_and_submit() {
         let repository = init_repo();
         let target = repository.path().canonicalize().unwrap();
@@ -2622,9 +2648,6 @@ mod tests {
             detached: false,
         };
         let mut state = AppState::new(vec![identity.clone()]);
-        state
-            .statuses
-            .insert(identity.id.clone(), Default::default());
         state.refs = Some(RefSnapshot::from_parts(
             ["main"],
             ["origin/main"],
@@ -2665,11 +2688,6 @@ mod tests {
                     Some("main"),
                     true,
                 )),
-                statuses: BTreeMap::from([(
-                    WorktreeId::new(repository.path()),
-                    Default::default(),
-                )]),
-                waiting_rows: BTreeSet::new(),
                 updating_refs: false,
                 warning: None,
             },
@@ -2795,8 +2813,6 @@ mod tests {
             RefreshPublication {
                 identities: Vec::new(),
                 refs: Some(updated),
-                statuses: BTreeMap::new(),
-                waiting_rows: BTreeSet::new(),
                 updating_refs: false,
                 warning: None,
             },
@@ -2813,8 +2829,6 @@ mod tests {
             RefreshPublication {
                 identities: Vec::new(),
                 refs: None,
-                statuses: BTreeMap::new(),
-                waiting_rows: BTreeSet::new(),
                 updating_refs: false,
                 warning: Some("Could not update origin; showing local refs".to_string()),
             },
@@ -3088,7 +3102,6 @@ mod tests {
             false,
         );
         let mut state = AppState::new(vec![target.clone()]);
-        state.statuses.insert(target.id.clone(), Default::default());
         state.refs = Some(refs.clone());
         let _ = app::reduce(&mut state, Event::Input(Key::Char('/')));
         for character in "auth".chars() {
@@ -3098,16 +3111,9 @@ mod tests {
         state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
             crate::operation::OperationKind::Sync,
         ));
-        let refreshed_status = crate::tui::app::WorktreeStatus {
-            ahead: Some(0),
-            behind: Some(0),
-            ..Default::default()
-        };
         let publication = RefreshPublication {
             identities: vec![target.clone()],
             refs: Some(refs),
-            statuses: BTreeMap::from([(target.id.clone(), refreshed_status.clone())]),
-            waiting_rows: BTreeSet::new(),
             updating_refs: false,
             warning: None,
         };
@@ -3138,7 +3144,6 @@ mod tests {
         );
 
         assert!(refresh.requested);
-        assert_eq!(state.statuses.get(&target.id), Some(&refreshed_status));
         assert_eq!(
             state.selected_visible().map(|row| &row.id),
             Some(&target.id)
@@ -3177,7 +3182,6 @@ mod tests {
             detached: false,
         };
         let mut state = AppState::new(vec![target.clone()]);
-        state.statuses.insert(target.id.clone(), Default::default());
         state.refs = Some(RefSnapshot::from_parts(
             ["main", "feature/auth"],
             [] as [&str; 0],
@@ -3281,8 +3285,6 @@ mod tests {
         let publication = RefreshPublication {
             identities: Vec::new(),
             refs: None,
-            statuses: BTreeMap::new(),
-            waiting_rows: BTreeSet::new(),
             updating_refs: false,
             warning: None,
         };
@@ -3575,9 +3577,6 @@ mod tests {
             };
             self.state.identities.push(identity.clone());
             self.state.selected = Some(identity.id.clone());
-            self.state
-                .statuses
-                .insert(identity.id.clone(), Default::default());
             identity
         }
 

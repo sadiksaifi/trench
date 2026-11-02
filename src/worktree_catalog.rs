@@ -16,17 +16,6 @@ pub struct WorktreeIdentity {
     pub(crate) head: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WorktreeStatus {
-    pub base: Option<String>,
-    pub staged: u32,
-    pub modified: u32,
-    pub untracked: u32,
-    pub conflicted: u32,
-    pub ahead: Option<usize>,
-    pub behind: Option<usize>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorktreeRecord {
     pub worktree: String,
@@ -35,12 +24,6 @@ pub struct WorktreeRecord {
     pub is_main: bool,
     pub is_current: bool,
     pub detached: bool,
-    pub base: Option<String>,
-    pub staged: u32,
-    pub modified: u32,
-    pub untracked: u32,
-    pub ahead: Option<usize>,
-    pub behind: Option<usize>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,32 +39,12 @@ pub enum CatalogError {
     },
 }
 
-pub trait BaseRefResolver {
-    fn base_for(&self, main: &WorktreeIdentity) -> Result<Option<String>, git::GitError>;
-}
-
-struct DetectedBaseRef;
-
-impl BaseRefResolver for DetectedBaseRef {
-    fn base_for(&self, main: &WorktreeIdentity) -> Result<Option<String>, git::GitError> {
-        Ok(git::status::detected_base(&main.path)?.or_else(|| main.branch.clone()))
-    }
-}
-
 pub struct WorktreeCatalog {
     identities: Vec<WorktreeIdentity>,
-    base: Option<String>,
 }
 
 impl WorktreeCatalog {
     pub fn discover(cwd: &Path) -> Result<Self, CatalogError> {
-        Self::discover_with_base(cwd, &DetectedBaseRef)
-    }
-
-    fn discover_with_base(
-        cwd: &Path,
-        base_resolver: &impl BaseRefResolver,
-    ) -> Result<Self, CatalogError> {
         let mut identities: Vec<_> = git::worktrees::discover(cwd)?
             .into_iter()
             .map(|entry| {
@@ -122,71 +85,23 @@ impl WorktreeCatalog {
                 .then_with(|| left.worktree.cmp(&right.worktree))
                 .then_with(|| left.path.cmp(&right.path))
         });
-        let base = identities
-            .iter()
-            .find(|identity| identity.is_main)
-            .map(|identity| base_resolver.base_for(identity))
-            .transpose()?
-            .flatten();
-        Ok(Self { identities, base })
-    }
-
-    pub fn with_base(mut self, base: Option<&str>) -> Self {
-        if let Some(base) = base {
-            self.base = Some(base.to_string());
-        }
-        self
+        Ok(Self { identities })
     }
 
     pub fn identities(&self) -> &[WorktreeIdentity] {
         &self.identities
     }
 
-    pub fn status(&self, id: &Path) -> Result<WorktreeStatus, CatalogError> {
-        let Some(identity) = self.identities.iter().find(|identity| identity.path == id) else {
-            return Err(CatalogError::NotFound {
-                selector: id.to_string_lossy().into_owned(),
-            });
-        };
-        if !id.exists() {
-            return Ok(WorktreeStatus {
-                base: self.base.clone(),
-                ..WorktreeStatus::default()
-            });
-        }
-        let counts = git::status::counts(id)?;
-        let comparison =
-            git::status::ahead_behind(id, identity.head.as_deref(), self.base.as_deref())?;
-        Ok(WorktreeStatus {
-            base: self.base.clone(),
-            staged: counts.staged,
-            modified: counts.modified,
-            untracked: counts.untracked,
-            conflicted: counts.conflicted,
-            ahead: comparison.map(|(ahead, _)| ahead),
-            behind: comparison.map(|(_, behind)| behind),
-        })
-    }
-
-    pub fn records(&self) -> Result<Vec<WorktreeRecord>, CatalogError> {
+    pub fn records(&self) -> Vec<WorktreeRecord> {
         self.identities
             .iter()
-            .map(|identity| {
-                let status = self.status(&identity.path)?;
-                Ok(WorktreeRecord {
-                    worktree: identity.worktree.clone(),
-                    branch: identity.branch.clone(),
-                    path: identity.path.to_string_lossy().into_owned(),
-                    is_main: identity.is_main,
-                    is_current: identity.is_current,
-                    detached: identity.detached,
-                    base: status.base,
-                    staged: status.staged,
-                    modified: status.modified,
-                    untracked: status.untracked,
-                    ahead: status.ahead,
-                    behind: status.behind,
-                })
+            .map(|identity| WorktreeRecord {
+                worktree: identity.worktree.clone(),
+                branch: identity.branch.clone(),
+                path: identity.path.to_string_lossy().into_owned(),
+                is_main: identity.is_main,
+                is_current: identity.is_current,
+                detached: identity.detached,
             })
             .collect()
     }

@@ -15,7 +15,7 @@ use crate::tui::{
 
 /// Live adapter around the pure refresh coordinator.
 ///
-/// It owns the Git-backed boundaries, runs expensive row/fetch tasks off the
+/// It owns the Git-backed boundaries, runs expensive fetch tasks off the
 /// terminal event loop, and exposes ordered publications for the app reducer.
 pub struct RefreshRuntime {
     source: CatalogRefreshSource,
@@ -32,14 +32,10 @@ pub struct RefreshRuntime {
 }
 
 impl RefreshRuntime {
-    pub fn new(
-        cwd: impl Into<PathBuf>,
-        repo_path: impl Into<PathBuf>,
-        configured_base: Option<String>,
-    ) -> Self {
+    pub fn new(cwd: impl Into<PathBuf>, repo_path: impl Into<PathBuf>) -> Self {
         let (completion_tx, completion_rx) = mpsc::channel();
         Self {
-            source: CatalogRefreshSource::new(cwd, configured_base),
+            source: CatalogRefreshSource::new(cwd),
             fetcher: GitOriginFetcher::new(repo_path),
             coordinator: RefreshCoordinator::default(),
             clock: SystemClock,
@@ -106,8 +102,7 @@ impl RefreshRuntime {
     }
 
     fn request(&mut self, cause: RefreshCause) -> Result<(), CatalogRefreshError> {
-        self.coordinator
-            .request_from(cause, &self.source, &self.clock)?;
+        self.coordinator.request_from(cause, &self.source)?;
         self.record_publication();
         self.dispatch_tasks();
         Ok(())
@@ -160,8 +155,6 @@ impl RefreshRuntime {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
     use tempfile::TempDir;
 
     use super::*;
@@ -181,48 +174,11 @@ mod tests {
     }
 
     #[test]
-    fn actual_adapter_publishes_identity_first_then_progress_and_manual_swr() {
-        let repo = init_repo();
-        let mut runtime = RefreshRuntime::new(repo.path(), repo.path(), None);
-
-        runtime.launch().unwrap();
-        let immediate = runtime.drain_publications();
-        assert_eq!(immediate.len(), 1);
-        assert_eq!(immediate[0].identities.len(), 1);
-        assert_eq!(immediate[0].refs.as_ref().unwrap().local, ["main"]);
-        assert!(immediate[0].statuses.is_empty());
-        assert_eq!(immediate[0].waiting_rows.len(), 1);
-        assert!(!immediate[0].updating_refs);
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let settled = loop {
-            runtime.tick();
-            let publications = runtime.drain_publications();
-            if let Some(publication) = publications
-                .into_iter()
-                .find(|publication| publication.waiting_rows.is_empty())
-            {
-                break publication;
-            }
-            assert!(Instant::now() < deadline, "row task did not settle");
-            std::thread::yield_now();
-        };
-        assert_eq!(settled.statuses.len(), 1);
-
-        runtime.manual().unwrap();
-        let refreshing = runtime.drain_publications();
-        assert_eq!(refreshing.len(), 1);
-        assert_eq!(refreshing[0].statuses, settled.statuses);
-        assert_eq!(refreshing[0].waiting_rows.len(), 1);
-        assert!(!refreshing[0].updating_refs);
-    }
-
-    #[test]
     fn consumed_watcher_refresh_retries_after_transient_discovery_failure() {
         let repo = init_repo();
         let git_dir = repo.path().join(".git");
         let unavailable_git_dir = repo.path().join(".git-unavailable");
-        let mut runtime = RefreshRuntime::new(repo.path(), repo.path(), None);
+        let mut runtime = RefreshRuntime::new(repo.path(), repo.path());
         runtime.launch().unwrap();
         runtime.drain_publications();
 

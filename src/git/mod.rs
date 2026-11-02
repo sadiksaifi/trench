@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 pub mod create;
-pub mod status;
 pub mod sync;
 pub mod worktrees;
 
@@ -19,7 +18,6 @@ pub struct RepoInfo {
 /// Opens the repository at `worktree_path` and counts all files with
 /// non-clean status (modified, new, deleted, renamed, typechanged).
 /// Returns 0 for a clean worktree.
-#[cfg(test)]
 pub fn dirty_count(worktree_path: &Path) -> Result<usize, GitError> {
     let repo =
         git2::Repository::open(worktree_path).map_err(|e| map_repo_open_error(e, worktree_path))?;

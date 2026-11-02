@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -40,25 +39,10 @@ pub struct WorktreeIdentity {
     pub detached: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WorktreeStatus {
-    pub base: Option<String>,
-    pub staged: u32,
-    pub modified: u32,
-    pub untracked: u32,
-    pub ahead: Option<usize>,
-    pub behind: Option<usize>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     #[cfg(test)]
     IdentitiesLoaded(Vec<WorktreeIdentity>),
-    #[cfg(test)]
-    StatusLoaded {
-        id: WorktreeId,
-        status: WorktreeStatus,
-    },
     RefreshPublished(RefreshPublication),
     RefreshTick,
     OperationSucceeded {
@@ -94,7 +78,6 @@ pub enum Effect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
     pub identities: Vec<WorktreeIdentity>,
-    pub statuses: BTreeMap<WorktreeId, WorktreeStatus>,
     pub refs: Option<RefSnapshot>,
     pub refresh: RefreshActivity,
     pub selected: Option<WorktreeId>,
@@ -120,7 +103,6 @@ pub struct Notification {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RefreshActivity {
-    pub waiting_rows: BTreeSet<WorktreeId>,
     pub updating_refs: bool,
     pub warning: Option<String>,
     pub spinner_tick: u64,
@@ -151,7 +133,6 @@ impl AppState {
         let selected = identities.first().map(|identity| identity.id.clone());
         Self {
             identities,
-            statuses: BTreeMap::new(),
             refs: None,
             refresh: RefreshActivity::default(),
             selected,
@@ -203,27 +184,14 @@ impl AppState {
         self.inspector_override
             .unwrap_or_else(|| self.viewport.is_wide())
     }
-
-    pub fn row_is_waiting(&self, id: &WorktreeId) -> bool {
-        self.refresh.waiting_rows.contains(id)
-    }
 }
 
 pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
     match event {
         #[cfg(test)]
         Event::IdentitiesLoaded(identities) => {
-            state
-                .statuses
-                .retain(|id, _| identities.iter().any(|row| &row.id == id));
             state.identities = identities;
             reconcile_visible_selection(state);
-        }
-        #[cfg(test)]
-        Event::StatusLoaded { id, status } => {
-            if state.identities.iter().any(|row| row.id == id) {
-                state.statuses.insert(id, status);
-            }
         }
         Event::RefreshPublished(publication) => {
             let pending = state
@@ -243,15 +211,13 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 state.selected = pending;
             }
             state.identities = publication.identities;
-            state.statuses = publication.statuses;
             state.refs = publication.refs;
-            state.refresh.waiting_rows = publication.waiting_rows;
             state.refresh.updating_refs = publication.updating_refs;
             state.refresh.warning = publication.warning;
             reconcile_visible_selection(state);
         }
         Event::RefreshTick => {
-            if state.refresh.updating_refs || !state.refresh.waiting_rows.is_empty() {
+            if state.refresh.updating_refs {
                 state.refresh.spinner_tick = state.refresh.spinner_tick.wrapping_add(1);
             }
         }
@@ -327,9 +293,7 @@ pub fn unavailable_reason(state: &AppState, action: Action) -> Option<&'static s
         (Action::Switch | Action::Open | Action::Sync | Action::Remove, None) => {
             Some("No worktree selected")
         }
-        (Action::Sync, Some(identity)) => {
-            sync_flow::unavailable_reason(identity, state.statuses.get(&identity.id))
-        }
+        (Action::Sync, Some(identity)) => sync_flow::unavailable_reason(identity),
         (Action::Remove, Some(identity)) if identity.is_main => {
             Some("The main worktree cannot be removed")
         }
@@ -459,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_identity_snapshot_keeps_catalog_order_and_has_no_statuses() {
+    fn initial_identity_snapshot_keeps_catalog_order() {
         let current = identity("/worktrees/zebra", "zebra");
         let alpha = identity("/worktrees/alpha", "alpha");
 
@@ -467,32 +431,6 @@ mod tests {
 
         assert_eq!(state.identities, vec![current.clone(), alpha]);
         assert_eq!(state.selected, Some(current.id));
-        assert!(state.statuses.is_empty());
-    }
-
-    #[test]
-    fn progressive_status_attaches_to_identity_after_order_changes() {
-        let alpha = identity("/worktrees/alpha", "alpha");
-        let beta = identity("/worktrees/beta", "beta");
-        let mut state = AppState::new(vec![alpha.clone(), beta.clone()]);
-        let _ = reduce(
-            &mut state,
-            Event::IdentitiesLoaded(vec![beta.clone(), alpha]),
-        );
-        let status = WorktreeStatus {
-            staged: 1,
-            ..WorktreeStatus::default()
-        };
-
-        let _ = reduce(
-            &mut state,
-            Event::StatusLoaded {
-                id: beta.id.clone(),
-                status: status.clone(),
-            },
-        );
-
-        assert_eq!(state.statuses.get(&beta.id), Some(&status));
     }
 
     #[test]
@@ -523,7 +461,6 @@ mod tests {
         main.is_main = true;
         let id = main.id.clone();
         let mut state = AppState::new(vec![main]);
-        state.statuses.insert(id.clone(), WorktreeStatus::default());
 
         assert_eq!(
             reduce(&mut state, Event::Input(Key::Char('d'))),
@@ -535,29 +472,6 @@ mod tests {
         assert_eq!(
             reduce(&mut state, Event::Input(Key::Char('s'))),
             vec![Effect::OpenSync(id)]
-        );
-    }
-
-    #[test]
-    fn sync_waits_for_clean_status_without_calling_git_from_the_reducer() {
-        let row = identity("/worktrees/alpha", "alpha");
-        let id = row.id.clone();
-        let mut state = AppState::new(vec![row]);
-
-        assert_eq!(
-            unavailable_reason(&state, Action::Sync),
-            Some("Git status is still loading")
-        );
-        state.statuses.insert(
-            id,
-            WorktreeStatus {
-                modified: 1,
-                ..WorktreeStatus::default()
-            },
-        );
-        assert_eq!(
-            unavailable_reason(&state, Action::Sync),
-            Some("Dirty worktrees cannot be synced")
         );
     }
 
@@ -583,15 +497,11 @@ mod tests {
     }
 
     #[test]
-    fn refresh_publication_preserves_selection_and_stale_values_while_waiting() {
+    fn refresh_publication_preserves_selection_and_updates_refs() {
         let alpha = identity("/worktrees/alpha", "alpha");
         let beta = identity("/worktrees/beta", "beta");
         let mut state = AppState::new(vec![alpha.clone(), beta.clone()]);
         let _ = reduce(&mut state, Event::Select(beta.id.clone()));
-        let stale = WorktreeStatus {
-            modified: 2,
-            ..WorktreeStatus::default()
-        };
 
         let _ = reduce(
             &mut state,
@@ -604,23 +514,18 @@ mod tests {
                     main_branch: Some("main".to_string()),
                     has_origin: false,
                 }),
-                statuses: BTreeMap::from([(beta.id.clone(), stale.clone())]),
-                waiting_rows: BTreeSet::from([beta.id.clone()]),
                 updating_refs: true,
                 warning: None,
             }),
         );
 
         assert_eq!(state.selected, Some(beta.id.clone()));
-        assert_eq!(state.statuses.get(&beta.id), Some(&stale));
-        assert!(state.row_is_waiting(&beta.id));
         assert_eq!(state.refs.as_ref().unwrap().local, ["main"]);
     }
 
     #[test]
-    fn spinner_ticks_only_while_refresh_activity_is_waiting() {
+    fn spinner_ticks_only_while_fetching_refs() {
         let alpha = identity("/worktrees/alpha", "alpha");
-        let id = alpha.id.clone();
         let mut state = AppState::new(vec![alpha.clone()]);
         let _ = reduce(&mut state, Event::RefreshTick);
         assert_eq!(state.refresh.spinner_tick, 0);
@@ -630,9 +535,7 @@ mod tests {
             Event::RefreshPublished(RefreshPublication {
                 identities: vec![alpha.clone()],
                 refs: None,
-                statuses: BTreeMap::new(),
-                waiting_rows: BTreeSet::from([id]),
-                updating_refs: false,
+                updating_refs: true,
                 warning: None,
             }),
         );
@@ -644,8 +547,6 @@ mod tests {
             Event::RefreshPublished(RefreshPublication {
                 identities: vec![alpha],
                 refs: None,
-                statuses: BTreeMap::new(),
-                waiting_rows: BTreeSet::new(),
                 updating_refs: false,
                 warning: None,
             }),
@@ -721,9 +622,6 @@ mod tests {
         let alpha = identity("/worktrees/alpha", "alpha");
         let beta = identity("/worktrees/beta", "beta");
         let mut state = AppState::new(vec![alpha, beta.clone()]);
-        state
-            .statuses
-            .insert(beta.id.clone(), WorktreeStatus::default());
         let _ = reduce(&mut state, Event::Input(Key::Char('/')));
         let _ = reduce(&mut state, Event::Input(Key::Char('b')));
 
@@ -749,8 +647,6 @@ mod tests {
             Event::RefreshPublished(RefreshPublication {
                 identities: vec![bravo.clone()],
                 refs: None,
-                statuses: BTreeMap::from([(bravo.id.clone(), WorktreeStatus::default())]),
-                waiting_rows: BTreeSet::new(),
                 updating_refs: false,
                 warning: None,
             }),
@@ -762,8 +658,6 @@ mod tests {
             Event::RefreshPublished(RefreshPublication {
                 identities: vec![alpha],
                 refs: None,
-                statuses: BTreeMap::new(),
-                waiting_rows: BTreeSet::new(),
                 updating_refs: false,
                 warning: None,
             }),
@@ -785,9 +679,6 @@ mod tests {
         main.branch = Some("main".to_string());
         main.is_main = true;
         let mut state = AppState::new(vec![main.clone(), detached.clone()]);
-        state
-            .statuses
-            .insert(main.id.clone(), WorktreeStatus::default());
 
         let _ = reduce(&mut state, Event::Input(Key::Char('/')));
         for character in "rev".chars() {
@@ -853,8 +744,6 @@ mod tests {
             Event::RefreshPublished(RefreshPublication {
                 identities: vec![alpha, beta.clone()],
                 refs: None,
-                statuses: BTreeMap::new(),
-                waiting_rows: BTreeSet::new(),
                 updating_refs: false,
                 warning: None,
             }),
