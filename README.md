@@ -37,6 +37,30 @@ Standalone installs can later run `trench upgrade`. Future Homebrew installs
 delegate that command to `brew upgrade trench`; source and manual installs are
 never overwritten automatically.
 
+## Install on Linux (from source)
+
+Linux users can build and install from source. Prebuilt release archives and the
+standalone installer currently support macOS only.
+
+Install Rust and Cargo, Git, a C/C++ toolchain, CMake, pkg-config, and Perl. On
+Debian or Ubuntu, the non-Rust prerequisites are available with:
+
+```sh
+sudo apt install build-essential git cmake pkg-config perl
+```
+
+Then, from a checkout of this repository:
+
+```sh
+make build
+make install
+trench --version
+```
+
+Cargo installs the executable to `${CARGO_HOME:-$HOME/.cargo}/bin/trench`; ensure
+that directory is on your `PATH`. Source installs are updated by pulling the
+latest source and running `make install` again, not by `trench upgrade`.
+
 ## CLI
 
 Trench exposes ten commands: `create`, `remove`, `switch`, `open`, `list`, `sync`, `init`, `shell-init`, `completions`, and `upgrade`. Run `trench <command> --help` for command-specific options.

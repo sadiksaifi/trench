@@ -74,6 +74,10 @@ fn creates_the_exact_planned_new_branch_without_product_state() {
     let root = outside.path().join("worktrees");
     init_repo(repo.path());
     write_project_config(repo.path(), &root, "");
+    git(
+        repo.path(),
+        &["config", "worktree.useRelativePaths", "true"],
+    );
 
     let preview = trench(
         repo.path(),
@@ -90,7 +94,8 @@ fn creates_the_exact_planned_new_branch_without_product_state() {
     );
     assert!(
         output.status.success(),
-        "{}",
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -104,7 +109,18 @@ fn creates_the_exact_planned_new_branch_without_product_state() {
     assert_eq!(result["tracking"], preview["tracking"]);
     assert_eq!(result["hook_policy"], preview["hook_policy"]);
     assert_eq!(result["mutation_state"], "applied");
-    assert!(Path::new(result["path"].as_str().unwrap()).is_dir());
+    let worktree_path = Path::new(result["path"].as_str().unwrap());
+    assert!(worktree_path.is_dir());
+    let dot_git = std::fs::read_to_string(worktree_path.join(".git")).unwrap();
+    let admin_path = Path::new(dot_git.trim().strip_prefix("gitdir: ").unwrap());
+    assert!(admin_path.is_absolute());
+    let backlink = std::fs::read_to_string(admin_path.join("gitdir")).unwrap();
+    let backlink = Path::new(backlink.trim());
+    assert!(backlink.is_absolute());
+    assert_eq!(
+        backlink.canonicalize().unwrap(),
+        worktree_path.join(".git").canonicalize().unwrap()
+    );
     assert_eq!(
         String::from_utf8_lossy(
             &Command::new("git")

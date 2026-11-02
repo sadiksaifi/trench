@@ -165,12 +165,10 @@ fn add_worktree_descriptor_bound(
     command
         .arg(format!("--git-dir={}", repo.path().display()))
         .args(["-c", "core.hooksPath=/dev/null"])
-        .args([
-            "worktree",
-            "add",
-            "--no-guess-remote",
-            "--no-relative-paths",
-        ])
+        // Older Git always uses absolute links and ignores this setting. Newer
+        // Git honors it, overriding any user preference for relative links.
+        .args(["-c", "worktree.useRelativePaths=false"])
+        .args(["worktree", "add", "--no-guess-remote"])
         .arg(&leaf)
         .arg(branch)
         .env_remove("GIT_DIR")
