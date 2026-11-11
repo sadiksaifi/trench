@@ -321,6 +321,34 @@ fn hook_failure_names_the_hook_and_says_what_state_things_are_in() {
 }
 
 #[test]
+fn create_refuses_a_branch_nested_in_an_existing_branch_before_touching_git() {
+    let sandbox = Sandbox::new("");
+    git(&sandbox.repo(), &["branch", "feat"]);
+
+    for args in [
+        &["create", "feat/login"][..],
+        &["create", "feat/login", "--dry-run"],
+    ] {
+        let output = sandbox.trench(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert_eq!(
+            stderr(&output),
+            "error: branch 'feat/login' cannot be created: branch 'feat' exists, and Git cannot have both\n",
+            "{args:?}"
+        );
+    }
+    assert!(!sandbox.planned("feat-login").exists());
+
+    git(&sandbox.repo(), &["branch", "topic/a"]);
+    let above = sandbox.trench(&["create", "topic"]);
+    assert!(
+        stderr(&above).contains("branch 'topic/a' exists, and Git cannot have both"),
+        "{}",
+        stderr(&above)
+    );
+}
+
+#[test]
 fn create_preview_reads_as_sentences_and_names_configured_hooks() {
     let sandbox = Sandbox::new("[hooks.post_create]\nshell = \"true\"\n");
 

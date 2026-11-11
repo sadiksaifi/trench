@@ -826,6 +826,62 @@ mod tests {
     }
 
     #[test]
+    fn help_blocks_every_key_from_the_list_until_question_mark_or_escape_closes_it() {
+        for close in [Key::Char('?'), Key::Escape] {
+            let mut state = AppState::new(vec![
+                identity("/repo/alpha", "alpha"),
+                identity("/repo/beta", "beta"),
+            ]);
+            assert!(reduce(&mut state, Event::Input(Key::Char('?'))).is_empty());
+            assert!(state.help_open);
+
+            for hidden in [Key::Down, Key::Char('j'), Key::Char('d'), Key::Enter] {
+                assert!(reduce(&mut state, Event::Input(hidden)).is_empty());
+            }
+            assert!(state.help_open);
+            assert_eq!(
+                state.selected,
+                Some(WorktreeId::new("/repo/alpha")),
+                "the selection behind help did not move"
+            );
+            assert!(reduce(&mut state, Event::Input(Key::Char('q'))).is_empty());
+
+            assert!(reduce(&mut state, Event::Input(close)).is_empty());
+            assert!(!state.help_open);
+            assert_eq!(
+                reduce(&mut state, Event::Input(Key::Char('q'))),
+                [Effect::Quit]
+            );
+        }
+    }
+
+    #[test]
+    fn a_worktree_whose_directory_is_gone_can_only_be_removed() {
+        let mut gone = identity("/repo/gone", "gone");
+        gone.missing = true;
+        let mut state = AppState::new(vec![gone.clone()]);
+
+        for (key, action) in [
+            (Key::Enter, Action::Switch),
+            (Key::Char('o'), Action::Open),
+            (Key::Char('s'), Action::Sync),
+        ] {
+            assert_eq!(
+                reduce(&mut state, Event::Input(key)),
+                [Effect::Unavailable {
+                    action,
+                    reason: "This worktree's directory is missing. Press d to remove it."
+                        .to_string(),
+                }]
+            );
+        }
+        assert_eq!(
+            reduce(&mut state, Event::Input(Key::Char('d'))),
+            [Effect::OpenRemove(gone.id)]
+        );
+    }
+
+    #[test]
     fn direct_explanations_use_the_shared_five_second_notice() {
         let mut state = AppState::new(Vec::new());
         let shown_at = Instant::now();

@@ -123,6 +123,21 @@ impl RefSnapshot {
             .ok_or(DefaultBaseError::NotDetected)
     }
 
+    /// The local branch that makes `branch` impossible to create.
+    ///
+    /// Git stores branches as paths, so `a` and `a/b` cannot both exist.
+    pub fn namespace_conflict(&self, branch: &str) -> Option<&str> {
+        let nested_in = |outer: &str, inner: &str| {
+            inner
+                .strip_prefix(outer)
+                .is_some_and(|rest| rest.starts_with('/'))
+        };
+        self.local
+            .iter()
+            .map(String::as_str)
+            .find(|existing| nested_in(existing, branch) || nested_in(branch, existing))
+    }
+
     pub fn resolve(&self, candidate: &str) -> Option<String> {
         if candidate.starts_with("origin/") {
             return self
@@ -213,6 +228,36 @@ fn branch_names(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_branch_conflicts_with_local_branches_above_and_below_it_only() {
+        let refs = RefSnapshot::from_parts(
+            ["main", "feat", "topic/a"],
+            ["origin/main", "origin/release"],
+            None,
+            Some("main"),
+            true,
+        );
+
+        assert_eq!(refs.namespace_conflict("feat/login"), Some("feat"));
+        assert_eq!(refs.namespace_conflict("topic"), Some("topic/a"));
+        assert_eq!(
+            refs.namespace_conflict("feature"),
+            None,
+            "a prefix is not a parent"
+        );
+        assert_eq!(refs.namespace_conflict("topic/b"), None);
+        assert_eq!(
+            refs.namespace_conflict("feat"),
+            None,
+            "the same name is not a conflict"
+        );
+        assert_eq!(
+            refs.namespace_conflict("release/2.4"),
+            None,
+            "remote-only branches do not occupy the local namespace"
+        );
+    }
 
     fn init_repo(path: &std::path::Path) -> git2::Repository {
         let repo = git2::Repository::init(path).unwrap();

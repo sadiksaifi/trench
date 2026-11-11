@@ -519,16 +519,9 @@ impl CreateDialog {
         if let Err(reason) = paths::validate_branch_name(name) {
             return Some(Problem::InvalidName(reason));
         }
-        if let Some(existing) = self.refs.local.iter().find(|existing| {
-            existing
-                .strip_prefix(name)
-                .is_some_and(|rest| rest.starts_with('/'))
-                || name
-                    .strip_prefix(existing.as_str())
-                    .is_some_and(|rest| rest.starts_with('/'))
-        }) {
+        if let Some(existing) = self.refs.namespace_conflict(name) {
             return Some(Problem::NamespaceConflict {
-                existing: existing.clone(),
+                existing: existing.to_string(),
                 name: name.to_string(),
             });
         }

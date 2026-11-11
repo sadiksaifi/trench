@@ -750,6 +750,16 @@ fn notify(state: &mut AppState, kind: NoticeKind, message: impl Into<String>) {
     );
 }
 
+/// The status-line wording for an editor that cannot be resolved.
+fn editor_command_notice(error: &crate::navigation::EditorCommandError) -> String {
+    match error {
+        crate::navigation::EditorCommandError::Missing => {
+            "No editor configured. Set $EDITOR or [editor] command.".to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Open the selected worktree in the editor and report any failure in the
 /// status line. A missing or failing editor must never end the session.
 fn open_in_editor(
@@ -761,16 +771,8 @@ fn open_in_editor(
 ) {
     let command = match EditorCommand::from_environment(configured_editor) {
         Ok(command) => command,
-        Err(crate::navigation::EditorCommandError::Missing) => {
-            notify(
-                state,
-                NoticeKind::Error,
-                "No editor configured. Set $EDITOR or [editor] command.",
-            );
-            return;
-        }
         Err(error) => {
-            notify(state, NoticeKind::Error, error.to_string());
+            notify(state, NoticeKind::Error, editor_command_notice(&error));
             return;
         }
     };
@@ -2377,6 +2379,107 @@ mod tests {
         };
         let plan = serde_json::to_value(&request.plan).unwrap();
         assert_eq!(plan["force_worktree_applied"], true);
+    }
+
+    #[test]
+    fn a_missing_editor_is_a_short_status_message_that_names_the_fix() {
+        let notice = editor_command_notice(&crate::navigation::EditorCommandError::Missing);
+
+        assert_eq!(
+            notice,
+            "No editor configured. Set $EDITOR or [editor] command."
+        );
+        assert!(notice.chars().count() <= 60, "fits one status line");
+
+        let mut state = AppState::new(Vec::new());
+        notify(&mut state, NoticeKind::Error, notice.clone());
+        let shown = state.notification.as_ref().unwrap();
+        assert_eq!(shown.kind, NoticeKind::Error);
+        assert_eq!(shown.text, notice);
+    }
+
+    #[test]
+    fn opening_create_before_branches_load_explains_instead_of_doing_nothing() {
+        let mut state = AppState::new(Vec::new());
+
+        let error =
+            open_create_dialog(&mut state, "trench", Path::new("/worktrees"), None).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Branches are still loading. Try again in a moment."
+        );
+        assert!(state.create_dialog.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_created_worktree_is_selected_when_its_root_is_behind_a_symlink() {
+        let repository = init_repo();
+        let real_root = repository.path().canonicalize().unwrap().join("real-root");
+        std::fs::create_dir_all(real_root.join("trench")).unwrap();
+        let linked_root = repository.path().join("linked-root");
+        std::os::unix::fs::symlink(&real_root, &linked_root).unwrap();
+        let created = real_root.join("trench").join("feature-auth");
+        std::fs::create_dir(&created).unwrap();
+        let listed = WorktreeIdentity {
+            id: WorktreeId::new(&created),
+            worktree: "feature-auth".to_string(),
+            branch: Some("feature/auth".to_string()),
+            path: created.clone(),
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+            missing: false,
+        };
+        let main = WorktreeIdentity {
+            id: WorktreeId::new(repository.path()),
+            worktree: "trench".to_string(),
+            branch: Some("main".to_string()),
+            path: repository.path().to_path_buf(),
+            is_main: true,
+            ..listed.clone()
+        };
+        let mut state = AppState::new(vec![main.clone()]);
+        let mut refresh = SuccessfulPostOperationRefresh::new(RefreshPublication {
+            identities: vec![main, listed.clone()],
+            refs: None,
+            updating_refs: false,
+            warning: None,
+        });
+
+        finish_create_success(
+            &mut state,
+            &mut refresh,
+            crate::operation::CreateOutcome {
+                plan: crate::create_plan::CreatePlan {
+                    dry_run: false,
+                    action: CreateAction::NewBranch("main".to_string()),
+                    branch: "feature/auth".to_string(),
+                    worktree: "feature-auth".to_string(),
+                    // The plan spells the path through the symlink, as the
+                    // configured root does.
+                    path: linked_root.join("trench").join("feature-auth"),
+                    base: Some("main".to_string()),
+                    tracking: None,
+                    hook_policy: HookPolicy::Run,
+                    preconditions: Vec::new(),
+                    source_oid: None,
+                },
+                mutation_state: crate::operation::MutationState::Applied,
+            },
+            Instant::now(),
+        );
+
+        assert_eq!(state.selected.as_ref(), Some(&listed.id));
+        assert_eq!(
+            state
+                .notification
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
+            Some("Created feature/auth (new branch from main)")
+        );
     }
 
     #[test]

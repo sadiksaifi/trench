@@ -99,6 +99,10 @@ pub enum CreatePlanError {
     CheckedOutBranchAmbiguous { branch: String, paths: Vec<PathBuf> },
     #[error("base ref not found: {base}")]
     BaseNotFound { base: String },
+    #[error(
+        "branch '{branch}' cannot be created: branch '{existing}' exists, and Git cannot have both"
+    )]
+    BranchNamespaceConflict { branch: String, existing: String },
 }
 
 enum RefClass<'a> {
@@ -193,6 +197,16 @@ impl CreatePlanner {
             });
         }
         let location = self.policy.derive(class.branch())?;
+        // A new or tracking branch needs a free place among local refs.
+        // Checking here gives a sentence instead of libgit2's ref-lock error.
+        if !matches!(class, RefClass::Local(_)) {
+            if let Some(existing) = self.refs.namespace_conflict(class.branch()) {
+                return Err(CreatePlanError::BranchNamespaceConflict {
+                    branch: class.branch().to_string(),
+                    existing: existing.to_string(),
+                });
+            }
+        }
         let (action, base, tracking) = match class {
             RefClass::New(_) => {
                 let base =
