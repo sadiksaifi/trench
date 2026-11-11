@@ -25,6 +25,8 @@ use crate::tui::{
     theme::Theme,
 };
 
+pub use remove::shows_every_risk as remove_shows_every_risk;
+
 pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
     frame.render_widget(Block::default().style(theme.on_surface(theme.text)), area);
     if area.width < Viewport::MIN_WIDTH || area.height < Viewport::MIN_HEIGHT {

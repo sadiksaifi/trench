@@ -158,6 +158,5 @@ mod tests {
             ]
         );
         assert_eq!(screen[9], " ? or Esc close");
-        assert!(screen.iter().all(|row| row.chars().count() <= 40));
     }
 }

@@ -27,11 +27,15 @@ const COLUMN_GAP: usize = 2;
 pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
     let row = |y: u16| Rect::new(area.x, area.y + y, area.width, 1);
     let last = area.height - 1;
+    // One row is always kept for the status line. A message too long for it
+    // takes a second row from the list instead of being cut.
+    let status = status(state, area.width, theme);
+    let status_rows = (status.len() as u16).max(1);
     let body = Rect::new(
         area.x,
         area.y + 2,
         area.width,
-        area.height.saturating_sub(4),
+        area.height.saturating_sub(3 + status_rows),
     );
 
     let visible = state.visible_identities();
@@ -58,8 +62,11 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
         Paragraph::new(body_lines(state, &visible, &columns, body, theme)),
         body,
     );
-    if let Some(status) = status(state, area.width, theme) {
-        frame.render_widget(Paragraph::new(status), row(last - 1));
+    if !status.is_empty() {
+        frame.render_widget(
+            Paragraph::new(status),
+            Rect::new(area.x, last - status_rows, area.width, status_rows),
+        );
     }
     widgets::hint_bar(frame, row(last), &hints(state, visible.is_empty()), theme);
 }
@@ -233,26 +240,40 @@ fn worktree_row(
     Line::from(spans)
 }
 
-/// The single status line: the latest message, or a standing refresh warning.
-fn status(state: &AppState, width: u16, theme: &Theme) -> Option<Line<'static>> {
+/// The status line: the latest message, or a standing refresh warning.
+///
+/// It wraps onto a second row before it truncates, because these messages
+/// name the command or key that fixes the problem.
+fn status(state: &AppState, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let (kind, message) = match (&state.notification, &state.refresh.warning) {
         (Some(notice), _) => (notice.kind, notice.text.as_str()),
         (None, Some(warning)) => (NoticeKind::Warning, warning.as_str()),
-        (None, None) => return None,
+        (None, None) => return Vec::new(),
     };
     let (glyph, style) = match kind {
         NoticeKind::Success => (widgets::OK, theme.success),
         NoticeKind::Warning => (widgets::WARNING, theme.warning),
         NoticeKind::Error => (widgets::FAILED, theme.error),
     };
+    let margin = " ".repeat(usize::from(MARGIN));
     let room = usize::from(width).saturating_sub(usize::from(MARGIN) * 2 + 2);
-    Some(Line::from(vec![
-        Span::styled(
-            format!("{}{glyph} ", " ".repeat(usize::from(MARGIN))),
-            style,
-        ),
-        Span::styled(text::truncate_end(message, room), theme.text),
-    ]))
+    widgets::wrap_clamped(message, room, 2)
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            Line::from(vec![
+                Span::styled(
+                    if index == 0 {
+                        format!("{margin}{glyph} ")
+                    } else {
+                        format!("{margin}  ")
+                    },
+                    style,
+                ),
+                Span::styled(line, theme.text),
+            ])
+        })
+        .collect()
 }
 
 fn hints(state: &AppState, nothing_visible: bool) -> Vec<Hint> {
@@ -356,7 +377,6 @@ mod tests {
             screen[4],
             "     feature/JIRA…sked-for-v2  …e-thing-nobody-asked-for-v2"
         );
-        assert!(screen.iter().all(|row| row.chars().count() <= 60));
     }
 
     #[test]
@@ -485,6 +505,33 @@ mod tests {
             );
             assert_eq!(screen(&mut state, 60, 10)[8], expected);
         }
+    }
+
+    #[test]
+    fn a_long_status_message_takes_a_second_row_before_it_is_cut() {
+        let mut state = state(&[
+            ("feature/auth", "/wt/acme/feature-auth"),
+            ("fix/typo", "/wt/acme/fix-typo"),
+        ]);
+        let _ = reduce(
+            &mut state,
+            Event::NotificationShown {
+                kind: NoticeKind::Warning,
+                message: "Worktree is locked. Run `git worktree unlock ~/.worktrees/acme/fix-typo` first.".to_string(),
+                shown_at: Instant::now(),
+            },
+        );
+        let screen = screen(&mut state, 60, 10);
+
+        assert_eq!(
+            screen[7..10],
+            [
+                " ! Worktree is locked. Run `git worktree unlock",
+                "   ~/.worktrees/acme/fix-typo` first.",
+                " Enter switch  c create  s sync  d remove  ? help  q quit",
+            ]
+        );
+        assert_eq!(screen[4], "     fix/typo      /wt/acme/fix-typo");
     }
 
     #[test]

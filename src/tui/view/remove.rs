@@ -18,23 +18,40 @@ use crate::{
 };
 
 const LABEL_WIDTH: usize = 6;
-const HEIGHT: u16 = 11;
+/// The dialog keeps this height when its content is shorter, so it does not
+/// shrink and grow as the branch checkbox is toggled.
+const MIN_HEIGHT: u16 = 11;
+const HEADER_ROWS: usize = 2;
+
+/// Whether the dialog, drawn in `area`, shows every risk the removal carries.
+///
+/// `y` accepts the risks on screen. When the terminal is too small to show
+/// them all, `y` must do nothing: nobody can accept a line they cannot see.
+pub fn shows_every_risk(dialog: &RemoveDialog, area: Rect) -> bool {
+    let layout = widgets::dialog_layout(area, MIN_HEIGHT);
+    arrange(
+        &body(dialog, usize::from(layout.content.width)),
+        rows_available(area),
+    )
+    .is_some()
+}
 
 pub fn render(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, theme: &Theme) {
-    let layout = widgets::dialog_layout(area, HEIGHT);
-    let width = usize::from(layout.content.width);
-    let room = width.saturating_sub(LABEL_WIDTH + 2);
-    let target = dialog.target();
+    let width = usize::from(widgets::dialog_layout(area, MIN_HEIGHT).content.width);
+    let arranged = arrange(&body(dialog, width), rows_available(area));
+    let body_rows = arranged.as_ref().map_or(0, Vec::len);
+    let layout = widgets::dialog_layout(area, MIN_HEIGHT.max((HEADER_ROWS + body_rows + 2) as u16));
     widgets::dialog_frame(frame, layout, "Remove worktree", None, theme);
 
-    let branch = target.branch.as_deref();
+    let room = width.saturating_sub(LABEL_WIDTH + 2);
+    let target = dialog.target();
     let home = paths::home_dir();
     let mut lines = vec![
         widgets::field(
             "Branch",
             LABEL_WIDTH,
             vec![Span::styled(
-                text::truncate_middle(branch.unwrap_or(&target.worktree), room),
+                text::truncate_middle(target.branch.as_deref().unwrap_or(&target.worktree), room),
                 theme.text,
             )],
             theme,
@@ -48,91 +65,29 @@ pub fn render(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, theme: &Them
             )],
             theme,
         ),
-        Line::default(),
     ];
-
-    let wrapped = |value: String, style| {
-        widgets::wrap(&value, width)
+    match &arranged {
+        Some(rows) => lines.extend(rows.iter().map(|row| match row {
+            Some((role, value)) => Line::styled(
+                value.clone(),
+                match role {
+                    Role::Choice => theme.text,
+                    Role::Note => theme.muted,
+                    Role::Risk => theme.warning,
+                    Role::Error => theme.error,
+                },
+            ),
+            None => Line::default(),
+        })),
+        None => lines.extend(
+            prefixed(
+                widgets::FAILED,
+                "Too small to show what would be lost. Enlarge the terminal.",
+                width,
+            )
             .into_iter()
-            .take(2)
-            .map(move |line| Line::styled(line, style))
-            .collect::<Vec<_>>()
-    };
-    let branch = branch.unwrap_or_default();
-    match dialog.branch_choice() {
-        BranchChoice::Offered { merged } => {
-            let mark = if dialog.delete_branch() { "[x]" } else { "[ ]" };
-            let status = match merged {
-                Some(true) => "merged",
-                Some(false) => "not merged",
-                None => "merge status unknown",
-            };
-            let fixed = format!("{mark} Also delete branch  ({status})");
-            let name = text::truncate_middle(branch, width.saturating_sub(text::width(&fixed)));
-            lines.push(Line::from(vec![
-                Span::styled(format!("{mark} "), theme.accent),
-                Span::styled(format!("Also delete branch {name} "), theme.text),
-                Span::styled(format!("({status})"), theme.muted),
-            ]));
-        }
-        BranchChoice::Detached => lines.extend(wrapped(
-            "Detached: there is no branch to delete.".to_string(),
-            theme.muted,
-        )),
-        BranchChoice::AlreadyGone => {
-            lines.extend(wrapped(
-                format!("Branch {branch} no longer exists."),
-                theme.muted,
-            ));
-        }
-        BranchChoice::CheckedOutElsewhere(path) => lines.extend(wrapped(
-            format!(
-                "Branch {branch} is also checked out at {}, so it stays.",
-                text::home_relative(&path, home.as_deref())
-            ),
-            theme.muted,
-        )),
-    }
-    lines.push(Line::default());
-
-    let risks = dialog.risks();
-    if let Some(error) = dialog.validation_error() {
-        lines.extend(wrapped(format!("{} {error}", widgets::FAILED), theme.error));
-    }
-    for risk in &risks {
-        let message = match risk {
-            Risk::UncommittedChanges => {
-                "Uncommitted changes in this worktree will be lost.".to_string()
-            }
-            Risk::UnverifiableChanges => format!(
-                "Branch {branch} no longer exists, so changes here cannot be checked and may be lost."
-            ),
-            Risk::UnmergedCommits => format!("Commits only on {branch} will be lost."),
-            Risk::UnknownMergeStatus => {
-                format!("The base was not found, so commits only on {branch} may be lost.")
-            }
-        };
-        lines.extend(wrapped(
-            format!("{} {message}", widgets::WARNING),
-            theme.warning,
-        ));
-    }
-    if risks.is_empty() && dialog.validation_error().is_none() {
-        let deletes_branch = if dialog.delete_branch() {
-            format!(" Deletes branch {branch}.")
-        } else {
-            String::new()
-        };
-        lines.extend(wrapped(
-            if target.directory_missing {
-                format!(
-                    "The directory is already gone. Only Git's record is removed.{deletes_branch}"
-                )
-            } else {
-                format!("Removes the directory.{deletes_branch} This cannot be undone.")
-            },
-            theme.muted,
-        ));
+            .map(|line| Line::styled(line, theme.error)),
+        ),
     }
 
     frame.render_widget(
@@ -142,14 +97,165 @@ pub fn render(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, theme: &Them
     widgets::hint_bar(
         frame,
         layout.hints,
-        &hints(dialog, !risks.is_empty()),
+        &hints(dialog, arranged.is_some()),
         theme,
     );
 }
 
-fn hints(dialog: &RemoveDialog, risky: bool) -> Vec<Hint> {
-    let mut hints =
-        vec![Hint::new("y", if risky { "remove anyway" } else { "remove" }, 0).tone(Tone::Danger)];
+/// Rows inside the tallest dialog `area` allows, below the two header rows.
+fn rows_available(area: Rect) -> usize {
+    // One row for the hint bar and two for the border.
+    usize::from(area.height.saturating_sub(3)).saturating_sub(HEADER_ROWS)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Choice,
+    Note,
+    Risk,
+    Error,
+}
+
+/// The dialog text below the header, wrapped to `width`, in two groups: the
+/// branch choice, then what the removal destroys.
+///
+/// Nothing here is ever shortened. A line either appears whole or the dialog
+/// reports that it does not fit.
+fn body(dialog: &RemoveDialog, width: usize) -> [Vec<(Role, String)>; 2] {
+    let target = dialog.target();
+    let branch = target.branch.as_deref().unwrap_or_default();
+    let home = paths::home_dir();
+    let wrapped = |role: Role, value: String| {
+        widgets::wrap(&value, width)
+            .into_iter()
+            .map(move |line| (role, line))
+            .collect::<Vec<_>>()
+    };
+
+    let choice = match dialog.branch_choice() {
+        BranchChoice::Offered { merged } => {
+            let mark = if dialog.delete_branch() { "[x]" } else { "[ ]" };
+            let status = match merged {
+                Some(true) => "merged",
+                Some(false) => "not merged",
+                None => "merge status unknown",
+            };
+            prefixed(
+                mark,
+                &format!("Also delete branch {branch} ({status})"),
+                width,
+            )
+            .into_iter()
+            .map(|line| (Role::Choice, line))
+            .collect()
+        }
+        BranchChoice::Detached => wrapped(
+            Role::Note,
+            "Detached: there is no branch to delete.".to_string(),
+        ),
+        BranchChoice::AlreadyGone => {
+            wrapped(Role::Note, format!("Branch {branch} no longer exists."))
+        }
+        BranchChoice::CheckedOutElsewhere(path) => wrapped(
+            Role::Note,
+            format!(
+                "Branch {branch} is also checked out at {}, so it stays.",
+                text::home_relative(&path, home.as_deref())
+            ),
+        ),
+    };
+
+    let mut losses = Vec::new();
+    for risk in dialog.risks() {
+        let message = match risk {
+            Risk::UncommittedChanges => "Uncommitted changes will be lost.".to_string(),
+            Risk::UnverifiableChanges => format!(
+                "Branch {branch} no longer exists, so changes here cannot be checked and may be lost."
+            ),
+            Risk::UnmergedCommits => format!("Commits only on {branch} will be lost."),
+            Risk::UnknownMergeStatus => {
+                format!("The base was not found, so commits only on {branch} may be lost.")
+            }
+            Risk::UnreachableCommits => {
+                "Commits here are on no branch and will be lost.".to_string()
+            }
+        };
+        losses.extend(
+            prefixed(widgets::WARNING, &message, width)
+                .into_iter()
+                .map(|line| (Role::Risk, line)),
+        );
+    }
+    // The error comes after the risks: it is the least important line to
+    // keep on screen, and the risks are what `y` accepts.
+    if let Some(error) = dialog.validation_error() {
+        losses.extend(
+            prefixed(widgets::FAILED, error, width)
+                .into_iter()
+                .map(|line| (Role::Error, line)),
+        );
+    }
+    if losses.is_empty() {
+        let deletes_branch = if dialog.delete_branch() {
+            format!(" Deletes branch {branch}.")
+        } else {
+            String::new()
+        };
+        losses = wrapped(
+            Role::Note,
+            if target.directory_missing {
+                format!(
+                    "The directory is already gone. Only Git's record is removed.{deletes_branch}"
+                )
+            } else {
+                format!("Removes the directory.{deletes_branch} This cannot be undone.")
+            },
+        );
+    }
+    [choice, losses]
+}
+
+/// Wrap `message` after a glyph, indenting continuation lines under the text.
+fn prefixed(glyph: &str, message: &str, width: usize) -> Vec<String> {
+    let indent = text::width(glyph) + 1;
+    widgets::wrap(message, width.saturating_sub(indent))
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                format!("{glyph} {line}")
+            } else {
+                format!("{}{line}", " ".repeat(indent))
+            }
+        })
+        .collect()
+}
+
+/// Lay the groups out in `rows`, with a blank row before each group when
+/// there is room. `None` means the text does not fit even without blanks.
+fn arrange(groups: &[Vec<(Role, String)>; 2], rows: usize) -> Option<Vec<Option<(Role, String)>>> {
+    let text_rows: usize = groups.iter().map(Vec::len).sum();
+    if text_rows > rows {
+        return None;
+    }
+    let spaced = text_rows + groups.len() <= rows;
+    let mut arranged = Vec::new();
+    for group in groups {
+        if spaced {
+            arranged.push(None);
+        }
+        arranged.extend(group.iter().cloned().map(Some));
+    }
+    Some(arranged)
+}
+
+fn hints(dialog: &RemoveDialog, every_risk_shown: bool) -> Vec<Hint> {
+    let risky = !dialog.risks().is_empty();
+    let mut hints = vec![if every_risk_shown {
+        Hint::new("y", if risky { "remove anyway" } else { "remove" }, 0).tone(Tone::Danger)
+    } else {
+        Hint::new("y", "remove", 0).tone(Tone::Disabled)
+    }];
     if dialog.can_delete_branch() {
         hints.push(Hint::new(
             "Space",
@@ -240,7 +346,7 @@ mod tests {
             let mut dialog =
                 RemoveDialog::new(WorktreeId::new(self.worktree()), assessment).unwrap();
             for key in keys {
-                dialog.handle_key(*key);
+                dialog.handle_key(*key, std::time::Instant::now());
             }
             let mut state = state(&[]);
             state.remove_dialog = Some(dialog);
@@ -297,7 +403,7 @@ mod tests {
                 "  │                                                      │",
                 "  │ [x] Also delete branch feature/auth (not merged)     │",
                 "  │                                                      │",
-                "  │ ! Uncommitted changes in this worktree will be lost. │",
+                "  │ ! Uncommitted changes will be lost.                  │",
                 "  │ ! Commits only on feature/auth will be lost.         │",
                 "  │                                                      │",
                 "  │                                                      │",
@@ -338,7 +444,7 @@ mod tests {
                 "  │ Branch feature/auth no longer exists.                │",
                 "  │                                                      │",
                 "  │ ! Branch feature/auth no longer exists, so changes   │",
-                "  │ here cannot be checked and may be lost.              │",
+                "  │   here cannot be checked and may be lost.            │",
                 "  │                                                      │",
                 "  │                                                      │",
                 " y remove anyway  Esc cancel",
@@ -366,13 +472,18 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_review_shows_the_reason_above_the_live_risks() {
+    fn a_stale_review_lists_the_live_risks_before_the_reason() {
         let fixture = Fixture::new();
         let mut state = fixture.open(&[]);
         std::fs::write(fixture.worktree().join("late.txt"), "late\n").unwrap();
         let dialog = state.remove_dialog.as_mut().unwrap();
         let error = dialog
-            .revalidate_request(fixture.root.path(), Some("main"), None)
+            .revalidate_request(
+                fixture.root.path(),
+                Some("main"),
+                None,
+                std::time::Instant::now(),
+            )
             .unwrap_err();
         dialog.set_validation_error(Some(error.to_string()));
 
@@ -381,21 +492,161 @@ mod tests {
         assert_eq!(
             rows[3..5],
             [
+                "  │ ! Uncommitted changes will be lost.                  │",
                 "  │ × The worktree changed. Review it and press y again. │",
-                "  │ ! Uncommitted changes in this worktree will be lost. │",
             ]
         );
     }
 
+    fn risky(fixture: &Fixture) -> AppState {
+        fixture.commit_on_branch();
+        std::fs::write(fixture.worktree().join("dirty.txt"), "dirty\n").unwrap();
+        fixture.open(&[RemoveKey::Space])
+    }
+
     #[test]
-    fn the_dialog_fits_the_minimum_terminal() {
+    fn a_narrow_terminal_wraps_every_line_instead_of_cutting_it() {
         let fixture = Fixture::new();
-        let screen = screen(&mut fixture.open(&[]), 40, 10);
+        let mut state = risky(&fixture);
+        let screen = screen(&mut state, 40, 14);
+
+        assert_eq!(
+            screen[4..6],
+            [
+                " │ [x] Also delete branch             │",
+                " │     feature/auth (not merged)      │",
+            ]
+        );
+        assert_eq!(
+            screen[7..9],
+            [
+                " │ ! Uncommitted changes will be      │",
+                " │   lost.                            │",
+            ]
+        );
+        // Wrapped lines differ by width; the sentences must survive whole.
+        let text = screen.join("").replace(['│', ' '], "");
+        assert!(
+            text.contains("!Uncommittedchangeswillbelost."),
+            "{screen:#?}"
+        );
+        assert!(
+            text.contains("!Commitsonlyonfeature/authwillbelost."),
+            "{screen:#?}"
+        );
+        assert_eq!(screen[13], " y remove anyway  Esc cancel");
+        assert!(super::shows_every_risk(
+            state.remove_dialog.as_ref().unwrap(),
+            ratatui::layout::Rect::new(0, 0, 40, 14)
+        ));
+    }
+
+    #[test]
+    fn a_terminal_too_short_for_the_risks_says_so_and_turns_y_off() {
+        let fixture = Fixture::new();
+        let mut state = risky(&fixture);
+        let area = ratatui::layout::Rect::new(0, 0, 40, 10);
+        let buffer = crate::tui::view::testing::draw(&mut state, 40, 10, "terminal");
+        let screen = crate::tui::view::testing::lines(&buffer);
+
+        assert!(!super::shows_every_risk(
+            state.remove_dialog.as_ref().unwrap(),
+            area
+        ));
+        assert_eq!(
+            screen[3..5],
+            [
+                " │ × Too small to show what would be  │",
+                " │   lost. Enlarge the terminal.      │",
+            ]
+        );
+        assert!(
+            screen.iter().all(|row| !row.contains("will be lost")),
+            "a risk is shown whole or not at all: {screen:#?}"
+        );
+        assert!(buffer[(1, 9)]
+            .modifier
+            .contains(ratatui::style::Modifier::DIM));
+    }
+
+    #[test]
+    fn a_stale_review_never_pushes_a_risk_off_the_dialog() {
+        let fixture = Fixture::new();
+        fixture.commit_on_branch();
+        let mut state = fixture.open(&[RemoveKey::Space]);
+        std::fs::write(fixture.worktree().join("late.txt"), "late\n").unwrap();
+        let dialog = state.remove_dialog.as_mut().unwrap();
+        let error = dialog
+            .revalidate_request(
+                fixture.root.path(),
+                Some("main"),
+                None,
+                std::time::Instant::now(),
+            )
+            .unwrap_err();
+        dialog.set_validation_error(Some(error.to_string()));
+
+        let screen = screen(&mut state, 52, 24).join("\n");
+
+        assert!(
+            screen.contains("! Uncommitted changes will be lost."),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("! Commits only on feature/auth will be lost."),
+            "{screen}"
+        );
+        assert!(screen.contains("× The worktree changed."), "{screen}");
+    }
+
+    #[test]
+    fn a_branch_checked_out_elsewhere_names_the_whole_path_at_any_width() {
+        let fixture = Fixture::new();
+        let second = fixture.root.path().join("second");
+        git(
+            fixture.root.path(),
+            &[
+                "worktree",
+                "add",
+                "--force",
+                second.to_str().unwrap(),
+                "feature/auth",
+            ],
+        );
+        let mut state = fixture.open(&[]);
+        let screen = screen(&mut state, 40, 30).join("");
+        let text = screen.replace(['│', ' '], "");
+
+        assert!(
+            text.contains("Branchfeature/authisalsocheckedoutat"),
+            "{screen}"
+        );
+        assert!(text.contains("/second,soitstays."), "{screen}");
+    }
+
+    #[test]
+    fn a_clean_worktree_fits_the_minimum_terminal_with_its_whole_message() {
+        let fixture = Fixture::new();
+        let mut state = fixture.open(&[]);
+        let screen = screen(&mut state, 40, 10);
 
         assert_eq!(screen[0], " ╭ Remove worktree ───────────────────╮");
         assert_eq!(screen[1], " │ Branch  feature/auth               │");
+        assert_eq!(
+            screen[3..8],
+            [
+                " │ [ ] Also delete branch             │",
+                " │     feature/auth (merged)          │",
+                " │ Removes the directory. This cannot │",
+                " │ be undone.                         │",
+                " │                                    │",
+            ]
+        );
         assert_eq!(screen[8], " ╰────────────────────────────────────╯");
         assert_eq!(screen[9], " y remove  Esc cancel");
-        assert!(screen.iter().all(|row| row.chars().count() <= 40));
+        assert!(super::shows_every_risk(
+            state.remove_dialog.as_ref().unwrap(),
+            ratatui::layout::Rect::new(0, 0, 40, 10)
+        ));
     }
 }

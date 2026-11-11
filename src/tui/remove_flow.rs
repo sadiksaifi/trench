@@ -6,6 +6,7 @@
 //! the only key that removes. Enter never destroys anything.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::{
     cli::commands::remove::stateless::{
@@ -41,7 +42,7 @@ pub enum RemoveFlowError {
     MainWorktree,
     #[error(
         "Worktree is locked. Run `git worktree unlock {path}` first.",
-        path = path.display()
+        path = crate::output::text::home_relative(path, crate::paths::home_dir().as_deref())
     )]
     Locked { path: PathBuf },
     #[error("The worktree changed. Review it and press y again.")]
@@ -61,7 +62,15 @@ pub enum Risk {
     UnmergedCommits,
     /// The base was not found, so the branch may have unmerged commits.
     UnknownMergeStatus,
+    /// The worktree is detached at commits that no branch or tag contains.
+    UnreachableCommits,
 }
+
+/// How long `y` is ignored after the facts on screen change.
+///
+/// A double-press arrives within a few hundred milliseconds. Without this
+/// pause its second press would accept a risk that was drawn one frame ago.
+pub const CONFIRM_DELAY_AFTER_CHANGE: Duration = Duration::from_millis(800);
 
 /// Whether the local branch can be deleted along with the worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +101,8 @@ pub struct RemoveTarget {
     pub directory_missing: bool,
     /// Another worktree that has the same branch checked out.
     pub branch_checked_out_elsewhere: Option<PathBuf>,
+    /// The detached HEAD has commits that no branch or tag contains.
+    pub head_unreachable: bool,
 }
 
 impl RemoveTarget {
@@ -109,6 +120,7 @@ impl RemoveTarget {
             branch_checked_out_elsewhere: assessment
                 .branch_checked_out_elsewhere()
                 .map(Path::to_path_buf),
+            head_unreachable: assessment.head_unreachable(),
         }
     }
 }
@@ -119,6 +131,8 @@ pub struct RemoveDialog {
     assessment: RemovalAssessment,
     delete_branch: bool,
     validation_error: Option<String>,
+    /// `y` does nothing before this moment.
+    confirm_after: Option<Instant>,
 }
 
 impl RemoveDialog {
@@ -150,6 +164,7 @@ impl RemoveDialog {
             assessment,
             delete_branch: false,
             validation_error: None,
+            confirm_after: None,
         })
     }
 
@@ -191,11 +206,17 @@ impl RemoveDialog {
     pub fn risks(&self) -> Vec<Risk> {
         let mut risks = Vec::new();
         if self.target.dirty {
-            risks.push(if self.target.branch_present {
-                Risk::UncommittedChanges
-            } else {
+            // Only a branch that was deleted makes the comparison impossible.
+            // A detached worktree never had one, and its HEAD still resolves.
+            let branch_deleted = self.target.branch.is_some() && !self.target.branch_present;
+            risks.push(if branch_deleted {
                 Risk::UnverifiableChanges
+            } else {
+                Risk::UncommittedChanges
             });
+        }
+        if self.target.head_unreachable {
+            risks.push(Risk::UnreachableCommits);
         }
         if self.delete_branch {
             match self.target.merged {
@@ -213,13 +234,14 @@ impl RemoveDialog {
         }
     }
 
-    pub fn handle_key(&mut self, key: RemoveKey) -> Option<RemoveEffect> {
+    pub fn handle_key(&mut self, key: RemoveKey, now: Instant) -> Option<RemoveEffect> {
         match key {
             RemoveKey::Escape => Some(RemoveEffect::Close),
             RemoveKey::Space => {
                 self.toggle_delete_branch();
                 None
             }
+            RemoveKey::Confirm if self.confirm_after.is_some_and(|after| now < after) => None,
             RemoveKey::Confirm => Some(RemoveEffect::Submit),
         }
     }
@@ -256,8 +278,10 @@ impl RemoveDialog {
         cwd: &Path,
         configured_base: Option<&str>,
         hooks: Option<HooksConfig>,
+        now: Instant,
     ) -> Result<OperationRequest, RemoveFlowError> {
         if self.refresh(cwd, configured_base)? {
+            self.confirm_after = Some(now + CONFIRM_DELAY_AFTER_CHANGE);
             return Err(RemoveFlowError::FactsChanged);
         }
         let options = RemoveOptions {
@@ -278,6 +302,7 @@ mod tests {
     use std::{
         path::{Path, PathBuf},
         process::Command,
+        time::{Duration, Instant},
     };
 
     use super::*;
@@ -498,16 +523,16 @@ mod tests {
             BranchChoice::Offered { merged: Some(true) }
         );
         assert!(dialog.risks().is_empty());
-        assert_eq!(dialog.handle_key(RemoveKey::Space), None);
+        assert_eq!(dialog.handle_key(RemoveKey::Space, Instant::now()), None);
         assert!(dialog.delete_branch());
         assert!(dialog.risks().is_empty());
         assert_eq!(
-            dialog.handle_key(RemoveKey::Confirm),
+            dialog.handle_key(RemoveKey::Confirm, Instant::now()),
             Some(RemoveEffect::Submit)
         );
 
         let OperationRequest::Remove(request) = dialog
-            .revalidate_request(fixture.root.path(), Some("main"), None)
+            .revalidate_request(fixture.root.path(), Some("main"), None, Instant::now())
             .unwrap()
         else {
             panic!("remove flow must construct the shared remove request")
@@ -541,7 +566,7 @@ mod tests {
         );
 
         let OperationRequest::Remove(request) = dialog
-            .revalidate_request(fixture.root.path(), Some("main"), None)
+            .revalidate_request(fixture.root.path(), Some("main"), None, Instant::now())
             .unwrap()
         else {
             panic!("expected remove request")
@@ -565,7 +590,7 @@ mod tests {
 
         assert!(dialog.risks().is_empty());
         let OperationRequest::Remove(request) = dialog
-            .revalidate_request(fixture.root.path(), Some("main"), None)
+            .revalidate_request(fixture.root.path(), Some("main"), None, Instant::now())
             .unwrap()
         else {
             panic!("expected remove request")
@@ -596,7 +621,12 @@ mod tests {
         assert_eq!(dialog.risks(), [Risk::UnknownMergeStatus]);
 
         let OperationRequest::Remove(request) = dialog
-            .revalidate_request(fixture.root.path(), Some("origin/main"), None)
+            .revalidate_request(
+                fixture.root.path(),
+                Some("origin/main"),
+                None,
+                Instant::now(),
+            )
             .unwrap()
         else {
             panic!("expected remove request")
@@ -619,7 +649,7 @@ mod tests {
         std::fs::write(fixture.worktree_path.join("late.txt"), "late\n").unwrap();
 
         let error = dialog
-            .revalidate_request(fixture.root.path(), Some("main"), None)
+            .revalidate_request(fixture.root.path(), Some("main"), None, Instant::now())
             .unwrap_err();
 
         assert!(matches!(error, RemoveFlowError::FactsChanged));
@@ -632,7 +662,7 @@ mod tests {
         assert!(fixture.worktree_path.join("late.txt").exists());
 
         let OperationRequest::Remove(request) = dialog
-            .revalidate_request(fixture.root.path(), Some("main"), None)
+            .revalidate_request(fixture.root.path(), Some("main"), None, Instant::now())
             .unwrap()
         else {
             panic!("expected remove request")
@@ -656,7 +686,7 @@ mod tests {
         assert!(dialog.risks().is_empty());
         assert!(dialog.can_delete_branch());
         assert!(matches!(
-            dialog.revalidate_request(fixture.root.path(), Some("main"), None),
+            dialog.revalidate_request(fixture.root.path(), Some("main"), None, Instant::now()),
             Ok(OperationRequest::Remove(_))
         ));
     }
@@ -681,6 +711,81 @@ mod tests {
     }
 
     #[test]
+    fn a_dirty_detached_worktree_reports_uncommitted_changes_not_a_missing_branch() {
+        let fixture = Fixture::new("detached-dirty");
+        git(&fixture.worktree_path, &["checkout", "--detach"]);
+        std::fs::write(fixture.worktree_path.join("dirty.txt"), "dirty\n").unwrap();
+        let dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+
+        assert_eq!(dialog.risks(), [Risk::UncommittedChanges]);
+    }
+
+    #[test]
+    fn commits_on_a_detached_head_that_no_branch_contains_are_a_risk() {
+        let fixture = Fixture::new("detached-commits");
+        git(&fixture.worktree_path, &["checkout", "--detach"]);
+        let reachable = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        assert!(
+            reachable.risks().is_empty(),
+            "HEAD is still on a branch tip"
+        );
+
+        std::fs::write(fixture.worktree_path.join("only-here.txt"), "x\n").unwrap();
+        git(&fixture.worktree_path, &["add", "only-here.txt"]);
+        git(&fixture.worktree_path, &["commit", "-m", "only here"]);
+        let unreachable = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+
+        assert_eq!(unreachable.risks(), [Risk::UnreachableCommits]);
+    }
+
+    #[test]
+    fn y_is_ignored_briefly_after_the_risks_change_so_a_double_press_cannot_accept_them() {
+        let fixture = Fixture::new("double-press");
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        let pressed = Instant::now();
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, pressed),
+            Some(RemoveEffect::Submit)
+        );
+        std::fs::write(fixture.worktree_path.join("late.txt"), "late\n").unwrap();
+        assert!(matches!(
+            dialog.revalidate_request(fixture.root.path(), Some("main"), None, pressed),
+            Err(RemoveFlowError::FactsChanged)
+        ));
+
+        // The second press of a double-tap lands before anyone could read.
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, pressed + Duration::from_millis(150)),
+            None
+        );
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Escape, pressed + Duration::from_millis(150)),
+            Some(RemoveEffect::Close),
+            "leaving is never delayed"
+        );
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, pressed + CONFIRM_DELAY_AFTER_CHANGE),
+            Some(RemoveEffect::Submit)
+        );
+    }
+
+    #[test]
     fn escape_closes_and_space_only_toggles_branch_deletion() {
         let fixture = Fixture::new("keys");
         let mut dialog = RemoveDialog::new(
@@ -689,12 +794,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(dialog.handle_key(RemoveKey::Space), None);
+        assert_eq!(dialog.handle_key(RemoveKey::Space, Instant::now()), None);
         assert!(dialog.delete_branch());
-        assert_eq!(dialog.handle_key(RemoveKey::Space), None);
+        assert_eq!(dialog.handle_key(RemoveKey::Space, Instant::now()), None);
         assert!(!dialog.delete_branch());
         assert_eq!(
-            dialog.handle_key(RemoveKey::Escape),
+            dialog.handle_key(RemoveKey::Escape, Instant::now()),
             Some(RemoveEffect::Close)
         );
     }

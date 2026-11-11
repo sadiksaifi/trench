@@ -65,9 +65,8 @@ pub fn render(dialog: &SyncDialog, state: &AppState, frame: &mut Frame, area: Re
             lines.push(Line::default());
             if let Some(error) = dialog.validation_error() {
                 lines.extend(
-                    widgets::wrap(&format!("{} {error}", widgets::FAILED), width)
+                    widgets::wrap_clamped(&format!("{} {error}", widgets::FAILED), width, 3)
                         .into_iter()
-                        .take(3)
                         .map(|line| Line::styled(line, theme.error)),
                 );
             } else {
@@ -189,9 +188,8 @@ fn sentence(
         SyncStrategy::Rebase => format!("Rebases {branch} onto {base}."),
         SyncStrategy::Merge => format!("Merges {base} into {branch}."),
     };
-    let mut lines = widgets::wrap(&action, width)
+    let mut lines = widgets::wrap_clamped(&action, width, 2)
         .into_iter()
-        .take(2)
         .map(|line| Line::styled(line, theme.text))
         .collect::<Vec<_>>();
     if !state.hooks.sync.is_empty() {
@@ -335,6 +333,32 @@ mod tests {
         assert_eq!(
             screen[7],
             "  │ × worktree has uncommitted changes                   │"
+        );
+    }
+
+    #[test]
+    fn a_sentence_too_long_for_the_dialog_ends_in_an_ellipsis() {
+        let mut state = state(&[]);
+        let branch = "feature/JIRA-12345-implement-the-thing-nobody-asked-for";
+        state.sync_dialog = Some(SyncDialog::new(
+            &identity(branch, "/wt/acme/long"),
+            RefSnapshot::from_parts(
+                ["main", branch],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            None,
+        ));
+        let screen = screen(&mut state, 40, 10);
+
+        assert_eq!(
+            screen[5..7],
+            [
+                " │ Rebases                            │",
+                " │ feature/JIRA-12345-implement-the-… │",
+            ]
         );
     }
 

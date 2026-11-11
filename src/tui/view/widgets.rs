@@ -317,6 +317,19 @@ pub fn row<'a>(
     Line::from(spans)
 }
 
+/// Wrap `value` to at most `max_lines` lines. Text that does not fit ends in
+/// an ellipsis, so a cut is always visible.
+pub fn wrap_clamped(value: &str, width: usize, max_lines: usize) -> Vec<String> {
+    let mut lines = wrap(value, width);
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            *last = text::truncate_end(&format!("{last}…"), width);
+        }
+    }
+    lines
+}
+
 /// Wrap `value` to `width` columns at spaces, breaking long words.
 pub fn wrap(value: &str, width: usize) -> Vec<String> {
     if width == 0 {
@@ -435,6 +448,19 @@ mod tests {
         for selected in 0..9 {
             let window = window(9, Some(selected), 4);
             assert!(window.rows.contains(&selected), "{selected}: {window:?}");
+        }
+    }
+
+    #[test]
+    fn clamped_wrapping_marks_the_cut_and_never_exceeds_the_width() {
+        assert_eq!(
+            wrap_clamped("one two three four five six", 9, 2),
+            ["one two", "three…"]
+        );
+        assert_eq!(wrap_clamped("alpha bravo charlie", 11, 1), ["alpha brav…"]);
+        assert_eq!(wrap_clamped("fits", 10, 2), ["fits"]);
+        for line in wrap_clamped("alpha bravo charlie delta", 11, 2) {
+            assert!(text::width(&line) <= 11, "{line}");
         }
     }
 

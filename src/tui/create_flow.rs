@@ -240,17 +240,19 @@ impl CreateDialog {
     }
 
     pub fn update_refs(&mut self, refs: RefSnapshot) {
+        let highlighted = self.highlighted_row();
         self.base_picker.update_refs(refs.clone());
         self.refs = refs;
-        self.clamp_highlight();
+        self.restore_highlight(highlighted);
     }
 
     pub fn update_worktrees<I>(&mut self, worktrees: I)
     where
         I: IntoIterator<Item = ExistingWorktree>,
     {
+        let highlighted = self.highlighted_row();
         self.worktrees = worktrees.into_iter().collect();
-        self.clamp_highlight();
+        self.restore_highlight(highlighted);
     }
 
     /// The branch list for the typed text.
@@ -444,12 +446,19 @@ impl CreateDialog {
         }
     }
 
-    fn clamp_highlight(&mut self) {
-        let rows = self.rows().len();
-        self.highlight = self
-            .highlight
-            .filter(|_| rows > 0)
-            .map(|index| index.min(rows - 1));
+    /// Put the highlight back on the row it was on before a refresh.
+    ///
+    /// Enter acts on the highlight, and a refresh can arrive at any moment
+    /// (the watcher, a background fetch). The highlight therefore follows the
+    /// branch, not the position. When that branch is gone, or now means a
+    /// different action, nothing is highlighted and the user picks again.
+    fn restore_highlight(&mut self, previous: Option<BranchRow>) {
+        self.highlight = previous.and_then(|previous| {
+            self.rows().iter().position(|row| {
+                row.branch == previous.branch
+                    && std::mem::discriminant(&row.kind) == std::mem::discriminant(&previous.kind)
+            })
+        });
     }
 
     fn planned_path(&self, branch: &str) -> PathBuf {
@@ -902,7 +911,67 @@ mod tests {
         ));
         dialog.update_worktrees([]);
         assert_eq!(dialog.rows()[0].kind, RowKind::New);
-        assert_eq!(dialog.highlight(), Some(0));
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_highlight_on_the_same_branch_not_the_same_position() {
+        let mut dialog = dialog();
+        dialog.handle_key(CreateKey::Down);
+        dialog.handle_key(CreateKey::Down);
+        assert_eq!(dialog.highlighted_row().unwrap().branch, "release");
+
+        // A branch that sorts before the highlight appears, as after a fetch.
+        dialog.update_refs(RefSnapshot::from_parts(
+            [
+                "main",
+                "aaa-newer",
+                "feature/login-page",
+                "feature/auth",
+                "release",
+            ],
+            ["origin/main", "origin/feature/login-v2", "origin/release"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        ));
+
+        assert_eq!(dialog.highlighted_row().unwrap().branch, "release");
+        assert_eq!(
+            dialog.handle_key(CreateKey::Enter),
+            Some(CreateEffect::Submit(CreateSubmission {
+                branch: "release".to_string(),
+                from: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn a_refresh_drops_the_highlight_when_its_row_is_gone_or_means_something_else() {
+        let mut gone = dialog();
+        gone.handle_key(CreateKey::Down);
+        gone.handle_key(CreateKey::Down);
+        gone.update_refs(RefSnapshot::from_parts(
+            ["main", "feature/login-page", "feature/auth"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        ));
+        assert_eq!(gone.highlight(), None, "release was deleted");
+        assert_eq!(gone.handle_key(CreateKey::Enter), None);
+
+        // The same name now has a worktree: Enter would navigate, not create.
+        let mut changed = dialog();
+        type_text(&mut changed, "release");
+        assert_eq!(changed.rows()[0].kind, RowKind::Local);
+        changed.update_worktrees([worktree("release", "release")]);
+        assert_eq!(changed.highlight(), None);
+        assert_eq!(changed.handle_key(CreateKey::Enter), None);
+        changed.handle_key(CreateKey::Down);
+        assert!(matches!(
+            changed.handle_key(CreateKey::Enter),
+            Some(CreateEffect::Navigate(_))
+        ));
     }
 
     #[test]

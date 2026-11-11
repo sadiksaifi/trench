@@ -100,10 +100,12 @@ porcelain contains name, branch and path. Listing never scans file status or
 counts commits ahead and behind. Sync and remove check the worktree you name
 at the moment you act.
 
-Results go to stdout only when a script would capture them: the path from
-`create` and `switch`, and the output of `list`. Everything else, such as
-"Removed worktree feature-login", goes to stderr. Errors read `error: ...`
-and, where trench knows the next step, are followed by a `hint:` line.
+stdout carries what a script would capture: the path from `create` and
+`switch`, the output of `list`, `--dry-run` previews, and `--json` documents.
+What `create`, `sync` and `remove` did, such as "Removed worktree
+feature-login", goes to stderr along with hook output. Errors read
+`error: ...` and, where trench knows the next step, are followed by a `hint:`
+line.
 
 If you delete a worktree's directory by hand, Git keeps listing it. trench
 marks it `(missing)` in `list`, and `trench remove` cleans up what is left.

@@ -405,11 +405,23 @@ fn handle_remove_input(
     cwd: &Path,
     configured_base: Option<&str>,
     hooks: Option<HooksConfig>,
+    now: Instant,
 ) -> Result<Option<RemoveInputEffect>> {
+    // `y` accepts the risks on screen. If the terminal cannot show them all,
+    // there is nothing to accept yet.
+    let area = ratatui::layout::Rect::new(0, 0, state.viewport.width, state.viewport.height);
+    if key == RemoveKey::Confirm
+        && state
+            .remove_dialog
+            .as_ref()
+            .is_some_and(|dialog| !view::remove_shows_every_risk(dialog, area))
+    {
+        return Ok(None);
+    }
     match state
         .remove_dialog
         .as_mut()
-        .and_then(|dialog| dialog.handle_key(key))
+        .and_then(|dialog| dialog.handle_key(key, now))
     {
         Some(RemoveEffect::Close) => {
             state.remove_dialog = None;
@@ -420,7 +432,7 @@ fn handle_remove_input(
                 .remove_dialog
                 .as_mut()
                 .expect("remove effect requires dialog")
-                .revalidate_request(cwd, configured_base, hooks);
+                .revalidate_request(cwd, configured_base, hooks, now);
             match result {
                 Ok(request) => {
                     state.help_open = false;
@@ -928,6 +940,7 @@ pub fn run() -> Result<TuiExit> {
                     &cwd,
                     resolved.git.default_base.as_deref(),
                     resolved.hooks.clone(),
+                    Instant::now(),
                 )? {
                     operation.start(*request);
                     state.operation_modal = operation.modal().cloned();
@@ -2263,6 +2276,7 @@ mod tests {
             repository.path(),
             Some("main"),
             None,
+            Instant::now(),
         )
         .unwrap() else {
             panic!("clean removal should start")
@@ -2370,6 +2384,7 @@ mod tests {
             repository.path(),
             Some("main"),
             None,
+            Instant::now(),
         )
         .unwrap() else {
             panic!("y should start the removal")
@@ -2480,6 +2495,82 @@ mod tests {
                 .map(|notice| notice.text.as_str()),
             Some("Created feature/auth (new branch from main)")
         );
+    }
+
+    #[test]
+    fn y_does_nothing_while_the_terminal_is_too_small_to_show_every_risk() {
+        let repository = init_repo();
+        let target_path = repository.path().join("worktrees").join("risky");
+        add_worktree(repository.path(), "risky", "risky", &target_path);
+        std::fs::write(target_path.join("feature.txt"), "feature\n").unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&target_path)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["add", "feature.txt"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "feature",
+        ]);
+        std::fs::write(target_path.join("dirty.txt"), "dirty\n").unwrap();
+        let target = WorktreeIdentity {
+            id: WorktreeId::new(&target_path),
+            worktree: "risky".to_string(),
+            branch: Some("risky".to_string()),
+            path: target_path.clone(),
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+            missing: false,
+        };
+        let mut state = AppState::new(vec![target.clone()]);
+        open_remove_dialog(&mut state, repository.path(), &target.id, Some("main")).unwrap();
+        let press = |state: &mut AppState, key| {
+            handle_remove_input(
+                state,
+                key,
+                repository.path(),
+                Some("main"),
+                None,
+                Instant::now(),
+            )
+            .unwrap()
+        };
+        assert!(press(&mut state, RemoveKey::Space).is_none());
+
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: 40,
+                height: 10,
+            },
+        );
+        assert!(press(&mut state, RemoveKey::Confirm).is_none());
+        assert!(target_path.join("dirty.txt").exists());
+        assert!(state.remove_dialog.is_some());
+
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: 80,
+                height: 24,
+            },
+        );
+        assert!(matches!(
+            press(&mut state, RemoveKey::Confirm),
+            Some(RemoveInputEffect::Start(_))
+        ));
     }
 
     #[test]
@@ -2647,6 +2738,7 @@ mod tests {
             &remove_root,
             Some("main"),
             None,
+            Instant::now(),
         )
         .unwrap() else {
             panic!("clean remove should start")

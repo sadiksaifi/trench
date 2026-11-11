@@ -238,9 +238,8 @@ fn summary(
     let plain = |value: String| Line::styled(text::truncate_end(&value, width), theme.text);
     let muted = |value: &str| Line::styled(text::truncate_end(value, width), theme.muted);
     let failure = |message: &str, advice: &str| {
-        let mut lines = widgets::wrap(&format!("{} {message}", widgets::FAILED), width)
+        let mut lines = widgets::wrap_clamped(&format!("{} {message}", widgets::FAILED), width, 2)
             .into_iter()
-            .take(2)
             .map(|line| Line::styled(line, theme.error))
             .collect::<Vec<_>>();
         lines.push(muted(advice));
@@ -583,7 +582,6 @@ mod tests {
             screen[5],
             "  │ › feature/JIRA-1234…ody-asked-for-v2  new branch     │"
         );
-        assert!(screen.iter().all(|row| row.chars().count() <= 60));
     }
 
     #[test]

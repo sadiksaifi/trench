@@ -159,6 +159,10 @@ pub struct RemovalAssessment {
     locked: bool,
     #[serde(skip)]
     branch_checked_out_elsewhere: Option<PathBuf>,
+    /// A detached HEAD that no branch or tag contains. Removing the worktree
+    /// drops its reflog, so those commits become unreachable.
+    #[serde(skip)]
+    head_unreachable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +237,11 @@ impl RemovalAssessment {
 
     pub fn locked(&self) -> bool {
         self.locked
+    }
+
+    /// The detached HEAD has commits that no branch or tag contains.
+    pub fn head_unreachable(&self) -> bool {
+        self.head_unreachable
     }
 
     /// Another worktree that has this target's branch checked out.
@@ -326,11 +335,15 @@ impl RemovalAssessment {
         };
         let dirty = directory.is_some() && git::dirty_count(&identity.path)? > 0;
         // Older Git does not print `locked` in porcelain output, so also read
-        // the lock file from the admin entry when the directory resolves one.
-        let locked = identity.locked
-            || directory
-                .as_ref()
-                .is_some_and(|directory| directory.admin_dir.join("locked").exists());
+        // the lock file from the worktree's admin entry.
+        let admin_entry = match &directory {
+            Some(directory) => Some(directory.admin_dir.clone()),
+            None => common_git_dir(repo_path)
+                .ok()
+                .and_then(|common| admin_entry_for(&common, &identity.path)),
+        };
+        let locked =
+            identity.locked || admin_entry.is_some_and(|entry| entry.join("locked").exists());
         let branch_checked_out_elsewhere = identity.branch.as_deref().and_then(|branch| {
             catalog
                 .identities()
@@ -401,6 +414,10 @@ impl RemovalAssessment {
             directory,
             locked,
             branch_checked_out_elsewhere,
+            head_unreachable: match head_oid {
+                Some(head) if identity.detached => !contained_by_any_ref(repo_path, head)?,
+                _ => false,
+            },
         })
     }
 
@@ -1310,6 +1327,29 @@ fn resolve_base(
     Ok(None)
 }
 
+/// Whether any branch, remote-tracking branch, or tag contains `commit`.
+fn contained_by_any_ref(repo_path: &Path, commit: git2::Oid) -> Result<bool, git::GitError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["for-each-ref", "--count=1", "--contains"])
+        .arg(commit.to_string())
+        .args(["refs/heads", "refs/remotes", "refs/tags"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()?;
+    if output.status.success() {
+        Ok(!output.stdout.iter().all(u8::is_ascii_whitespace))
+    } else {
+        Err(git::GitError::CommandFailed {
+            operation: "checking which refs contain the detached HEAD",
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    }
+}
+
 fn local_branch_oid(repo: &git2::Repository, branch: &str) -> Result<git2::Oid, git::GitError> {
     repo.find_branch(branch, git2::BranchType::Local)
         .map_err(|error| {
@@ -2195,18 +2235,58 @@ fn prepare_exact_worktree_removal(
     ))
 }
 
+/// The admin entry (`<common>/worktrees/<id>`) whose `gitdir` file points at
+/// `worktree`, found without the worktree directory having to exist.
+fn admin_entry_for(common: &Path, worktree: &Path) -> Option<PathBuf> {
+    let expected = git::worktrees::canonicalize_lenient(worktree);
+    std::fs::read_dir(common.join("worktrees"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|entry| {
+            std::fs::read_to_string(entry.join("gitdir")).is_ok_and(|gitdir| {
+                // The file holds `<worktree>/.git`, relative to the entry
+                // when `worktree.useRelativePaths` is set.
+                let gitdir = entry.join(gitdir.trim());
+                gitdir
+                    .parent()
+                    .is_some_and(|path| git::worktrees::canonicalize_lenient(path) == expected)
+            })
+        })
+}
+
 /// Retire the Git metadata of a worktree whose directory is already gone.
 ///
-/// `git worktree prune` only drops entries whose directories are missing, so
-/// it can never delete files. It leaves locked entries in place, which is why
-/// the entry is looked up again afterwards.
+/// `git worktree remove` on a missing directory drops that one entry and
+/// nothing else: other stale entries stay, and a locked entry is refused.
+/// The directory is checked immediately before, so there are no files for
+/// Git to delete.
 fn retire_missing_worktree(assessment: &RemovalAssessment) -> Result<(), ExactRemovalFailure> {
     if std::fs::symlink_metadata(&assessment.path).is_ok() {
         return Err(ExactRemovalFailure::not_started(
             git::GitError::PreconditionsChanged,
         ));
     }
-    prune_worktrees(&assessment.repo_path).map_err(ExactRemovalFailure::not_started)?;
+    let common = common_git_dir(&assessment.repo_path).map_err(ExactRemovalFailure::not_started)?;
+    let output = Command::new("git")
+        .arg(format!("--git-dir={}", common.display()))
+        .args(["-c", "core.hooksPath=/dev/null"])
+        .args(["worktree", "remove"])
+        .arg(&assessment.path)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()
+        .map_err(|error| ExactRemovalFailure::not_started(error.into()))?;
+    if !output.status.success() {
+        return Err(ExactRemovalFailure::not_started(
+            git::GitError::CommandFailed {
+                operation: "removing the worktree entry",
+                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            },
+        ));
+    }
     let still_listed = git::worktrees::discover(&assessment.repo_path)
         .map_err(ExactRemovalFailure::not_started)?
         .into_iter()
@@ -2214,12 +2294,8 @@ fn retire_missing_worktree(assessment: &RemovalAssessment) -> Result<(), ExactRe
     if still_listed {
         return Err(ExactRemovalFailure::not_started(
             git::GitError::CommandFailed {
-                operation: "pruning worktrees",
-                message: format!(
-                    "Git kept the entry for {}; if it is locked, run `git worktree unlock {}` and retry",
-                    assessment.path.display(),
-                    assessment.path.display()
-                ),
+                operation: "removing the worktree entry",
+                message: format!("Git still lists {}", assessment.path.display()),
             },
         ));
     }
@@ -3502,6 +3578,39 @@ mod tests {
         assert_eq!(value["hook_policy"], "skip");
         assert!(value.get("repo_path").is_none());
         assert!(value.get("head_oid").is_none());
+    }
+
+    #[test]
+    fn a_lock_on_a_missing_worktree_is_read_from_its_admin_entry() {
+        let fixture = Fixture::new("feature/locked-gone");
+        let common = common_git_dir(&fixture.main).unwrap();
+        let entry = admin_entry_for(&common, &fixture.linked).expect("entry for the worktree");
+        assert!(entry.join("gitdir").exists());
+        assert_eq!(
+            admin_entry_for(&common, &fixture.root.path().join("never-a-worktree")),
+            None
+        );
+
+        // Write the lock the way `git worktree lock` does, then lose the
+        // directory. Porcelain `locked` is not available on older Git, so the
+        // assessment must find the lock without it.
+        std::fs::write(entry.join("locked"), "on a removable disk\n").unwrap();
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        assert_eq!(
+            admin_entry_for(&common, &fixture.linked).as_deref(),
+            Some(entry.as_path())
+        );
+
+        let assessment = fixture.assess();
+        assert!(assessment.directory_missing());
+        assert!(assessment.locked());
+        assert!(matches!(
+            assessment.authorize(RemoveOptions {
+                dry_run: true,
+                ..RemoveOptions::default()
+            }),
+            Err(RemovalAuthorizationError::LockedWorktree { .. })
+        ));
     }
 
     #[test]

@@ -488,7 +488,14 @@ fn run_remove(request: RemoveCliRequest<'_>) -> anyhow::Result<()> {
     let assessment =
         match RemovalAssessment::discover(&cwd, request.identifier, configured_base.as_deref()) {
             Ok(assessment) => assessment,
-            Err(RemovalAssessmentError::Catalog(error)) => return Err(error.into()),
+            // Only "no such worktree" is exit 2. Every other selector problem,
+            // including an ambiguous one, stays a general error.
+            Err(RemovalAssessmentError::Catalog(
+                error @ worktree_catalog::CatalogError::NotFound { .. },
+            )) => return Err(error.into()),
+            Err(RemovalAssessmentError::Catalog(error)) => {
+                fail(cli::report::catalog_error(&error), ExitCode::GeneralError)
+            }
             Err(error) => fail(Report::new(error.to_string()), ExitCode::GeneralError),
         };
     let worktree = assessment.worktree().to_string();
@@ -554,11 +561,9 @@ fn run_remove(request: RemoveCliRequest<'_>) -> anyhow::Result<()> {
             if request.json {
                 println!("{}", output::json::format_json_value(&outcome)?);
             } else {
+                // Warnings were already printed as they happened.
                 for line in outcome.summary_lines() {
                     eprintln!("{line}");
-                }
-                if let Some(warning) = &outcome.warning {
-                    human::print_warning(warning);
                 }
             }
             Ok(())

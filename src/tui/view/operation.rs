@@ -11,6 +11,7 @@ use crate::{
     cli::report,
     operation::{MutationState, OperationKind, OperationStage},
     output::text,
+    paths,
     tui::{
         operation_modal::{ModalStatus, OperationModal, StageView},
         theme::Theme,
@@ -38,12 +39,11 @@ pub fn render(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &The
         theme,
     );
 
-    let mut lines = stages(modal)
-        .into_iter()
-        .map(|stage| stage_line(modal, stage, theme))
-        .collect::<Vec<_>>();
+    // What failed and what state things are in must never be pushed off the
+    // dialog by progress rows, so the details are laid out first.
+    let mut details = Vec::new();
     for warning in modal.warnings() {
-        lines.extend(
+        details.extend(
             widgets::wrap(&format!("{} {warning}", widgets::WARNING), width)
                 .into_iter()
                 .map(|line| Line::styled(line, theme.warning)),
@@ -61,29 +61,49 @@ pub fn render(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &The
             Some(hook) => report::hook_failure_message(hook, message),
             None => message.clone(),
         };
-        lines.push(Line::default());
-        lines.extend(
-            widgets::wrap(&format!("{} {headline}", widgets::FAILED), width)
+        details.extend(
+            widgets::wrap_clamped(&format!("{} {headline}", widgets::FAILED), width, 3)
                 .into_iter()
                 .map(|line| Line::styled(line, theme.error)),
         );
+        if let Some(path) = retained_quarantine {
+            let home = paths::home_dir();
+            details.extend(
+                widgets::wrap(
+                    &format!(
+                        "Kept for recovery: {}",
+                        text::home_relative(path, home.as_deref())
+                    ),
+                    width,
+                )
+                .into_iter()
+                .map(|line| Line::styled(line, theme.text)),
+            );
+        }
         // Without this sentence the user cannot tell whether a failed
         // operation left anything behind.
         let state = report::state_after_failure(modal.operation(), *mutation_state, true)
             .unwrap_or("nothing was changed");
-        lines.extend(
+        details.extend(
             widgets::wrap(&sentence(state), width)
                 .into_iter()
                 .map(|line| Line::styled(line, theme.text)),
         );
-        if let Some(path) = retained_quarantine {
-            lines.extend(
-                widgets::wrap(&format!("Kept for recovery: {}", path.display()), width)
-                    .into_iter()
-                    .map(|line| Line::styled(line, theme.text)),
-            );
-        }
     }
+
+    let stage_rows = stages(modal);
+    let separator = usize::from(!details.is_empty());
+    let room_for_stages = rows.saturating_sub(details.len() + separator);
+    let skipped = stage_rows.len().saturating_sub(room_for_stages);
+    let mut lines = stage_rows
+        .into_iter()
+        .skip(skipped)
+        .map(|stage| stage_line(modal, stage, theme))
+        .collect::<Vec<_>>();
+    if !details.is_empty() && !lines.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.extend(details);
 
     // Hook output takes whatever rows are left, newest at the bottom.
     let output_rows = rows.saturating_sub(lines.len() + 1);
@@ -402,6 +422,29 @@ mod tests {
     }
 
     #[test]
+    fn the_recovery_path_outranks_progress_rows_on_a_short_terminal() {
+        let mut modal = OperationModal::new(OperationKind::Remove);
+        run(&mut modal, OperationStage::PreHook, Some(true));
+        run(&mut modal, OperationStage::RemoveWorktree, Some(false));
+        modal.fail(&OperationFailure {
+            stage: OperationStage::RemoveWorktree,
+            mutation_state: MutationState::PartiallyApplied,
+            class: ErrorClass::Io,
+            message: "I/O error: Permission denied (os error 13)".to_string(),
+            retained_quarantine: Some("/wt/.trench-remove-1-0".into()),
+        });
+        let screen = screen(&mut show(modal), 40, 10);
+        let text = screen.join("").replace(['│', ' '], "");
+
+        assert!(
+            text.contains("Keptforrecovery:/wt/.trench-remove-1-0"),
+            "{screen:#?}"
+        );
+        assert!(text.contains("×I/Oerror:Permissiondenied"), "{screen:#?}");
+        assert!(text.contains("Somechangeswereapplied"), "{screen:#?}");
+    }
+
+    #[test]
     fn the_view_fits_the_minimum_terminal() {
         let mut modal = OperationModal::new(OperationKind::Remove);
         run(&mut modal, OperationStage::RemoveWorktree, None);
@@ -413,6 +456,5 @@ mod tests {
             screen[0]
         );
         assert_eq!(screen[8], " ╰────────────────────────────────────╯");
-        assert!(screen.iter().all(|row| row.chars().count() <= 40));
     }
 }

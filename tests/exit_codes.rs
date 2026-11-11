@@ -692,6 +692,91 @@ fn remove_missing_directory_skips_pre_remove_and_runs_post_remove() {
 }
 
 #[test]
+fn removing_a_missing_worktree_leaves_other_stale_entries_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "stale-target");
+    create_worktree(tmp.path(), "stale-bystander");
+    let target = worktree_path(tmp.path(), "stale-target");
+    let bystander = worktree_path(tmp.path(), "stale-bystander");
+    std::fs::remove_dir_all(&target).unwrap();
+    // The bystander is only away, as on an unmounted disk. It comes back.
+    let parked = tmp.path().join("parked");
+    std::fs::rename(&bystander, &parked).unwrap();
+
+    let removed = trench_cmd(tmp.path())
+        .args(["remove", "stale-target", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!git_lists_worktree(tmp.path(), &target));
+    assert!(
+        git_lists_worktree(tmp.path(), &bystander),
+        "an entry the user did not name was pruned"
+    );
+
+    std::fs::rename(&parked, &bystander).unwrap();
+    git(&bystander, &["status"]);
+}
+
+#[test]
+fn an_ambiguous_remove_selector_keeps_its_general_error_exit_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    let first = tmp.path().join("one").join("shared");
+    let second = tmp.path().join("two").join("shared");
+    for (path, branch) in [(&first, "first"), (&second, "second")] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        git(
+            tmp.path(),
+            &["worktree", "add", "-b", branch, path.to_str().unwrap()],
+        );
+    }
+
+    let refused = trench_cmd(tmp.path())
+        .args(["remove", "shared", "--yes"])
+        .output()
+        .unwrap();
+
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.starts_with("error: more than one worktree matches 'shared'"),
+        "{stderr}"
+    );
+    assert!(first.exists() && second.exists());
+}
+
+#[test]
+fn a_failing_post_remove_hook_is_reported_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    std::fs::write(
+        tmp.path().join(".trench.toml"),
+        "[hooks.post_remove]\nrun = [\"false\"]\n",
+    )
+    .unwrap();
+    create_worktree(tmp.path(), "hook-warns-once");
+
+    let removed = trench_cmd(tmp.path())
+        .args(["remove", "hook-warns-once", "--yes", "--force-worktree"])
+        .output()
+        .unwrap();
+
+    assert!(removed.status.success());
+    let stderr = String::from_utf8_lossy(&removed.stderr);
+    assert_eq!(
+        stderr.matches("warning: post_remove hook failed").count(),
+        1,
+        "{stderr}"
+    );
+}
+
+#[test]
 fn remove_refuses_locked_worktree_without_touching_it() {
     let tmp = tempfile::tempdir().unwrap();
     init_git_repo(tmp.path());
