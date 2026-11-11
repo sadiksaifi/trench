@@ -478,12 +478,7 @@ mod tests {
         std::fs::write(fixture.worktree().join("late.txt"), "late\n").unwrap();
         let dialog = state.remove_dialog.as_mut().unwrap();
         let error = dialog
-            .revalidate_request(
-                fixture.root.path(),
-                Some("main"),
-                None,
-                std::time::Instant::now(),
-            )
+            .revalidate_request(fixture.root.path(), Some("main"), None)
             .unwrap_err();
         dialog.set_validation_error(Some(error.to_string()));
 
@@ -577,12 +572,7 @@ mod tests {
         std::fs::write(fixture.worktree().join("late.txt"), "late\n").unwrap();
         let dialog = state.remove_dialog.as_mut().unwrap();
         let error = dialog
-            .revalidate_request(
-                fixture.root.path(),
-                Some("main"),
-                None,
-                std::time::Instant::now(),
-            )
+            .revalidate_request(fixture.root.path(), Some("main"), None)
             .unwrap_err();
         dialog.set_validation_error(Some(error.to_string()));
 

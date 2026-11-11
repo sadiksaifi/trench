@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     paths,
-    ref_catalog::{RefCandidate, RefSnapshot},
+    ref_catalog::{RefCandidate, RefKind, RefSnapshot},
     tui::{
         app::WorktreeId,
         line_input::{LineEdit, LineInput},
@@ -263,13 +263,17 @@ impl CreateDialog {
     /// before branches that already have one.
     pub fn rows(&self) -> Vec<BranchRow> {
         let query = self.branch.value().trim();
-        // Rows are listed by local name, so `origin/x` is matched as `x`.
-        let typed = query.strip_prefix("origin/").unwrap_or(query);
+        // A remote branch is listed by its local name, so `origin/x` also
+        // matches the row `x`. A local branch really named `origin/x` is
+        // listed under that whole name and matches the text as typed.
+        let short = query.strip_prefix("origin/").unwrap_or(query);
         let mut ranked = self
             .existing_rows()
             .into_iter()
             .filter_map(|row| {
-                search::fuzzy_score(&row.branch, typed).map(|score| (score, kind_rank(&row), row))
+                search::fuzzy_score(&row.branch, query)
+                    .max(search::fuzzy_score(&row.branch, short))
+                    .map(|score| (score, kind_rank(&row), row))
             })
             .collect::<Vec<_>>();
         ranked.sort_by(|left, right| {
@@ -282,7 +286,7 @@ impl CreateDialog {
         if query.is_empty() {
             return rows;
         }
-        match rows.iter().position(|row| row.branch == typed) {
+        match exact_match(&rows, query, short) {
             Some(exact) => {
                 let row = rows.remove(exact);
                 rows.insert(0, row);
@@ -385,10 +389,14 @@ impl CreateDialog {
         match key {
             CreateKey::Character(character) => self.edit_branch(LineEdit::Insert(character)),
             CreateKey::Edit(edit) => self.edit_branch(edit),
+            // Moving the highlight asks about a different row, so a message
+            // about the previous attempt no longer applies.
             CreateKey::Up => {
+                self.validation_error = None;
                 self.highlight = self.highlight.map(|index| index.saturating_sub(1));
             }
             CreateKey::Down => {
+                self.validation_error = None;
                 let last = self.rows().len().checked_sub(1)?;
                 self.highlight = Some(self.highlight.map_or(0, |index| (index + 1).min(last)));
             }
@@ -473,18 +481,24 @@ impl CreateDialog {
             .candidates()
             .into_iter()
             .map(|candidate| {
-                let branch = candidate
-                    .name
-                    .strip_prefix("origin/")
-                    .unwrap_or(&candidate.name)
-                    .to_string();
-                let kind = match self.worktree_for(&branch) {
-                    Some(worktree) => RowKind::HasWorktree {
+                // The ref's kind decides what the name means. A local branch
+                // may itself be called `origin/x`; only a remote ref has a
+                // prefix to strip.
+                let branch = match candidate.kind {
+                    RefKind::Local => candidate.name.clone(),
+                    RefKind::Remote => candidate
+                        .name
+                        .strip_prefix("origin/")
+                        .unwrap_or(&candidate.name)
+                        .to_string(),
+                };
+                let kind = match (self.worktree_for(&branch), candidate.kind) {
+                    (Some(worktree), _) => RowKind::HasWorktree {
                         id: worktree.id.clone(),
                         path: worktree.path.clone(),
                     },
-                    None if candidate.name == branch => RowKind::Local,
-                    None => RowKind::Remote {
+                    (None, RefKind::Local) => RowKind::Local,
+                    (None, RefKind::Remote) => RowKind::Remote {
                         upstream: candidate.name,
                     },
                 };
@@ -543,6 +557,25 @@ impl CreateDialog {
                 directory,
             })
     }
+}
+
+/// The row the typed text names exactly, in the order planning resolves it:
+/// a local branch of the short name, the remote ref as typed, then a local
+/// branch whose whole name is the typed text.
+fn exact_match(rows: &[BranchRow], query: &str, short: &str) -> Option<usize> {
+    let remote = |row: &BranchRow| matches!(row.kind, RowKind::Remote { .. });
+    let named = |name: &str, wants_remote: bool| {
+        rows.iter()
+            .position(|row| row.branch == name && remote(row) == wants_remote)
+    };
+    named(short, false)
+        .or_else(|| {
+            rows.iter().position(|row| {
+                matches!(&row.kind, RowKind::Remote { upstream }
+                    if upstream == query || upstream == &format!("origin/{query}"))
+            })
+        })
+        .or_else(|| named(query, false))
 }
 
 /// Order among equally good matches: creatable branches first.
@@ -715,6 +748,47 @@ mod tests {
         type_text(&mut prefixed, "origin/feature/login-v2");
         assert_eq!(prefixed.rows()[0].branch, "feature/login-v2");
         assert!(prefixed.rows().iter().all(|row| row.kind != RowKind::New));
+    }
+
+    #[test]
+    fn a_local_branch_whose_name_starts_with_origin_is_not_mistaken_for_a_remote() {
+        let path = Path::new(ROOT).join("acme").join("origin-foo");
+        let mut dialog = CreateDialog::new(
+            "acme",
+            Path::new(ROOT),
+            RefSnapshot::from_parts(
+                ["main", "origin/foo", "origin/bar"],
+                ["origin/main"],
+                Some("origin/main"),
+                Some("main"),
+                true,
+            ),
+            None,
+            [ExistingWorktree::new(
+                Some("origin/foo"),
+                WorktreeId::new(&path),
+                &path,
+            )],
+        );
+        type_text(&mut dialog, "origin/foo");
+
+        let row = dialog.highlighted_row().unwrap();
+        assert_eq!(row.branch, "origin/foo", "the local name is kept whole");
+        assert!(matches!(row.kind, RowKind::HasWorktree { .. }));
+        assert_eq!(
+            dialog.handle_key(CreateKey::Enter),
+            Some(CreateEffect::Navigate(WorktreeId::new(&path)))
+        );
+
+        let mut local = dialog.clone();
+        local.set_branch("origin/bar");
+        assert_eq!(
+            local.summary(),
+            Summary::Local {
+                branch: "origin/bar".to_string(),
+                path: PathBuf::from("/worktrees/acme/origin-bar"),
+            }
+        );
     }
 
     #[test]

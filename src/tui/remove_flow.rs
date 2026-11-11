@@ -70,6 +70,8 @@ pub enum Risk {
 ///
 /// A double-press arrives within a few hundred milliseconds. Without this
 /// pause its second press would accept a risk that was drawn one frame ago.
+/// Every path that replaces the facts arms it: a stale `y`, and returning to
+/// the form after a failed attempt (a hook may have changed the worktree).
 pub const CONFIRM_DELAY_AFTER_CHANGE: Duration = Duration::from_millis(800);
 
 /// Whether the local branch can be deleted along with the worktree.
@@ -265,6 +267,10 @@ impl RemoveDialog {
         self.target = RemoveTarget::new(self.target.id.clone(), &assessment);
         self.assessment = assessment;
         self.delete_branch = self.delete_branch && self.can_delete_branch();
+        // The clock starts now, after discovery. Discovery can take longer
+        // than the pause itself, and keys typed while it ran are still
+        // queued; they must not count as having read the new facts.
+        self.confirm_after = Some(Instant::now() + CONFIRM_DELAY_AFTER_CHANGE);
         Ok(true)
     }
 
@@ -278,10 +284,8 @@ impl RemoveDialog {
         cwd: &Path,
         configured_base: Option<&str>,
         hooks: Option<HooksConfig>,
-        now: Instant,
     ) -> Result<OperationRequest, RemoveFlowError> {
         if self.refresh(cwd, configured_base)? {
-            self.confirm_after = Some(now + CONFIRM_DELAY_AFTER_CHANGE);
             return Err(RemoveFlowError::FactsChanged);
         }
         let options = RemoveOptions {
@@ -302,7 +306,7 @@ mod tests {
     use std::{
         path::{Path, PathBuf},
         process::Command,
-        time::{Duration, Instant},
+        time::Instant,
     };
 
     use super::*;
@@ -532,7 +536,7 @@ mod tests {
         );
 
         let OperationRequest::Remove(request) = dialog
-            .revalidate_request(fixture.root.path(), Some("main"), None, Instant::now())
+            .revalidate_request(fixture.root.path(), Some("main"), None)
             .unwrap()
         else {
             panic!("remove flow must construct the shared remove request")
@@ -566,7 +570,7 @@ mod tests {
         );
 
         let OperationRequest::Remove(request) = dialog
-            .revalidate_request(fixture.root.path(), Some("main"), None, Instant::now())
+            .revalidate_request(fixture.root.path(), Some("main"), None)
             .unwrap()
         else {
             panic!("expected remove request")
@@ -590,7 +594,7 @@ mod tests {
 
         assert!(dialog.risks().is_empty());
         let OperationRequest::Remove(request) = dialog
-            .revalidate_request(fixture.root.path(), Some("main"), None, Instant::now())
+            .revalidate_request(fixture.root.path(), Some("main"), None)
             .unwrap()
         else {
             panic!("expected remove request")
@@ -621,12 +625,7 @@ mod tests {
         assert_eq!(dialog.risks(), [Risk::UnknownMergeStatus]);
 
         let OperationRequest::Remove(request) = dialog
-            .revalidate_request(
-                fixture.root.path(),
-                Some("origin/main"),
-                None,
-                Instant::now(),
-            )
+            .revalidate_request(fixture.root.path(), Some("origin/main"), None)
             .unwrap()
         else {
             panic!("expected remove request")
@@ -649,7 +648,7 @@ mod tests {
         std::fs::write(fixture.worktree_path.join("late.txt"), "late\n").unwrap();
 
         let error = dialog
-            .revalidate_request(fixture.root.path(), Some("main"), None, Instant::now())
+            .revalidate_request(fixture.root.path(), Some("main"), None)
             .unwrap_err();
 
         assert!(matches!(error, RemoveFlowError::FactsChanged));
@@ -662,7 +661,7 @@ mod tests {
         assert!(fixture.worktree_path.join("late.txt").exists());
 
         let OperationRequest::Remove(request) = dialog
-            .revalidate_request(fixture.root.path(), Some("main"), None, Instant::now())
+            .revalidate_request(fixture.root.path(), Some("main"), None)
             .unwrap()
         else {
             panic!("expected remove request")
@@ -686,7 +685,7 @@ mod tests {
         assert!(dialog.risks().is_empty());
         assert!(dialog.can_delete_branch());
         assert!(matches!(
-            dialog.revalidate_request(fixture.root.path(), Some("main"), None, Instant::now()),
+            dialog.revalidate_request(fixture.root.path(), Some("main"), None),
             Ok(OperationRequest::Remove(_))
         ));
     }
@@ -765,22 +764,78 @@ mod tests {
         );
         std::fs::write(fixture.worktree_path.join("late.txt"), "late\n").unwrap();
         assert!(matches!(
-            dialog.revalidate_request(fixture.root.path(), Some("main"), None, pressed),
+            dialog.revalidate_request(fixture.root.path(), Some("main"), None),
             Err(RemoveFlowError::FactsChanged)
         ));
+        let shown = Instant::now();
 
         // The second press of a double-tap lands before anyone could read.
+        assert_eq!(dialog.handle_key(RemoveKey::Confirm, shown), None);
         assert_eq!(
-            dialog.handle_key(RemoveKey::Confirm, pressed + Duration::from_millis(150)),
-            None
-        );
-        assert_eq!(
-            dialog.handle_key(RemoveKey::Escape, pressed + Duration::from_millis(150)),
+            dialog.handle_key(RemoveKey::Escape, shown),
             Some(RemoveEffect::Close),
             "leaving is never delayed"
         );
         assert_eq!(
-            dialog.handle_key(RemoveKey::Confirm, pressed + CONFIRM_DELAY_AFTER_CHANGE),
+            dialog.handle_key(RemoveKey::Confirm, shown + CONFIRM_DELAY_AFTER_CHANGE),
+            Some(RemoveEffect::Submit)
+        );
+    }
+
+    #[test]
+    fn the_pause_starts_when_the_new_facts_arrive_not_when_y_was_pressed() {
+        let fixture = Fixture::new("slow-discovery");
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        // The first `y` was pressed long ago: discovery was slow, and a
+        // second `y` sat in the input queue the whole time.
+        let pressed = Instant::now() - CONFIRM_DELAY_AFTER_CHANGE * 4;
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, pressed),
+            Some(RemoveEffect::Submit)
+        );
+        std::fs::write(fixture.worktree_path.join("late.txt"), "late\n").unwrap();
+        assert!(dialog
+            .revalidate_request(fixture.root.path(), Some("main"), None)
+            .is_err());
+
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, Instant::now()),
+            None,
+            "the queued press is processed as soon as discovery returns"
+        );
+    }
+
+    #[test]
+    fn refreshing_the_form_after_a_failed_attempt_also_starts_the_pause() {
+        let fixture = Fixture::new("hook-changed-it");
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        // A pre_remove hook wrote a file and then failed.
+        std::fs::write(fixture.worktree_path.join("from-hook.txt"), "x\n").unwrap();
+
+        assert!(dialog.refresh(fixture.root.path(), Some("main")).unwrap());
+
+        assert_eq!(dialog.risks(), [Risk::UncommittedChanges]);
+        assert_eq!(dialog.handle_key(RemoveKey::Confirm, Instant::now()), None);
+
+        // Nothing changed this time, so nothing new needs reading.
+        let mut unchanged = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        assert!(!unchanged
+            .refresh(fixture.root.path(), Some("main"))
+            .unwrap());
+        assert_eq!(
+            unchanged.handle_key(RemoveKey::Confirm, Instant::now()),
             Some(RemoveEffect::Submit)
         );
     }

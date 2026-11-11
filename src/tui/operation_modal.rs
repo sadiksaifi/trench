@@ -49,6 +49,10 @@ pub struct OperationModal {
     mutation_started: bool,
     hook_lines: Vec<String>,
     hook_scroll: usize,
+    /// Rows the failure report is scrolled down by.
+    report_scroll: usize,
+    /// How far the failure report can scroll at the current terminal size.
+    report_scroll_limit: usize,
     warnings: Vec<String>,
     status: ModalStatus,
 }
@@ -64,6 +68,8 @@ impl OperationModal {
             mutation_started: operation == OperationKind::Sync,
             hook_lines: Vec::new(),
             hook_scroll: 0,
+            report_scroll: 0,
+            report_scroll_limit: 0,
             warnings: Vec::new(),
             status: ModalStatus::Running,
         }
@@ -150,6 +156,17 @@ impl OperationModal {
             {
                 Some(ModalEffect::Close)
             }
+            // A failure is a report read from the top: what failed, what
+            // state things are in, then progress and output. It scrolls as
+            // one document so every line of it can be reached.
+            ModalKey::Up if matches!(self.status, ModalStatus::Failed { .. }) => {
+                self.report_scroll = self.report_scroll.saturating_sub(1);
+                None
+            }
+            ModalKey::Down if matches!(self.status, ModalStatus::Failed { .. }) => {
+                self.report_scroll = (self.report_scroll + 1).min(self.report_scroll_limit);
+                None
+            }
             ModalKey::Up => {
                 self.hook_scroll = self
                     .hook_scroll
@@ -203,6 +220,21 @@ impl OperationModal {
 
     pub fn spinner_visible(&self) -> bool {
         self.status == ModalStatus::Running && self.current_stage.is_some()
+    }
+
+    pub fn hook_lines(&self) -> &[String] {
+        &self.hook_lines
+    }
+
+    pub fn report_scroll(&self) -> usize {
+        self.report_scroll.min(self.report_scroll_limit)
+    }
+
+    /// Tell the modal how many rows of the failure report are off screen.
+    /// The view knows the geometry; the modal only keeps the position.
+    pub fn set_report_scroll_limit(&mut self, limit: usize) {
+        self.report_scroll_limit = limit;
+        self.report_scroll = self.report_scroll.min(limit);
     }
 
     pub fn visible_hook_lines(&self, height: usize) -> Vec<&str> {
@@ -324,6 +356,36 @@ mod tests {
         assert!(!modal.can_return_to_form());
         assert_eq!(modal.handle_key(ModalKey::Enter), Some(ModalEffect::Close));
         assert_eq!(modal.handle_key(ModalKey::Escape), Some(ModalEffect::Close));
+    }
+
+    #[test]
+    fn a_failure_report_scrolls_as_one_document_within_its_limit() {
+        let mut modal = OperationModal::new(OperationKind::Remove);
+        modal.fail(&OperationFailure {
+            stage: OperationStage::RemoveWorktree,
+            mutation_state: MutationState::PartiallyApplied,
+            class: crate::operation::ErrorClass::Io,
+            message: "I/O error".to_string(),
+            retained_quarantine: None,
+        });
+
+        modal.handle_key(ModalKey::Down);
+        assert_eq!(modal.report_scroll(), 0, "nothing is off screen yet");
+
+        modal.set_report_scroll_limit(2);
+        for _ in 0..5 {
+            modal.handle_key(ModalKey::Down);
+        }
+        assert_eq!(modal.report_scroll(), 2);
+        modal.handle_key(ModalKey::Up);
+        assert_eq!(modal.report_scroll(), 1);
+
+        modal.set_report_scroll_limit(0);
+        assert_eq!(
+            modal.report_scroll(),
+            0,
+            "a taller terminal resets the view"
+        );
     }
 
     #[test]

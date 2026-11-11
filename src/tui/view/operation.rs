@@ -24,6 +24,19 @@ use crate::{
 
 const HEIGHT: u16 = 16;
 
+/// How many rows of a failure report do not fit in the dialog drawn in
+/// `area`. The runtime passes this to the modal so scrolling stops at the end.
+pub fn report_overflow(modal: &OperationModal, area: Rect) -> usize {
+    let layout = widgets::dialog_layout(area, HEIGHT);
+    let theme = crate::tui::theme::from_name("mono");
+    match failure_report(modal, usize::from(layout.content.width), &theme) {
+        Some(report) => report
+            .len()
+            .saturating_sub(usize::from(layout.content.height)),
+        None => 0,
+    }
+}
+
 pub fn render(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &Theme) {
     let layout = widgets::dialog_layout(area, HEIGHT);
     let width = usize::from(layout.content.width);
@@ -39,90 +52,133 @@ pub fn render(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &The
         theme,
     );
 
-    // What failed and what state things are in must never be pushed off the
-    // dialog by progress rows, so the details are laid out first.
-    let mut details = Vec::new();
+    let (lines, scrollable) = match failure_report(modal, width, theme) {
+        Some(report) => {
+            let overflow = report.len().saturating_sub(rows);
+            let offset = modal.report_scroll().min(overflow);
+            (
+                report.into_iter().skip(offset).take(rows).collect(),
+                overflow > 0,
+            )
+        }
+        None => (progress(modal, width, rows, theme), true),
+    };
+    frame.render_widget(
+        Paragraph::new::<Vec<Line>>(lines).style(theme.on_dialog(theme.text)),
+        layout.content,
+    );
+    widgets::hint_bar(frame, layout.hints, &hints(modal, scrollable), theme);
+}
+
+/// A running or finished operation: stages, then the newest hook output.
+fn progress(
+    modal: &OperationModal,
+    width: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = stages(modal)
+        .into_iter()
+        .map(|stage| stage_line(modal, stage, theme))
+        .collect::<Vec<_>>();
     for warning in modal.warnings() {
-        details.extend(
+        lines.extend(
             widgets::wrap(&format!("{} {warning}", widgets::WARNING), width)
                 .into_iter()
                 .map(|line| Line::styled(line, theme.warning)),
         );
     }
-    if let ModalStatus::Failed {
+    // Hook output takes whatever rows are left, newest at the bottom.
+    let output = modal.visible_hook_lines(rows.saturating_sub(lines.len() + 1));
+    if !output.is_empty() {
+        lines.push(Line::default());
+        lines.extend(
+            output
+                .into_iter()
+                .map(|line| output_line(line, width, theme)),
+        );
+    }
+    lines
+}
+
+/// A failed operation, as one document read from the top: what failed, what
+/// is left behind, what state things are in, then progress and all output.
+///
+/// The lines that tell the user what to do come first, and nothing is cut:
+/// the whole report is reachable by scrolling. `None` unless it failed.
+fn failure_report(
+    modal: &OperationModal,
+    width: usize,
+    theme: &Theme,
+) -> Option<Vec<Line<'static>>> {
+    let ModalStatus::Failed {
         stage,
         mutation_state,
         message,
         retained_quarantine,
     } = modal.status()
-    {
-        let hook = report::hook_name(modal.operation(), *stage);
-        let headline = match hook {
-            Some(hook) => report::hook_failure_message(hook, message),
-            None => message.clone(),
-        };
-        details.extend(
-            widgets::wrap_clamped(&format!("{} {headline}", widgets::FAILED), width, 3)
-                .into_iter()
-                .map(|line| Line::styled(line, theme.error)),
-        );
-        if let Some(path) = retained_quarantine {
-            let home = paths::home_dir();
-            details.extend(
-                widgets::wrap(
-                    &format!(
-                        "Kept for recovery: {}",
-                        text::home_relative(path, home.as_deref())
-                    ),
-                    width,
-                )
-                .into_iter()
-                .map(|line| Line::styled(line, theme.text)),
-            );
-        }
-        // Without this sentence the user cannot tell whether a failed
-        // operation left anything behind.
-        let state = report::state_after_failure(modal.operation(), *mutation_state, true)
-            .unwrap_or("nothing was changed");
-        details.extend(
-            widgets::wrap(&sentence(state), width)
-                .into_iter()
-                .map(|line| Line::styled(line, theme.text)),
-        );
+    else {
+        return None;
+    };
+    let wrapped = |value: String, style| {
+        widgets::wrap(&value, width)
+            .into_iter()
+            .map(move |line| Line::styled(line, style))
+    };
+    let headline = match report::hook_name(modal.operation(), *stage) {
+        Some(hook) => report::hook_failure_message(hook, message),
+        None => message.clone(),
+    };
+    let mut lines =
+        wrapped(format!("{} {headline}", widgets::FAILED), theme.error).collect::<Vec<_>>();
+    if let Some(path) = retained_quarantine {
+        let home = paths::home_dir();
+        lines.extend(wrapped(
+            format!(
+                "Kept for recovery: {}",
+                text::home_relative(path, home.as_deref())
+            ),
+            theme.text,
+        ));
+    }
+    // Without this sentence the user cannot tell whether a failed operation
+    // left anything behind.
+    let state = report::state_after_failure(modal.operation(), *mutation_state, true)
+        .unwrap_or("nothing was changed");
+    lines.extend(wrapped(sentence(state), theme.text));
+    for warning in modal.warnings() {
+        lines.extend(wrapped(
+            format!("{} {warning}", widgets::WARNING),
+            theme.warning,
+        ));
     }
 
     let stage_rows = stages(modal);
-    let separator = usize::from(!details.is_empty());
-    let room_for_stages = rows.saturating_sub(details.len() + separator);
-    let skipped = stage_rows.len().saturating_sub(room_for_stages);
-    let mut lines = stage_rows
-        .into_iter()
-        .skip(skipped)
-        .map(|stage| stage_line(modal, stage, theme))
-        .collect::<Vec<_>>();
-    if !details.is_empty() && !lines.is_empty() {
+    if !stage_rows.is_empty() {
         lines.push(Line::default());
+        lines.extend(
+            stage_rows
+                .into_iter()
+                .map(|stage| stage_line(modal, stage, theme)),
+        );
     }
-    lines.extend(details);
-
-    // Hook output takes whatever rows are left, newest at the bottom.
-    let output_rows = rows.saturating_sub(lines.len() + 1);
-    let output = modal.visible_hook_lines(output_rows);
-    if !output.is_empty() {
+    if !modal.hook_lines().is_empty() {
         lines.push(Line::default());
-        lines.extend(output.into_iter().map(|line| {
-            Line::styled(
-                format!("  {}", text::truncate_end(line, width.saturating_sub(2))),
-                theme.muted,
-            )
-        }));
+        lines.extend(
+            modal
+                .hook_lines()
+                .iter()
+                .map(|line| output_line(line, width, theme)),
+        );
     }
+    Some(lines)
+}
 
-    frame.render_widget(
-        Paragraph::new(lines).style(theme.on_dialog(theme.text)),
-        layout.content,
-    );
-    widgets::hint_bar(frame, layout.hints, &hints(modal), theme);
+fn output_line(line: &str, width: usize, theme: &Theme) -> Line<'static> {
+    Line::styled(
+        format!("  {}", text::truncate_end(line, width.saturating_sub(2))),
+        theme.muted,
+    )
 }
 
 fn title(modal: &OperationModal) -> &'static str {
@@ -216,8 +272,9 @@ fn sentence(clause: &str) -> String {
     }
 }
 
-fn hints(modal: &OperationModal) -> Vec<Hint> {
+fn hints(modal: &OperationModal, scrollable: bool) -> Vec<Hint> {
     let mut hints = Vec::new();
+    let failed = matches!(modal.status(), ModalStatus::Failed { .. });
     match modal.status() {
         ModalStatus::Failed { .. } if modal.can_return_to_form() => {
             hints.push(Hint::new("Enter", "back to form", 0));
@@ -227,7 +284,13 @@ fn hints(modal: &OperationModal) -> Vec<Hint> {
         ModalStatus::Running if modal.can_cancel() => hints.push(Hint::new("Esc", "cancel", 0)),
         ModalStatus::Running | ModalStatus::Succeeded => {}
     }
-    hints.push(Hint::new("↑/↓", "scroll output", 2));
+    if scrollable {
+        hints.push(Hint::new(
+            "↑/↓",
+            if failed { "scroll" } else { "scroll output" },
+            2,
+        ));
+    }
     hints
 }
 
@@ -354,22 +417,19 @@ mod tests {
         assert_eq!(
             screen[2..12],
             [
-                "  │ ✓ Create worktree                                    │",
-                "  │ × post_create hook                                   │",
-                "  │ ✓ Roll back                                          │",
-                "  │                                                      │",
                 "  │ × post_create hook failed: `bun install              │",
                 "  │ --frozen-lockfile` exited with code 1                │",
                 "  │ Nothing was created; the worktree and branch were    │",
                 "  │ rolled back.                                         │",
                 "  │                                                      │",
+                "  │ ✓ Create worktree                                    │",
+                "  │ × post_create hook                                   │",
+                "  │ ✓ Roll back                                          │",
+                "  │                                                      │",
                 "  │   error: lockfile is out of date                     │",
             ]
         );
-        assert_eq!(
-            screen[19],
-            " Enter back to form  Esc close  ↑/↓ scroll output"
-        );
+        assert_eq!(screen[19], " Enter back to form  Esc close");
     }
 
     #[test]
@@ -392,14 +452,14 @@ mod tests {
             screen[1]
         );
         assert_eq!(
-            screen[5..8],
+            screen[2..5],
             [
                 "  │ × post_sync hook failed: `make gen` exited with code │",
                 "  │ 9                                                    │",
                 "  │ The sync itself succeeded; only the hook failed.     │",
             ]
         );
-        assert_eq!(screen[19], " Enter close  ↑/↓ scroll output");
+        assert_eq!(screen[19], " Enter close");
     }
 
     #[test]
@@ -421,8 +481,7 @@ mod tests {
         assert!(screen.contains("Kept for recovery: /wt/.trench-remove-1-0"));
     }
 
-    #[test]
-    fn the_recovery_path_outranks_progress_rows_on_a_short_terminal() {
+    fn partial_failure(recovery: &str) -> OperationModal {
         let mut modal = OperationModal::new(OperationKind::Remove);
         run(&mut modal, OperationStage::PreHook, Some(true));
         run(&mut modal, OperationStage::RemoveWorktree, Some(false));
@@ -431,17 +490,58 @@ mod tests {
             mutation_state: MutationState::PartiallyApplied,
             class: ErrorClass::Io,
             message: "I/O error: Permission denied (os error 13)".to_string(),
-            retained_quarantine: Some("/wt/.trench-remove-1-0".into()),
+            retained_quarantine: Some(recovery.into()),
         });
-        let screen = screen(&mut show(modal), 40, 10);
-        let text = screen.join("").replace(['│', ' '], "");
+        modal
+    }
 
-        assert!(
-            text.contains("Keptforrecovery:/wt/.trench-remove-1-0"),
-            "{screen:#?}"
+    #[test]
+    fn a_failure_report_opens_on_what_failed_and_what_is_left_behind() {
+        let screen = screen(&mut show(partial_failure("/wt/.trench-remove-1-0")), 40, 10);
+
+        assert_eq!(
+            screen[1..5],
+            [
+                " │ × I/O error: Permission denied (os │",
+                " │ error 13)                          │",
+                " │ Kept for recovery:                 │",
+                " │ /wt/.trench-remove-1-0             │",
+            ]
         );
-        assert!(text.contains("×I/Oerror:Permissiondenied"), "{screen:#?}");
-        assert!(text.contains("Somechangeswereapplied"), "{screen:#?}");
+        assert_eq!(screen[9], " Enter close  ↑/↓ scroll");
+    }
+
+    #[test]
+    fn every_line_of_a_long_failure_report_can_be_scrolled_into_view() {
+        let recovery = format!("/{}.trench-remove-77-0", "deep/".repeat(34));
+        let area = ratatui::layout::Rect::new(0, 0, 40, 10);
+        let mut modal = partial_failure(&recovery);
+        let overflow = super::report_overflow(&modal, area);
+        assert!(overflow > 0, "the report is taller than the dialog");
+
+        let mut seen = String::new();
+        for _ in 0..=overflow {
+            modal.set_report_scroll_limit(overflow);
+            let screen = screen(&mut show(modal.clone()), 40, 10);
+            seen.push_str(&screen[1..8].join("").replace(['│', ' '], ""));
+            modal.handle_key(crate::tui::operation_modal::ModalKey::Down);
+        }
+
+        assert!(seen.contains(".trench-remove-77-0"), "{seen}");
+        assert!(seen.contains("Somechangeswereapplied"), "{seen}");
+        assert!(seen.contains("×Removeworktree"), "{seen}");
+        assert_eq!(
+            modal.report_scroll(),
+            overflow,
+            "scrolling stops at the end"
+        );
+    }
+
+    #[test]
+    fn a_report_that_fits_offers_no_scroll_key() {
+        let screen = screen(&mut show(partial_failure("/wt/q")), 80, 24);
+
+        assert_eq!(screen[23], " Enter close");
     }
 
     #[test]

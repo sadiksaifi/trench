@@ -19,7 +19,7 @@ use crate::{
         app::{self, AppState, Effect, Event, HookNames, NoticeKind, WorktreeId},
         create_flow::{
             CreateDialog, CreateEffect, CreateKey, CreateSubmission, ExistingWorktree,
-            OriginRefresh,
+            OriginRefresh, RowKind,
         },
         keymap::Key,
         line_input::LineEdit,
@@ -142,10 +142,38 @@ enum CreateDispatch {
     Run(Box<OperationRequest>),
 }
 
+impl CreateDispatch {
+    /// Whether this plan does what a row of `kind` promised.
+    fn matches(&self, kind: &RowKind) -> bool {
+        match (self, kind) {
+            (Self::Navigate(_), RowKind::HasWorktree { .. }) => true,
+            (Self::Run(request), kind) => match (&**request, kind) {
+                (OperationRequest::Create(create), RowKind::New) => {
+                    matches!(create.plan.action, CreateAction::NewBranch(_))
+                }
+                (OperationRequest::Create(create), RowKind::Local) => {
+                    create.plan.action == CreateAction::ExistingLocal
+                }
+                (OperationRequest::Create(create), RowKind::Remote { upstream }) => {
+                    create.plan.action == CreateAction::TrackRemote(upstream.clone())
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+}
+
+/// Shown when live Git no longer matches the create dialog's summary.
+const STALE_CREATE_SUMMARY: &str =
+    "That branch changed while this dialog was open. Pick it again to see what Enter will do.";
+
 #[derive(Debug)]
 enum CreateInputEffect {
     Navigate(WorktreeId),
     Start(Box<OperationRequest>),
+    /// The summary was stale: reload branches and worktrees.
+    Refresh,
 }
 
 #[derive(Debug)]
@@ -336,6 +364,19 @@ fn handle_create_input(
                 hooks,
             ) {
                 Ok(dispatch) => dispatch,
+                // A base was sent for a "new" branch that now exists: the
+                // summary is stale, which is not a mistake in the input.
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<crate::create_plan::CreatePlanError>(),
+                        Some(crate::create_plan::CreatePlanError::FromRequiresNewBranch { .. })
+                    ) =>
+                {
+                    if let Some(dialog) = state.create_dialog.as_mut() {
+                        dialog.set_validation_error(Some(STALE_CREATE_SUMMARY.to_string()));
+                    }
+                    return Ok(Some(CreateInputEffect::Refresh));
+                }
                 Err(error) => {
                     if let Some(dialog) = state.create_dialog.as_mut() {
                         dialog.set_validation_error(Some(error.to_string()));
@@ -343,6 +384,20 @@ fn handle_create_input(
                     return Ok(None);
                 }
             };
+            // The plan comes from live Git; the summary came from the last
+            // refresh. When they name different actions, Enter would do
+            // something the screen did not say, so it does nothing instead.
+            let shown = state
+                .create_dialog
+                .as_ref()
+                .and_then(CreateDialog::highlighted_row)
+                .map(|row| row.kind);
+            if !shown.is_some_and(|kind| dispatch.matches(&kind)) {
+                if let Some(dialog) = state.create_dialog.as_mut() {
+                    dialog.set_validation_error(Some(STALE_CREATE_SUMMARY.to_string()));
+                }
+                return Ok(Some(CreateInputEffect::Refresh));
+            }
             match dispatch {
                 CreateDispatch::Navigate(id) => {
                     state.help_open = false;
@@ -432,7 +487,7 @@ fn handle_remove_input(
                 .remove_dialog
                 .as_mut()
                 .expect("remove effect requires dialog")
-                .revalidate_request(cwd, configured_base, hooks, now);
+                .revalidate_request(cwd, configured_base, hooks);
             match result {
                 Ok(request) => {
                     state.help_open = false;
@@ -517,6 +572,12 @@ fn apply_create_input_effect(
         Some(CreateInputEffect::Start(request)) => {
             operation.start(*request);
             state.operation_modal = operation.modal().cloned();
+        }
+        Some(CreateInputEffect::Refresh) => {
+            if let Err(error) = refresh.post_operation() {
+                tracing::warn!(%error, "failed to refresh a stale create dialog");
+            }
+            apply_refresh_publications(refresh, state);
         }
         None => {}
     }
@@ -690,17 +751,26 @@ fn close_after_failure(state: &mut AppState, refresh: &mut RefreshRuntime) {
     apply_refresh_publications(refresh, state);
 }
 
+/// Route a key to the operation dialog.
+///
+/// Esc cancels only while the operation runs and has changed nothing. Once
+/// it has finished, Esc belongs to the dialog, which closes a failure.
 fn operation_modal_effect(
     operation: &mut OperationRuntime<ThreadOperationLauncher, SystemRuntimeClock>,
     key: ModalKey,
+    area: ratatui::layout::Rect,
 ) -> Option<ModalEffect> {
-    if key == ModalKey::Escape {
-        operation.cancel().then_some(ModalEffect::Cancel)
-    } else {
-        operation
-            .modal_mut()
-            .and_then(|modal| modal.handle_key(key))
+    let cancellable = operation
+        .modal()
+        .is_some_and(crate::tui::operation_modal::OperationModal::can_cancel);
+    if key == ModalKey::Escape && cancellable {
+        return operation.cancel().then_some(ModalEffect::Cancel);
     }
+    let modal = operation.modal_mut()?;
+    // The dialog can only scroll as far as the terminal hides lines.
+    let overflow = view::operation_report_overflow(modal, area);
+    modal.set_report_scroll_limit(overflow);
+    modal.handle_key(key)
 }
 
 struct OperationFormContext<'a> {
@@ -883,7 +953,11 @@ pub fn run() -> Result<TuiExit> {
                 let Some(modal_key) = translate_modal_key(key) else {
                     continue;
                 };
-                let effect = operation_modal_effect(&mut operation, modal_key);
+                let effect = operation_modal_effect(
+                    &mut operation,
+                    modal_key,
+                    ratatui::layout::Rect::new(0, 0, width, height),
+                );
                 apply_operation_modal_effect(
                     effect,
                     &mut state,
@@ -1935,7 +2009,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_out_enter_replans_when_the_worktree_disappears_while_form_is_open() {
+    fn enter_does_not_create_when_the_summary_said_the_branch_already_has_a_worktree() {
         let repository = init_repo();
         let root = repository.path().join("worktrees");
         let repo_info = crate::git::discover_repo(repository.path()).unwrap();
@@ -1974,14 +2048,60 @@ mod tests {
         )
         .unwrap();
 
-        let Some(CreateInputEffect::Start(request)) = effect else {
-            panic!("disappeared checkout should be replanned")
-        };
-        let OperationRequest::Create(request) = *request else {
-            panic!("expected create request")
-        };
-        assert_eq!(request.plan.action, CreateAction::ExistingLocal);
-        assert_ne!(request.plan.path, old_path);
+        // The dialog said "already has a worktree, nothing will be created".
+        // Live Git now says creating is possible. Enter must not silently do
+        // the other thing: it reports the change and asks again.
+        assert!(
+            matches!(effect, Some(CreateInputEffect::Refresh)),
+            "{effect:?}"
+        );
+        let dialog = state.create_dialog.as_ref().unwrap();
+        assert_eq!(dialog.validation_error(), Some(STALE_CREATE_SUMMARY));
+        assert!(!root.join(&repo_info.name).join("release").exists());
+    }
+
+    #[test]
+    fn enter_does_not_check_out_an_existing_branch_when_the_summary_said_new_branch() {
+        let repository = init_repo();
+        let root = repository.path().join("worktrees");
+        let repo_info = crate::git::discover_repo(repository.path()).unwrap();
+        let mut state = AppState::new(Vec::new());
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        ));
+        open_create_dialog(&mut state, &repo_info.name, &root, Some("main")).unwrap();
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .set_branch("feature/raced");
+        // Someone creates the branch before Enter; the dialog's refs are stale.
+        let git_repo = git2::Repository::open(repository.path()).unwrap();
+        let commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+        git_repo.branch("feature/raced", &commit, false).unwrap();
+
+        let effect = handle_create_input(
+            &mut state,
+            CreateKey::Enter,
+            repository.path(),
+            &root,
+            Some("main"),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(effect, Some(CreateInputEffect::Refresh)),
+            "{effect:?}"
+        );
+        assert_eq!(
+            state.create_dialog.as_ref().unwrap().validation_error(),
+            Some(STALE_CREATE_SUMMARY)
+        );
     }
 
     #[test]
@@ -2341,6 +2461,33 @@ mod tests {
             "the form shows what Git has now"
         );
         assert_eq!(dialog.validation_error(), None);
+
+        // `Enter y` typed in one go: the `y` arrives with the new risk
+        // on screen for no time at all, so it must not remove anything.
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: 80,
+                height: 24,
+            },
+        );
+        let mut press = |at: Instant| {
+            handle_remove_input(
+                &mut state,
+                RemoveKey::Confirm,
+                repository.path(),
+                Some("main"),
+                None,
+                at,
+            )
+            .unwrap()
+        };
+        assert!(press(Instant::now()).is_none());
+        assert!(target_path.join("late.txt").exists());
+        assert!(matches!(
+            press(Instant::now() + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE),
+            Some(RemoveInputEffect::Start(_))
+        ));
     }
 
     #[test]
@@ -2571,6 +2718,64 @@ mod tests {
             press(&mut state, RemoveKey::Confirm),
             Some(RemoveInputEffect::Start(_))
         ));
+    }
+
+    #[test]
+    fn escape_and_enter_both_leave_a_failed_operation_through_the_runtime() {
+        let repository = init_repo();
+        let root = repository.path().join("worktrees");
+        let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let failing = HooksConfig {
+            pre_create: Some(crate::config::HookDef {
+                run: Some(vec!["false".to_string()]),
+                ..crate::config::HookDef::default()
+            }),
+            ..HooksConfig::default()
+        };
+        let start = || {
+            let dispatch = build_create_dispatch(
+                &CreateSubmission {
+                    branch: "feature/fails".to_string(),
+                    from: None,
+                },
+                repository.path(),
+                &root,
+                Some("main"),
+                Some(failing.clone()),
+            )
+            .unwrap();
+            let CreateDispatch::Run(request) = dispatch else {
+                panic!("expected a create request")
+            };
+            let mut operation =
+                OperationRuntime::new(ThreadOperationLauncher, SystemRuntimeClock::default());
+            operation.start(*request);
+            let deadline = Instant::now() + std::time::Duration::from_secs(20);
+            while !operation.modal().is_some_and(|modal| {
+                matches!(
+                    modal.status(),
+                    crate::tui::operation_modal::ModalStatus::Failed { .. }
+                )
+            }) {
+                assert!(Instant::now() < deadline, "the hook never failed");
+                let _ = operation.tick();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            operation
+        };
+
+        let mut operation = start();
+        assert_eq!(
+            operation_modal_effect(&mut operation, ModalKey::Escape, area),
+            Some(ModalEffect::Close),
+            "Esc is on the hint bar, so it must work"
+        );
+
+        let mut operation = start();
+        assert_eq!(
+            operation_modal_effect(&mut operation, ModalKey::Enter, area),
+            Some(ModalEffect::ReturnToForm)
+        );
     }
 
     #[test]

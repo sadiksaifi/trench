@@ -2256,43 +2256,69 @@ fn admin_entry_for(common: &Path, worktree: &Path) -> Option<PathBuf> {
 }
 
 /// Retire the Git metadata of a worktree whose directory is already gone.
-///
-/// `git worktree remove` on a missing directory drops that one entry and
-/// nothing else: other stale entries stay, and a locked entry is refused.
-/// The directory is checked immediately before, so there are no files for
-/// Git to delete.
 fn retire_missing_worktree(assessment: &RemovalAssessment) -> Result<(), ExactRemovalFailure> {
+    retire_missing_worktree_with(assessment, || {})
+}
+
+/// Delete the one admin entry that belongs to the missing worktree.
+///
+/// No worktree pathname is ever handed to Git or to a recursive delete here.
+/// `git worktree remove <path>` would delete the directory if it reappeared
+/// between the check and the command, and `git worktree prune` would drop
+/// every other stale entry. Deleting the validated entry under
+/// `<common>/worktrees/` is what `prune` does for one entry, and the only
+/// thing it can destroy is Git's record.
+///
+/// `before_delete` runs after the final checks, so tests can restore the
+/// directory at the worst moment.
+fn retire_missing_worktree_with(
+    assessment: &RemovalAssessment,
+    before_delete: impl FnOnce(),
+) -> Result<(), ExactRemovalFailure> {
+    let not_started = |operation: &'static str, message: String| {
+        ExactRemovalFailure::not_started(git::GitError::CommandFailed { operation, message })
+    };
     if std::fs::symlink_metadata(&assessment.path).is_ok() {
         return Err(ExactRemovalFailure::not_started(
             git::GitError::PreconditionsChanged,
         ));
     }
     let common = common_git_dir(&assessment.repo_path).map_err(ExactRemovalFailure::not_started)?;
-    let output = Command::new("git")
-        .arg(format!("--git-dir={}", common.display()))
-        .args(["-c", "core.hooksPath=/dev/null"])
-        .args(["worktree", "remove"])
-        .arg(&assessment.path)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR")
-        .output()
-        .map_err(|error| ExactRemovalFailure::not_started(error.into()))?;
-    if !output.status.success() {
+    let entry = admin_entry_for(&common, &assessment.path).ok_or_else(|| {
+        not_started(
+            "removing the worktree entry",
+            format!("Git has no entry for {}", assessment.path.display()),
+        )
+    })?;
+    let is_directory = std::fs::symlink_metadata(&entry)
+        .map(|metadata| metadata.file_type().is_dir())
+        .unwrap_or(false);
+    if !is_directory || entry.parent() != Some(common.join("worktrees").as_path()) {
         return Err(ExactRemovalFailure::not_started(
-            git::GitError::CommandFailed {
-                operation: "removing the worktree entry",
-                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            },
+            git::GitError::PreconditionsChanged,
         ));
     }
+    if entry.join("locked").exists() {
+        return Err(not_started(
+            "removing the worktree entry",
+            format!(
+                "the worktree is locked; run `git worktree unlock {}` first",
+                assessment.path.display()
+            ),
+        ));
+    }
+
+    before_delete();
+    // From here on a failure may have deleted part of the entry, so it can
+    // no longer be reported as "nothing changed".
+    std::fs::remove_dir_all(&entry)
+        .map_err(|error| ExactRemovalFailure::recovered_partial(error.into()))?;
     let still_listed = git::worktrees::discover(&assessment.repo_path)
-        .map_err(ExactRemovalFailure::not_started)?
+        .map_err(ExactRemovalFailure::recovered_partial)?
         .into_iter()
-        .any(|entry| entry.path == assessment.path);
+        .any(|listed| listed.path == assessment.path);
     if still_listed {
-        return Err(ExactRemovalFailure::not_started(
+        return Err(ExactRemovalFailure::recovered_partial(
             git::GitError::CommandFailed {
                 operation: "removing the worktree entry",
                 message: format!("Git still lists {}", assessment.path.display()),
@@ -3611,6 +3637,74 @@ mod tests {
             }),
             Err(RemovalAuthorizationError::LockedWorktree { .. })
         ));
+    }
+
+    #[test]
+    fn a_directory_restored_during_retirement_keeps_every_file() {
+        let fixture = Fixture::new("feature/restored");
+        let parked = fixture.root.path().join("parked");
+        std::fs::write(fixture.linked.join("precious"), "user data").unwrap();
+        std::fs::rename(&fixture.linked, &parked).unwrap();
+        let assessment = fixture.assess();
+        assert!(assessment.directory_missing());
+
+        // The disk comes back after the last absence check, at the worst
+        // possible moment.
+        retire_missing_worktree_with(&assessment, || {
+            std::fs::rename(&parked, &fixture.linked).unwrap();
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(fixture.linked.join("precious")).unwrap(),
+            "user data",
+            "retiring a Git entry must never delete worktree files"
+        );
+    }
+
+    #[test]
+    fn retirement_removes_only_the_named_entry() {
+        let fixture = Fixture::new("feature/target");
+        let repo = git2::Repository::open(&fixture.main).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let bystander = fixture.root.path().join("bystander");
+        let local = repo.branch("bystander", &head, false).unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(local.get()));
+        repo.worktree("bystander", &bystander, Some(&options))
+            .unwrap();
+        let common = common_git_dir(&fixture.main).unwrap();
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        std::fs::remove_dir_all(&bystander).unwrap();
+
+        retire_missing_worktree(&fixture.assess()).unwrap();
+
+        assert_eq!(admin_entry_for(&common, &fixture.linked), None);
+        assert!(admin_entry_for(&common, &bystander).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_retirement_that_fails_part_way_reports_partial_application() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new("feature/partial");
+        let common = common_git_dir(&fixture.main).unwrap();
+        let entry = admin_entry_for(&common, &fixture.linked).unwrap();
+        let blocked = entry.join("logs");
+        std::fs::create_dir_all(&blocked).unwrap();
+        std::fs::write(blocked.join("HEAD"), "").unwrap();
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        let assessment = fixture.assess();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let failure = retire_missing_worktree(&assessment).unwrap_err();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            failure.partially_applied,
+            "part of the entry was deleted, so the state is not untouched"
+        );
     }
 
     #[test]
