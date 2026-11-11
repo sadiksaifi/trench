@@ -35,6 +35,8 @@ pub enum ModalKey {
 pub enum ModalEffect {
     Cancel,
     ReturnToForm,
+    /// Dismiss a finished failure and go back to the list.
+    Close,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,16 +142,13 @@ impl OperationModal {
             ModalKey::Escape if self.status == ModalStatus::Running && !self.mutation_started => {
                 Some(ModalEffect::Cancel)
             }
-            ModalKey::Enter
-                if matches!(
-                    self.status,
-                    ModalStatus::Failed {
-                        mutation_state: MutationState::NotStarted | MutationState::RolledBack,
-                        ..
-                    }
-                ) =>
+            ModalKey::Enter if self.can_return_to_form() => Some(ModalEffect::ReturnToForm),
+            // A failure never traps the user: once the operation has stopped,
+            // Enter and Esc always lead somewhere.
+            ModalKey::Enter | ModalKey::Escape
+                if matches!(self.status, ModalStatus::Failed { .. }) =>
             {
-                Some(ModalEffect::ReturnToForm)
+                Some(ModalEffect::Close)
             }
             ModalKey::Up => {
                 self.hook_scroll = self
@@ -164,6 +163,22 @@ impl OperationModal {
             }
             ModalKey::Enter | ModalKey::Escape => None,
         }
+    }
+
+    /// The failure changed nothing, so the form that started it is still valid.
+    pub fn can_return_to_form(&self) -> bool {
+        matches!(
+            self.status,
+            ModalStatus::Failed {
+                mutation_state: MutationState::NotStarted | MutationState::RolledBack,
+                ..
+            }
+        )
+    }
+
+    /// Esc stops the operation: it is running and has not changed anything.
+    pub fn can_cancel(&self) -> bool {
+        self.status == ModalStatus::Running && !self.mutation_started
     }
 
     pub fn operation(&self) -> OperationKind {
@@ -188,10 +203,6 @@ impl OperationModal {
 
     pub fn spinner_visible(&self) -> bool {
         self.status == ModalStatus::Running && self.current_stage.is_some()
-    }
-
-    pub fn mutation_started(&self) -> bool {
-        self.mutation_started
     }
 
     pub fn visible_hook_lines(&self, height: usize) -> Vec<&str> {
@@ -261,7 +272,7 @@ mod tests {
             line: "checking tools".to_string(),
         });
 
-        assert!(modal.mutation_started());
+        assert!(!modal.can_cancel());
         assert_eq!(modal.handle_key(ModalKey::Escape), None);
         assert_eq!(modal.visible_hook_lines(1), ["checking tools"]);
         modal.handle_key(ModalKey::Up);
@@ -310,7 +321,44 @@ mod tests {
                 retained_quarantine: Some(quarantine),
             }
         );
-        assert_eq!(modal.handle_key(ModalKey::Enter), None);
+        assert!(!modal.can_return_to_form());
+        assert_eq!(modal.handle_key(ModalKey::Enter), Some(ModalEffect::Close));
+        assert_eq!(modal.handle_key(ModalKey::Escape), Some(ModalEffect::Close));
+    }
+
+    #[test]
+    fn a_hook_failure_after_the_change_can_always_be_closed() {
+        let mut modal = OperationModal::new(OperationKind::Sync);
+        modal.fail(&OperationFailure {
+            stage: OperationStage::PostHook,
+            mutation_state: MutationState::Applied,
+            class: crate::operation::ErrorClass::Hook,
+            message: "command failed: `make gen` exited with code 9".to_string(),
+            retained_quarantine: None,
+        });
+
+        assert!(!modal.can_cancel());
+        assert_eq!(modal.handle_key(ModalKey::Enter), Some(ModalEffect::Close));
+        assert_eq!(modal.handle_key(ModalKey::Escape), Some(ModalEffect::Close));
+    }
+
+    #[test]
+    fn a_failure_that_changed_nothing_offers_the_form_on_enter_and_the_list_on_escape() {
+        let mut modal = OperationModal::new(OperationKind::Create);
+        modal.fail(&OperationFailure {
+            stage: OperationStage::PreHook,
+            mutation_state: MutationState::NotStarted,
+            class: crate::operation::ErrorClass::Hook,
+            message: "command failed: `false` exited with code 1".to_string(),
+            retained_quarantine: None,
+        });
+
+        assert!(modal.can_return_to_form());
+        assert_eq!(
+            modal.handle_key(ModalKey::Enter),
+            Some(ModalEffect::ReturnToForm)
+        );
+        assert_eq!(modal.handle_key(ModalKey::Escape), Some(ModalEffect::Close));
     }
 
     #[test]
@@ -346,7 +394,7 @@ mod tests {
     fn sync_modal_is_non_cancellable_from_its_first_frame() {
         let mut modal = OperationModal::new(OperationKind::Sync);
 
-        assert!(modal.mutation_started());
+        assert!(!modal.can_cancel());
         assert_eq!(modal.handle_key(ModalKey::Escape), None);
     }
 }

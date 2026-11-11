@@ -99,6 +99,7 @@ impl RefreshSource for CatalogRefreshSource {
                 is_main: identity.is_main,
                 is_current: identity.is_current,
                 detached: identity.detached,
+                missing: identity.missing,
             })
             .collect();
         Ok(ImmediateSnapshot {
@@ -346,6 +347,7 @@ mod tests {
             is_main: false,
             is_current: false,
             detached: false,
+            missing: false,
         }
     }
 

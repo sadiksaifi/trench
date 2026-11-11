@@ -37,6 +37,16 @@ pub struct WorktreeIdentity {
     pub is_main: bool,
     pub is_current: bool,
     pub detached: bool,
+    /// The worktree directory no longer exists on disk.
+    pub missing: bool,
+}
+
+impl WorktreeIdentity {
+    /// The name shown for this worktree: its branch, or the selector trench
+    /// accepts for a detached worktree (`detached@<commit>`).
+    pub fn label(&self) -> &str {
+        self.branch.as_deref().unwrap_or(&self.worktree)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +61,7 @@ pub enum Event {
         shown_at: Instant,
     },
     NotificationShown {
+        kind: NoticeKind,
         message: String,
         shown_at: Instant,
     },
@@ -83,8 +94,11 @@ pub struct AppState {
     pub selected: Option<WorktreeId>,
     pub search: Option<QueryBuffer>,
     pub viewport: Viewport,
-    pub inspector_override: Option<bool>,
     pub help_open: bool,
+    /// The repository name shown in the header.
+    pub repository: String,
+    /// The lifecycle hooks configured for each operation, by config key.
+    pub hooks: HookNames,
     pub create_dialog: Option<CreateDialog>,
     pub sync_dialog: Option<SyncDialog>,
     pub remove_dialog: Option<RemoveDialog>,
@@ -95,10 +109,31 @@ pub struct AppState {
 
 pub const NOTIFICATION_DURATION: Duration = Duration::from_secs(5);
 
+/// What a status-line message reports. Each kind has its own glyph, so the
+/// meaning does not depend on color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeKind {
+    /// Something finished: `✓`.
+    Success,
+    /// A key did nothing, and why: `!`.
+    Warning,
+    /// Something failed: `×`.
+    Error,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notification {
+    pub kind: NoticeKind,
     pub text: String,
     expires_at: Instant,
+}
+
+/// Configured hook names per operation, for the dialogs that announce them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HookNames {
+    pub create: Vec<&'static str>,
+    pub sync: Vec<&'static str>,
+    pub remove: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -115,16 +150,11 @@ pub struct Viewport {
 }
 
 impl Viewport {
-    pub const MIN_WIDTH: u16 = 60;
-    pub const MIN_HEIGHT: u16 = 16;
-    pub const WIDE_WIDTH: u16 = 100;
+    pub const MIN_WIDTH: u16 = 40;
+    pub const MIN_HEIGHT: u16 = 10;
 
     pub fn is_tiny(self) -> bool {
         self.width < Self::MIN_WIDTH || self.height < Self::MIN_HEIGHT
-    }
-
-    pub fn is_wide(self) -> bool {
-        self.width >= Self::WIDE_WIDTH
     }
 }
 
@@ -141,8 +171,9 @@ impl AppState {
                 width: Viewport::MIN_WIDTH,
                 height: Viewport::MIN_HEIGHT,
             },
-            inspector_override: None,
             help_open: false,
+            repository: String::new(),
+            hooks: HookNames::default(),
             create_dialog: None,
             sync_dialog: None,
             remove_dialog: None,
@@ -180,9 +211,12 @@ impl AppState {
             .find(|row| &row.id == selected)
     }
 
-    pub fn inspector_visible(&self) -> bool {
-        self.inspector_override
-            .unwrap_or_else(|| self.viewport.is_wide())
+    /// A dialog is covering the list.
+    pub fn dialog_open(&self) -> bool {
+        self.operation_modal.is_some()
+            || self.create_dialog.is_some()
+            || self.sync_dialog.is_some()
+            || self.remove_dialog.is_some()
     }
 }
 
@@ -231,13 +265,19 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             state.sync_dialog = None;
             state.operation_modal = None;
             state.notification = Some(Notification {
+                kind: NoticeKind::Success,
                 text: message,
                 expires_at: shown_at + NOTIFICATION_DURATION,
             });
             return vec![Effect::Refresh];
         }
-        Event::NotificationShown { message, shown_at } => {
+        Event::NotificationShown {
+            kind,
+            message,
+            shown_at,
+        } => {
             state.notification = Some(Notification {
+                kind,
                 text: message,
                 expires_at: shown_at + NOTIFICATION_DURATION,
             });
@@ -256,6 +296,14 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         }
         Event::Select(_) => {}
         Event::Input(key) => {
+            // Help covers the list. Until it is closed, no key may act on
+            // rows the user cannot see.
+            if state.help_open {
+                if matches!(key, Key::Char('?') | Key::Escape) {
+                    state.help_open = false;
+                }
+                return Vec::new();
+            }
             let Some(action) = keymap::action_for(state.context(), key) else {
                 if let Some(query) = state.search.as_mut() {
                     let changed = match key {
@@ -293,6 +341,9 @@ pub fn unavailable_reason(state: &AppState, action: Action) -> Option<&'static s
         (Action::Switch | Action::Open | Action::Sync | Action::Remove, None) => {
             Some("No worktree selected")
         }
+        (Action::Switch | Action::Open | Action::Sync, Some(identity)) if identity.missing => {
+            Some("This worktree's directory is missing. Press d to remove it.")
+        }
         (Action::Sync, Some(identity)) => sync_flow::unavailable_reason(identity),
         (Action::Remove, Some(identity)) if identity.is_main => {
             Some("The main worktree cannot be removed")
@@ -328,10 +379,6 @@ fn reduce_action(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::Refresh => vec![Effect::Refresh],
         Action::Quit => vec![Effect::Quit],
-        Action::ToggleInspector => {
-            state.inspector_override = Some(!state.inspector_visible());
-            Vec::new()
-        }
         Action::SelectNext => {
             select_relative(state, 1);
             Vec::new()
@@ -341,7 +388,7 @@ fn reduce_action(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::Help => {
-            state.help_open = !state.help_open;
+            state.help_open = true;
             Vec::new()
         }
     }
@@ -386,6 +433,7 @@ mod tests {
             is_main: false,
             is_current: false,
             detached: false,
+            missing: false,
         }
     }
 
@@ -417,7 +465,7 @@ mod tests {
             effects,
             vec![Effect::Unavailable {
                 action: crate::tui::keymap::Action::Sync,
-                reason: "Detached worktrees cannot be synced".to_string(),
+                reason: "A detached worktree has no branch to sync.".to_string(),
             }]
         );
     }
@@ -690,7 +738,7 @@ mod tests {
             reduce(&mut state, Event::Input(Key::Char('s'))),
             vec![Effect::Unavailable {
                 action: Action::Sync,
-                reason: "Detached worktrees cannot be synced".to_string(),
+                reason: "A detached worktree has no branch to sync.".to_string(),
             }]
         );
         assert_eq!(
@@ -785,7 +833,8 @@ mod tests {
         assert!(reduce(
             &mut state,
             Event::NotificationShown {
-                message: "Dirty worktrees cannot be synced".to_string(),
+                kind: NoticeKind::Warning,
+                message: "feature/auth has uncommitted changes.".to_string(),
                 shown_at,
             },
         )
@@ -795,7 +844,7 @@ mod tests {
                 .notification
                 .as_ref()
                 .map(|notice| notice.text.as_str()),
-            Some("Dirty worktrees cannot be synced")
+            Some("feature/auth has uncommitted changes.")
         );
 
         let _ = reduce(

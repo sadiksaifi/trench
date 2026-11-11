@@ -1,30 +1,24 @@
 use std::{
-    io::{self, Write},
     path::{Path, PathBuf},
     time::Instant,
 };
 
 use anyhow::{Context, Result};
-use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event as TerminalEvent, KeyCode, KeyEvent,
-        KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    },
-    execute,
+use crossterm::event::{
+    self, Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
-use ratatui::layout::Rect;
 
 use crate::{
     cli::commands::sync::stateless::{HookPolicy as SyncHookPolicy, SyncPlanner},
+    cli::report,
     config::{self, HooksConfig},
     create_plan::{CreateAction, CreatePlanner, HookPolicy},
     navigation::EditorCommand,
     operation::{CreateRequest, OperationOutcome, OperationRequest, SyncRequest},
     tui::{
-        app::{self, AppState, Effect, Event, WorktreeId},
-        cockpit,
+        app::{self, AppState, Effect, Event, HookNames, NoticeKind, WorktreeId},
         create_flow::{
-            CheckedOutBranch, CreateDialog, CreateEffect, CreateKey, CreateSubmission,
+            CreateDialog, CreateEffect, CreateKey, CreateSubmission, ExistingWorktree,
             OriginRefresh,
         },
         keymap::Key,
@@ -36,8 +30,8 @@ use crate::{
         refresh::RefreshPublication,
         refresh_runtime::RefreshRuntime,
         remove_flow::{RemoveDialog, RemoveEffect, RemoveKey},
-        sync_flow::{SyncDialog, SyncEffect, SyncKey, SyncMode, SyncSubmission},
-        theme,
+        sync_flow::{SyncDialog, SyncEffect, SyncKey, SyncSubmission},
+        theme, view,
     },
 };
 
@@ -98,71 +92,19 @@ fn open_editor(
     Ok(())
 }
 
-struct MouseCapture<W: Write> {
-    writer: W,
-    requested: bool,
-    enabled: bool,
-}
-
-impl<W: Write> MouseCapture<W> {
-    fn new(writer: W) -> Self {
-        Self {
-            writer,
-            requested: false,
-            enabled: false,
-        }
-    }
-
-    fn set_active(&mut self, active: bool) -> io::Result<()> {
-        self.requested = active;
-        if active && !self.enabled {
-            execute!(self.writer, EnableMouseCapture)?;
-            self.enabled = true;
-        } else if !active && self.enabled {
-            execute!(self.writer, DisableMouseCapture)?;
-            self.enabled = false;
-        }
-        Ok(())
-    }
-
-    fn suspend(&mut self) -> io::Result<()> {
-        if self.enabled {
-            execute!(self.writer, DisableMouseCapture)?;
-            self.enabled = false;
-        }
-        Ok(())
-    }
-
-    fn resume(&mut self) -> io::Result<()> {
-        if self.requested && !self.enabled {
-            execute!(self.writer, EnableMouseCapture)?;
-            self.enabled = true;
-        }
-        Ok(())
-    }
-}
-
-impl<W: Write> Drop for MouseCapture<W> {
-    fn drop(&mut self) {
-        let _ = self.suspend();
-    }
-}
-
-struct RatatuiTerminalDriver<'a, W: Write> {
+struct RatatuiTerminalDriver<'a> {
     terminal: &'a mut ratatui::DefaultTerminal,
-    mouse_capture: &'a mut MouseCapture<W>,
 }
 
-impl<W: Write> TerminalDriver for RatatuiTerminalDriver<'_, W> {
+impl TerminalDriver for RatatuiTerminalDriver<'_> {
     fn suspend(&mut self) -> Result<()> {
-        self.mouse_capture.suspend()?;
         ratatui::restore();
         Ok(())
     }
 
     fn resume(&mut self) -> Result<()> {
         *self.terminal = ratatui::init();
-        self.mouse_capture.resume().map_err(Into::into)
+        Ok(())
     }
 }
 
@@ -233,29 +175,39 @@ impl PostOperationRefresh for RefreshRuntime {
     }
 }
 
+/// Every worktree the create dialog must know about: the branches that are
+/// taken and the directories that are in use.
+fn existing_worktrees(state: &AppState) -> Vec<ExistingWorktree> {
+    state
+        .identities
+        .iter()
+        .map(|identity| {
+            ExistingWorktree::new(
+                identity.branch.as_deref(),
+                identity.id.clone(),
+                identity.path.clone(),
+            )
+        })
+        .collect()
+}
+
 fn open_create_dialog(
     state: &mut AppState,
     repository: &str,
     worktree_root: &Path,
     configured_base: Option<&str>,
 ) -> Result<()> {
-    let refs = state.refs.clone().context("references are still loading")?;
-    let checked_out = state
-        .identities
-        .iter()
-        .filter_map(|identity| {
-            identity.branch.as_ref().map(|branch| {
-                CheckedOutBranch::new(branch, identity.id.clone(), identity.path.clone())
-            })
-        })
-        .collect::<Vec<_>>();
+    let refs = state
+        .refs
+        .clone()
+        .context("Branches are still loading. Try again in a moment.")?;
     state.help_open = false;
-    state.create_dialog = Some(CreateDialog::new_with_configured_base(
+    state.create_dialog = Some(CreateDialog::new(
         repository,
         worktree_root,
         refs,
         configured_base,
-        checked_out,
+        existing_worktrees(state),
     ));
     Ok(())
 }
@@ -274,9 +226,15 @@ fn open_sync_dialog(
         anyhow::bail!(reason);
     }
     if crate::git::dirty_count(&identity.path)? > 0 {
-        anyhow::bail!("Dirty worktrees cannot be synced");
+        anyhow::bail!(
+            "{} has uncommitted changes. Commit or stash them, then sync.",
+            identity.label()
+        );
     }
-    let refs = state.refs.clone().context("references are still loading")?;
+    let refs = state
+        .refs
+        .clone()
+        .context("Branches are still loading. Try again in a moment.")?;
     state.help_open = false;
     state.sync_dialog = Some(SyncDialog::new(&identity, refs, configured_base));
     Ok(())
@@ -293,7 +251,7 @@ fn open_remove_dialog(
         .filter(|identity| &identity.id == target)
         .context("selected worktree is no longer visible")?;
     if selected.is_main {
-        anyhow::bail!("the main worktree cannot be removed");
+        anyhow::bail!("The main worktree cannot be removed.");
     }
     state.help_open = false;
     state.remove_dialog = Some(RemoveDialog::discover_selected(
@@ -468,7 +426,6 @@ fn handle_remove_input(
                     state.help_open = false;
                     return Ok(Some(RemoveInputEffect::Start(Box::new(request))));
                 }
-                Err(crate::tui::remove_flow::RemoveFlowError::ConfirmationRequired) => {}
                 Err(error) => {
                     if let Some(dialog) = state.remove_dialog.as_mut() {
                         dialog.set_validation_error(Some(error.to_string()));
@@ -489,7 +446,7 @@ fn finish_create_success(
 ) {
     let refresh_result = refresh.request_post_operation();
     let (message, warning) = match refresh_result.as_ref() {
-        Ok(()) => (format!("Created {}", outcome.plan.branch), None),
+        Ok(()) => (report::created(&outcome.plan), None),
         Err(error) => {
             let warning = format!(
                 "Created {}, but refresh failed; press r to refresh: {error}",
@@ -501,7 +458,11 @@ fn finish_create_success(
     let _ = app::reduce(
         state,
         Event::OperationSucceeded {
-            select: Some(WorktreeId::new(outcome.plan.path)),
+            // The catalog lists canonical paths. Without this, a worktree
+            // root behind a symlink would never match the new row.
+            select: Some(WorktreeId::new(
+                crate::git::worktrees::canonicalize_lenient(&outcome.plan.path),
+            )),
             message,
             shown_at,
         },
@@ -580,10 +541,7 @@ fn finish_sync_success(
     shown_at: Instant,
 ) {
     let refresh_result = refresh.request_post_operation();
-    let summary = format!(
-        "Synced {} via {} onto {}",
-        outcome.target, outcome.strategy, outcome.base
-    );
+    let summary = report::synced(&outcome);
     let (message, warning) = match refresh_result.as_ref() {
         Ok(()) => (summary, None),
         Err(error) => {
@@ -613,10 +571,11 @@ fn finish_remove_success(
     shown_at: Instant,
 ) {
     let refresh_result = refresh.request_post_operation();
-    let summary = if outcome.branch_deleted {
-        format!("Removed {} and its local branch", outcome.worktree)
-    } else {
-        format!("Removed {}", outcome.worktree)
+    let summary = match outcome.branch.as_deref() {
+        Some(branch) if outcome.branch_deleted => {
+            format!("Removed {} and deleted branch {branch}", outcome.worktree)
+        }
+        _ => format!("Removed {}", outcome.worktree),
     };
     let (message, warning) = match refresh_result.as_ref() {
         Ok(()) => (summary, outcome.warning.clone()),
@@ -690,28 +649,32 @@ fn return_to_sync_form(
     }
 }
 
-fn return_to_remove_form(
-    state: &mut AppState,
-    cwd: &Path,
-    configured_base: Option<&str>,
-    hooks: Option<HooksConfig>,
-) {
+fn return_to_remove_form(state: &mut AppState, cwd: &Path, configured_base: Option<&str>) {
     state.operation_modal = None;
     state.help_open = false;
     let Some(dialog) = state.remove_dialog.as_mut() else {
         return;
     };
-    let validation_error = dialog
-        .revalidate_request(cwd, configured_base, hooks)
+    // The failed attempt may have changed the worktree (a hook ran). Showing
+    // fresh facts keeps the next `y` honest.
+    let error = dialog
+        .refresh(cwd, configured_base)
         .err()
-        .and_then(|error| {
-            (!matches!(
-                error,
-                crate::tui::remove_flow::RemoveFlowError::ConfirmationRequired
-            ))
-            .then(|| error.to_string())
-        });
-    dialog.set_validation_error(validation_error);
+        .map(|error| error.to_string());
+    dialog.set_validation_error(error);
+}
+
+/// Leave a finished failure: drop the forms and show what Git has now.
+fn close_after_failure(state: &mut AppState, refresh: &mut RefreshRuntime) {
+    state.operation_modal = None;
+    state.create_dialog = None;
+    state.sync_dialog = None;
+    state.remove_dialog = None;
+    state.help_open = false;
+    if let Err(error) = refresh.post_operation() {
+        tracing::warn!(%error, "failed to refresh after a failed operation");
+    }
+    apply_refresh_publications(refresh, state);
 }
 
 fn operation_modal_effect(
@@ -753,7 +716,7 @@ fn apply_operation_modal_effect(
             }
             apply_refresh_publications(refresh, state);
             if state.remove_dialog.is_some() {
-                return_to_remove_form(state, context.cwd, context.configured_base, context.hooks);
+                return_to_remove_form(state, context.cwd, context.configured_base);
             } else if state.sync_dialog.is_some() {
                 return_to_sync_form(state, context.cwd, context.configured_base, context.hooks);
             } else {
@@ -766,9 +729,64 @@ fn apply_operation_modal_effect(
                 );
             }
         }
+        Some(ModalEffect::Close) => {
+            operation.dismiss();
+            close_after_failure(state, refresh);
+        }
         None => {}
     }
     state.operation_modal = operation.modal().cloned();
+}
+
+fn notify(state: &mut AppState, kind: NoticeKind, message: impl Into<String>) {
+    let _ = app::reduce(
+        state,
+        Event::NotificationShown {
+            kind,
+            message: message.into(),
+            shown_at: Instant::now(),
+        },
+    );
+}
+
+/// Open the selected worktree in the editor and report any failure in the
+/// status line. A missing or failing editor must never end the session.
+fn open_in_editor(
+    state: &mut AppState,
+    terminal: &mut ratatui::DefaultTerminal,
+    refresh: &mut RefreshRuntime,
+    configured_editor: Option<&str>,
+    path: &Path,
+) {
+    let command = match EditorCommand::from_environment(configured_editor) {
+        Ok(command) => command,
+        Err(crate::navigation::EditorCommandError::Missing) => {
+            notify(
+                state,
+                NoticeKind::Error,
+                "No editor configured. Set $EDITOR, or [editor] command in the trench config.",
+            );
+            return;
+        }
+        Err(error) => {
+            notify(state, NoticeKind::Error, error.to_string());
+            return;
+        }
+    };
+    let result = open_editor(
+        &mut RatatuiTerminalDriver { terminal },
+        &mut ProcessEditorLauncher,
+        &mut RuntimeRefreshDriver {
+            runtime: refresh,
+            state,
+        },
+        &command,
+        path,
+    );
+    if let Err(error) = result {
+        tracing::warn!(error = %error, "editor navigation failed");
+        notify(state, NoticeKind::Error, format!("{error:#}"));
+    }
 }
 
 pub fn run() -> Result<TuiExit> {
@@ -780,14 +798,20 @@ pub fn run() -> Result<TuiExit> {
     let mut refresh = RefreshRuntime::new(cwd.clone(), repo.path.clone());
     refresh.launch()?;
     let mut state = AppState::new(Vec::new());
+    state.repository = repo.name.clone();
+    state.hooks = HookNames {
+        create: report::create_hooks(resolved.hooks.as_ref()),
+        sync: report::sync_hooks(resolved.hooks.as_ref()),
+        remove: report::remove_hooks(resolved.hooks.as_ref()),
+    };
     apply_refresh_publications(&mut refresh, &mut state);
-    let selected_theme = theme::from_name(&resolved.ui.theme);
+    let selected_theme =
+        theme::resolve(&resolved.ui.theme, std::env::var_os("NO_COLOR").as_deref());
     let mut operation =
         OperationRuntime::new(ThreadOperationLauncher, SystemRuntimeClock::default());
 
     super::install_panic_hook();
     let mut terminal = ratatui::init();
-    let mut mouse_capture = MouseCapture::new(std::io::stdout());
     let result = (|| -> Result<TuiExit> {
         'event_loop: loop {
             for effect in operation.tick() {
@@ -812,9 +836,9 @@ pub fn run() -> Result<TuiExit> {
             state.operation_modal = operation.modal().cloned();
             let _ = app::reduce(&mut state, Event::NotificationTick(Instant::now()));
             let (width, height) = crossterm::terminal::size()?;
-            sync_mouse_capture_for_viewport(&mut state, &mut mouse_capture, width, height)?;
+            let _ = app::reduce(&mut state, Event::ViewportChanged { width, height });
             terminal.draw(|frame| {
-                cockpit::render(&state, frame, frame.area(), &selected_theme);
+                view::render(&state, frame, frame.area(), &selected_theme);
             })?;
 
             let _ = app::reduce(&mut state, Event::RefreshTick);
@@ -824,119 +848,13 @@ pub fn run() -> Result<TuiExit> {
             if !event::poll(std::time::Duration::from_millis(50))? {
                 continue;
             }
-            let terminal_event = event::read()?;
-            if let TerminalEvent::Mouse(mouse) = terminal_event {
-                if !interactive_mouse_surface_visible(&state) {
-                    continue;
-                }
-                if state.help_open {
-                    route_visible_help_mouse(&mut state, mouse, Rect::new(0, 0, width, height));
-                    continue;
-                }
-                if let Some(effect) =
-                    route_visible_operation_mouse(&state, mouse, Rect::new(0, 0, width, height))
-                {
-                    match effect {
-                        OperationMouseEffect::Key(key) => {
-                            let effect = operation_modal_effect(&mut operation, key);
-                            apply_operation_modal_effect(
-                                effect,
-                                &mut state,
-                                &mut operation,
-                                &mut refresh,
-                                OperationFormContext {
-                                    cwd: &cwd,
-                                    worktree_root: &resolved.worktrees.root,
-                                    configured_base: resolved.git.default_base.as_deref(),
-                                    hooks: resolved.hooks.clone(),
-                                },
-                            );
-                        }
-                        OperationMouseEffect::Help => state.help_open = true,
-                        OperationMouseEffect::Ignored => {}
-                    }
-                    continue;
-                }
-                if let Some(effect) =
-                    route_visible_create_mouse(&mut state, mouse, Rect::new(0, 0, width, height))
-                {
-                    match effect {
-                        CreateMouseEffect::Key(key) => {
-                            let effect = handle_create_input(
-                                &mut state,
-                                key,
-                                &cwd,
-                                &resolved.worktrees.root,
-                                resolved.git.default_base.as_deref(),
-                                resolved.hooks.clone(),
-                            )?;
-                            apply_create_input_effect(
-                                effect,
-                                &mut state,
-                                &mut refresh,
-                                &mut operation,
-                            );
-                        }
-                        CreateMouseEffect::Help => state.help_open = true,
-                        CreateMouseEffect::Handled | CreateMouseEffect::Ignored => {}
-                    }
-                }
-                if let Some(effect) =
-                    route_visible_sync_mouse(&mut state, mouse, Rect::new(0, 0, width, height))
-                {
-                    match effect {
-                        SyncMouseEffect::Key(key) => {
-                            let effect = handle_sync_input(
-                                &mut state,
-                                key,
-                                &cwd,
-                                resolved.git.default_base.as_deref(),
-                                resolved.hooks.clone(),
-                            )?;
-                            apply_sync_input_effect(
-                                effect,
-                                &mut state,
-                                &mut refresh,
-                                &mut operation,
-                            );
-                        }
-                        SyncMouseEffect::Help => state.help_open = true,
-                        SyncMouseEffect::Handled | SyncMouseEffect::Ignored => {}
-                    }
-                }
-                if let Some(effect) =
-                    route_visible_remove_mouse(&state, mouse, Rect::new(0, 0, width, height))
-                {
-                    match effect {
-                        RemoveMouseEffect::Key(key) => {
-                            if let Some(RemoveInputEffect::Start(request)) = handle_remove_input(
-                                &mut state,
-                                key,
-                                &cwd,
-                                resolved.git.default_base.as_deref(),
-                                resolved.hooks.clone(),
-                            )? {
-                                operation.start(*request);
-                                state.operation_modal = operation.modal().cloned();
-                            }
-                        }
-                        RemoveMouseEffect::Help => state.help_open = true,
-                        RemoveMouseEffect::Ignored => {}
-                    }
-                }
-                continue;
-            }
-            let TerminalEvent::Key(key) = terminal_event else {
+            let TerminalEvent::Key(key) = event::read()? else {
                 continue;
             };
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            if key.code == KeyCode::Char('c')
-                && key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL)
-            {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 break 'event_loop Ok(TuiExit::Quit);
             }
             let Some(key) = visible_surface_key(&state, key) else {
@@ -946,23 +864,7 @@ pub fn run() -> Result<TuiExit> {
                 break 'event_loop Ok(TuiExit::Quit);
             }
 
-            if (state.operation_modal.is_some()
-                || state.create_dialog.is_some()
-                || state.sync_dialog.is_some()
-                || state.remove_dialog.is_some())
-                && state.help_open
-            {
-                if matches!(key.code, KeyCode::Char('?') | KeyCode::Esc) {
-                    state.help_open = false;
-                }
-                continue;
-            }
-
             if state.operation_modal.is_some() {
-                if key.code == KeyCode::Char('?') {
-                    state.help_open = true;
-                    continue;
-                }
                 let Some(modal_key) = translate_modal_key(key) else {
                     continue;
                 };
@@ -983,10 +885,6 @@ pub fn run() -> Result<TuiExit> {
             }
 
             if state.create_dialog.is_some() {
-                if key.code == KeyCode::Char('?') {
-                    state.help_open = true;
-                    continue;
-                }
                 let Some(create_key) = translate_create_key(key) else {
                     continue;
                 };
@@ -1003,10 +901,6 @@ pub fn run() -> Result<TuiExit> {
             }
 
             if state.sync_dialog.is_some() {
-                if key.code == KeyCode::Char('?') {
-                    state.help_open = true;
-                    continue;
-                }
                 let Some(sync_key) = translate_sync_key(key) else {
                     continue;
                 };
@@ -1022,10 +916,6 @@ pub fn run() -> Result<TuiExit> {
             }
 
             if state.remove_dialog.is_some() {
-                if key.code == KeyCode::Char('?') {
-                    state.help_open = true;
-                    continue;
-                }
                 let Some(remove_key) = translate_remove_key(key) else {
                     continue;
                 };
@@ -1050,28 +940,13 @@ pub fn run() -> Result<TuiExit> {
                     Effect::Switch(id) => {
                         break 'event_loop Ok(TuiExit::Switch(id.as_path().to_path_buf()));
                     }
-                    Effect::Open(id) => {
-                        let command =
-                            EditorCommand::from_environment(resolved.editor_command.as_deref())?;
-                        let mut terminal_driver = RatatuiTerminalDriver {
-                            terminal: &mut terminal,
-                            mouse_capture: &mut mouse_capture,
-                        };
-                        let mut launcher = ProcessEditorLauncher;
-                        let mut refresh_driver = RuntimeRefreshDriver {
-                            runtime: &mut refresh,
-                            state: &mut state,
-                        };
-                        if let Err(error) = open_editor(
-                            &mut terminal_driver,
-                            &mut launcher,
-                            &mut refresh_driver,
-                            &command,
-                            id.as_path(),
-                        ) {
-                            tracing::warn!(error = %error, "editor navigation failed");
-                        }
-                    }
+                    Effect::Open(id) => open_in_editor(
+                        &mut state,
+                        &mut terminal,
+                        &mut refresh,
+                        resolved.editor_command.as_deref(),
+                        id.as_path(),
+                    ),
                     Effect::OpenCreate => {
                         if let Err(error) = open_create_dialog(
                             &mut state,
@@ -1079,20 +954,14 @@ pub fn run() -> Result<TuiExit> {
                             &resolved.worktrees.root,
                             resolved.git.default_base.as_deref(),
                         ) {
-                            tracing::warn!(%error, "create dialog unavailable");
+                            notify(&mut state, NoticeKind::Warning, error.to_string());
                         }
                     }
                     Effect::OpenSync(id) => {
                         if let Err(error) =
                             open_sync_dialog(&mut state, &id, resolved.git.default_base.as_deref())
                         {
-                            let _ = app::reduce(
-                                &mut state,
-                                Event::NotificationShown {
-                                    message: error.to_string(),
-                                    shown_at: Instant::now(),
-                                },
-                            );
+                            notify(&mut state, NoticeKind::Warning, error.to_string());
                         }
                     }
                     Effect::OpenRemove(id) => {
@@ -1102,13 +971,7 @@ pub fn run() -> Result<TuiExit> {
                             &id,
                             resolved.git.default_base.as_deref(),
                         ) {
-                            let _ = app::reduce(
-                                &mut state,
-                                Event::NotificationShown {
-                                    message: error.to_string(),
-                                    shown_at: Instant::now(),
-                                },
-                            );
+                            notify(&mut state, NoticeKind::Warning, error.to_string());
                         }
                     }
                     Effect::Refresh => {
@@ -1117,20 +980,13 @@ pub fn run() -> Result<TuiExit> {
                     }
                     Effect::Quit => break 'event_loop Ok(TuiExit::Quit),
                     Effect::Unavailable { reason, .. } => {
-                        let _ = app::reduce(
-                            &mut state,
-                            Event::NotificationShown {
-                                message: reason,
-                                shown_at: Instant::now(),
-                            },
-                        );
+                        notify(&mut state, NoticeKind::Warning, reason);
                     }
                 }
             }
         }
     })();
 
-    drop(mouse_capture);
     ratatui::restore();
     super::restore_panic_hook();
     result
@@ -1152,20 +1008,12 @@ fn apply_refresh_publication(state: &mut AppState, publication: RefreshPublicati
         OriginRefresh::Idle
     };
     let _ = app::reduce(state, Event::RefreshPublished(publication));
-    let checked_out = state
-        .identities
-        .iter()
-        .filter_map(|identity| {
-            identity.branch.as_ref().map(|branch| {
-                CheckedOutBranch::new(branch, identity.id.clone(), identity.path.clone())
-            })
-        })
-        .collect::<Vec<_>>();
+    let worktrees = existing_worktrees(state);
     if let Some(dialog) = state.create_dialog.as_mut() {
         if let Some(refs) = refs.clone() {
             dialog.update_refs(refs);
         }
-        dialog.update_checked_out(checked_out);
+        dialog.update_worktrees(worktrees);
         dialog.set_origin_refresh(origin_refresh);
     }
     if let Some(dialog) = state.sync_dialog.as_mut() {
@@ -1220,56 +1068,6 @@ fn visible_surface_key(state: &AppState, key: KeyEvent) -> Option<KeyEvent> {
     (!state.viewport.is_tiny() || key.code == KeyCode::Char('q')).then_some(key)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VisibleDialog {
-    Operation,
-    Create,
-    Sync,
-    Remove,
-}
-
-fn visible_dialog(state: &AppState) -> Option<VisibleDialog> {
-    if state.operation_modal.is_some() {
-        Some(VisibleDialog::Operation)
-    } else if state.create_dialog.is_some() {
-        Some(VisibleDialog::Create)
-    } else if state.sync_dialog.is_some() {
-        Some(VisibleDialog::Sync)
-    } else if state.remove_dialog.is_some() {
-        Some(VisibleDialog::Remove)
-    } else {
-        None
-    }
-}
-
-fn interactive_mouse_surface_visible(state: &AppState) -> bool {
-    !state.viewport.is_tiny() && (state.help_open || visible_dialog(state).is_some())
-}
-
-fn sync_mouse_capture_for_viewport<W: Write>(
-    state: &mut AppState,
-    capture: &mut MouseCapture<W>,
-    width: u16,
-    height: u16,
-) -> Result<()> {
-    let _ = app::reduce(state, Event::ViewportChanged { width, height });
-    capture
-        .set_active(interactive_mouse_surface_visible(state))
-        .context("failed to update mouse capture")
-}
-
-fn route_visible_help_mouse(state: &mut AppState, mouse: MouseEvent, area: Rect) -> bool {
-    if !interactive_mouse_surface_visible(state) || !state.help_open {
-        return false;
-    }
-    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-        && cockpit::help_close_hit(state, area, (mouse.column, mouse.row))
-    {
-        state.help_open = false;
-    }
-    true
-}
-
 fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Some(CreateKey::Down),
@@ -1290,195 +1088,6 @@ fn translate_create_key(key: KeyEvent) -> Option<CreateKey> {
             Some(CreateKey::Character(character))
         }
         _ => None,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OperationMouseEffect {
-    Key(ModalKey),
-    Help,
-    Ignored,
-}
-
-fn route_visible_operation_mouse(
-    state: &AppState,
-    mouse: MouseEvent,
-    area: Rect,
-) -> Option<OperationMouseEffect> {
-    if !interactive_mouse_surface_visible(state)
-        || state.help_open
-        || visible_dialog(state) != Some(VisibleDialog::Operation)
-    {
-        return None;
-    }
-    state.operation_modal.as_ref().map(|modal| {
-        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            return OperationMouseEffect::Ignored;
-        }
-        match cockpit::operation_hit_map(modal, area).target_at((mouse.column, mouse.row)) {
-            Some(cockpit::OperationHitTarget::Cta(key)) => OperationMouseEffect::Key(key),
-            Some(cockpit::OperationHitTarget::Help) => OperationMouseEffect::Help,
-            None => OperationMouseEffect::Ignored,
-        }
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CreateMouseEffect {
-    Key(CreateKey),
-    Help,
-    Handled,
-    Ignored,
-}
-
-fn route_visible_create_mouse(
-    state: &mut AppState,
-    mouse: MouseEvent,
-    area: Rect,
-) -> Option<CreateMouseEffect> {
-    if !interactive_mouse_surface_visible(state)
-        || state.help_open
-        || visible_dialog(state) != Some(VisibleDialog::Create)
-    {
-        return None;
-    }
-    state
-        .create_dialog
-        .as_mut()
-        .map(|dialog| route_create_mouse(dialog, mouse, area))
-}
-
-fn route_create_mouse(
-    dialog: &mut CreateDialog,
-    mouse: MouseEvent,
-    area: Rect,
-) -> CreateMouseEffect {
-    let point = (mouse.column, mouse.row);
-    let hits = cockpit::create_hit_map(dialog, area);
-    match mouse.kind {
-        MouseEventKind::ScrollUp if hits.options_contain(point) => {
-            CreateMouseEffect::Key(CreateKey::Up)
-        }
-        MouseEventKind::ScrollDown if hits.options_contain(point) => {
-            CreateMouseEffect::Key(CreateKey::Down)
-        }
-        MouseEventKind::Down(MouseButton::Left) => match hits.target_at(point) {
-            Some(cockpit::CreateHitTarget::Input) => CreateMouseEffect::Handled,
-            Some(cockpit::CreateHitTarget::Row(index)) => {
-                dialog.activate_visible_row(index);
-                CreateMouseEffect::Handled
-            }
-            Some(cockpit::CreateHitTarget::Back) => CreateMouseEffect::Key(CreateKey::Escape),
-            Some(cockpit::CreateHitTarget::Cta) if create_cta_enabled(dialog) => {
-                CreateMouseEffect::Key(CreateKey::Enter)
-            }
-            Some(cockpit::CreateHitTarget::Cta) => CreateMouseEffect::Handled,
-            Some(cockpit::CreateHitTarget::Help) => CreateMouseEffect::Help,
-            None => CreateMouseEffect::Ignored,
-        },
-        _ => CreateMouseEffect::Ignored,
-    }
-}
-
-fn create_cta_enabled(dialog: &CreateDialog) -> bool {
-    match dialog.mode() {
-        crate::tui::create_flow::CreateMode::SelectBase => !dialog.base_candidates().is_empty(),
-        crate::tui::create_flow::CreateMode::Name => dialog.preview().is_some(),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RemoveMouseEffect {
-    Key(RemoveKey),
-    Help,
-    Ignored,
-}
-
-fn route_visible_remove_mouse(
-    state: &AppState,
-    mouse: MouseEvent,
-    area: Rect,
-) -> Option<RemoveMouseEffect> {
-    if !interactive_mouse_surface_visible(state)
-        || state.help_open
-        || visible_dialog(state) != Some(VisibleDialog::Remove)
-    {
-        return None;
-    }
-    state.remove_dialog.as_ref().map(|dialog| {
-        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            return RemoveMouseEffect::Ignored;
-        }
-        match cockpit::remove_hit_map(dialog, area).target_at((mouse.column, mouse.row)) {
-            Some(cockpit::RemoveHitTarget::Checkbox) => RemoveMouseEffect::Key(RemoveKey::Space),
-            Some(cockpit::RemoveHitTarget::Cta) => RemoveMouseEffect::Key(RemoveKey::Enter),
-            Some(cockpit::RemoveHitTarget::Back) => RemoveMouseEffect::Key(RemoveKey::Escape),
-            Some(cockpit::RemoveHitTarget::Help) => RemoveMouseEffect::Help,
-            None => RemoveMouseEffect::Ignored,
-        }
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SyncMouseEffect {
-    Key(SyncKey),
-    Help,
-    Handled,
-    Ignored,
-}
-
-fn route_visible_sync_mouse(
-    state: &mut AppState,
-    mouse: MouseEvent,
-    area: Rect,
-) -> Option<SyncMouseEffect> {
-    if !interactive_mouse_surface_visible(state)
-        || state.help_open
-        || visible_dialog(state) != Some(VisibleDialog::Sync)
-    {
-        return None;
-    }
-    state
-        .sync_dialog
-        .as_mut()
-        .map(|dialog| route_sync_mouse(dialog, mouse, area))
-}
-
-fn route_sync_mouse(dialog: &mut SyncDialog, mouse: MouseEvent, area: Rect) -> SyncMouseEffect {
-    let point = (mouse.column, mouse.row);
-    let hits = cockpit::sync_hit_map(dialog, area);
-    match mouse.kind {
-        MouseEventKind::ScrollUp if hits.options_contain(point) => {
-            SyncMouseEffect::Key(SyncKey::Up)
-        }
-        MouseEventKind::ScrollDown if hits.options_contain(point) => {
-            SyncMouseEffect::Key(SyncKey::Down)
-        }
-        MouseEventKind::Down(MouseButton::Left) => match hits.target_at(point) {
-            Some(cockpit::SyncHitTarget::Input) => SyncMouseEffect::Handled,
-            Some(cockpit::SyncHitTarget::Row(index)) => {
-                dialog.select_base_candidate(index);
-                SyncMouseEffect::Handled
-            }
-            Some(cockpit::SyncHitTarget::Base) => SyncMouseEffect::Key(SyncKey::Tab),
-            Some(cockpit::SyncHitTarget::Rebase) => SyncMouseEffect::Key(SyncKey::Left),
-            Some(cockpit::SyncHitTarget::Merge) => SyncMouseEffect::Key(SyncKey::Right),
-            Some(cockpit::SyncHitTarget::Cta) if sync_cta_enabled(dialog) => {
-                SyncMouseEffect::Key(SyncKey::Enter)
-            }
-            Some(cockpit::SyncHitTarget::Cta) => SyncMouseEffect::Handled,
-            Some(cockpit::SyncHitTarget::Back) => SyncMouseEffect::Key(SyncKey::Escape),
-            Some(cockpit::SyncHitTarget::Help) => SyncMouseEffect::Help,
-            None => SyncMouseEffect::Ignored,
-        },
-        _ => SyncMouseEffect::Ignored,
-    }
-}
-
-fn sync_cta_enabled(dialog: &SyncDialog) -> bool {
-    match dialog.mode() {
-        SyncMode::Form => dialog.submission().is_some(),
-        SyncMode::BasePicker => !dialog.base_candidates().is_empty(),
     }
 }
 
@@ -1507,9 +1116,11 @@ fn translate_sync_key(key: KeyEvent) -> Option<SyncKey> {
     }
 }
 
+/// `y` is the only key that removes. Enter is deliberately not mapped: it is
+/// the list's "switch" key, and a habit must never delete a worktree.
 fn translate_remove_key(key: KeyEvent) -> Option<RemoveKey> {
     match key.code {
-        KeyCode::Enter => Some(RemoveKey::Enter),
+        KeyCode::Char('y' | 'Y') => Some(RemoveKey::Confirm),
         KeyCode::Esc => Some(RemoveKey::Escape),
         KeyCode::Char(' ') => Some(RemoveKey::Space),
         _ => None,
@@ -1529,6 +1140,7 @@ fn translate_modal_key(key: KeyEvent) -> Option<ModalKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::create_flow::CreateFocus;
     use std::{cell::RefCell, rc::Rc};
 
     use tempfile::TempDir;
@@ -1767,525 +1379,6 @@ mod tests {
     }
 
     #[test]
-    fn create_mouse_routes_rows_input_actions_help_wheel_and_safe_no_ops() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        use ratatui::layout::Rect;
-
-        let mut dialog = CreateDialog::new(
-            "trench",
-            Path::new("/worktrees"),
-            RefSnapshot::from_parts(
-                ["main", "release"],
-                ["origin/main"],
-                Some("origin/main"),
-                Some("main"),
-                true,
-            ),
-            [],
-        );
-        let area = Rect::new(0, 0, 80, 24);
-        let hits = cockpit::create_hit_map(&dialog, area);
-        let left_click = |rect: Rect| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: rect.x + rect.width / 2,
-            row: rect.y + rect.height / 2,
-            modifiers: KeyModifiers::NONE,
-        };
-
-        assert_eq!(
-            route_create_mouse(&mut dialog, left_click(hits.rows[1]), area),
-            CreateMouseEffect::Handled
-        );
-        assert_eq!(dialog.base_selection(), 1);
-        assert_eq!(
-            route_create_mouse(&mut dialog, left_click(hits.input), area),
-            CreateMouseEffect::Handled
-        );
-        assert_eq!(
-            route_create_mouse(&mut dialog, left_click(hits.cta), area),
-            CreateMouseEffect::Key(CreateKey::Enter)
-        );
-        assert_eq!(
-            route_create_mouse(&mut dialog, left_click(hits.back), area),
-            CreateMouseEffect::Key(CreateKey::Escape)
-        );
-        assert_eq!(
-            route_create_mouse(&mut dialog, left_click(hits.help), area),
-            CreateMouseEffect::Help
-        );
-        assert_eq!(
-            route_create_mouse(
-                &mut dialog,
-                MouseEvent {
-                    kind: MouseEventKind::ScrollDown,
-                    column: hits.rows[0].x,
-                    row: hits.rows[0].y,
-                    modifiers: KeyModifiers::NONE,
-                },
-                area,
-            ),
-            CreateMouseEffect::Key(CreateKey::Down)
-        );
-        assert_eq!(
-            route_create_mouse(
-                &mut dialog,
-                MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    column: 0,
-                    row: 0,
-                    modifiers: KeyModifiers::NONE,
-                },
-                area,
-            ),
-            CreateMouseEffect::Ignored
-        );
-
-        dialog.set_branch("");
-        let disabled = cockpit::create_hit_map(&dialog, area);
-        assert_eq!(
-            route_create_mouse(&mut dialog, left_click(disabled.cta), area),
-            CreateMouseEffect::Handled
-        );
-        dialog.set_branch("feature/auth");
-        let enabled = cockpit::create_hit_map(&dialog, area);
-        assert_eq!(
-            route_create_mouse(&mut dialog, left_click(enabled.cta), area),
-            CreateMouseEffect::Key(CreateKey::Enter)
-        );
-        assert_eq!(
-            route_create_mouse(
-                &mut dialog,
-                MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    column: 30,
-                    row: 8,
-                    modifiers: KeyModifiers::NONE,
-                },
-                Rect::new(0, 0, 59, 15),
-            ),
-            CreateMouseEffect::Ignored
-        );
-    }
-
-    #[test]
-    fn clicking_a_name_match_applies_that_outcome_before_cta_activation() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        use ratatui::layout::Rect;
-
-        let checked_out = CheckedOutBranch::new(
-            "release",
-            WorktreeId::new("/worktrees/trench/release"),
-            "/worktrees/trench/release",
-        );
-        let mut dialog = CreateDialog::new(
-            "trench",
-            Path::new("/worktrees"),
-            RefSnapshot::from_parts(
-                ["main", "release"],
-                ["origin/main"],
-                Some("origin/main"),
-                Some("main"),
-                true,
-            ),
-            [checked_out],
-        );
-        dialog.set_branch("re");
-        let area = Rect::new(0, 0, 80, 20);
-        let row = cockpit::create_hit_map(&dialog, area).rows[0];
-        assert_eq!(
-            route_create_mouse(
-                &mut dialog,
-                MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    column: row.x,
-                    row: row.y,
-                    modifiers: KeyModifiers::NONE,
-                },
-                area,
-            ),
-            CreateMouseEffect::Handled
-        );
-        assert_eq!(dialog.branch(), "release");
-        assert!(matches!(
-            dialog.preview().map(|preview| preview.kind),
-            Some(crate::tui::create_flow::BranchKind::CheckedOut { .. })
-        ));
-
-        let cta = cockpit::create_hit_map(&dialog, area).cta;
-        let routed = route_create_mouse(
-            &mut dialog,
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: cta.x,
-                row: cta.y,
-                modifiers: KeyModifiers::NONE,
-            },
-            area,
-        );
-        assert_eq!(routed, CreateMouseEffect::Key(CreateKey::Enter));
-        assert!(matches!(
-            dialog.handle_key(CreateKey::Enter),
-            Some(CreateEffect::Navigate(_))
-        ));
-    }
-
-    #[test]
-    fn mouse_capture_is_idle_until_an_interactive_overlay_opens() {
-        use std::io::{self, Write};
-
-        #[derive(Clone, Default)]
-        struct SharedWriter(Rc<RefCell<Vec<u8>>>);
-
-        impl Write for SharedWriter {
-            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-                self.0.borrow_mut().extend_from_slice(buffer);
-                Ok(buffer.len())
-            }
-
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let output = SharedWriter::default();
-        let capture = MouseCapture::new(output.clone());
-        drop(capture);
-
-        assert!(output.0.borrow().is_empty());
-    }
-
-    #[test]
-    fn mouse_capture_balances_overlay_suspend_resume_close_and_drop() {
-        use std::io::{self, Write};
-
-        #[derive(Clone, Default)]
-        struct SharedWriter(Rc<RefCell<Vec<u8>>>);
-
-        impl Write for SharedWriter {
-            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-                self.0.borrow_mut().extend_from_slice(buffer);
-                Ok(buffer.len())
-            }
-
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let output = SharedWriter::default();
-        let mut capture = MouseCapture::new(output.clone());
-        capture.set_active(true).unwrap();
-        capture.suspend().unwrap();
-        capture.resume().unwrap();
-        capture.set_active(false).unwrap();
-        drop(capture);
-
-        let bytes = output.0.borrow();
-        let text = String::from_utf8_lossy(&bytes);
-        assert_eq!(text.matches("\u{1b}[?1000h").count(), 2);
-        assert_eq!(text.matches("\u{1b}[?1000l").count(), 2);
-    }
-
-    #[test]
-    fn mouse_capture_tracks_dialog_visibility_across_types_and_tiny_resizes() {
-        use std::io::{self, Write};
-
-        #[derive(Clone, Default)]
-        struct SharedWriter(Rc<RefCell<Vec<u8>>>);
-        impl Write for SharedWriter {
-            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-                self.0.borrow_mut().extend_from_slice(buffer);
-                Ok(buffer.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let refs = RefSnapshot::from_parts(
-            ["main"],
-            ["origin/main"],
-            Some("origin/main"),
-            Some("main"),
-            true,
-        );
-        let mut state = AppState::new(Vec::new());
-        state.create_dialog = Some(CreateDialog::new(
-            "trench",
-            Path::new("/worktrees"),
-            refs,
-            [],
-        ));
-        let output = SharedWriter::default();
-        let mut capture = MouseCapture::new(output.clone());
-
-        for (width, height, expected) in [
-            (60, 16, true),
-            (59, 16, false),
-            (60, 16, true),
-            (60, 15, false),
-            (60, 16, true),
-        ] {
-            sync_mouse_capture_for_viewport(&mut state, &mut capture, width, height).unwrap();
-            assert_eq!(interactive_mouse_surface_visible(&state), expected);
-            let area = Rect::new(0, 0, width, height);
-            let cta = cockpit::create_hit_map(state.create_dialog.as_ref().unwrap(), area).cta;
-            let click = MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: cta.x + cta.width / 2,
-                row: cta.y,
-                modifiers: KeyModifiers::NONE,
-            };
-            assert_eq!(
-                route_visible_create_mouse(&mut state, click, area).is_some(),
-                expected,
-                "capture and first-click routing must change in the same production step"
-            );
-        }
-        state.create_dialog = None;
-        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
-            crate::operation::OperationKind::Create,
-        ));
-        sync_mouse_capture_for_viewport(&mut state, &mut capture, 60, 16).unwrap();
-        assert!(interactive_mouse_surface_visible(&state));
-        state.operation_modal = None;
-        state.help_open = true;
-        sync_mouse_capture_for_viewport(&mut state, &mut capture, 60, 16).unwrap();
-        assert!(interactive_mouse_surface_visible(&state));
-        state.help_open = false;
-        sync_mouse_capture_for_viewport(&mut state, &mut capture, 60, 16).unwrap();
-        assert!(!interactive_mouse_surface_visible(&state));
-        drop(capture);
-
-        let text = String::from_utf8_lossy(&output.0.borrow()).into_owned();
-        assert_eq!(text.matches("\u{1b}[?1000h").count(), 3);
-        assert_eq!(text.matches("\u{1b}[?1000l").count(), 3);
-        assert!(visible_surface_key(
-            &state,
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
-        )
-        .is_some());
-    }
-
-    #[test]
-    fn running_operation_hides_create_mouse_targets_and_prevents_a_second_submit() {
-        let refs = RefSnapshot::from_parts(
-            ["main"],
-            ["origin/main"],
-            Some("origin/main"),
-            Some("main"),
-            true,
-        );
-        let mut dialog = CreateDialog::new("trench", Path::new("/worktrees"), refs, []);
-        dialog.handle_key(CreateKey::Enter);
-        dialog.set_branch("feature/auth");
-        let area = Rect::new(0, 0, 80, 20);
-        let old_cta = cockpit::create_hit_map(&dialog, area).cta;
-        let mut state = AppState::new(Vec::new());
-        state.create_dialog = Some(dialog);
-        let _ = app::reduce(
-            &mut state,
-            Event::ViewportChanged {
-                width: area.width,
-                height: area.height,
-            },
-        );
-        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
-            crate::operation::OperationKind::Create,
-        ));
-        let before = state.operation_modal.clone();
-        let click = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: old_cta.x + old_cta.width / 2,
-            row: old_cta.y,
-            modifiers: KeyModifiers::NONE,
-        };
-
-        assert!(interactive_mouse_surface_visible(&state));
-        assert_eq!(route_visible_create_mouse(&mut state, click, area), None);
-        assert_eq!(state.operation_modal, before);
-    }
-
-    #[test]
-    fn help_over_a_running_operation_remains_mouse_interactive_and_closes() {
-        let area = Rect::new(0, 0, 80, 20);
-        let mut state = AppState::new(Vec::new());
-        let _ = app::reduce(
-            &mut state,
-            Event::ViewportChanged {
-                width: area.width,
-                height: area.height,
-            },
-        );
-        state.help_open = true;
-        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
-            crate::operation::OperationKind::Create,
-        ));
-        let close = (0..area.height)
-            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
-            .find(|point| cockpit::help_close_hit(&state, area, *point))
-            .expect("help close target");
-        let click = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: close.0,
-            row: close.1,
-            modifiers: KeyModifiers::NONE,
-        };
-
-        assert!(interactive_mouse_surface_visible(&state));
-        assert!(route_visible_help_mouse(&mut state, click, area));
-        assert!(!state.help_open);
-        assert!(state.operation_modal.is_some());
-        assert!(interactive_mouse_surface_visible(&state));
-
-        state.operation_modal = None;
-        state.help_open = true;
-        let normal_close = (0..area.height)
-            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
-            .find(|point| cockpit::help_close_hit(&state, area, *point))
-            .expect("normal help close target");
-        assert!(route_visible_help_mouse(
-            &mut state,
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: normal_close.0,
-                row: normal_close.1,
-                modifiers: KeyModifiers::NONE,
-            },
-            area,
-        ));
-        assert!(!state.help_open);
-    }
-
-    #[test]
-    fn operation_mouse_routes_only_live_cancel_back_and_help_actions() {
-        use crate::operation::{
-            ErrorClass, MutationState, OperationEvent, OperationFailure, OperationKind,
-            OperationStage,
-        };
-
-        let area = Rect::new(0, 0, 80, 20);
-        let mut state = AppState::new(Vec::new());
-        let _ = app::reduce(
-            &mut state,
-            Event::ViewportChanged {
-                width: area.width,
-                height: area.height,
-            },
-        );
-        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
-            OperationKind::Create,
-        ));
-        let click = |rect: Rect| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: rect.x + rect.width / 2,
-            row: rect.y,
-            modifiers: KeyModifiers::NONE,
-        };
-
-        let running = cockpit::operation_hit_map(state.operation_modal.as_ref().unwrap(), area);
-        assert_eq!(
-            route_visible_operation_mouse(&state, click(running.cta), area),
-            Some(OperationMouseEffect::Key(ModalKey::Escape))
-        );
-        assert_eq!(
-            route_visible_operation_mouse(&state, click(running.help), area),
-            Some(OperationMouseEffect::Help)
-        );
-
-        state
-            .operation_modal
-            .as_mut()
-            .unwrap()
-            .apply(OperationEvent::MutationStarted);
-        assert_eq!(
-            route_visible_operation_mouse(&state, click(running.cta), area),
-            Some(OperationMouseEffect::Ignored),
-            "the old cancel target must become inert at the mutation boundary"
-        );
-
-        state
-            .operation_modal
-            .as_mut()
-            .unwrap()
-            .fail(&OperationFailure {
-                stage: OperationStage::CreateWorktree,
-                mutation_state: MutationState::RolledBack,
-                class: ErrorClass::Git,
-                message: "rolled back".to_string(),
-                retained_quarantine: None,
-            });
-        let recoverable = cockpit::operation_hit_map(state.operation_modal.as_ref().unwrap(), area);
-        assert_eq!(
-            route_visible_operation_mouse(&state, click(recoverable.cta), area),
-            Some(OperationMouseEffect::Key(ModalKey::Enter))
-        );
-
-        state
-            .operation_modal
-            .as_mut()
-            .unwrap()
-            .fail(&OperationFailure {
-                stage: OperationStage::CreateWorktree,
-                mutation_state: MutationState::PartiallyApplied,
-                class: ErrorClass::Git,
-                message: "partial".to_string(),
-                retained_quarantine: None,
-            });
-        assert_eq!(
-            route_visible_operation_mouse(&state, click(recoverable.cta), area),
-            Some(OperationMouseEffect::Ignored)
-        );
-
-        state.operation_modal.as_mut().unwrap().succeed();
-        assert_eq!(
-            route_visible_operation_mouse(&state, click(recoverable.cta), area),
-            Some(OperationMouseEffect::Ignored)
-        );
-
-        let mut not_started =
-            crate::tui::operation_modal::OperationModal::new(OperationKind::Create);
-        not_started.fail(&OperationFailure {
-            stage: OperationStage::PreHook,
-            mutation_state: MutationState::NotStarted,
-            class: ErrorClass::Hook,
-            message: "pre-hook failed".to_string(),
-            retained_quarantine: None,
-        });
-        state.operation_modal = Some(not_started);
-        let retry = cockpit::operation_hit_map(state.operation_modal.as_ref().unwrap(), area);
-        assert_eq!(
-            route_visible_operation_mouse(&state, click(retry.cta), area),
-            Some(OperationMouseEffect::Key(ModalKey::Enter))
-        );
-
-        state
-            .operation_modal
-            .as_mut()
-            .unwrap()
-            .fail(&OperationFailure {
-                stage: OperationStage::PostHook,
-                mutation_state: MutationState::Applied,
-                class: ErrorClass::Hook,
-                message: "post-hook failed".to_string(),
-                retained_quarantine: None,
-            });
-        assert_eq!(
-            route_visible_operation_mouse(&state, click(retry.cta), area),
-            Some(OperationMouseEffect::Ignored)
-        );
-        for tiny in [Rect::new(0, 0, 59, 16), Rect::new(0, 0, 60, 15)] {
-            assert_eq!(
-                cockpit::operation_hit_map(state.operation_modal.as_ref().unwrap(), tiny),
-                cockpit::OperationHitMap::default()
-            );
-            state.help_open = true;
-            assert!(!cockpit::help_close_hit(&state, tiny, (0, 0)));
-            state.help_open = false;
-        }
-    }
-
-    #[test]
     fn terminal_keys_translate_to_sync_form_vocabulary() {
         let modifiers = crossterm::event::KeyModifiers::NONE;
         assert_eq!(
@@ -2307,144 +1400,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_mouse_routes_form_picker_actions_and_safe_no_ops() {
-        let target = WorktreeIdentity {
-            id: WorktreeId::new("/worktrees/feature"),
-            worktree: "feature".to_string(),
-            branch: Some("feature".to_string()),
-            path: PathBuf::from("/worktrees/feature"),
-            head: Some("1234567890abcdef".to_string()),
-            is_main: false,
-            is_current: true,
-            detached: false,
-        };
-        let mut state = AppState::new(vec![target.clone()]);
-        state.sync_dialog = Some(SyncDialog::new(
-            &target,
-            RefSnapshot::from_parts(
-                ["main", "release"],
-                ["origin/main"],
-                Some("origin/main"),
-                Some("main"),
-                true,
-            ),
-            Some("main"),
-        ));
-        let area = Rect::new(0, 0, 80, 20);
-        let _ = app::reduce(
-            &mut state,
-            Event::ViewportChanged {
-                width: area.width,
-                height: area.height,
-            },
-        );
-        let click = |rect: Rect| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: rect.x + rect.width / 2,
-            row: rect.y,
-            modifiers: KeyModifiers::NONE,
-        };
-        let hits = cockpit::sync_hit_map(state.sync_dialog.as_ref().unwrap(), area);
-        assert_eq!(
-            route_visible_sync_mouse(&mut state, click(hits.base), area),
-            Some(SyncMouseEffect::Key(SyncKey::Tab))
-        );
-        assert_eq!(
-            route_visible_sync_mouse(&mut state, click(hits.rebase), area),
-            Some(SyncMouseEffect::Key(SyncKey::Left))
-        );
-        assert_eq!(
-            route_visible_sync_mouse(&mut state, click(hits.merge), area),
-            Some(SyncMouseEffect::Key(SyncKey::Right))
-        );
-        assert_eq!(
-            route_visible_sync_mouse(&mut state, click(hits.cta), area),
-            Some(SyncMouseEffect::Key(SyncKey::Enter))
-        );
-
-        state.sync_dialog.as_mut().unwrap().handle_key(SyncKey::Tab);
-        let picker = cockpit::sync_hit_map(state.sync_dialog.as_ref().unwrap(), area);
-        assert_eq!(
-            route_visible_sync_mouse(&mut state, click(picker.rows[1]), area),
-            Some(SyncMouseEffect::Handled)
-        );
-        assert_eq!(state.sync_dialog.as_ref().unwrap().base_selection(), 1);
-        assert_eq!(
-            route_visible_sync_mouse(&mut state, click(picker.cta), area),
-            Some(SyncMouseEffect::Key(SyncKey::Enter))
-        );
-        assert_eq!(
-            route_visible_sync_mouse(&mut state, click(picker.back), area),
-            Some(SyncMouseEffect::Key(SyncKey::Escape))
-        );
-        assert_eq!(
-            route_visible_sync_mouse(&mut state, click(picker.help), area),
-            Some(SyncMouseEffect::Help)
-        );
-        assert_eq!(
-            route_visible_sync_mouse(
-                &mut state,
-                MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Right),
-                    column: picker.cta.x,
-                    row: picker.cta.y,
-                    modifiers: KeyModifiers::NONE,
-                },
-                area,
-            ),
-            Some(SyncMouseEffect::Ignored)
-        );
-        assert_eq!(
-            route_visible_sync_mouse(
-                &mut state,
-                MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    column: 0,
-                    row: 0,
-                    modifiers: KeyModifiers::NONE,
-                },
-                area,
-            ),
-            Some(SyncMouseEffect::Ignored)
-        );
-
-        state.sync_dialog = Some(SyncDialog::new(
-            &target,
-            RefSnapshot::from_parts(
-                std::iter::empty::<&str>(),
-                std::iter::empty::<&str>(),
-                None::<&str>,
-                None::<&str>,
-                false,
-            ),
-            None,
-        ));
-        let disabled = cockpit::sync_hit_map(state.sync_dialog.as_ref().unwrap(), area);
-        assert_eq!(
-            route_visible_sync_mouse(&mut state, click(disabled.cta), area),
-            Some(SyncMouseEffect::Handled),
-            "a disabled CTA must consume the click without submitting"
-        );
-        for tiny in [Rect::new(0, 0, 59, 16), Rect::new(0, 0, 60, 15)] {
-            let _ = app::reduce(
-                &mut state,
-                Event::ViewportChanged {
-                    width: tiny.width,
-                    height: tiny.height,
-                },
-            );
-            assert_eq!(
-                cockpit::sync_hit_map(state.sync_dialog.as_ref().unwrap(), tiny),
-                cockpit::SyncHitMap::default()
-            );
-            assert_eq!(
-                route_visible_sync_mouse(&mut state, click(disabled.cta), tiny),
-                None
-            );
-        }
-    }
-
-    #[test]
     fn open_create_request_builds_a_live_form_from_cockpit_state_and_config() {
         let checked_out = WorktreeIdentity {
             id: WorktreeId::new("/worktrees/trench/release"),
@@ -2455,6 +1410,7 @@ mod tests {
             is_main: false,
             is_current: false,
             detached: false,
+            missing: false,
         };
         let mut state = AppState::new(vec![checked_out]);
         state.refs = Some(RefSnapshot::from_parts(
@@ -2475,7 +1431,7 @@ mod tests {
 
         let dialog = state.create_dialog.as_mut().expect("create form opened");
         dialog.set_branch("feature/auth");
-        assert_eq!(dialog.preview().unwrap().base.as_deref(), Some("release"));
+        assert_eq!(dialog.base(), Some("release"));
         dialog.set_branch("release");
         assert!(matches!(
             dialog.handle_key(CreateKey::Enter),
@@ -2613,6 +1569,7 @@ mod tests {
             is_main: true,
             is_current: true,
             detached: false,
+            missing: false,
         };
         let mut state = AppState::new(vec![identity.clone()]);
         state.refs = Some(RefSnapshot::from_parts(
@@ -2627,7 +1584,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("Dirty worktrees cannot be synced"),
+                .contains("has uncommitted changes. Commit or stash them, then sync."),
             "{error}"
         );
         assert!(state.sync_dialog.is_none());
@@ -2646,6 +1603,7 @@ mod tests {
             is_main: true,
             is_current: true,
             detached: false,
+            missing: false,
         };
         let mut state = AppState::new(vec![identity.clone()]);
         state.refs = Some(RefSnapshot::from_parts(
@@ -2724,7 +1682,7 @@ mod tests {
     }
 
     #[test]
-    fn create_steps_route_next_completion_and_submit_without_leaking_into_cockpit_keys() {
+    fn create_dialog_opens_on_the_branch_and_enter_starts_only_a_highlighted_row() {
         let repository = init_repo();
         let root = repository.path().join("worktrees");
         let mut state = AppState::new(Vec::new());
@@ -2737,49 +1695,33 @@ mod tests {
         ));
         let repo_info = crate::git::discover_repo(repository.path()).unwrap();
         open_create_dialog(&mut state, &repo_info.name, &root, Some("main")).unwrap();
+        let press = |state: &mut AppState, key| {
+            handle_create_input(state, key, repository.path(), &root, Some("main"), None).unwrap()
+        };
         assert_eq!(
-            state.create_dialog.as_ref().unwrap().mode(),
-            crate::tui::create_flow::CreateMode::SelectBase
+            state.create_dialog.as_ref().unwrap().focus(),
+            CreateFocus::Branch
         );
-        assert!(handle_create_input(
-            &mut state,
-            CreateKey::Enter,
-            repository.path(),
-            &root,
-            Some("main"),
-            None,
-        )
-        .unwrap()
-        .is_none());
-        assert_eq!(
-            state.create_dialog.as_ref().unwrap().mode(),
-            crate::tui::create_flow::CreateMode::Name
-        );
+        assert!(press(&mut state, CreateKey::Enter).is_none());
+        assert!(state.create_dialog.is_some(), "nothing is highlighted yet");
+
         state
             .create_dialog
             .as_mut()
             .unwrap()
             .set_branch("feature/auth");
+        assert!(press(&mut state, CreateKey::Tab).is_none());
+        assert_eq!(
+            state.create_dialog.as_ref().unwrap().focus(),
+            CreateFocus::Base
+        );
+        assert!(press(&mut state, CreateKey::Escape).is_none());
+        assert_eq!(
+            state.create_dialog.as_ref().unwrap().focus(),
+            CreateFocus::Branch
+        );
 
-        assert!(handle_create_input(
-            &mut state,
-            CreateKey::Tab,
-            repository.path(),
-            &root,
-            Some("main"),
-            None,
-        )
-        .unwrap()
-        .is_none());
-        let start = handle_create_input(
-            &mut state,
-            CreateKey::Enter,
-            repository.path(),
-            &root,
-            Some("main"),
-            None,
-        )
-        .unwrap();
+        let start = press(&mut state, CreateKey::Enter);
         assert!(matches!(
             start,
             Some(CreateInputEffect::Start(request))
@@ -2799,7 +1741,10 @@ mod tests {
         );
         state.refs = Some(initial.clone());
         open_create_dialog(&mut state, "trench", Path::new("/worktrees"), None).unwrap();
-        state.create_dialog.as_mut().unwrap().open_base_picker();
+        let dialog = state.create_dialog.as_mut().unwrap();
+        dialog.set_branch("feature/new");
+        dialog.handle_key(CreateKey::Tab);
+        assert_eq!(dialog.focus(), CreateFocus::Base);
 
         let updated = RefSnapshot::from_parts(
             ["main"],
@@ -2891,13 +1836,13 @@ mod tests {
         return_to_create_form(&mut state, repository.path(), &root, Some("main"), None);
 
         let dialog = state.create_dialog.as_ref().unwrap();
-        assert_eq!(dialog.mode(), crate::tui::create_flow::CreateMode::Name);
-        assert_eq!(dialog.branch(), "feature/auth");
+        assert_eq!(dialog.focus(), CreateFocus::Branch);
+        assert_eq!(dialog.branch_input().value(), "feature/auth");
         assert!(dialog.validation_error().is_some());
     }
 
     #[test]
-    fn invalid_submission_stays_in_the_form_with_a_validation_message() {
+    fn a_name_the_dialog_already_knows_is_invalid_never_reaches_planning() {
         let repository = init_repo();
         let root = repository.path().join("worktrees");
         let repo_info = crate::git::discover_repo(repository.path()).unwrap();
@@ -2915,6 +1860,45 @@ mod tests {
             .as_mut()
             .unwrap()
             .set_branch("bad~branch");
+
+        assert!(handle_create_input(
+            &mut state,
+            CreateKey::Enter,
+            repository.path(),
+            &root,
+            Some("main"),
+            None,
+        )
+        .unwrap()
+        .is_none());
+        let dialog = state.create_dialog.as_ref().unwrap();
+        assert!(!dialog.can_submit());
+        assert!(dialog.validation_error().is_none());
+    }
+
+    #[test]
+    fn a_planning_failure_stays_in_the_form_with_its_message() {
+        let repository = init_repo();
+        let root = repository.path().join("worktrees");
+        let repo_info = crate::git::discover_repo(repository.path()).unwrap();
+        let mut state = AppState::new(Vec::new());
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        ));
+        open_create_dialog(&mut state, &repo_info.name, &root, Some("main")).unwrap();
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .set_branch("feature/taken");
+        // Only live planning can see a directory that is not a worktree.
+        let occupied = root.join(&repo_info.name).join("feature-taken");
+        std::fs::create_dir_all(&occupied).unwrap();
+        std::fs::write(occupied.join("leftover"), "x").unwrap();
 
         assert!(handle_create_input(
             &mut state,
@@ -2950,6 +1934,7 @@ mod tests {
             is_main: false,
             is_current: false,
             detached: false,
+            missing: false,
         };
         let mut state = AppState::new(vec![old]);
         state.refs = Some(RefSnapshot::from_parts(
@@ -3000,6 +1985,7 @@ mod tests {
             is_main: false,
             is_current: false,
             detached: false,
+            missing: false,
         };
         let mut state = AppState::new(vec![old]);
         state.refs = Some(RefSnapshot::from_parts(
@@ -3093,6 +2079,7 @@ mod tests {
             is_main: false,
             is_current: false,
             detached: false,
+            missing: false,
         };
         let refs = RefSnapshot::from_parts(
             ["main", "feature/auth"],
@@ -3154,10 +2141,10 @@ mod tests {
         );
         assert!(state.sync_dialog.is_none());
         assert!(state.operation_modal.is_none());
-        assert!(state
-            .notification
-            .as_ref()
-            .is_some_and(|notice| { notice.text == "Synced feature-auth via rebase onto main" }));
+        assert!(state.notification.as_ref().is_some_and(|notice| {
+            notice.text
+                == "Rebased feature/auth onto main. Was 1 ahead, 2 behind; now 0 ahead, 0 behind."
+        }));
     }
 
     #[test]
@@ -3180,6 +2167,7 @@ mod tests {
             is_main: false,
             is_current: false,
             detached: false,
+            missing: false,
         };
         let mut state = AppState::new(vec![target.clone()]);
         state.refs = Some(RefSnapshot::from_parts(
@@ -3261,13 +2249,14 @@ mod tests {
             is_main: false,
             is_current: false,
             detached: false,
+            missing: false,
         };
         let mut state = AppState::new(vec![target.clone()]);
         open_remove_dialog(&mut state, repository.path(), &target.id, Some("main")).unwrap();
 
         let Some(RemoveInputEffect::Start(request)) = handle_remove_input(
             &mut state,
-            RemoveKey::Enter,
+            RemoveKey::Confirm,
             repository.path(),
             Some("main"),
             None,
@@ -3307,7 +2296,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_remove_enter_returns_to_a_live_revalidated_confirmation() {
+    fn returning_from_a_failed_remove_shows_live_risks() {
         let repository = init_repo();
         let target_path = repository.path().join("worktrees").join("late-dirty");
         add_worktree(repository.path(), "late-dirty", "late-dirty", &target_path);
@@ -3320,23 +2309,25 @@ mod tests {
             is_main: false,
             is_current: false,
             detached: false,
+            missing: false,
         };
         let mut state = AppState::new(vec![target.clone()]);
         open_remove_dialog(&mut state, repository.path(), &target.id, Some("main")).unwrap();
         std::fs::write(target_path.join("late.txt"), "late\n").unwrap();
 
-        return_to_remove_form(&mut state, repository.path(), Some("main"), None);
+        return_to_remove_form(&mut state, repository.path(), Some("main"));
 
         let dialog = state.remove_dialog.as_ref().unwrap();
-        assert_eq!(dialog.mode(), crate::tui::remove_flow::RemoveMode::Review);
         assert_eq!(
-            dialog.validation_error(),
-            Some("removal facts changed; review and confirm again")
+            dialog.risks(),
+            [crate::tui::remove_flow::Risk::UncommittedChanges],
+            "the form shows what Git has now"
         );
+        assert_eq!(dialog.validation_error(), None);
     }
 
     #[test]
-    fn tiny_viewport_does_not_route_hidden_remove_confirmation_keys() {
+    fn a_dirty_worktree_is_removed_only_after_y_and_never_by_enter() {
         let repository = init_repo();
         let target_path = repository.path().join("worktrees").join("dirty");
         add_worktree(repository.path(), "dirty", "dirty", &target_path);
@@ -3350,197 +2341,58 @@ mod tests {
             is_main: false,
             is_current: false,
             detached: false,
+            missing: false,
         };
         let mut state = AppState::new(vec![target.clone()]);
         open_remove_dialog(&mut state, repository.path(), &target.id, Some("main")).unwrap();
-        assert!(handle_remove_input(
+
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        assert_eq!(translate_remove_key(key(KeyCode::Enter)), None);
+        assert_eq!(
+            translate_remove_key(key(KeyCode::Char('y'))),
+            Some(RemoveKey::Confirm)
+        );
+        assert_eq!(
+            translate_remove_key(key(KeyCode::Char(' '))),
+            Some(RemoveKey::Space)
+        );
+        assert_eq!(
+            translate_remove_key(key(KeyCode::Esc)),
+            Some(RemoveKey::Escape)
+        );
+
+        let Some(RemoveInputEffect::Start(request)) = handle_remove_input(
             &mut state,
-            RemoveKey::Enter,
+            RemoveKey::Confirm,
             repository.path(),
             Some("main"),
             None,
         )
-        .unwrap()
-        .is_none());
-        assert_eq!(
-            state.remove_dialog.as_ref().unwrap().mode(),
-            crate::tui::remove_flow::RemoveMode::ConfirmDirtyWorktree
-        );
-        let _ = app::reduce(
-            &mut state,
-            Event::ViewportChanged {
-                width: 59,
-                height: 16,
-            },
-        );
-
-        let enter = KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE);
-        assert_eq!(visible_surface_key(&state, enter), None);
-        let quit = KeyEvent::new(KeyCode::Char('q'), crossterm::event::KeyModifiers::NONE);
-        assert_eq!(visible_surface_key(&state, quit), Some(quit));
-        assert_eq!(
-            state.remove_dialog.as_ref().unwrap().mode(),
-            crate::tui::remove_flow::RemoveMode::ConfirmDirtyWorktree
-        );
+        .unwrap() else {
+            panic!("y should start the removal")
+        };
+        let OperationRequest::Remove(request) = *request else {
+            panic!("expected a remove request")
+        };
+        let plan = serde_json::to_value(&request.plan).unwrap();
+        assert_eq!(plan["force_worktree_applied"], true);
     }
 
     #[test]
-    fn remove_mouse_routes_visible_controls_and_blocks_hidden_surfaces_without_mutation() {
-        let repository = init_repo();
-        let target_path = repository.path().join("worktrees").join("mouse-remove");
-        add_worktree(
-            repository.path(),
-            "mouse-remove",
-            "mouse-remove",
-            &target_path,
-        );
-        std::fs::write(target_path.join("dirty.txt"), "dirty\n").unwrap();
-        let target = WorktreeIdentity {
-            id: WorktreeId::new(&target_path),
-            worktree: "mouse-remove".to_string(),
-            branch: Some("mouse-remove".to_string()),
-            path: target_path,
-            head: None,
-            is_main: false,
-            is_current: false,
-            detached: false,
-        };
-        let area = Rect::new(0, 0, 60, 16);
-        let mut state = AppState::new(vec![target.clone()]);
-        open_remove_dialog(&mut state, repository.path(), &target.id, Some("main")).unwrap();
+    fn a_terminal_below_the_minimum_routes_only_quit() {
+        let mut state = AppState::new(Vec::new());
         let _ = app::reduce(
             &mut state,
             Event::ViewportChanged {
-                width: 60,
-                height: 16,
+                width: 39,
+                height: 10,
             },
         );
-        let hits = cockpit::remove_hit_map(state.remove_dialog.as_ref().unwrap(), area);
-        let click = |rect: Rect| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: rect.x + rect.width / 2,
-            row: rect.y,
-            modifiers: KeyModifiers::NONE,
-        };
 
-        assert_eq!(
-            route_visible_remove_mouse(&state, click(hits.checkbox), area),
-            Some(RemoveMouseEffect::Key(RemoveKey::Space))
-        );
-        state
-            .remove_dialog
-            .as_mut()
-            .unwrap()
-            .handle_key(RemoveKey::Space);
-        assert!(state.remove_dialog.as_ref().unwrap().delete_branch());
-        assert_eq!(
-            route_visible_remove_mouse(&state, click(hits.cta), area),
-            Some(RemoveMouseEffect::Key(RemoveKey::Enter))
-        );
-        state
-            .remove_dialog
-            .as_mut()
-            .unwrap()
-            .handle_key(RemoveKey::Enter);
-        assert_eq!(
-            state.remove_dialog.as_ref().unwrap().mode(),
-            crate::tui::remove_flow::RemoveMode::ConfirmDirtyWorktree
-        );
-        let confirm_hits = cockpit::remove_hit_map(state.remove_dialog.as_ref().unwrap(), area);
-        assert_eq!(
-            route_visible_remove_mouse(&state, click(confirm_hits.back), area),
-            Some(RemoveMouseEffect::Key(RemoveKey::Escape))
-        );
-        assert_eq!(
-            route_visible_remove_mouse(&state, click(confirm_hits.help), area),
-            Some(RemoveMouseEffect::Help)
-        );
-        state.help_open = true;
-        let help_close = (0..area.height)
-            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
-            .find(|point| cockpit::help_close_hit(&state, area, *point))
-            .unwrap();
-        let help_click = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: help_close.0,
-            row: help_close.1,
-            modifiers: KeyModifiers::NONE,
-        };
-        assert!(route_visible_help_mouse(&mut state, help_click, area));
-        assert!(!state.help_open);
-
-        let backdrop = MouseEvent {
-            column: 0,
-            row: 0,
-            ..click(Rect::new(0, 0, 1, 1))
-        };
-        assert_eq!(
-            route_visible_remove_mouse(&state, backdrop, area),
-            Some(RemoveMouseEffect::Ignored)
-        );
-        state.sync_dialog = Some(SyncDialog::new(
-            &target,
-            RefSnapshot::from_parts(
-                ["main"],
-                ["origin/main"],
-                Some("origin/main"),
-                Some("main"),
-                true,
-            ),
-            Some("main"),
-        ));
-        assert_eq!(visible_dialog(&state), Some(VisibleDialog::Sync));
-        assert_eq!(
-            route_visible_remove_mouse(&state, click(confirm_hits.cta), area),
-            None,
-            "a remove dialog covered by sync must not retain stale targets"
-        );
-        state.sync_dialog = None;
-        let cta_key = route_visible_remove_mouse(&state, click(confirm_hits.cta), area);
-        assert_eq!(cta_key, Some(RemoveMouseEffect::Key(RemoveKey::Enter)));
-        let start = handle_remove_input(
-            &mut state,
-            RemoveKey::Enter,
-            repository.path(),
-            Some("main"),
-            None,
-        )
-        .unwrap();
-        assert!(matches!(start, Some(RemoveInputEffect::Start(_))));
-        state.operation_modal = Some(crate::tui::operation_modal::OperationModal::new(
-            crate::operation::OperationKind::Remove,
-        ));
-        assert_eq!(
-            route_visible_remove_mouse(&state, click(confirm_hits.cta), area),
-            None
-        );
-        state.operation_modal = None;
-        let _ = app::reduce(
-            &mut state,
-            Event::ViewportChanged {
-                width: 59,
-                height: 16,
-            },
-        );
-        assert_eq!(
-            route_visible_remove_mouse(&state, click(confirm_hits.cta), Rect::new(0, 0, 59, 16)),
-            None
-        );
-        let _ = app::reduce(
-            &mut state,
-            Event::ViewportChanged {
-                width: 60,
-                height: 15,
-            },
-        );
-        assert_eq!(
-            route_visible_remove_mouse(&state, click(confirm_hits.cta), Rect::new(0, 0, 60, 15)),
-            None
-        );
-        assert!(
-            target.id.as_path().exists(),
-            "routing tests must not remove the worktree"
-        );
+        let confirm = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(visible_surface_key(&state, confirm), None);
+        let quit = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(visible_surface_key(&state, quit), Some(quit));
     }
 
     struct ControllerHarness {
@@ -3574,6 +2426,7 @@ mod tests {
                 is_main: false,
                 is_current: false,
                 detached: false,
+                missing: false,
             };
             self.state.identities.push(identity.clone());
             self.state.selected = Some(identity.id.clone());
@@ -3686,7 +2539,7 @@ mod tests {
         open_remove_dialog(&mut remove.state, &remove_root, &clean.id, Some("main")).unwrap();
         let Some(RemoveInputEffect::Start(request)) = handle_remove_input(
             &mut remove.state,
-            RemoveKey::Enter,
+            RemoveKey::Confirm,
             &remove_root,
             Some("main"),
             None,
@@ -3712,7 +2565,7 @@ mod tests {
         });
         assert_eq!(
             modal.handle_key(crate::tui::operation_modal::ModalKey::Enter),
-            None
+            Some(crate::tui::operation_modal::ModalEffect::Close)
         );
     }
 

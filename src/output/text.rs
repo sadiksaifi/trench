@@ -67,6 +67,24 @@ pub fn truncate_middle(value: &str, columns: usize) -> String {
     }
 }
 
+/// Split `value` so the first part is at most `columns` wide.
+///
+/// The first part is never empty for a non-empty value, so repeated splitting
+/// always terminates, even when one character is wider than `columns`.
+pub fn split_at(value: &str, columns: usize) -> (&str, &str) {
+    let mut used = 0;
+    let mut end = 0;
+    for (index, grapheme) in value.grapheme_indices(true) {
+        let grapheme_width = width(grapheme);
+        if used + grapheme_width > columns && index > 0 {
+            break;
+        }
+        used += grapheme_width;
+        end = index + grapheme.len();
+    }
+    value.split_at(end)
+}
+
 /// Render `path` with the home directory written as `~`.
 pub fn home_relative(path: &Path, home: Option<&Path>) -> String {
     match home.and_then(|home| path.strip_prefix(home).ok()) {
@@ -151,6 +169,15 @@ mod tests {
         assert_eq!(truncate_start("branch-日本語", 5), "…本語");
         assert_eq!(pad_end("日本", 6), "日本  ");
         assert_eq!(pad_end("toolong", 3), "toolong");
+    }
+
+    #[test]
+    fn split_at_never_returns_an_empty_head_for_text() {
+        assert_eq!(split_at("abcdef", 4), ("abcd", "ef"));
+        assert_eq!(split_at("ab", 4), ("ab", ""));
+        assert_eq!(split_at("日本語", 3), ("日", "本語"));
+        assert_eq!(split_at("日本語", 1), ("日", "本語"));
+        assert_eq!(split_at("", 3), ("", ""));
     }
 
     #[test]

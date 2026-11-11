@@ -1,174 +1,204 @@
-use ratatui::style::{Color, Style};
+//! Semantic styles for the TUI.
+//!
+//! Views ask for a role (`muted`, `selection`, `danger`) and never for a
+//! color. The default theme uses only the terminal's own colors and
+//! attributes, so it stays readable on light, dark and monochrome terminals.
+
+use ratatui::style::{Color, Modifier, Style};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
-    pub fg: Color,
-    pub fg_muted: Color,
-    pub helper_fg: Color,
-    pub placeholder_fg: Color,
-    pub bg: Color,
-    pub bg_elevated: Color,
-    pub bg_panel: Color,
-    pub control_bg: Color,
-    pub accent: Color,
-    pub accent_soft: Color,
-    pub success: Color,
-    pub error: Color,
-    pub warning: Color,
-    pub danger_bg: Color,
-    pub danger_fg: Color,
-    pub primary_bg: Color,
-    pub primary_fg: Color,
-    pub disabled_fg: Color,
-    pub border: Color,
-    pub border_active: Color,
-    pub border_focus: Color,
-    pub selection_bg: Color,
-    pub selection_fg: Color,
+    /// Ordinary text.
+    pub text: Style,
+    /// Secondary text: labels, placeholders, tags, hint descriptions.
+    pub muted: Style,
+    /// Titles, the cursor, and the focused field.
+    pub accent: Style,
+    /// The selected row.
+    pub selection: Style,
+    pub success: Style,
+    pub error: Style,
+    pub warning: Style,
+    /// The key that confirms a destructive action.
+    pub danger: Style,
+    pub border: Style,
+    /// A key that does nothing right now.
+    pub disabled: Style,
+    /// Screen background. `Color::Reset` keeps the terminal's own.
+    pub surface: Color,
+    /// Dialog background. `Color::Reset` keeps the terminal's own.
+    pub dialog_surface: Color,
 }
 
 impl Theme {
-    pub fn with_bg(&self, style: Style, color: Color) -> Style {
-        if color == Color::Reset {
-            style
-        } else {
-            style.bg(color)
-        }
+    /// `style` drawn on the screen background.
+    pub fn on_surface(&self, style: Style) -> Style {
+        on(style, self.surface)
+    }
+
+    /// `style` drawn on the dialog background.
+    pub fn on_dialog(&self, style: Style) -> Style {
+        on(style, self.dialog_surface)
     }
 }
 
+fn on(style: Style, background: Color) -> Style {
+    if background == Color::Reset {
+        style
+    } else {
+        style.bg(background)
+    }
+}
+
+/// The theme for a configured name and the `NO_COLOR` environment variable.
+///
+/// `NO_COLOR` set to any non-empty value wins over the configured name
+/// (https://no-color.org).
+pub fn resolve(name: &str, no_color: Option<&std::ffi::OsStr>) -> Theme {
+    if no_color.is_some_and(|value| !value.is_empty()) {
+        mono()
+    } else {
+        from_name(name)
+    }
+}
+
+/// Unknown names use the default theme.
 pub fn from_name(name: &str) -> Theme {
     match name {
-        "ops" | "default" | "" => ops(),
-        "transparent" | "ops-transparent" => transparent(ops()),
-        "catppuccin" => catppuccin(),
-        "catppuccin-transparent" | "nord-transparent" | "solarized-transparent" => {
-            transparent(catppuccin())
-        }
-        "gruvbox" | "dark" => gruvbox(),
-        "gruvbox-transparent" | "dark-transparent" => transparent(gruvbox()),
-        "minimal" => minimal(),
-        "nord" | "solarized" => catppuccin(),
-        _ => ops(),
+        "ops" => palette(OPS),
+        "transparent" | "ops-transparent" => transparent(palette(OPS)),
+        "catppuccin" => palette(CATPPUCCIN),
+        "catppuccin-transparent" => transparent(palette(CATPPUCCIN)),
+        "gruvbox" => palette(GRUVBOX),
+        "gruvbox-transparent" => transparent(palette(GRUVBOX)),
+        "mono" => mono(),
+        _ => terminal(),
     }
 }
 
-fn ops() -> Theme {
+/// The terminal's own foreground, background and 16 colors.
+fn terminal() -> Theme {
+    let bold = Modifier::BOLD;
     Theme {
-        fg: Color::Rgb(250, 249, 245),
-        fg_muted: Color::Rgb(170, 166, 157),
-        helper_fg: Color::Rgb(250, 249, 245),
-        placeholder_fg: Color::Rgb(250, 249, 245),
-        bg: Color::Rgb(20, 20, 19),
-        bg_elevated: Color::Rgb(39, 36, 31),
-        bg_panel: Color::Rgb(28, 27, 24),
-        control_bg: Color::Rgb(50, 46, 41),
-        accent: Color::Rgb(240, 139, 101),
-        accent_soft: Color::Rgb(168, 93, 70),
-        success: Color::Rgb(145, 199, 136),
-        error: Color::Rgb(255, 123, 114),
-        warning: Color::Rgb(230, 182, 115),
-        danger_bg: Color::Rgb(162, 59, 56),
-        danger_fg: Color::Rgb(250, 249, 245),
-        primary_bg: Color::Rgb(240, 139, 101),
-        primary_fg: Color::Rgb(20, 20, 19),
-        disabled_fg: Color::Rgb(119, 113, 104),
-        border: Color::Rgb(119, 113, 104),
-        border_active: Color::Rgb(113, 183, 255),
-        border_focus: Color::Rgb(240, 139, 101),
-        selection_bg: Color::Rgb(168, 93, 70),
-        selection_fg: Color::Rgb(250, 249, 245),
+        text: Style::default(),
+        muted: Style::default().add_modifier(Modifier::DIM),
+        accent: Style::default().fg(Color::Cyan).add_modifier(bold),
+        selection: Style::default().add_modifier(Modifier::REVERSED | bold),
+        success: Style::default().fg(Color::Green),
+        error: Style::default().fg(Color::Red),
+        warning: Style::default().fg(Color::Yellow),
+        danger: Style::default().fg(Color::Red).add_modifier(bold),
+        border: Style::default().add_modifier(Modifier::DIM),
+        disabled: Style::default().add_modifier(Modifier::DIM),
+        surface: Color::Reset,
+        dialog_surface: Color::Reset,
     }
 }
 
-fn catppuccin() -> Theme {
+/// No colors at all: bold, dim and reverse video carry every role.
+fn mono() -> Theme {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
     Theme {
-        fg: Color::Rgb(205, 214, 244),
-        fg_muted: Color::Rgb(127, 132, 156),
-        helper_fg: Color::Rgb(205, 214, 244),
-        placeholder_fg: Color::Rgb(205, 214, 244),
-        bg: Color::Rgb(30, 30, 46),
-        bg_elevated: Color::Rgb(49, 50, 68),
-        bg_panel: Color::Rgb(24, 24, 37),
-        control_bg: Color::Rgb(69, 71, 90),
-        accent: Color::Rgb(137, 180, 250),
-        accent_soft: Color::Rgb(69, 71, 90),
-        success: Color::Rgb(166, 227, 161),
-        error: Color::Rgb(243, 139, 168),
-        warning: Color::Rgb(249, 226, 175),
-        danger_bg: Color::Rgb(137, 70, 90),
-        danger_fg: Color::Rgb(255, 255, 255),
-        primary_bg: Color::Rgb(137, 180, 250),
-        primary_fg: Color::Rgb(30, 30, 46),
-        disabled_fg: Color::Rgb(127, 132, 156),
-        border: Color::Rgb(88, 91, 112),
-        border_active: Color::Rgb(137, 180, 250),
-        border_focus: Color::Rgb(245, 194, 231),
-        selection_bg: Color::Rgb(88, 91, 112),
-        selection_fg: Color::Rgb(205, 214, 244),
+        accent: bold,
+        success: Style::default(),
+        error: bold,
+        warning: bold,
+        danger: bold,
+        ..terminal()
     }
 }
 
-fn gruvbox() -> Theme {
+/// A fixed 24-bit palette that paints its own background.
+#[derive(Clone, Copy)]
+struct Palette {
+    fg: (u8, u8, u8),
+    fg_muted: (u8, u8, u8),
+    disabled: (u8, u8, u8),
+    bg: (u8, u8, u8),
+    bg_dialog: (u8, u8, u8),
+    accent: (u8, u8, u8),
+    success: (u8, u8, u8),
+    error: (u8, u8, u8),
+    warning: (u8, u8, u8),
+    border: (u8, u8, u8),
+    selection_bg: (u8, u8, u8),
+    selection_fg: (u8, u8, u8),
+}
+
+const OPS: Palette = Palette {
+    fg: (250, 249, 245),
+    fg_muted: (170, 166, 157),
+    disabled: (119, 113, 104),
+    bg: (20, 20, 19),
+    bg_dialog: (39, 36, 31),
+    accent: (240, 139, 101),
+    success: (145, 199, 136),
+    error: (255, 123, 114),
+    warning: (230, 182, 115),
+    border: (119, 113, 104),
+    selection_bg: (168, 93, 70),
+    selection_fg: (250, 249, 245),
+};
+
+const CATPPUCCIN: Palette = Palette {
+    fg: (205, 214, 244),
+    fg_muted: (166, 173, 200),
+    disabled: (127, 132, 156),
+    bg: (30, 30, 46),
+    bg_dialog: (49, 50, 68),
+    accent: (137, 180, 250),
+    success: (166, 227, 161),
+    error: (243, 139, 168),
+    warning: (249, 226, 175),
+    border: (88, 91, 112),
+    selection_bg: (88, 91, 112),
+    selection_fg: (205, 214, 244),
+};
+
+const GRUVBOX: Palette = Palette {
+    fg: (235, 219, 178),
+    fg_muted: (168, 153, 132),
+    disabled: (146, 131, 116),
+    bg: (29, 32, 33),
+    bg_dialog: (40, 40, 40),
+    accent: (131, 165, 152),
+    success: (184, 187, 38),
+    error: (255, 105, 84),
+    warning: (250, 189, 47),
+    border: (124, 111, 100),
+    selection_bg: (87, 145, 148),
+    selection_fg: (29, 32, 33),
+};
+
+fn rgb((red, green, blue): (u8, u8, u8)) -> Color {
+    Color::Rgb(red, green, blue)
+}
+
+fn palette(palette: Palette) -> Theme {
+    let fg = |color| Style::default().fg(rgb(color));
+    let bold = Modifier::BOLD;
     Theme {
-        fg: Color::Rgb(235, 219, 178),
-        fg_muted: Color::Rgb(168, 153, 132),
-        helper_fg: Color::Rgb(235, 219, 178),
-        placeholder_fg: Color::Rgb(235, 219, 178),
-        bg: Color::Rgb(29, 32, 33),
-        bg_elevated: Color::Rgb(40, 40, 40),
-        bg_panel: Color::Rgb(50, 48, 47),
-        control_bg: Color::Rgb(60, 56, 54),
-        accent: Color::Rgb(131, 165, 152),
-        accent_soft: Color::Rgb(69, 133, 136),
-        success: Color::Rgb(184, 187, 38),
-        error: Color::Rgb(251, 73, 52),
-        warning: Color::Rgb(250, 189, 47),
-        danger_bg: Color::Rgb(157, 0, 6),
-        danger_fg: Color::Rgb(251, 241, 199),
-        primary_bg: Color::Rgb(131, 165, 152),
-        primary_fg: Color::Rgb(29, 32, 33),
-        disabled_fg: Color::Rgb(146, 131, 116),
-        border: Color::Rgb(80, 73, 69),
-        border_active: Color::Rgb(131, 165, 152),
-        border_focus: Color::Rgb(250, 189, 47),
-        selection_bg: Color::Rgb(87, 145, 148),
-        selection_fg: Color::Rgb(29, 32, 33),
+        text: fg(palette.fg),
+        muted: fg(palette.fg_muted),
+        accent: fg(palette.accent).add_modifier(bold),
+        selection: fg(palette.selection_fg)
+            .bg(rgb(palette.selection_bg))
+            .add_modifier(bold),
+        success: fg(palette.success),
+        error: fg(palette.error),
+        warning: fg(palette.warning),
+        danger: fg(palette.error).add_modifier(bold),
+        border: fg(palette.border),
+        disabled: fg(palette.disabled),
+        surface: rgb(palette.bg),
+        dialog_surface: rgb(palette.bg_dialog),
     }
 }
 
-fn minimal() -> Theme {
-    Theme {
-        fg: Color::White,
-        fg_muted: Color::DarkGray,
-        helper_fg: Color::White,
-        placeholder_fg: Color::White,
-        bg: Color::Reset,
-        bg_elevated: Color::Black,
-        bg_panel: Color::Reset,
-        control_bg: Color::Black,
-        accent: Color::Cyan,
-        accent_soft: Color::Blue,
-        success: Color::Green,
-        error: Color::Red,
-        warning: Color::Yellow,
-        danger_bg: Color::Red,
-        danger_fg: Color::White,
-        primary_bg: Color::Cyan,
-        primary_fg: Color::Black,
-        disabled_fg: Color::DarkGray,
-        border: Color::Gray,
-        border_active: Color::White,
-        border_focus: Color::Cyan,
-        selection_bg: Color::Blue,
-        selection_fg: Color::White,
-    }
-}
-
+/// Keep a palette's colors but draw on the terminal's own background.
 fn transparent(mut theme: Theme) -> Theme {
-    theme.bg = Color::Reset;
-    theme.bg_elevated = Color::Reset;
-    theme.bg_panel = Color::Reset;
+    theme.surface = Color::Reset;
+    theme.dialog_surface = Color::Reset;
     theme
 }
 
@@ -176,233 +206,173 @@ fn transparent(mut theme: Theme) -> Theme {
 mod tests {
     use super::*;
 
-    #[test]
-    fn ops_theme_has_expected_anchor_colors() {
-        let theme = from_name("ops");
-        assert_eq!(theme.fg, Color::Rgb(250, 249, 245));
-        assert_eq!(theme.bg, Color::Rgb(20, 20, 19));
-        assert_eq!(theme.bg_panel, Color::Rgb(28, 27, 24));
-        assert_eq!(theme.bg_elevated, Color::Rgb(39, 36, 31));
-        assert_eq!(theme.accent, Color::Rgb(240, 139, 101));
-        assert_eq!(theme.border, Color::Rgb(119, 113, 104));
-        assert_eq!(theme.border_active, Color::Rgb(113, 183, 255));
-        assert_eq!(theme.selection_bg, Color::Rgb(168, 93, 70));
-        assert_eq!(theme.selection_fg, Color::Rgb(250, 249, 245));
-    }
+    const NAMED: [&str; 8] = [
+        "terminal",
+        "mono",
+        "ops",
+        "transparent",
+        "catppuccin",
+        "catppuccin-transparent",
+        "gruvbox",
+        "gruvbox-transparent",
+    ];
 
-    #[test]
-    fn every_theme_has_distinct_control_and_selection_surfaces() {
-        for name in ["ops", "catppuccin", "gruvbox", "minimal"] {
-            let theme = from_name(name);
-            assert_ne!(
-                theme.control_bg, theme.selection_bg,
-                "{name} must distinguish idle and selected controls"
-            );
-        }
-    }
-
-    #[test]
-    fn rgb_themes_keep_selected_text_at_accessible_contrast() {
-        for name in ["ops", "catppuccin", "gruvbox"] {
-            let theme = from_name(name);
-            assert!(
-                contrast(theme.selection_fg, theme.selection_bg) >= 4.5,
-                "{name} selected text must meet 4.5:1 contrast"
-            );
-        }
-    }
-
-    #[test]
-    fn rgb_themes_keep_create_helpers_and_placeholders_at_accessible_contrast() {
-        for name in ["ops", "catppuccin", "gruvbox"] {
-            let theme = from_name(name);
-            assert!(
-                contrast(theme.helper_fg, theme.bg_elevated) >= 4.5,
-                "{name} helper text must meet 4.5:1 contrast"
-            );
-            assert!(
-                contrast(theme.placeholder_fg, theme.control_bg) >= 4.5,
-                "{name} placeholder text must meet 4.5:1 contrast"
-            );
-        }
-    }
-
-    fn contrast(foreground: Color, background: Color) -> f64 {
-        let luminance = |color| {
-            let Color::Rgb(red, green, blue) = color else {
-                panic!("contrast helper expects RGB colors")
-            };
-            let channel = |value: u8| {
-                let value = f64::from(value) / 255.0;
-                if value <= 0.04045 {
-                    value / 12.92
-                } else {
-                    ((value + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
-        };
-        let lighter = luminance(foreground).max(luminance(background));
-        let darker = luminance(foreground).min(luminance(background));
-        (lighter + 0.05) / (darker + 0.05)
-    }
-
-    #[test]
-    fn catppuccin_theme_has_expected_colors() {
-        let theme = from_name("catppuccin");
-        assert_eq!(theme.fg, Color::Rgb(205, 214, 244));
-        assert_eq!(theme.bg, Color::Rgb(30, 30, 46));
-        assert_eq!(theme.accent, Color::Rgb(137, 180, 250));
-        assert_eq!(theme.success, Color::Rgb(166, 227, 161));
-        assert_eq!(theme.error, Color::Rgb(243, 139, 168));
-        assert_eq!(theme.warning, Color::Rgb(249, 226, 175));
-        assert_eq!(theme.fg_muted, Color::Rgb(127, 132, 156));
-        assert_eq!(theme.border, Color::Rgb(88, 91, 112));
-    }
-
-    #[test]
-    fn gruvbox_theme_has_expected_colors() {
-        let theme = from_name("gruvbox");
-        assert_eq!(theme.fg, Color::Rgb(235, 219, 178));
-        assert_eq!(theme.bg, Color::Rgb(29, 32, 33));
-        assert_eq!(theme.accent, Color::Rgb(131, 165, 152));
-        assert_eq!(theme.success, Color::Rgb(184, 187, 38));
-        assert_eq!(theme.error, Color::Rgb(251, 73, 52));
-        assert_eq!(theme.warning, Color::Rgb(250, 189, 47));
-        assert_eq!(theme.fg_muted, Color::Rgb(168, 153, 132));
-        assert_eq!(theme.border, Color::Rgb(80, 73, 69));
-    }
-
-    #[test]
-    fn gruvbox_differs_from_ops() {
-        let ops = from_name("ops");
-        let grv = from_name("gruvbox");
-        assert_ne!(ops, grv, "gruvbox and ops should be different themes");
-    }
-
-    #[test]
-    fn minimal_theme_uses_only_basic_ansi_colors() {
-        let theme = from_name("minimal");
-        let colors = [
-            theme.fg,
-            theme.fg_muted,
-            theme.helper_fg,
-            theme.placeholder_fg,
-            theme.bg,
-            theme.bg_elevated,
-            theme.bg_panel,
-            theme.control_bg,
+    fn styles(theme: &Theme) -> [Style; 10] {
+        [
+            theme.text,
+            theme.muted,
             theme.accent,
-            theme.accent_soft,
+            theme.selection,
             theme.success,
             theme.error,
             theme.warning,
-            theme.danger_bg,
-            theme.danger_fg,
-            theme.primary_bg,
-            theme.primary_fg,
-            theme.disabled_fg,
+            theme.danger,
             theme.border,
-            theme.border_active,
-            theme.border_focus,
-            theme.selection_bg,
-            theme.selection_fg,
-        ];
-        for color in &colors {
-            match color {
-                Color::Rgb(_, _, _) => {
-                    panic!("minimal theme must not use Rgb colors, found {color:?}")
-                }
-                Color::Indexed(_) => {
-                    panic!("minimal theme must not use indexed colors, found {color:?}")
-                }
-                _ => {}
+            theme.disabled,
+        ]
+    }
+
+    fn is_rgb(color: Option<Color>) -> bool {
+        matches!(color, Some(Color::Rgb(..)))
+    }
+
+    #[test]
+    fn default_theme_uses_only_the_terminals_own_colors_and_background() {
+        let theme = from_name("terminal");
+
+        assert_eq!(theme.surface, Color::Reset);
+        assert_eq!(theme.dialog_surface, Color::Reset);
+        assert_eq!(theme.text, Style::default());
+        for style in styles(&theme) {
+            assert!(!is_rgb(style.fg) && !is_rgb(style.bg), "{style:?}");
+            assert_ne!(
+                style.fg,
+                Some(Color::White),
+                "unreadable on a light terminal"
+            );
+            assert_ne!(
+                style.fg,
+                Some(Color::Black),
+                "unreadable on a dark terminal"
+            );
+        }
+        assert!(theme.selection.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn unset_empty_and_unknown_names_use_the_default_theme() {
+        for name in [
+            "",
+            "default",
+            "minimal",
+            "nord",
+            "solarized",
+            "dark",
+            "no-such-theme",
+        ] {
+            assert_eq!(from_name(name), from_name("terminal"), "{name}");
+        }
+    }
+
+    #[test]
+    fn no_color_forces_a_theme_without_any_color() {
+        for name in NAMED {
+            let theme = resolve(name, Some(std::ffi::OsStr::new("1")));
+            assert_eq!(theme, from_name("mono"), "{name}");
+        }
+        for style in styles(&from_name("mono")) {
+            assert_eq!((style.fg, style.bg), (None, None), "{style:?}");
+        }
+        assert_eq!(from_name("mono").surface, Color::Reset);
+    }
+
+    #[test]
+    fn an_empty_no_color_value_does_not_disable_color() {
+        assert_eq!(
+            resolve("ops", Some(std::ffi::OsStr::new(""))),
+            from_name("ops")
+        );
+        assert_eq!(resolve("ops", None), from_name("ops"));
+    }
+
+    #[test]
+    fn every_theme_marks_selection_and_roles_without_relying_on_color_alone() {
+        for name in NAMED {
+            let theme = from_name(name);
+            assert_ne!(theme.selection, theme.text, "{name}");
+            assert_ne!(theme.muted, theme.text, "{name}");
+            assert_ne!(theme.accent, theme.text, "{name}");
+            assert_ne!(theme.danger, theme.text, "{name}");
+        }
+    }
+
+    #[test]
+    fn transparent_variants_keep_the_palette_on_the_terminal_background() {
+        for (opaque, transparent) in [
+            ("ops", "transparent"),
+            ("ops", "ops-transparent"),
+            ("catppuccin", "catppuccin-transparent"),
+            ("gruvbox", "gruvbox-transparent"),
+        ] {
+            let (opaque, transparent) = (from_name(opaque), from_name(transparent));
+            assert!(is_rgb(Some(opaque.surface)));
+            assert_eq!(transparent.surface, Color::Reset);
+            assert_eq!(transparent.dialog_surface, Color::Reset);
+            assert_eq!(transparent.text, opaque.text);
+            assert_eq!(transparent.selection, opaque.selection);
+        }
+    }
+
+    #[test]
+    fn palettes_keep_text_readable_on_their_own_surfaces() {
+        for palette in [OPS, CATPPUCCIN, GRUVBOX] {
+            for (foreground, background) in [
+                (palette.fg, palette.bg),
+                (palette.fg, palette.bg_dialog),
+                (palette.fg_muted, palette.bg),
+                (palette.fg_muted, palette.bg_dialog),
+                (palette.selection_fg, palette.selection_bg),
+                (palette.error, palette.bg_dialog),
+            ] {
+                assert!(
+                    contrast(foreground, background) >= 4.5,
+                    "{foreground:?} on {background:?}"
+                );
             }
         }
     }
 
-    #[test]
-    fn minimal_theme_has_expected_values() {
-        let theme = from_name("minimal");
-        assert_eq!(theme.fg, Color::White);
-        assert_eq!(theme.fg_muted, Color::DarkGray);
-        assert_eq!(theme.bg, Color::Reset);
-        assert_eq!(theme.accent, Color::Cyan);
-        assert_eq!(theme.success, Color::Green);
-        assert_eq!(theme.error, Color::Red);
-        assert_eq!(theme.warning, Color::Yellow);
-        assert_eq!(theme.border, Color::Gray);
+    fn contrast(foreground: (u8, u8, u8), background: (u8, u8, u8)) -> f64 {
+        let (lighter, darker) = {
+            let (first, second) = (luminance(foreground), luminance(background));
+            if first >= second {
+                (first, second)
+            } else {
+                (second, first)
+            }
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    fn luminance((red, green, blue): (u8, u8, u8)) -> f64 {
+        let channel = |value: u8| {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
     }
 
     #[test]
-    fn minimal_differs_from_ops() {
+    fn surface_helpers_never_paint_over_the_terminal_background() {
+        let terminal = from_name("terminal");
+        assert_eq!(terminal.on_surface(terminal.muted), terminal.muted);
+        assert_eq!(terminal.on_dialog(terminal.text), terminal.text);
+
         let ops = from_name("ops");
-        let min = from_name("minimal");
-        assert_ne!(ops, min, "minimal and ops should be different themes");
-    }
-
-    #[test]
-    fn transparent_theme_keeps_ops_palette_but_resets_base_surfaces() {
-        let theme = from_name("transparent");
-        assert_eq!(theme.fg, Color::Rgb(250, 249, 245));
-        assert_eq!(theme.accent, Color::Rgb(240, 139, 101));
-        assert_eq!(theme.bg, Color::Reset);
-        assert_eq!(theme.bg_elevated, Color::Reset);
-        assert_eq!(theme.bg_panel, Color::Reset);
-    }
-
-    #[test]
-    fn catppuccin_transparent_alias_resets_base_surfaces() {
-        let theme = from_name("catppuccin-transparent");
-        assert_eq!(theme.fg, Color::Rgb(205, 214, 244));
-        assert_eq!(theme.accent, Color::Rgb(137, 180, 250));
-        assert_eq!(theme.bg, Color::Reset);
-        assert_eq!(theme.bg_elevated, Color::Reset);
-        assert_eq!(theme.bg_panel, Color::Reset);
-    }
-
-    #[test]
-    fn invalid_theme_name_falls_back_to_ops() {
-        let fallback = from_name("nonexistent");
-        let ops = from_name("ops");
-        assert_eq!(fallback, ops, "unknown theme should fall back to ops");
-    }
-
-    #[test]
-    fn empty_theme_name_falls_back_to_ops() {
-        let fallback = from_name("");
-        let ops = from_name("ops");
-        assert_eq!(fallback, ops);
-    }
-
-    #[test]
-    fn theme_struct_has_all_semantic_fields() {
-        let theme = from_name("ops");
-        let colors = [
-            theme.fg,
-            theme.fg_muted,
-            theme.bg,
-            theme.bg_elevated,
-            theme.bg_panel,
-            theme.control_bg,
-            theme.accent,
-            theme.accent_soft,
-            theme.success,
-            theme.error,
-            theme.warning,
-            theme.danger_bg,
-            theme.danger_fg,
-            theme.border,
-            theme.border_active,
-            theme.selection_bg,
-            theme.selection_fg,
-        ];
-        for (i, color) in colors.iter().enumerate() {
-            assert_ne!(
-                *color,
-                Color::Reset,
-                "color at index {i} should not be Color::Reset"
-            );
-        }
+        assert_eq!(ops.on_dialog(ops.text).bg, Some(ops.dialog_surface));
     }
 }

@@ -205,7 +205,7 @@ pub struct ResolvedWorktreesConfig {
 impl Default for ResolvedUiConfig {
     fn default() -> Self {
         Self {
-            theme: "ops".to_string(),
+            theme: "terminal".to_string(),
         }
     }
 }
@@ -705,7 +705,7 @@ run = ["bun install"]
     fn resolve_defaults_only() {
         let resolved = resolve_config(None, None, &GlobalConfig::default());
 
-        assert_eq!(resolved.ui.theme, "ops");
+        assert_eq!(resolved.ui.theme, "terminal");
 
         assert_eq!(resolved.git.default_base, None);
 

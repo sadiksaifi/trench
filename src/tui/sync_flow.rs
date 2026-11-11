@@ -116,10 +116,6 @@ impl SyncDialog {
         self.base_picker.selection()
     }
 
-    pub fn select_base_candidate(&mut self, index: usize) {
-        self.base_picker.select(index);
-    }
-
     pub fn set_origin_refresh(&mut self, refresh: crate::tui::ref_picker::OriginRefresh) {
         self.base_picker.set_origin_refresh(refresh);
     }
@@ -215,7 +211,8 @@ impl SyncDialog {
                 self.base_picker
                     .handle_key(RefPickerKey::Edit(LineEdit::NextCharacter));
             }
-            SyncKey::Tab => {}
+            // Tab is "next field": from the base it goes back to the form.
+            SyncKey::Tab => self.mode = SyncMode::Form,
         }
         None
     }
@@ -224,7 +221,7 @@ impl SyncDialog {
 pub fn unavailable_reason(identity: &WorktreeIdentity) -> Option<&'static str> {
     identity
         .detached
-        .then_some("Detached worktrees cannot be synced")
+        .then_some("A detached worktree has no branch to sync.")
 }
 
 #[cfg(test)]
@@ -247,6 +244,7 @@ mod tests {
             is_main,
             is_current: false,
             detached: branch.is_none(),
+            missing: false,
         }
     }
 
