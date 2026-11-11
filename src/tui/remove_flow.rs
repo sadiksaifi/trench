@@ -38,6 +38,11 @@ pub enum RemoveFlowError {
     Assessment(#[from] RemovalAssessmentError),
     #[error("the main worktree cannot be removed")]
     MainWorktree,
+    #[error(
+        "Worktree is locked. Run `git worktree unlock {path}` first.",
+        path = path.display()
+    )]
+    Locked { path: std::path::PathBuf },
     #[error("the current removal risk has not been confirmed")]
     ConfirmationRequired,
     #[error("removal facts changed; review and confirm again")]
@@ -54,6 +59,31 @@ pub struct RemoveTarget {
     pub detached: bool,
     pub dirty: bool,
     pub merged: Option<bool>,
+    /// The local branch still exists. When it does not, Git cannot compare
+    /// the worktree against a commit, so `dirty` is a precaution.
+    pub branch_present: bool,
+    /// The worktree directory is gone; only Git metadata will be removed.
+    pub directory_missing: bool,
+    /// Another worktree that has the same branch checked out.
+    pub branch_checked_out_elsewhere: Option<std::path::PathBuf>,
+}
+
+impl RemoveTarget {
+    fn new(id: WorktreeId, assessment: &RemovalAssessment) -> Self {
+        Self {
+            id,
+            worktree: assessment.worktree().to_string(),
+            branch: assessment.branch().map(ToOwned::to_owned),
+            detached: assessment.detached(),
+            dirty: assessment.dirty(),
+            merged: assessment.merged(),
+            branch_present: assessment.branch_present(),
+            directory_missing: assessment.directory_missing(),
+            branch_checked_out_elsewhere: assessment
+                .branch_checked_out_elsewhere()
+                .map(Path::to_path_buf),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,14 +115,12 @@ impl RemoveDialog {
         if assessment.is_main() {
             return Err(RemoveFlowError::MainWorktree);
         }
-        let target = RemoveTarget {
-            id,
-            worktree: assessment.worktree().to_string(),
-            branch: assessment.branch().map(ToOwned::to_owned),
-            detached: assessment.detached(),
-            dirty: assessment.dirty(),
-            merged: assessment.merged(),
-        };
+        if assessment.locked() {
+            return Err(RemoveFlowError::Locked {
+                path: assessment.path().to_path_buf(),
+            });
+        }
+        let target = RemoveTarget::new(id, &assessment);
         Ok(Self {
             target,
             assessment,
@@ -125,7 +153,9 @@ impl RemoveDialog {
     }
 
     pub fn can_delete_branch(&self) -> bool {
-        !self.target.detached && self.assessment.branch_present()
+        !self.target.detached
+            && self.target.branch_present
+            && self.target.branch_checked_out_elsewhere.is_none()
     }
 
     pub(crate) fn action_labels(&self) -> (&'static str, &'static str) {
@@ -242,11 +272,7 @@ impl RemoveDialog {
             configured_base,
         )?;
         if assessment != self.assessment {
-            self.target.worktree = assessment.worktree().to_string();
-            self.target.branch = assessment.branch().map(ToOwned::to_owned);
-            self.target.detached = assessment.detached();
-            self.target.dirty = assessment.dirty();
-            self.target.merged = assessment.merged();
+            self.target = RemoveTarget::new(self.target.id.clone(), &assessment);
             self.assessment = assessment;
             self.delete_branch = false;
             self.dirty_confirmed = false;
@@ -255,11 +281,7 @@ impl RemoveDialog {
             self.validation_error = Some("Removal facts changed; review again".to_string());
             return Err(RemoveFlowError::FactsChanged);
         }
-        self.target.worktree = assessment.worktree().to_string();
-        self.target.branch = assessment.branch().map(ToOwned::to_owned);
-        self.target.detached = assessment.detached();
-        self.target.dirty = assessment.dirty();
-        self.target.merged = assessment.merged();
+        self.target = RemoveTarget::new(self.target.id.clone(), &assessment);
         self.assessment = assessment;
         if self.begin_submit() != RemoveMode::Ready {
             return Err(RemoveFlowError::ConfirmationRequired);
@@ -441,6 +463,94 @@ mod tests {
         assert!(!dialog.can_delete_branch());
         dialog.toggle_delete_branch();
         assert!(!dialog.delete_branch());
+    }
+
+    #[test]
+    fn missing_directory_opens_the_dialog_and_removes_without_a_dirty_confirmation() {
+        let fixture = Fixture::new("deleted-by-hand");
+        std::fs::remove_dir_all(&fixture.worktree_path).unwrap();
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+
+        assert!(dialog.target().directory_missing);
+        assert!(!dialog.target().dirty);
+        assert!(dialog.can_delete_branch());
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Enter),
+            Some(RemoveEffect::Submit)
+        );
+        assert!(matches!(
+            dialog.revalidate_request(fixture.root.path(), Some("main"), None),
+            Ok(OperationRequest::Remove(_))
+        ));
+    }
+
+    #[test]
+    fn locked_worktree_is_rejected_with_the_unlock_command() {
+        let fixture = Fixture::new("locked");
+        git(
+            fixture.root.path(),
+            &["worktree", "lock", fixture.worktree_path.to_str().unwrap()],
+        );
+
+        let error = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, RemoveFlowError::Locked { .. }));
+        assert!(error.to_string().contains("git worktree unlock"));
+    }
+
+    #[test]
+    fn branch_checked_out_in_another_worktree_has_no_branch_deletion_control() {
+        let fixture = Fixture::new("shared");
+        let second = fixture.root.path().join("worktrees").join("second");
+        git(
+            fixture.root.path(),
+            &[
+                "worktree",
+                "add",
+                "--force",
+                second.to_str().unwrap(),
+                "shared",
+            ],
+        );
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+
+        assert!(!dialog.can_delete_branch());
+        assert_eq!(
+            dialog.target().branch_checked_out_elsewhere.as_deref(),
+            Some(second.canonicalize().unwrap().as_path())
+        );
+        dialog.toggle_delete_branch();
+        assert!(!dialog.delete_branch());
+    }
+
+    #[test]
+    fn missing_local_branch_is_named_as_the_reason_for_the_changes_confirmation() {
+        let fixture = Fixture::new("branch-gone");
+        git(
+            fixture.root.path(),
+            &["update-ref", "-d", "refs/heads/branch-gone"],
+        );
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+
+        assert!(!dialog.target().branch_present);
+        assert_eq!(dialog.handle_key(RemoveKey::Enter), None);
+        assert_eq!(dialog.mode(), RemoveMode::ConfirmDirtyWorktree);
     }
 
     #[test]

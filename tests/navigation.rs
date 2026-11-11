@@ -14,6 +14,7 @@ fn trench(dir: &Path) -> Command {
     let mut command = Command::new(trench_bin());
     command
         .current_dir(dir)
+        .env("HOME", xdg.join("home"))
         .env("XDG_CONFIG_HOME", xdg.join("config"))
         .env("XDG_DATA_HOME", xdg.join("data"))
         .env("XDG_STATE_HOME", xdg.join("state"))

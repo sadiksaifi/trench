@@ -150,10 +150,20 @@ pub struct RemovalAssessment {
     base_ref: Option<String>,
     #[serde(skip)]
     base_oid: Option<git2::Oid>,
+    /// The directory and its Git admin entry, or `None` when the worktree
+    /// directory no longer exists and only Git metadata remains.
     #[serde(skip)]
+    directory: Option<LiveDirectory>,
+    #[serde(skip)]
+    locked: bool,
+    #[serde(skip)]
+    branch_checked_out_elsewhere: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveDirectory {
     admin_dir: PathBuf,
-    #[serde(skip)]
-    directory_identity: DirectoryIdentity,
+    identity: DirectoryIdentity,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -215,6 +225,26 @@ impl RemovalAssessment {
         self.branch_oid.is_some()
     }
 
+    /// The worktree directory is gone and only Git metadata remains.
+    pub fn directory_missing(&self) -> bool {
+        self.directory.is_none()
+    }
+
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    /// Another worktree that has this target's branch checked out.
+    pub fn branch_checked_out_elsewhere(&self) -> Option<&Path> {
+        self.branch_checked_out_elsewhere.as_deref()
+    }
+
+    fn live_directory(&self) -> Result<&LiveDirectory, git::GitError> {
+        self.directory
+            .as_ref()
+            .ok_or(git::GitError::PreconditionsChanged)
+    }
+
     /// Resolve a target from live Git state without fetching, writing state, or
     /// creating directories.
     pub fn discover(
@@ -238,7 +268,24 @@ impl RemovalAssessment {
             .as_deref()
             .and_then(|head| git2::Oid::from_str(head).ok())
             .filter(|oid| !oid.is_zero());
-        let repo = git2::Repository::open(&identity.path).map_err(|source| {
+        // A linked worktree whose directory was deleted by hand still has Git
+        // metadata. Refs are shared, so read them from the repository itself
+        // and retire only the metadata; there is nothing on disk to protect.
+        let directory_identity = match DirectoryIdentity::read(&identity.path) {
+            Ok(directory) => Some(directory),
+            Err(RemovalAssessmentError::TargetUnavailable { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound && !identity.is_main =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let repo_source = if directory_identity.is_some() {
+            identity.path.as_path()
+        } else {
+            repo_path
+        };
+        let repo = git2::Repository::open(repo_source).map_err(|source| {
             RemovalAssessmentError::RepositoryIdentity {
                 path: identity.path.clone(),
                 source,
@@ -264,13 +311,34 @@ impl RemovalAssessment {
                 })
             }
         };
-        let dirty = git::dirty_count(&identity.path)? > 0;
-        let admin_dir = repo.path().canonicalize().map_err(|source| {
-            RemovalAssessmentError::TargetUnavailable {
-                path: repo.path().to_path_buf(),
-                source,
-            }
-        })?;
+        let directory = match directory_identity {
+            Some(directory_identity) => Some(LiveDirectory {
+                admin_dir: repo.path().canonicalize().map_err(|source| {
+                    RemovalAssessmentError::TargetUnavailable {
+                        path: repo.path().to_path_buf(),
+                        source,
+                    }
+                })?,
+                identity: directory_identity,
+            }),
+            None => None,
+        };
+        let dirty = directory.is_some() && git::dirty_count(&identity.path)? > 0;
+        // Older Git does not print `locked` in porcelain output, so also read
+        // the lock file from the admin entry when the directory resolves one.
+        let locked = identity.locked
+            || directory
+                .as_ref()
+                .is_some_and(|directory| directory.admin_dir.join("locked").exists());
+        let branch_checked_out_elsewhere = identity.branch.as_deref().and_then(|branch| {
+            catalog
+                .identities()
+                .iter()
+                .find(|other| {
+                    other.path != identity.path && other.branch.as_deref() == Some(branch)
+                })
+                .map(|other| other.path.clone())
+        });
         let branch_oid = match identity.branch.as_deref() {
             Some(branch) => match local_branch_oid(&repo, branch) {
                 Ok(oid) => Some(oid),
@@ -329,8 +397,9 @@ impl RemovalAssessment {
             branch_oid,
             base_ref,
             base_oid,
-            admin_dir,
-            directory_identity: DirectoryIdentity::read(&identity.path)?,
+            directory,
+            locked,
+            branch_checked_out_elsewhere,
         })
     }
 
@@ -391,6 +460,11 @@ impl RemovalAssessment {
         if self.is_main {
             return Err(RemovalAuthorizationError::MainWorktree);
         }
+        if self.locked {
+            return Err(RemovalAuthorizationError::LockedWorktree {
+                path: self.path.clone(),
+            });
+        }
         if options.force_branch && !options.delete_branch {
             return Err(RemovalAuthorizationError::ForceBranchRequiresDeleteBranch);
         }
@@ -400,6 +474,15 @@ impl RemovalAssessment {
         if options.delete_branch && !self.branch_present() {
             return Err(RemovalAuthorizationError::MissingLocalBranch {
                 branch: self.branch.clone().expect("attached target has a branch"),
+            });
+        }
+        if let (true, Some(other)) = (
+            options.delete_branch,
+            self.branch_checked_out_elsewhere.as_ref(),
+        ) {
+            return Err(RemovalAuthorizationError::BranchCheckedOutElsewhere {
+                branch: self.branch.clone().expect("attached target has a branch"),
+                path: other.clone(),
             });
         }
         let confirmation = match (options.dry_run, options.yes, receipt) {
@@ -419,7 +502,14 @@ impl RemovalAssessment {
             }
         };
         if self.dirty && !options.force_worktree {
-            return Err(RemovalAuthorizationError::DirtyWorktree);
+            return Err(match self.branch.as_ref() {
+                Some(branch) if !self.branch_present() => {
+                    RemovalAuthorizationError::UnverifiableWorktree {
+                        branch: branch.clone(),
+                    }
+                }
+                _ => RemovalAuthorizationError::DirtyWorktree,
+            });
         }
         if options.delete_branch {
             match self.merged {
@@ -444,6 +534,7 @@ impl RemovalAssessment {
             dirty: self.dirty,
             merged: self.merged,
             branch_present: self.branch_present(),
+            directory_missing: self.directory_missing(),
             yes: options.yes,
             confirmation,
             force_worktree: options.force_worktree,
@@ -476,6 +567,20 @@ pub enum RemovalAuthorizationError {
     ConfirmationReceiptUnexpected,
     #[error("worktree is dirty; pass --force-worktree to remove it")]
     DirtyWorktree,
+    #[error(
+        "local branch '{branch}' no longer exists, so the worktree cannot be verified clean; pass --force-worktree to remove it"
+    )]
+    UnverifiableWorktree { branch: String },
+    #[error(
+        "worktree is locked; run `git worktree unlock {path}` before removing it",
+        path = path.display()
+    )]
+    LockedWorktree { path: PathBuf },
+    #[error(
+        "branch '{branch}' is also checked out at {path}; omit --delete-branch to remove only this worktree",
+        path = path.display()
+    )]
+    BranchCheckedOutElsewhere { branch: String, path: PathBuf },
     #[error("--force-branch requires --delete-branch")]
     ForceBranchRequiresDeleteBranch,
     #[error("detached worktrees have no local branch to delete")]
@@ -501,6 +606,7 @@ pub struct RemovalPlan {
     dirty: bool,
     merged: Option<bool>,
     branch_present: bool,
+    directory_missing: bool,
     yes: bool,
     confirmation: RemovalConfirmation,
     force_worktree: bool,
@@ -642,6 +748,7 @@ pub struct RemovalOutcome {
     pub dirty: bool,
     pub merged: Option<bool>,
     pub branch_present: bool,
+    pub directory_missing: bool,
     pub yes: bool,
     pub confirmation: RemovalConfirmation,
     pub force_worktree: bool,
@@ -673,6 +780,7 @@ impl RemovalOutcome {
             dirty: plan.dirty,
             merged: plan.merged,
             branch_present: plan.branch_present,
+            directory_missing: plan.directory_missing,
             yes: plan.yes,
             confirmation: plan.confirmation,
             force_worktree: plan.force_worktree,
@@ -837,9 +945,21 @@ pub async fn execute_with_guard(
 
     let hook_context = hook_context(&plan);
     let hooks_status = hook_status(&plan, hooks_config);
+    let mut warning = None;
     let stage_started = start_stage(sink, RemovalStage::PreRemove);
     if plan.hook_policy == RemovalHookPolicy::Run {
-        if let Some(pre_remove) = hooks_config.and_then(|hooks| hooks.pre_remove.as_ref()) {
+        let pre_remove = hooks_config.and_then(|hooks| hooks.pre_remove.as_ref());
+        if let (Some(_), true) = (pre_remove, plan.directory_missing) {
+            // The hook's working directory is gone. Running it anywhere else
+            // would point cleanup commands at a tree the user did not select.
+            let message =
+                "pre_remove hook skipped: the worktree directory no longer exists".to_string();
+            sink.emit(RemovalEvent::Warning {
+                stage: RemovalStage::PreRemove,
+                message: message.clone(),
+            });
+            warning = Some(message);
+        } else if let Some(pre_remove) = pre_remove {
             let hook_sink = HookEventAdapter {
                 sink,
                 hook: HookEvent::PreRemove,
@@ -894,8 +1014,13 @@ pub async fn execute_with_guard(
     }
 
     let stage_started = start_stage(sink, RemovalStage::RemoveWorktree);
-    let pending = match prepare_exact_worktree_removal(&plan.expected, plan.force_worktree_applied)
-    {
+    let pending = if plan.directory_missing {
+        // Nothing exists on disk; the prune stage retires the Git metadata.
+        Ok(None)
+    } else {
+        prepare_exact_worktree_removal(&plan.expected, plan.force_worktree_applied).map(Some)
+    };
+    let pending = match pending {
         Ok(pending) => pending,
         Err(error) => {
             finish_stage(sink, RemovalStage::RemoveWorktree, stage_started, false);
@@ -918,13 +1043,22 @@ pub async fn execute_with_guard(
     finish_stage(sink, RemovalStage::RemoveWorktree, stage_started, true);
 
     let stage_started = start_stage(sink, RemovalStage::Prune);
-    if let Err(error) = pending.retire(&plan.expected, &ProductionRemovalBoundary) {
+    let retired = match pending {
+        Some(pending) => pending.retire(&plan.expected, &ProductionRemovalBoundary),
+        None => retire_missing_worktree(&plan.expected),
+    };
+    if let Err(error) = retired {
         finish_stage(sink, RemovalStage::Prune, stage_started, false);
+        let mutation_state = if error.partially_applied {
+            RemovalMutationState::PartiallyApplied
+        } else {
+            RemovalMutationState::NotStarted
+        };
         return Err(fail_with_quarantine(
             sink,
             operation_started,
             RemovalStage::Prune,
-            RemovalMutationState::PartiallyApplied,
+            mutation_state,
             classify_git_error(&error.error),
             error.error.to_string(),
             error.retained_quarantine,
@@ -950,7 +1084,6 @@ pub async fn execute_with_guard(
         finish_stage(sink, RemovalStage::DeleteBranch, stage_started, true);
     }
 
-    let mut warning = None;
     let stage_started = start_stage(sink, RemovalStage::PostRemove);
     if plan.hook_policy == RemovalHookPolicy::Run {
         if let Some(post_remove) = hooks_config.and_then(|hooks| hooks.post_remove.as_ref()) {
@@ -969,7 +1102,10 @@ pub async fn execute_with_guard(
             .await
             {
                 let message = format!("post_remove hook failed: {error}");
-                warning = Some(message.clone());
+                warning = Some(match warning {
+                    Some(earlier) => format!("{earlier}; {message}"),
+                    None => message.clone(),
+                });
                 sink.emit(RemovalEvent::Warning {
                     stage: RemovalStage::PostRemove,
                     message,
@@ -1424,17 +1560,13 @@ impl ExactTarget {
         use std::os::unix::fs::MetadataExt;
 
         let held = self.directory.metadata()?;
-        if (held.dev(), held.ino())
-            != (
-                assessment.directory_identity.device,
-                assessment.directory_identity.inode,
-            )
-        {
+        let expected = assessment.live_directory()?;
+        if (held.dev(), held.ino()) != (expected.identity.device, expected.identity.inode) {
             return Err(git::GitError::PreconditionsChanged);
         }
         let live_repo = git2::Repository::open(&assessment.path)?;
         let live_admin = live_repo.path().canonicalize().map_err(git::GitError::Io)?;
-        if live_admin != assessment.admin_dir {
+        if live_admin != expected.admin_dir {
             return Err(git::GitError::PreconditionsChanged);
         }
         let live = std::fs::symlink_metadata(&assessment.path)?;
@@ -1521,7 +1653,7 @@ impl ExactTarget {
         }
         let live_repo = git2::Repository::open(path)?;
         let live_admin = live_repo.path().canonicalize().map_err(git::GitError::Io)?;
-        if live_admin != assessment.admin_dir {
+        if live_admin != assessment.live_directory()?.admin_dir {
             return Err(git::GitError::PreconditionsChanged);
         }
         Ok(())
@@ -1849,6 +1981,9 @@ fn repair_worktree_metadata(common: &Path, path: &Path) -> Result<(), git::GitEr
     let output = Command::new("git")
         .arg(format!("--git-dir={}", common.display()))
         .args(["-c", "core.hooksPath=/dev/null"])
+        // Relative links make Git set `extensions.relativeWorktrees`, which
+        // the linked libgit2 cannot open. Keep the links absolute.
+        .args(["-c", "worktree.useRelativePaths=false"])
         .args(["worktree", "repair"])
         .arg(path)
         .env_remove("GIT_DIR")
@@ -2067,6 +2202,37 @@ fn prepare_exact_worktree_removal(
     Err(ExactRemovalFailure::not_started(
         git::GitError::PreconditionsChanged,
     ))
+}
+
+/// Retire the Git metadata of a worktree whose directory is already gone.
+///
+/// `git worktree prune` only drops entries whose directories are missing, so
+/// it can never delete files. It leaves locked entries in place, which is why
+/// the entry is looked up again afterwards.
+fn retire_missing_worktree(assessment: &RemovalAssessment) -> Result<(), ExactRemovalFailure> {
+    if std::fs::symlink_metadata(&assessment.path).is_ok() {
+        return Err(ExactRemovalFailure::not_started(
+            git::GitError::PreconditionsChanged,
+        ));
+    }
+    prune_worktrees(&assessment.repo_path).map_err(ExactRemovalFailure::not_started)?;
+    let still_listed = git::worktrees::discover(&assessment.repo_path)
+        .map_err(ExactRemovalFailure::not_started)?
+        .into_iter()
+        .any(|entry| entry.path == assessment.path);
+    if still_listed {
+        return Err(ExactRemovalFailure::not_started(
+            git::GitError::CommandFailed {
+                operation: "pruning worktrees",
+                message: format!(
+                    "Git kept the entry for {}; if it is locked, run `git worktree unlock {}` and retry",
+                    assessment.path.display(),
+                    assessment.path.display()
+                ),
+            },
+        ));
+    }
+    Ok(())
 }
 
 fn prune_worktrees(repo_path: &Path) -> Result<(), git::GitError> {
