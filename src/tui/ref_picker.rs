@@ -40,22 +40,17 @@ pub enum OriginRefresh {
 impl RefPicker {
     pub fn new(refs: RefSnapshot, configured_base: Option<&str>) -> Self {
         let selected = refs.default_base(configured_base).ok();
-        let selection = selected
-            .as_deref()
-            .and_then(|selected| {
-                picker_candidates(&refs, Some(selected))
-                    .iter()
-                    .position(|candidate| candidate.name == selected)
-            })
-            .unwrap_or(0);
-        Self {
+        let mut picker = Self {
             refs,
             configured_base: configured_base.map(ToOwned::to_owned),
             selected,
             query: LineInput::default(),
-            selection,
+            selection: 0,
             origin_refresh: OriginRefresh::Idle,
-        }
+        };
+        // Highlight the base in use, wherever the list places it.
+        picker.open();
+        picker
     }
 
     pub fn selected(&self) -> Option<&str> {
@@ -64,17 +59,21 @@ impl RefPicker {
 
     /// The refs that match the typed filter, best match first.
     ///
-    /// An empty filter keeps the catalog order. The sort is stable, so equal
-    /// matches keep that order too.
+    /// With an empty filter the base in use comes first, followed by the
+    /// catalog order: the list opens on the current choice instead of
+    /// leaving it at the bottom. The sort is stable, so equal matches keep
+    /// that order too.
     pub fn candidates(&self) -> Vec<RefCandidate> {
         let mut ranked = picker_candidates(&self.refs, self.selected.as_deref())
             .into_iter()
             .filter_map(|candidate| {
-                search::fuzzy_score(&candidate.name, self.query.value())
-                    .map(|score| (score, candidate))
+                let score = search::fuzzy_score(&candidate.name, self.query.value())?;
+                let in_use = self.query.value().is_empty()
+                    && self.selected.as_deref() == Some(candidate.name.as_str());
+                Some(((in_use, score), candidate))
             })
             .collect::<Vec<_>>();
-        ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        ranked.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
         ranked.into_iter().map(|(_, candidate)| candidate).collect()
     }
 
@@ -218,14 +217,14 @@ mod tests {
         let mut picker = RefPicker::new(refs(), Some("release"));
 
         assert_eq!(picker.selected(), Some("release"));
-        assert_eq!(picker.selection(), 1);
+        assert_eq!(picker.selection(), 0, "the base in use is listed first");
         assert_eq!(
             picker
                 .candidates()
                 .iter()
                 .map(|candidate| candidate.name.as_str())
                 .collect::<Vec<_>>(),
-            ["main", "release", "origin/topic/two"]
+            ["release", "main", "origin/topic/two"]
         );
         assert_eq!(
             picker.handle_key(RefPickerKey::Enter),

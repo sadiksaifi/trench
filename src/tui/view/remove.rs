@@ -118,13 +118,19 @@ pub fn render(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, theme: &Them
         ));
     }
     if risks.is_empty() && dialog.validation_error().is_none() {
+        let deletes_branch = if dialog.delete_branch() {
+            format!(" Deletes branch {branch}.")
+        } else {
+            String::new()
+        };
         lines.extend(wrapped(
             if target.directory_missing {
-                "The directory is already gone. Only Git's record is removed."
+                format!(
+                    "The directory is already gone. Only Git's record is removed.{deletes_branch}"
+                )
             } else {
-                "Removes the directory. This cannot be undone."
-            }
-            .to_string(),
+                format!("Removes the directory.{deletes_branch} This cannot be undone.")
+            },
             theme.muted,
         ));
     }

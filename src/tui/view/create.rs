@@ -540,10 +540,10 @@ mod tests {
                 "  │ Branch  feature/login                                │",
                 "  │ From    ▌type to filter bases                        │",
                 "  │                                                      │",
+                "  │ › origin/main                         remote branch  │",
                 "  │   feature/auth                        local branch   │",
                 "  │   feature/login-page                  local branch   │",
                 "  │   main                                local branch   │",
-                "  │   origin/feature/login-v2             remote branch  │",
             ]
         );
         assert_eq!(base[17], " Enter use base  ↑/↓ pick  Esc back");

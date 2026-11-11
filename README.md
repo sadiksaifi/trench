@@ -61,15 +61,52 @@ Cargo installs the executable to `${CARGO_HOME:-$HOME/.cargo}/bin/trench`; ensur
 that directory is on your `PATH`. Source installs are updated by pulling the
 latest source and running `make install` again, not by `trench upgrade`.
 
+## Using trench
+
+Run `trench` in a terminal and you get the list: every worktree of the
+repository, its branch and its path. From there the keys on the last row do
+the work. `c` creates a worktree, `Enter` switches to the selected one, `s`
+syncs it with its base, `d` removes it, `/` searches, and `?` shows the rest.
+
+Creating is one screen. Type a branch name. If the branch exists, locally or
+on origin, trench checks it out; if it does not, trench creates it from the
+base shown in `From`, which you can change with `Tab`. The line at the bottom
+of the dialog always says what `Enter` is about to do.
+
+Removing is one screen too. It shows what would be lost before you decide:
+uncommitted changes, or commits that exist only on a branch you chose to
+delete. Only `y` removes. `Enter` never does.
+
+The TUI uses your terminal's own colors and background by default, and it
+honors `NO_COLOR`. Set `[ui] theme` to `ops`, `catppuccin` or `gruvbox` for a
+fixed palette, and add `-transparent` to keep your terminal's background.
+
 ## CLI
 
-Trench exposes ten commands: `create`, `remove`, `switch`, `open`, `list`, `sync`, `init`, `shell-init`, `completions`, and `upgrade`. Run `trench <command> --help` for command-specific options.
+Everything the TUI does is also a command, for scripts and for agents:
+`create`, `list`, `switch`, `open`, `sync`, `remove`, `init`, `shell-init`,
+`completions` and `upgrade`. Run `trench <command> --help` for the options.
 
-`trench list` shows worktree names, branches and paths. JSON records contain
-`worktree`, `branch`, `path`, `is_main`, `is_current` and `detached`; porcelain
-contains name, branch and path. The TUI inspector also shows HEAD. Displays do
-not scan file status or compute ahead/behind counts. Sync and remove check the
-selected worktree when you act.
+```sh
+trench create feature/login            # prints the new worktree's path
+trench create feature/login --from develop
+trench sync feature/login --strategy rebase
+trench remove feature/login --delete-branch
+```
+
+`trench list` prints each worktree's branch and path. JSON records contain
+`worktree`, `branch`, `path`, `is_main`, `is_current` and `detached`;
+porcelain contains name, branch and path. Listing never scans file status or
+counts commits ahead and behind. Sync and remove check the worktree you name
+at the moment you act.
+
+Results go to stdout only when a script would capture them: the path from
+`create` and `switch`, and the output of `list`. Everything else, such as
+"Removed worktree feature-login", goes to stderr. Errors read `error: ...`
+and, where trench knows the next step, are followed by a `hint:` line.
+
+If you delete a worktree's directory by hand, Git keeps listing it. trench
+marks it `(missing)` in `list`, and `trench remove` cleans up what is left.
 
 Structured and preview flags are local to the commands that support them:
 

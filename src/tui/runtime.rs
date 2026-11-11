@@ -571,11 +571,12 @@ fn finish_remove_success(
     shown_at: Instant,
 ) {
     let refresh_result = refresh.request_post_operation();
-    let summary = match outcome.branch.as_deref() {
-        Some(branch) if outcome.branch_deleted => {
-            format!("Removed {} and deleted branch {branch}", outcome.worktree)
-        }
-        _ => format!("Removed {}", outcome.worktree),
+    // The list names worktrees by branch, so the message does too.
+    let label = outcome.branch.as_deref().unwrap_or(&outcome.worktree);
+    let summary = if outcome.branch_deleted {
+        format!("Removed {label} and deleted its branch")
+    } else {
+        format!("Removed {label}")
     };
     let (message, warning) = match refresh_result.as_ref() {
         Ok(()) => (summary, outcome.warning.clone()),
@@ -764,7 +765,7 @@ fn open_in_editor(
             notify(
                 state,
                 NoticeKind::Error,
-                "No editor configured. Set $EDITOR, or [editor] command in the trench config.",
+                "No editor configured. Set $EDITOR or [editor] command.",
             );
             return;
         }

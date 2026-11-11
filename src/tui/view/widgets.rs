@@ -182,7 +182,16 @@ pub fn dialog_frame(
     status: Option<Line<'static>>,
     theme: &Theme,
 ) {
-    frame.render_widget(Clear, layout.outer);
+    // One blank column on each side keeps the dimmed list from touching the
+    // border, which would read as text running into the dialog.
+    let cleared = Rect::new(
+        layout.outer.x.saturating_sub(1),
+        layout.outer.y,
+        layout.outer.width + 2,
+        layout.outer.height,
+    )
+    .intersection(frame.area());
+    frame.render_widget(Clear, cleared);
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
