@@ -71,8 +71,9 @@ pub enum Risk {
 /// A double-press arrives within a few hundred milliseconds. Without this
 /// pause its second press would accept a risk that was drawn one frame ago.
 /// Every path that puts a risk on screen starts it: opening the dialog on a
-/// risky worktree, Space adding a risk, a stale `y`, and returning to the
-/// form after a failed attempt (a hook may have changed the worktree).
+/// risky worktree, Space adding a risk, a stale `y`, returning to the form
+/// after a failed attempt (a hook may have changed the worktree), and risks
+/// becoming visible after the terminal was too small to show them.
 pub const CONFIRM_DELAY_AFTER_CHANGE: Duration = Duration::from_millis(800);
 
 /// Whether the local branch can be deleted along with the worktree.
@@ -136,6 +137,8 @@ pub struct RemoveDialog {
     validation_error: Option<String>,
     /// `y` does nothing before this moment.
     confirm_after: Option<Instant>,
+    /// Whether the last frame drawn showed every risk.
+    risks_displayed: bool,
 }
 
 impl RemoveDialog {
@@ -168,6 +171,7 @@ impl RemoveDialog {
             delete_branch: false,
             validation_error: None,
             confirm_after: None,
+            risks_displayed: false,
         };
         // `d y` typed in one burst would otherwise accept risks that were
         // on screen for a single frame.
@@ -185,6 +189,19 @@ impl RemoveDialog {
 
     fn start_confirm_pause(&mut self) {
         self.confirm_after = Some(Instant::now() + CONFIRM_DELAY_AFTER_CHANGE);
+    }
+
+    /// Record whether the frame drawn at `now` showed every risk.
+    ///
+    /// The pause exists so risks are on screen long enough to read. Time
+    /// spent while they were not drawn (a terminal too small, the dialog
+    /// covered by a running operation) does not count: the first frame that
+    /// shows them starts the pause again.
+    pub fn set_risks_displayed(&mut self, displayed: bool, now: Instant) {
+        if displayed && !self.risks_displayed && !self.risks().is_empty() {
+            self.confirm_after = Some(now + CONFIRM_DELAY_AFTER_CHANGE);
+        }
+        self.risks_displayed = displayed;
     }
 
     pub fn target(&self) -> &RemoveTarget {
@@ -825,6 +842,56 @@ mod tests {
         assert!(dialog.confirm_ready(opened + CONFIRM_DELAY_AFTER_CHANGE));
         assert_eq!(
             dialog.handle_key(RemoveKey::Confirm, opened + CONFIRM_DELAY_AFTER_CHANGE),
+            Some(RemoveEffect::Submit)
+        );
+    }
+
+    #[test]
+    fn risks_that_become_visible_again_restart_the_pause_from_that_frame() {
+        let fixture = Fixture::new("hidden-then-shown");
+        std::fs::write(fixture.worktree_path.join("notes.txt"), "work\n").unwrap();
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        let opened = Instant::now();
+
+        // The terminal was too small to show the risk for ten seconds: the
+        // pause that started when the dialog opened is long over.
+        dialog.set_risks_displayed(false, opened);
+        let enlarged = opened + CONFIRM_DELAY_AFTER_CHANGE * 12;
+        assert!(dialog.confirm_ready(enlarged));
+
+        // The first frame that shows the risk starts the pause again.
+        dialog.set_risks_displayed(true, enlarged);
+        assert_eq!(dialog.handle_key(RemoveKey::Confirm, enlarged), None);
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, enlarged + CONFIRM_DELAY_AFTER_CHANGE),
+            Some(RemoveEffect::Submit)
+        );
+
+        // Staying visible from frame to frame does not keep restarting it.
+        let later = enlarged + CONFIRM_DELAY_AFTER_CHANGE * 2;
+        dialog.set_risks_displayed(true, later);
+        assert!(dialog.confirm_ready(later));
+    }
+
+    #[test]
+    fn a_dialog_without_risk_needs_no_pause_when_it_becomes_visible() {
+        let fixture = Fixture::new("clean-shown");
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        let now = Instant::now();
+
+        dialog.set_risks_displayed(false, now);
+        dialog.set_risks_displayed(true, now);
+
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, now),
             Some(RemoveEffect::Submit)
         );
     }

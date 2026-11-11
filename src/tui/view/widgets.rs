@@ -337,27 +337,34 @@ pub fn wrap(value: &str, width: usize) -> Vec<String> {
     }
     let mut lines = Vec::new();
     let mut line = String::new();
+    let mut line_width = 0;
     for word in value.split_whitespace() {
-        let mut word = word.to_string();
+        // `rest` is a slice of the word, and widths are tracked as numbers,
+        // so a word of any length is walked once.
+        let mut rest = word;
+        let mut rest_width = text::width(rest);
         loop {
             let separator = usize::from(!line.is_empty());
-            if text::width(&line) + separator + text::width(&word) <= width {
+            if line_width + separator + rest_width <= width {
                 if separator == 1 {
                     line.push(' ');
                 }
-                line.push_str(&word);
+                line.push_str(rest);
+                line_width += separator + rest_width;
                 break;
             }
             if line.is_empty() {
                 // The word alone is wider than the line: split it.
-                let (head, rest) = text::split_at(&word, width);
+                let (head, tail) = text::split_at(rest, width);
+                rest_width -= text::width(head);
                 lines.push(head.to_string());
-                word = rest.to_string();
-                if word.is_empty() {
+                rest = tail;
+                if rest.is_empty() {
                     break;
                 }
             } else {
                 lines.push(std::mem::take(&mut line));
+                line_width = 0;
             }
         }
     }
@@ -462,6 +469,24 @@ mod tests {
         for line in wrap_clamped("alpha bravo charlie delta", 11, 2) {
             assert!(text::width(&line) <= 11, "{line}");
         }
+    }
+
+    #[test]
+    fn wrapping_one_enormous_word_takes_time_in_proportion_to_its_length() {
+        // A hook can print megabytes without a newline or a space. Wrapping
+        // must not copy the remainder for every line it produces.
+        let word = "x".repeat(1_000_000);
+        let started = std::time::Instant::now();
+
+        let lines = wrap(&word, 50);
+
+        assert_eq!(lines.len(), 20_000);
+        assert!(lines.iter().all(|line| line.len() == 50));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

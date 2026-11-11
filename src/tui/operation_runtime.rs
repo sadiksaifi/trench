@@ -133,14 +133,18 @@ where
 
     pub fn start(&mut self, request: OperationRequest) {
         while self.receiver.try_recv().is_ok() {}
-        let operation = match &request {
-            OperationRequest::Create(_) => OperationKind::Create,
-            OperationRequest::Sync(_) => OperationKind::Sync,
-            OperationRequest::Remove(_) => OperationKind::Remove,
+        let (operation, directory_missing) = match &request {
+            OperationRequest::Create(_) => (OperationKind::Create, false),
+            OperationRequest::Sync(_) => (OperationKind::Sync, false),
+            OperationRequest::Remove(remove) => {
+                (OperationKind::Remove, remove.plan.directory_missing())
+            }
         };
         let cancellation = CancellationToken::default();
         self.started_at = self.clock.now();
-        self.modal = Some(OperationModal::new(operation));
+        let mut modal = OperationModal::new(operation);
+        modal.set_directory_missing(directory_missing);
+        self.modal = Some(modal);
         self.cancellation = Some(cancellation.clone());
         self.launcher
             .launch(request, self.sender.clone(), cancellation);

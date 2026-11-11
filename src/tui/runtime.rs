@@ -304,7 +304,7 @@ fn build_create_dispatch(
 ) -> Result<CreateDispatch> {
     let repo = crate::git::discover_repo(cwd)?;
     let plan = CreatePlanner::discover(cwd, worktree_root, configured_base, HookPolicy::Run)?
-        .plan(&submission.branch, submission.from.as_deref())?;
+        .plan(&submission.selection, submission.from.as_deref())?;
     if matches!(plan.action, CreateAction::Navigate(_)) {
         return Ok(CreateDispatch::Navigate(WorktreeId::new(plan.path)));
     }
@@ -743,6 +743,20 @@ fn return_to_remove_form(state: &mut AppState, cwd: &Path, configured_base: Opti
     dialog.set_validation_error(error);
 }
 
+/// Tell the remove dialog whether the frame just drawn showed its risks.
+///
+/// Called after every draw. The dialog is hidden behind a running or failed
+/// operation, and shows a "too small" notice when the risks do not fit; in
+/// both cases the user has not been shown what `y` would accept.
+fn note_remove_risks_drawn(state: &mut AppState, now: Instant) {
+    let area = ratatui::layout::Rect::new(0, 0, state.viewport.width, state.viewport.height);
+    let covered = state.operation_modal.is_some() || state.viewport.is_tiny();
+    if let Some(dialog) = state.remove_dialog.as_mut() {
+        let displayed = !covered && view::remove_shows_every_risk(dialog, area);
+        dialog.set_risks_displayed(displayed, now);
+    }
+}
+
 /// Leave a finished failure: drop the forms and show what Git has now.
 fn close_after_failure(state: &mut AppState, refresh: &mut RefreshRuntime) {
     state.operation_modal = None;
@@ -930,6 +944,7 @@ pub fn run() -> Result<TuiExit> {
             terminal.draw(|frame| {
                 view::render(&state, frame, frame.area(), &selected_theme);
             })?;
+            note_remove_risks_drawn(&mut state, Instant::now());
 
             let _ = app::reduce(&mut state, Event::RefreshTick);
             refresh.tick();
@@ -1550,7 +1565,7 @@ mod tests {
             ..HooksConfig::default()
         };
         let submission = CreateSubmission {
-            branch: "feature/auth".to_string(),
+            selection: "feature/auth".to_string(),
             from: None,
         };
 
@@ -1906,7 +1921,7 @@ mod tests {
             .set_branch("feature/auth");
         let planned = build_create_dispatch(
             &CreateSubmission {
-                branch: "feature/auth".to_string(),
+                selection: "feature/auth".to_string(),
                 from: None,
             },
             repository.path(),
@@ -2120,6 +2135,107 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_remote_row_tracks_that_remote_even_when_a_local_branch_shadows_its_name() {
+        let repository = init_repo();
+        let root = repository.path().join("worktrees");
+        let repo_info = crate::git::discover_repo(repository.path()).unwrap();
+        let git_repo = git2::Repository::open(repository.path()).unwrap();
+        let commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+        git_repo.branch("foo", &commit, false).unwrap();
+        git_repo
+            .reference("refs/remotes/origin/origin/foo", commit.id(), false, "test")
+            .unwrap();
+        let mut state = AppState::new(Vec::new());
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main", "foo"],
+            ["origin/origin/foo"],
+            None,
+            Some("main"),
+            true,
+        ));
+        open_create_dialog(&mut state, &repo_info.name, &root, Some("main")).unwrap();
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .set_branch("origin/origin/foo");
+        let row = state
+            .create_dialog
+            .as_ref()
+            .unwrap()
+            .highlighted_row()
+            .unwrap();
+        assert_eq!(row.branch, "origin/foo");
+        assert!(matches!(row.kind, RowKind::Remote { .. }));
+
+        let effect = handle_create_input(
+            &mut state,
+            CreateKey::Enter,
+            repository.path(),
+            &root,
+            Some("main"),
+            None,
+        )
+        .unwrap();
+
+        let Some(CreateInputEffect::Start(request)) = effect else {
+            panic!("the highlighted remote branch should be created: {effect:?}")
+        };
+        let OperationRequest::Create(request) = *request else {
+            panic!("expected a create request")
+        };
+        assert_eq!(
+            request.plan.action,
+            CreateAction::TrackRemote("origin/origin/foo".to_string())
+        );
+        assert_eq!(request.plan.branch, "origin/foo");
+    }
+
+    #[test]
+    fn enter_creates_when_the_worktree_root_is_written_as_a_relative_path() {
+        let repository = init_repo();
+        let repo_info = crate::git::discover_repo(repository.path()).unwrap();
+        // As configured: `root = "../relative-wt"`, relative to the directory
+        // trench runs in. Planning normalizes it; the dialog must show and
+        // compare the same normalized path.
+        let cwd = std::env::current_dir().unwrap();
+        let absolute = cwd.parent().unwrap().join("trench-relative-root-test");
+        let relative = Path::new("../trench-relative-root-test");
+        let mut state = AppState::new(Vec::new());
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        ));
+        open_create_dialog(&mut state, &repo_info.name, relative, Some("main")).unwrap();
+        let dialog = state.create_dialog.as_mut().unwrap();
+        dialog.set_branch("new-topic");
+        assert_eq!(
+            dialog.planned_path("new-topic"),
+            absolute.join(&repo_info.name).join("new-topic"),
+            "the summary shows the directory that will really be used"
+        );
+
+        let effect = handle_create_input(
+            &mut state,
+            CreateKey::Enter,
+            repository.path(),
+            relative,
+            Some("main"),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(effect, Some(CreateInputEffect::Start(_))),
+            "{effect:?}: {:?}",
+            state.create_dialog.as_ref().unwrap().validation_error()
+        );
+    }
+
+    #[test]
     fn the_enter_gate_compares_the_branch_the_directory_and_the_base() {
         let repository = init_repo();
         let root = repository.path().join("worktrees");
@@ -2141,7 +2257,7 @@ mod tests {
         let plan_for = |branch: &str, from: Option<&str>, root: &Path| {
             build_create_dispatch(
                 &CreateSubmission {
-                    branch: branch.to_string(),
+                    selection: branch.to_string(),
                     from: from.map(ToOwned::to_owned),
                 },
                 repository.path(),
@@ -2272,7 +2388,7 @@ mod tests {
         let root = repository.path().join("worktrees");
         let dispatch = build_create_dispatch(
             &CreateSubmission {
-                branch: "feature/auth".to_string(),
+                selection: "feature/auth".to_string(),
                 from: None,
             },
             repository.path(),
@@ -2848,7 +2964,7 @@ mod tests {
         let start = || {
             let dispatch = build_create_dispatch(
                 &CreateSubmission {
-                    branch: "feature/fails".to_string(),
+                    selection: "feature/fails".to_string(),
                     from: None,
                 },
                 repository.path(),
@@ -2889,6 +3005,78 @@ mod tests {
             operation_modal_effect(&mut operation, ModalKey::Enter, area),
             Some(ModalEffect::ReturnToForm)
         );
+    }
+
+    #[test]
+    fn enlarging_the_terminal_does_not_let_y_accept_risks_it_just_revealed() {
+        let repository = init_repo();
+        let target_path = repository.path().join("worktrees").join("resize");
+        add_worktree(repository.path(), "resize", "resize", &target_path);
+        std::fs::write(target_path.join("feature.txt"), "feature\n").unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&target_path)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["add", "feature.txt"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "feature",
+        ]);
+        std::fs::write(target_path.join("dirty.txt"), "dirty\n").unwrap();
+        let target = WorktreeIdentity {
+            id: WorktreeId::new(&target_path),
+            worktree: "resize".to_string(),
+            branch: Some("resize".to_string()),
+            path: target_path.clone(),
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+            missing: false,
+        };
+        let mut state = AppState::new(vec![target.clone()]);
+        let resize = |state: &mut AppState, width, height| {
+            let _ = app::reduce(state, Event::ViewportChanged { width, height });
+        };
+        let press = |state: &mut AppState, key, at| {
+            handle_remove_input(state, key, repository.path(), Some("main"), None, at).unwrap()
+        };
+        let opened = Instant::now();
+        let pause = crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE;
+
+        // 40x10 cannot show both risks. The user waits there for a while.
+        resize(&mut state, 40, 10);
+        open_remove_dialog(&mut state, repository.path(), &target.id, Some("main")).unwrap();
+        note_remove_risks_drawn(&mut state, opened);
+        assert!(press(&mut state, RemoveKey::Space, opened).is_none());
+        let waited = opened + pause * 10;
+        note_remove_risks_drawn(&mut state, waited);
+        assert!(press(&mut state, RemoveKey::Confirm, waited).is_none());
+
+        // The terminal grows, one frame draws the risks, and `y` arrives.
+        resize(&mut state, 100, 30);
+        note_remove_risks_drawn(&mut state, waited);
+        assert!(
+            press(&mut state, RemoveKey::Confirm, waited).is_none(),
+            "the risks have been on screen for no time at all"
+        );
+        assert!(target_path.join("dirty.txt").exists());
+
+        note_remove_risks_drawn(&mut state, waited + pause);
+        assert!(matches!(
+            press(&mut state, RemoveKey::Confirm, waited + pause),
+            Some(RemoveInputEffect::Start(_))
+        ));
     }
 
     #[test]
@@ -2990,7 +3178,7 @@ mod tests {
         let worktree_root = create.root().join("worktrees");
         let request = build_create_dispatch(
             &CreateSubmission {
-                branch: "feature/new".to_string(),
+                selection: "feature/new".to_string(),
                 from: None,
             },
             create.root(),

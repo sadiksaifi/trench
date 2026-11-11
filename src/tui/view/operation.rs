@@ -71,7 +71,12 @@ pub fn render(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &The
         Paragraph::new::<Vec<Line>>(lines).style(theme.on_dialog(theme.text)),
         layout.content,
     );
-    widgets::hint_bar(frame, layout.hints, &hints(modal, scrollable), theme);
+    widgets::hint_bar(
+        frame,
+        layout.hints,
+        &hints(modal, scrollable, area.width),
+        theme,
+    );
 }
 
 /// A running or finished operation: stages, then the newest hook output.
@@ -151,7 +156,7 @@ fn failure_report(
         modal.operation(),
         *stage,
         *mutation_state,
-        retained_quarantine.is_some(),
+        modal.directory_missing(),
         true,
     )
     .unwrap_or("nothing was changed");
@@ -297,12 +302,21 @@ fn sentence(clause: &str) -> String {
     }
 }
 
-fn hints(modal: &OperationModal, scrollable: bool) -> Vec<Hint> {
+/// Below this width the hints use their short wording, so the one that
+/// says how to scroll is never the hint that gets dropped.
+const WIDE_HINTS: u16 = 60;
+
+fn hints(modal: &OperationModal, scrollable: bool, width: u16) -> Vec<Hint> {
     let mut hints = Vec::new();
     let failed = matches!(modal.status(), ModalStatus::Failed { .. });
+    let wide = width >= WIDE_HINTS;
     match modal.status() {
         ModalStatus::Failed { .. } if modal.can_return_to_form() => {
-            hints.push(Hint::new("Enter", "back to form", 0));
+            hints.push(Hint::new(
+                "Enter",
+                if wide { "back to form" } else { "back" },
+                0,
+            ));
             hints.push(Hint::new("Esc", "close", 1));
         }
         ModalStatus::Failed { .. } => hints.push(Hint::new("Enter", "close", 0)),
@@ -310,10 +324,10 @@ fn hints(modal: &OperationModal, scrollable: bool) -> Vec<Hint> {
         ModalStatus::Running | ModalStatus::Succeeded => {}
     }
     if scrollable {
-        hints.push(if failed {
-            Hint::new("↑/↓ PgUp/PgDn", "scroll", 2)
-        } else {
-            Hint::new("↑/↓", "scroll output", 2)
+        hints.push(match (failed, wide) {
+            (true, true) => Hint::new("↑/↓ PgUp/PgDn", "scroll", 2),
+            (true, false) => Hint::new("↑/↓", "scroll", 2),
+            (false, _) => Hint::new("↑/↓", "scroll output", 2),
         });
     }
     hints
@@ -533,7 +547,7 @@ mod tests {
                 " │ /wt/.trench-remove-1-0             │",
             ]
         );
-        assert_eq!(screen[9], " Enter close  ↑/↓ PgUp/PgDn scroll");
+        assert_eq!(screen[9], " Enter close  ↑/↓ scroll");
     }
 
     #[test]
@@ -599,6 +613,55 @@ mod tests {
             overflow,
             "scrolling stops at the end"
         );
+    }
+
+    #[test]
+    fn a_narrow_failure_dialog_still_says_how_to_reach_the_hidden_output() {
+        let mut modal = OperationModal::new(OperationKind::Create);
+        run(&mut modal, OperationStage::PreHook, Some(false));
+        for index in 0..12 {
+            output(&mut modal, &format!("hook line {index}"));
+        }
+        modal.fail(&OperationFailure {
+            stage: OperationStage::PreHook,
+            mutation_state: MutationState::NotStarted,
+            class: ErrorClass::Hook,
+            message: "command failed: `false` exited with code 1".to_string(),
+            retained_quarantine: None,
+        });
+
+        // Output is below the fold, so the hint that reveals it must survive
+        // at the narrowest width, next to both ways out.
+        assert_eq!(
+            screen(&mut show(modal.clone()), 40, 10)[9],
+            " Enter back  Esc close  ↑/↓ scroll"
+        );
+        assert_eq!(
+            screen(&mut show(modal), 100, 30)[29],
+            " Enter back to form  Esc close  ↑/↓ PgUp/PgDn scroll"
+        );
+    }
+
+    #[test]
+    fn the_prune_hint_is_shown_only_when_the_removed_worktree_had_no_directory() {
+        let mut gone = partial_failure("/wt/q");
+        gone.fail(&OperationFailure {
+            stage: OperationStage::Prune,
+            mutation_state: MutationState::PartiallyApplied,
+            class: ErrorClass::Io,
+            message: "I/O error".to_string(),
+            retained_quarantine: None,
+        });
+        let present = screen(&mut show(gone.clone()), 100, 30).join("\n");
+        assert!(
+            present.contains("check the worktree before retrying"),
+            "{present}"
+        );
+        assert!(!present.contains("git worktree prune"), "{present}");
+
+        gone.set_directory_missing(true);
+        let missing = screen(&mut show(gone), 100, 30).join("\n");
+        assert!(missing.contains("run `git worktree prune`"), "{missing}");
     }
 
     #[test]

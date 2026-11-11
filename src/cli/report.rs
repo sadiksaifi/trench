@@ -130,19 +130,21 @@ pub fn state_after_failure(
 /// What a failed operation left behind, in one clause.
 ///
 /// This is `state_after_failure`, plus the one case where the general advice
-/// points nowhere: a worktree whose directory was already gone has nothing to
-/// "check", and what remains is a half-deleted Git entry.
+/// points nowhere: removing a worktree whose directory was already gone
+/// (`directory_missing`). There is no worktree to "check", and what remains
+/// is a half-deleted Git entry. A removal that failed with the directory
+/// present keeps the general advice, because its files are what was touched.
 pub fn failure_state(
     operation: OperationKind,
     stage: OperationStage,
     state: MutationState,
-    retained: bool,
+    directory_missing: bool,
     failed_in_hook: bool,
 ) -> Option<&'static str> {
     if operation == OperationKind::Remove
         && stage == OperationStage::Prune
         && state == MutationState::PartiallyApplied
-        && !retained
+        && directory_missing
     {
         return Some(
             "part of the worktree's Git entry was removed; run `git worktree prune` to clear the rest",
@@ -151,7 +153,13 @@ pub fn failure_state(
     state_after_failure(operation, state, failed_in_hook)
 }
 
-pub fn operation_failure(operation: OperationKind, failure: &OperationFailure) -> Report {
+/// `directory_missing` says the operation was removing a worktree whose
+/// directory was already gone; it is false for every other operation.
+pub fn operation_failure(
+    operation: OperationKind,
+    failure: &OperationFailure,
+    directory_missing: bool,
+) -> Report {
     let hook = hook_name(operation, failure.stage)
         .filter(|_| matches!(failure.class, ErrorClass::Hook | ErrorClass::HookTimeout));
     let mut report = Report::new(match hook {
@@ -162,7 +170,7 @@ pub fn operation_failure(operation: OperationKind, failure: &OperationFailure) -
         operation,
         failure.stage,
         failure.mutation_state,
-        failure.retained_quarantine.is_some(),
+        directory_missing,
         hook.is_some(),
     ) {
         report = report.hint(state);
@@ -453,7 +461,11 @@ mod tests {
             "command failed: `bun install` exited with code 1",
         );
         assert_eq!(
-            plain(operation_failure(OperationKind::Create, &rolled_back)),
+            plain(operation_failure(
+                OperationKind::Create,
+                &rolled_back,
+                false
+            )),
             "error: post_create hook failed: `bun install` exited with code 1\n\
              hint: nothing was created; the worktree and branch were rolled back"
         );
@@ -465,7 +477,11 @@ mod tests {
             "command failed: `false` exited with code 1",
         );
         assert_eq!(
-            plain(operation_failure(OperationKind::Remove, &before_change)),
+            plain(operation_failure(
+                OperationKind::Remove,
+                &before_change,
+                false
+            )),
             "error: pre_remove hook failed: `false` exited with code 1\n\
              hint: nothing was changed"
         );
@@ -480,7 +496,7 @@ mod tests {
             "hook timed out after 1s",
         );
         assert_eq!(
-            plain(operation_failure(OperationKind::Create, &timed_out)),
+            plain(operation_failure(OperationKind::Create, &timed_out, false)),
             "error: pre_create hook timed out after 1s\n\
              hint: nothing was changed\n\
              hint: raise timeout_secs in [hooks.pre_create]"
@@ -496,7 +512,7 @@ mod tests {
             "removal plan no longer matches live Git state",
         );
         assert_eq!(
-            plain(operation_failure(OperationKind::Remove, &refused)),
+            plain(operation_failure(OperationKind::Remove, &refused, false)),
             "error: removal plan no longer matches live Git state"
         );
     }
@@ -511,7 +527,7 @@ mod tests {
         );
         partial.retained_quarantine = Some("/wt/.trench-remove-1-0".into());
         assert_eq!(
-            plain(operation_failure(OperationKind::Remove, &partial)),
+            plain(operation_failure(OperationKind::Remove, &partial, false)),
             "error: I/O error: Permission denied (os error 13)\n\
              hint: some changes were applied; check the worktree before retrying\n\
              hint: kept for recovery: /wt/.trench-remove-1-0"
@@ -527,23 +543,22 @@ mod tests {
             "I/O error: Permission denied (os error 13)",
         );
         assert_eq!(
-            plain(operation_failure(OperationKind::Remove, &half_retired)),
+            plain(operation_failure(OperationKind::Remove, &half_retired, true)),
             "error: I/O error: Permission denied (os error 13)\n\
              hint: part of the worktree's Git entry was removed; run `git worktree prune` to clear the rest"
         );
 
-        // With a quarantined directory there is something to check, so the
-        // general advice and the recovery path apply.
-        let mut quarantined = failure(
-            OperationStage::Prune,
-            MutationState::PartiallyApplied,
-            ErrorClass::Io,
-            "I/O error",
-        );
-        quarantined.retained_quarantine = Some("/wt/.trench-remove-1-0".into());
-        assert!(
-            plain(operation_failure(OperationKind::Remove, &quarantined))
-                .contains("check the worktree before retrying")
+        // The same stage and state with the directory present means its
+        // files were emptied and the directory restored. Pruning cannot help
+        // there, so the advice points at the worktree instead.
+        assert_eq!(
+            plain(operation_failure(
+                OperationKind::Remove,
+                &half_retired,
+                false
+            )),
+            "error: I/O error: Permission denied (os error 13)\n\
+             hint: some changes were applied; check the worktree before retrying"
         );
     }
 

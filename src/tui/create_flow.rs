@@ -103,7 +103,10 @@ pub enum CreateKey {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateSubmission {
-    pub branch: String,
+    /// The name handed to planning. For a remote-only branch this is the
+    /// remote ref (`origin/x`), not the local name the row shows, so
+    /// planning cannot mistake it for a local branch of a similar name.
+    pub selection: String,
     pub from: Option<String>,
 }
 
@@ -355,15 +358,17 @@ impl CreateDialog {
         }
         match row.kind {
             RowKind::New => Some(CreateSubmission {
-                branch: row.branch,
+                selection: row.branch,
                 from: Some(self.base()?.to_string()),
             }),
-            RowKind::Local | RowKind::Remote { .. } | RowKind::HasWorktree { .. } => {
-                Some(CreateSubmission {
-                    branch: row.branch,
-                    from: None,
-                })
-            }
+            RowKind::Remote { upstream } => Some(CreateSubmission {
+                selection: upstream,
+                from: None,
+            }),
+            RowKind::Local | RowKind::HasWorktree { .. } => Some(CreateSubmission {
+                selection: row.branch,
+                from: None,
+            }),
         }
     }
 
@@ -471,9 +476,7 @@ impl CreateDialog {
 
     /// Where a worktree for `branch` would be created, as the summary shows.
     pub fn planned_path(&self, branch: &str) -> PathBuf {
-        self.worktree_root
-            .join(&self.repository)
-            .join(paths::sanitize_branch(branch))
+        crate::worktree_policy::planned_path(&self.worktree_root, &self.repository, branch)
     }
 
     fn existing_rows(&self) -> Vec<BranchRow> {
@@ -676,7 +679,7 @@ mod tests {
         assert_eq!(
             dialog.handle_key(CreateKey::Enter),
             Some(CreateEffect::Submit(CreateSubmission {
-                branch: "feature/login".to_string(),
+                selection: "feature/login".to_string(),
                 from: Some("origin/main".to_string()),
             }))
         );
@@ -702,7 +705,7 @@ mod tests {
         assert_eq!(
             dialog.handle_key(CreateKey::Enter),
             Some(CreateEffect::Submit(CreateSubmission {
-                branch: "feature/login-page".to_string(),
+                selection: "feature/login-page".to_string(),
                 from: None,
             }))
         );
@@ -737,7 +740,9 @@ mod tests {
         assert_eq!(
             dialog.handle_key(CreateKey::Enter),
             Some(CreateEffect::Submit(CreateSubmission {
-                branch: "feature/login-v2".to_string(),
+                // Planning is given the remote ref, so it cannot confuse the
+                // row with a local branch of a similar name.
+                selection: "origin/feature/login-v2".to_string(),
                 from: None,
             }))
         );
@@ -909,7 +914,7 @@ mod tests {
         assert_eq!(
             dialog.handle_key(CreateKey::Enter),
             Some(CreateEffect::Submit(CreateSubmission {
-                branch: "feature/login".to_string(),
+                selection: "feature/login".to_string(),
                 from: Some("release".to_string()),
             }))
         );
@@ -1024,7 +1029,7 @@ mod tests {
         assert_eq!(
             dialog.handle_key(CreateKey::Enter),
             Some(CreateEffect::Submit(CreateSubmission {
-                branch: "release".to_string(),
+                selection: "release".to_string(),
                 from: None,
             }))
         );

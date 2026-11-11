@@ -416,7 +416,9 @@ fn run_create(
         Ok(operation::OperationOutcome::Sync(_)) => {
             unreachable!("create request returned a sync outcome")
         }
-        Err(failure) => exit_operation_failure(operation::OperationKind::Create, &failure, json),
+        Err(failure) => {
+            exit_operation_failure(operation::OperationKind::Create, &failure, json, false)
+        }
     }
 }
 
@@ -433,6 +435,7 @@ fn exit_operation_failure(
     kind: operation::OperationKind,
     failure: &operation::OperationFailure,
     json: bool,
+    directory_missing: bool,
 ) -> ! {
     if json {
         match output::json::format_json_value(failure) {
@@ -443,7 +446,7 @@ fn exit_operation_failure(
             ),
         }
     } else {
-        cli::report::operation_failure(kind, failure).print();
+        cli::report::operation_failure(kind, failure, directory_missing).print();
     }
     match failure.class {
         operation::ErrorClass::Hook => ExitCode::HookFailed.exit(),
@@ -499,6 +502,7 @@ fn run_remove(request: RemoveCliRequest<'_>) -> anyhow::Result<()> {
             Err(error) => fail(Report::new(error.to_string()), ExitCode::GeneralError),
         };
     let worktree = assessment.worktree().to_string();
+    let directory_missing = assessment.directory_missing();
     let options = RemoveOptions {
         yes: request.yes,
         force_worktree: request.force_worktree,
@@ -569,9 +573,12 @@ fn run_remove(request: RemoveCliRequest<'_>) -> anyhow::Result<()> {
             Ok(())
         }
         Ok(_) => unreachable!("remove request returned a create outcome"),
-        Err(failure) => {
-            exit_operation_failure(operation::OperationKind::Remove, &failure, request.json)
-        }
+        Err(failure) => exit_operation_failure(
+            operation::OperationKind::Remove,
+            &failure,
+            request.json,
+            directory_missing,
+        ),
     }
 }
 

@@ -832,6 +832,11 @@ impl RemovalAssessment {
 }
 
 impl RemovalPlan {
+    /// The worktree directory is gone; only Git's record will be removed.
+    pub fn directory_missing(&self) -> bool {
+        self.directory_missing
+    }
+
     /// The `--dry-run` preview. `hooks` describes the configured hooks.
     pub fn render_preview(&self, hooks: &str) -> String {
         let action = if self.directory_missing {

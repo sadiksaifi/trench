@@ -4,6 +4,23 @@ use crate::operation::{
     MutationState, OperationEvent, OperationFailure, OperationKind, OperationStage,
 };
 
+/// The most characters of one hook output line the dialog keeps.
+///
+/// The dialog is redrawn many times a second, and every stored line may be
+/// measured and wrapped on each frame. A hook that prints megabytes without
+/// a newline must not make that work unbounded.
+pub const MAX_OUTPUT_LINE_CHARS: usize = 2_000;
+
+fn shorten_output_line(line: String) -> String {
+    match line.char_indices().nth(MAX_OUTPUT_LINE_CHARS) {
+        None => line,
+        Some((cut, _)) => {
+            let dropped = line[cut..].chars().count();
+            format!("{}… ({dropped} more characters)", &line[..cut])
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageView {
     pub stage: OperationStage,
@@ -59,6 +76,8 @@ pub struct OperationModal {
     report_scroll_limit: usize,
     /// Rows one PgUp or PgDn moves: the height of the dialog's text area.
     page: usize,
+    /// The operation removes a worktree whose directory is already gone.
+    directory_missing: bool,
     warnings: Vec<String>,
     status: ModalStatus,
 }
@@ -77,6 +96,7 @@ impl OperationModal {
             report_scroll: 0,
             report_scroll_limit: 0,
             page: 1,
+            directory_missing: false,
             warnings: Vec::new(),
             status: ModalStatus::Running,
         }
@@ -100,7 +120,7 @@ impl OperationModal {
                 if self.hook_scroll > 0 {
                     self.hook_scroll = self.hook_scroll.saturating_add(1);
                 }
-                self.hook_lines.push(line);
+                self.hook_lines.push(shorten_output_line(line));
             }
             OperationEvent::StageFinished {
                 stage,
@@ -250,6 +270,14 @@ impl OperationModal {
         self.status == ModalStatus::Running && self.current_stage.is_some()
     }
 
+    pub fn directory_missing(&self) -> bool {
+        self.directory_missing
+    }
+
+    pub fn set_directory_missing(&mut self, missing: bool) {
+        self.directory_missing = missing;
+    }
+
     pub fn hook_lines(&self) -> &[String] {
         &self.hook_lines
     }
@@ -386,6 +414,40 @@ mod tests {
         assert!(!modal.can_return_to_form());
         assert_eq!(modal.handle_key(ModalKey::Enter), Some(ModalEffect::Close));
         assert_eq!(modal.handle_key(ModalKey::Escape), Some(ModalEffect::Close));
+    }
+
+    #[test]
+    fn an_enormous_output_line_is_stored_shortened_and_says_how_much_was_cut() {
+        let mut modal = OperationModal::new(OperationKind::Create);
+        modal.apply(OperationEvent::Output {
+            hook: crate::hooks::HookEvent::PreCreate,
+            step: crate::hooks::types::HookStep::Shell,
+            stream: crate::hooks::types::OutputStream::Stdout,
+            line: "x".repeat(1_000_000),
+        });
+        modal.apply(OperationEvent::Output {
+            hook: crate::hooks::HookEvent::PreCreate,
+            step: crate::hooks::types::HookStep::Shell,
+            stream: crate::hooks::types::OutputStream::Stdout,
+            line: "short".to_string(),
+        });
+
+        let stored = &modal.hook_lines()[0];
+        assert!(
+            stored.chars().count() < MAX_OUTPUT_LINE_CHARS + 60,
+            "{}",
+            stored.len()
+        );
+        assert!(stored.starts_with(&"x".repeat(MAX_OUTPUT_LINE_CHARS)));
+        assert!(
+            stored.ends_with(&format!(
+                "… ({} more characters)",
+                1_000_000 - MAX_OUTPUT_LINE_CHARS
+            )),
+            "{}",
+            &stored[stored.len() - 60..]
+        );
+        assert_eq!(modal.hook_lines()[1], "short");
     }
 
     #[test]

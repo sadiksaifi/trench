@@ -377,6 +377,30 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_ref_selected_by_its_full_name_is_not_mistaken_for_a_local_branch() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        commit_on_new_branch(repo.path(), "foo");
+        let git = git2::Repository::open(repo.path()).unwrap();
+        let head = git.head().unwrap().peel_to_commit().unwrap().id();
+        git.reference("refs/remotes/origin/origin/foo", head, false, "test")
+            .unwrap();
+        let planner =
+            CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        // The remote branch is itself called `origin/foo`, and a local `foo`
+        // exists. The full remote ref names it without ambiguity.
+        let plan = planner.plan("origin/origin/foo", None).unwrap();
+
+        assert_eq!(
+            plan.action,
+            CreateAction::TrackRemote("origin/origin/foo".to_string())
+        );
+        assert_eq!(plan.branch, "origin/foo");
+    }
+
+    #[test]
     fn a_remote_only_branch_is_still_reached_by_either_spelling() {
         let repo = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
