@@ -1,4 +1,3 @@
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::ser::{Serialize, SerializeStruct, Serializer};
@@ -77,25 +76,6 @@ impl Serialize for CreatePlan {
         output.serialize_field("tracking", &self.tracking)?;
         output.serialize_field("hook_policy", &self.hook_policy)?;
         output.end()
-    }
-}
-
-impl fmt::Display for CreatePlan {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let base = self.base.as_deref().unwrap_or("(none)");
-        let tracking = self.tracking.as_deref().unwrap_or("(none)");
-        let hook_policy = match self.hook_policy {
-            HookPolicy::Run => "run",
-            HookPolicy::Skip => "skip",
-        };
-        writeln!(f, "Dry run — no changes will be made\n")?;
-        writeln!(f, "  Action:       {}", self.action.name())?;
-        writeln!(f, "  Branch:       {}", self.branch)?;
-        writeln!(f, "  Worktree:     {}", self.worktree)?;
-        writeln!(f, "  Path:         {}", self.path.display())?;
-        writeln!(f, "  Base:         {base}")?;
-        writeln!(f, "  Tracking:     {tracking}")?;
-        writeln!(f, "  Hook policy:  {hook_policy}")
     }
 }
 
@@ -549,27 +529,6 @@ mod tests {
                 "tracking": null,
                 "hook_policy": "run"
             })
-        );
-    }
-
-    #[test]
-    fn human_preview_reports_raw_plan_fields() {
-        let plan = CreatePlan {
-            dry_run: true,
-            action: CreateAction::TrackRemote("origin/release".to_string()),
-            branch: "release".to_string(),
-            worktree: "release".to_string(),
-            path: PathBuf::from("/worktrees/trench/release"),
-            base: None,
-            tracking: Some("origin/release".to_string()),
-            hook_policy: HookPolicy::Skip,
-            preconditions: Vec::new(),
-            source_oid: None,
-        };
-
-        assert_eq!(
-            plan.to_string(),
-            "Dry run — no changes will be made\n\n  Action:       track_remote\n  Branch:       release\n  Worktree:     release\n  Path:         /worktrees/trench/release\n  Base:         (none)\n  Tracking:     origin/release\n  Hook policy:  skip\n"
         );
     }
 }

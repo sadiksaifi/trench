@@ -82,7 +82,7 @@ fn executable(path: &Path, contents: &str) {
 }
 
 #[test]
-fn direct_switch_prints_a_composable_path_and_parent_shell_hint_without_state() {
+fn direct_switch_prints_only_a_composable_path_when_piped_and_keeps_no_state() {
     let root = tempfile::tempdir().unwrap();
     let repository = root.path().join("repository");
     let worktrees = root.path().join("worktrees");
@@ -101,10 +101,8 @@ fn direct_switch_prints_a_composable_path_and_parent_shell_hint_without_state() 
         String::from_utf8(output.stdout).unwrap(),
         format!("{}\n", path.display())
     );
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        "hint: a child process cannot change its parent shell; use `tn switch <worktree>` to cd\n"
-    );
+    // The `tn` hint is for a person at a prompt. A pipe gets the path alone.
+    assert!(output.stderr.is_empty());
     assert!(!repository.join(".xdg/data/trench/trench.db").exists());
 }
 
@@ -122,7 +120,7 @@ fn switch_outside_a_repository_reports_the_git_error_and_actionable_hint() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("not a git repository"), "{stderr}");
     assert!(
-        stderr.contains("hint: Run `trench` inside a Git worktree."),
+        stderr.contains("hint: run trench inside a Git repository"),
         "{stderr}"
     );
 }

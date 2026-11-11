@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::config::HooksConfig;
 use crate::hooks::{HookEnvContext, HookEvent};
+use crate::output::human;
 use crate::worktree_catalog::{CatalogError, WorktreeCatalog};
 use crate::{git, hooks};
 
@@ -797,93 +798,83 @@ impl RemovalOutcome {
     }
 }
 
-impl fmt::Display for RemovalPlan {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_human_outcome(formatter, "Would remove", self, false, None)
-    }
-}
-
-impl fmt::Display for RemovalOutcome {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let action = if self.dry_run {
-            "Would remove"
-        } else {
-            "Removed"
-        };
-        write!(
-            formatter,
-            "{action} worktree '{}' at {}",
+impl RemovalAssessment {
+    /// The question an interactive `trench remove` asks before acting.
+    pub fn prompt(&self, delete_branch: bool) -> String {
+        let mut prompt = format!(
+            "Remove worktree {} at {}",
             self.worktree,
             self.path.display()
-        )?;
-        match (&self.branch, self.delete_branch, self.branch_deleted) {
-            (Some(branch), _, _) if !self.branch_present => {
-                write!(formatter, "; local branch '{branch}' already absent")?
-            }
-            (Some(branch), true, true) => write!(formatter, "; deleted local branch '{branch}'")?,
-            (Some(branch), true, false) => {
-                write!(formatter, "; local branch '{branch}' selected for deletion")?
-            }
-            (Some(branch), false, _) => write!(formatter, "; kept local branch '{branch}'")?,
-            (None, _, _) => write!(formatter, "; detached HEAD (no local branch)")?,
+        );
+        if let (true, Some(branch)) = (delete_branch, self.branch.as_deref()) {
+            prompt.push_str(&format!(" and delete branch {branch}"));
         }
-        write!(
-            formatter,
-            "; --yes={}; confirmation={}; --force-worktree={} (applied={}); --delete-branch={}; --force-branch={} (applied={}); --no-hooks={}",
-            self.yes,
-            self.confirmation,
-            self.force_worktree,
-            self.force_worktree_applied,
-            self.delete_branch,
-            self.force_branch,
-            self.force_branch_applied,
-            self.no_hooks,
-        )?;
-        if let Some(warning) = &self.warning {
-            write!(formatter, "; warning: {warning}")?;
-        }
-        Ok(())
+        prompt.push('?');
+        prompt
     }
 }
 
-fn write_human_outcome(
-    formatter: &mut fmt::Formatter<'_>,
-    action: &str,
-    plan: &RemovalPlan,
-    branch_deleted: bool,
-    warning: Option<&str>,
-) -> fmt::Result {
-    write!(
-        formatter,
-        "{action} worktree '{}' at {}",
-        plan.worktree,
-        plan.path.display()
-    )?;
-    match (&plan.branch, plan.delete_branch, branch_deleted) {
-        (Some(branch), _, _) if !plan.branch_present => {
-            write!(formatter, "; local branch '{branch}' already absent")?
+impl RemovalPlan {
+    /// The `--dry-run` preview. `hooks` describes the configured hooks.
+    pub fn render_preview(&self, hooks: &str) -> String {
+        let action = if self.directory_missing {
+            format!("Would remove the Git entry for worktree {}", self.worktree)
+        } else {
+            format!("Would remove worktree {}", self.worktree)
+        };
+        let branch = match self.branch.as_deref() {
+            None => "detached".to_string(),
+            Some(branch) if !self.branch_present => format!("{branch} (already gone)"),
+            Some(branch) if !self.delete_branch => format!("{branch} (kept)"),
+            Some(branch) => match self.merged {
+                Some(true) => format!("{branch} (would be deleted)"),
+                Some(false) => format!("{branch} (would be deleted, not merged)"),
+                None => format!("{branch} (would be deleted, merge status unknown)"),
+            },
+        };
+        let mut fields = vec![("Branch", branch)];
+        if self.directory_missing {
+            fields.push(("Path", format!("{}  (missing)", self.path.display())));
+        } else {
+            fields.push(("Path", self.path.display().to_string()));
+            fields.push((
+                "Dirty",
+                if self.dirty {
+                    "yes, changes would be discarded".to_string()
+                } else {
+                    "no".to_string()
+                },
+            ));
         }
-        (Some(branch), true, true) => write!(formatter, "; deleted local branch '{branch}'")?,
-        (Some(branch), true, false) => write!(formatter, "; would delete local branch '{branch}'")?,
-        (Some(branch), false, _) => write!(formatter, "; would keep local branch '{branch}'")?,
-        (None, _, _) => write!(formatter, "; detached HEAD (no local branch)")?,
+        fields.push(("Hooks", hooks.to_string()));
+        human::render_preview(&action, &fields)
     }
-    write!(
-        formatter,
-        "; --yes={}; confirmation={}; --force-worktree={} (applied={}); --delete-branch={}; --force-branch={} (applied={}); --no-hooks={}",
-        plan.yes,
-        plan.confirmation,
-        plan.force_worktree,
-        plan.force_worktree_applied,
-        plan.delete_branch,
-        plan.force_branch,
-        plan.force_branch_applied,
-        plan.no_hooks,
-    )?;
-    if let Some(warning) = warning {
-        write!(formatter, "; warning: {warning}")?;
+}
+
+impl RemovalOutcome {
+    /// What the removal did, one fact per line.
+    pub fn summary_lines(&self) -> Vec<String> {
+        let mut lines = vec![if self.directory_missing {
+            format!(
+                "Removed the Git entry for worktree {}; its directory was already gone",
+                self.worktree
+            )
+        } else {
+            format!("Removed worktree {}", self.worktree)
+        }];
+        match self.branch.as_deref() {
+            Some(branch) if !self.branch_present => {
+                lines.push(format!("Branch {branch} was already gone"));
+            }
+            Some(branch) if self.branch_deleted => lines.push(format!("Deleted branch {branch}")),
+            Some(branch) => lines.push(format!("Kept branch {branch}")),
+            None => {}
+        }
+        if self.force_worktree_applied {
+            lines.push("Discarded uncommitted changes".to_string());
+        }
+        lines
     }
-    Ok(())
 }
 
 #[derive(Debug, thiserror::Error, Serialize)]
@@ -3511,13 +3502,143 @@ mod tests {
         assert_eq!(value["hook_policy"], "skip");
         assert!(value.get("repo_path").is_none());
         assert!(value.get("head_oid").is_none());
+    }
 
-        let human = plan.to_string();
-        assert!(human.contains("--yes=true"));
-        assert!(human.contains("confirmation=dry_run"));
-        assert!(human.contains("--force-worktree=true (applied=false)"));
-        assert!(human.contains("--delete-branch=true"));
-        assert!(human.contains("--force-branch=true (applied=false)"));
-        assert!(human.contains("--no-hooks=true"));
+    #[test]
+    fn human_preview_states_what_would_happen_without_echoing_flags() {
+        let fixture = Fixture::new("feature/preview");
+        let path = fixture.assess().path().display().to_string();
+        let kept = fixture
+            .assess()
+            .authorize(RemoveOptions {
+                dry_run: true,
+                ..RemoveOptions::default()
+            })
+            .unwrap();
+        assert_eq!(
+            kept.render_preview("none configured"),
+            format!(
+                "Dry run: nothing was changed.\n\n\
+                 Would remove worktree feature-preview\n\
+                 \x20 Branch  feature/preview (kept)\n\
+                 \x20 Path    {path}\n\
+                 \x20 Dirty   no\n\
+                 \x20 Hooks   none configured\n"
+            )
+        );
+
+        std::fs::write(fixture.linked.join("untracked"), "dirty").unwrap();
+        let forced = fixture
+            .assess()
+            .authorize(RemoveOptions {
+                dry_run: true,
+                force_worktree: true,
+                delete_branch: true,
+                ..RemoveOptions::default()
+            })
+            .unwrap()
+            .render_preview("pre_remove");
+        assert!(
+            forced.contains("Branch  feature/preview (would be deleted)"),
+            "{forced}"
+        );
+        assert!(
+            forced.contains("Dirty   yes, changes would be discarded"),
+            "{forced}"
+        );
+        assert!(!forced.contains("--"), "{forced}");
+    }
+
+    #[test]
+    fn human_preview_marks_a_missing_directory_and_an_absent_branch() {
+        let fixture = Fixture::new("feature/stale");
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        let missing = fixture
+            .assess()
+            .authorize(RemoveOptions {
+                dry_run: true,
+                ..RemoveOptions::default()
+            })
+            .unwrap()
+            .render_preview("none configured");
+
+        assert!(
+            missing.contains("Would remove the Git entry for worktree feature-stale"),
+            "{missing}"
+        );
+        assert!(missing.contains("  (missing)\n"), "{missing}");
+        assert!(!missing.contains("Dirty"), "{missing}");
+    }
+
+    #[test]
+    fn human_outcome_is_one_fact_per_line() {
+        let fixture = Fixture::new("feature/outcome");
+        let plan = fixture
+            .assess()
+            .authorize(RemoveOptions {
+                yes: true,
+                delete_branch: true,
+                ..RemoveOptions::default()
+            })
+            .unwrap();
+        let outcome = |branch_deleted, warning: Option<&str>| {
+            RemovalOutcome::from_plan(
+                &plan,
+                RemovalHooksStatus::None,
+                RemovalMutationState::Applied,
+                branch_deleted,
+                warning.map(ToOwned::to_owned),
+            )
+        };
+
+        assert_eq!(
+            outcome(true, None).summary_lines(),
+            [
+                "Removed worktree feature-outcome",
+                "Deleted branch feature/outcome"
+            ]
+        );
+        let mut kept = outcome(false, None);
+        kept.delete_branch = false;
+        kept.force_worktree_applied = true;
+        assert_eq!(
+            kept.summary_lines(),
+            [
+                "Removed worktree feature-outcome",
+                "Kept branch feature/outcome",
+                "Discarded uncommitted changes"
+            ]
+        );
+        let mut stale = outcome(false, None);
+        stale.delete_branch = false;
+        stale.directory_missing = true;
+        stale.branch_present = false;
+        assert_eq!(
+            stale.summary_lines(),
+            [
+                "Removed the Git entry for worktree feature-outcome; its directory was already gone",
+                "Branch feature/outcome was already gone"
+            ]
+        );
+        let mut detached = outcome(false, None);
+        detached.branch = None;
+        assert_eq!(
+            detached.summary_lines(),
+            ["Removed worktree feature-outcome"]
+        );
+    }
+
+    #[test]
+    fn prompt_names_the_branch_only_when_it_will_be_deleted() {
+        let fixture = Fixture::new("feature/prompt");
+        let path = fixture.assess().path().display().to_string();
+        assert_eq!(
+            fixture.assess().prompt(false),
+            format!("Remove worktree feature-prompt at {path}?")
+        );
+        assert_eq!(
+            fixture.assess().prompt(true),
+            format!("Remove worktree feature-prompt at {path} and delete branch feature/prompt?")
+        );
     }
 }

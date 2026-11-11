@@ -41,6 +41,8 @@ pub enum CatalogError {
         selector: String,
         matches: Vec<PathBuf>,
     },
+    #[error("the directory of worktree {worktree} is missing: {path}", path = path.display())]
+    DirectoryMissing { worktree: String, path: PathBuf },
 }
 
 pub struct WorktreeCatalog {
@@ -110,6 +112,21 @@ impl WorktreeCatalog {
                 detached: identity.detached,
             })
             .collect()
+    }
+
+    /// Resolve a worktree that a shell or editor is about to enter.
+    ///
+    /// Git keeps listing a worktree after its directory is deleted by hand.
+    /// Handing that path to `cd` or an editor fails later with a worse error.
+    pub fn resolve_present(&self, selector: &str) -> Result<&WorktreeIdentity, CatalogError> {
+        let identity = self.resolve(selector)?;
+        if identity.missing {
+            return Err(CatalogError::DirectoryMissing {
+                worktree: identity.worktree.clone(),
+                path: identity.path.clone(),
+            });
+        }
+        Ok(identity)
     }
 
     pub fn resolve(&self, selector: &str) -> Result<&WorktreeIdentity, CatalogError> {

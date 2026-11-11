@@ -119,7 +119,7 @@ fn dry_run_human_output_is_stdout_only_and_never_prompts() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         format!(
-            "Dry run - no changes will be made\n  Worktree: feature-topic\n  Branch:   feature/topic\n  Path:     {}\n  Base:     main\n  Strategy: merge\n  Hooks:    enabled\n",
+            "Dry run: nothing was changed.\n\nWould merge main into feature/topic\n  Path   {}\n  Now    0 ahead, 0 behind\n  Hooks  none configured\n",
             worktree.display()
         )
     );
@@ -389,7 +389,7 @@ fn sync_help_exposes_only_the_single_target_contract() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     for option in [
-        "<BRANCH>",
+        "<WORKTREE>",
         "--strategy",
         "--base",
         "--no-hooks",

@@ -423,7 +423,7 @@ fn post_create_failure_preserves_an_existing_local_branch() {
 }
 
 #[test]
-fn create_success_human_output_is_only_the_planned_path() {
+fn create_success_prints_the_path_on_stdout_and_one_summary_line_on_stderr() {
     let repo = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
@@ -440,7 +440,10 @@ fn create_success_human_output_is_only_the_planned_path() {
         String::from_utf8_lossy(&output.stdout),
         format!("{}\n", expected.display())
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "Created feature/human (new branch from main)\n"
+    );
 }
 
 #[test]

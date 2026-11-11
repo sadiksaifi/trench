@@ -84,25 +84,6 @@ pub struct SyncPreview {
     pub plan: SyncPlan,
 }
 
-impl std::fmt::Display for SyncPreview {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(formatter, "Dry run - no changes will be made")?;
-        writeln!(formatter, "  Worktree: {}", self.plan.target)?;
-        writeln!(formatter, "  Branch:   {}", self.plan.branch)?;
-        writeln!(formatter, "  Path:     {}", self.plan.path.display())?;
-        writeln!(formatter, "  Base:     {}", self.plan.base)?;
-        writeln!(formatter, "  Strategy: {}", self.plan.strategy)?;
-        write!(
-            formatter,
-            "  Hooks:    {}",
-            match self.plan.hook_policy {
-                HookPolicy::Run => "enabled",
-                HookPolicy::Skip => "skipped",
-            }
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SyncOutcome {
     pub target: String,
@@ -114,26 +95,6 @@ pub struct SyncOutcome {
     pub after: AheadBehind,
     pub mutation_state: MutationState,
     pub elapsed: Duration,
-}
-
-impl std::fmt::Display for SyncOutcome {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            formatter,
-            "Synced '{}' via {} onto {}",
-            self.target, self.strategy, self.base
-        )?;
-        writeln!(
-            formatter,
-            "  before: ahead={}, behind={}",
-            self.before.ahead, self.before.behind
-        )?;
-        write!(
-            formatter,
-            "  after:  ahead={}, behind={}",
-            self.after.ahead, self.after.behind
-        )
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,9 +204,11 @@ pub enum SyncPlanError {
 impl SyncPlanError {
     pub fn class(&self) -> SyncErrorClass {
         match self {
-            Self::Catalog(CatalogError::NotFound { .. } | CatalogError::Ambiguous { .. }) => {
-                SyncErrorClass::InvalidTarget
-            }
+            Self::Catalog(
+                CatalogError::NotFound { .. }
+                | CatalogError::Ambiguous { .. }
+                | CatalogError::DirectoryMissing { .. },
+            ) => SyncErrorClass::InvalidTarget,
             Self::DefaultBase(_) | Self::ExplicitBaseNotFound { .. } => SyncErrorClass::InvalidBase,
             Self::Detached { .. } => SyncErrorClass::Detached,
             Self::Dirty { .. } => SyncErrorClass::Dirty,
@@ -292,7 +255,7 @@ impl SyncPlanner {
         hook_policy: HookPolicy,
     ) -> Result<SyncPlan, SyncPlanError> {
         let catalog = WorktreeCatalog::discover(&self.cwd)?;
-        let target = catalog.resolve(selector)?;
+        let target = catalog.resolve_present(selector)?;
         if target.detached || target.branch.is_none() {
             return Err(SyncPlanError::Detached {
                 target: target.worktree.clone(),

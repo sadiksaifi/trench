@@ -43,6 +43,15 @@ fn home_dir_path() -> Result<PathBuf> {
         .context("HOME must be set to an absolute path")
 }
 
+/// The home directory as worktree paths spell it.
+///
+/// Worktree paths are canonical, so `HOME` is canonicalized too; otherwise a
+/// symlinked home (`/var` on macOS) would never match as a prefix.
+pub fn home_dir() -> Option<PathBuf> {
+    let home = home_dir_path().ok()?;
+    Some(home.canonicalize().unwrap_or(home))
+}
+
 fn env_dir_path(env_var: &str) -> Option<PathBuf> {
     std::env::var_os(env_var).and_then(|value| {
         let path = PathBuf::from(value);

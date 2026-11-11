@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-#[cfg(test)]
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -132,6 +131,51 @@ impl Emitter for TerminalEmitter {
     fn emit(&self, event: OperationEvent) {
         if let OperationEvent::Output { line, .. } = event {
             eprintln!("{line}");
+        }
+    }
+}
+
+/// Prints hook output under one `<hook> hook:` header per hook.
+#[derive(Debug, Default)]
+pub struct HookOutputLabels {
+    last: Mutex<Option<crate::hooks::HookEvent>>,
+}
+
+impl HookOutputLabels {
+    pub fn print(&self, hook: &crate::hooks::HookEvent, line: &str) {
+        let mut stderr = std::io::stderr().lock();
+        let _ = self.write(&mut stderr, hook, line);
+    }
+
+    fn write(
+        &self,
+        out: &mut dyn std::io::Write,
+        hook: &crate::hooks::HookEvent,
+        line: &str,
+    ) -> std::io::Result<()> {
+        let mut last = self.last.lock().unwrap_or_else(|error| error.into_inner());
+        if last.as_ref() != Some(hook) {
+            writeln!(out, "{} hook:", hook.as_str())?;
+            *last = Some(*hook);
+        }
+        writeln!(out, "  {line}")
+    }
+}
+
+/// The emitter for human CLI output: labeled hook output and warnings.
+#[derive(Debug, Default)]
+pub struct HumanEmitter {
+    labels: HookOutputLabels,
+}
+
+impl Emitter for HumanEmitter {
+    fn emit(&self, event: OperationEvent) {
+        match event {
+            OperationEvent::Output { hook, line, .. } => self.labels.print(&hook, &line),
+            OperationEvent::Warning { message, .. } => {
+                crate::output::human::print_warning(&message);
+            }
+            _ => {}
         }
     }
 }

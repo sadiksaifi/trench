@@ -10,7 +10,7 @@ pub struct SwitchResult {
 
 pub fn execute(identifier: &str, cwd: &Path) -> Result<SwitchResult, CatalogError> {
     let catalog = WorktreeCatalog::discover(cwd)?;
-    let identity = catalog.resolve(identifier)?;
+    let identity = catalog.resolve_present(identifier)?;
     Ok(SwitchResult {
         path: identity.path.to_string_lossy().into_owned(),
         name: identity.worktree.clone(),

@@ -96,7 +96,7 @@ impl OpenPlan {
 
 pub fn resolve_path(cwd: &Path, selector: &str) -> Result<PathBuf, CatalogError> {
     Ok(WorktreeCatalog::discover(cwd)?
-        .resolve(selector)?
+        .resolve_present(selector)?
         .path
         .clone())
 }
