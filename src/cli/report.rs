@@ -150,6 +150,14 @@ pub fn failure_state(
             "part of the worktree's Git entry was removed; run `git worktree prune` to clear the rest",
         );
     }
+    // The pre_create hook runs before anything is created. Execution still
+    // calls that state `rolled_back`, but there was nothing to roll back.
+    if operation == OperationKind::Create
+        && stage == OperationStage::PreHook
+        && state == MutationState::RolledBack
+    {
+        return Some("nothing was created");
+    }
     state_after_failure(operation, state, failed_in_hook)
 }
 
@@ -216,7 +224,6 @@ pub fn sync_failure(failure: &sync::SyncFailure) -> Report {
             report.hint(format!("raise timeout_secs in [hooks.{hook}]"))
         }
         (sync::SyncErrorClass::InvalidTarget, _) => report.hint(LIST_HINT),
-        (sync::SyncErrorClass::Dirty, _) => report.hint("commit or stash the changes, then sync"),
         _ => report,
     }
 }
@@ -488,6 +495,23 @@ mod tests {
     }
 
     #[test]
+    fn a_pre_create_hook_failure_says_nothing_was_created_without_claiming_a_rollback() {
+        // Execution reports `rolled_back` for this stage, but nothing had
+        // been created yet, so there was nothing to roll back.
+        let refused = failure(
+            OperationStage::PreHook,
+            MutationState::RolledBack,
+            ErrorClass::Hook,
+            "command failed: `false` exited with code 1",
+        );
+        assert_eq!(
+            plain(operation_failure(OperationKind::Create, &refused, false)),
+            "error: pre_create hook failed: `false` exited with code 1\n\
+             hint: nothing was created"
+        );
+    }
+
+    #[test]
     fn hook_timeouts_point_at_the_timeout_setting() {
         let timed_out = failure(
             OperationStage::PreHook,
@@ -575,6 +599,22 @@ mod tests {
             plain(sync_failure(&failure)),
             "error: post_sync hook failed: `make gen` exited with code 9\n\
              hint: the sync itself succeeded; only the hook failed"
+        );
+    }
+
+    #[test]
+    fn a_dirty_sync_gives_its_advice_once() {
+        let failure = sync::SyncFailure {
+            stage: sync::SyncStage::Validate,
+            mutation_state: sync::MutationState::NotStarted,
+            class: sync::SyncErrorClass::Dirty,
+            message: "worktree 'feature-topic' has uncommitted changes; commit or stash them before syncing"
+                .to_string(),
+            elapsed: std::time::Duration::ZERO,
+        };
+        assert_eq!(
+            plain(sync_failure(&failure)),
+            "error: worktree 'feature-topic' has uncommitted changes; commit or stash them before syncing"
         );
     }
 

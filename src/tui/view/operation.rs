@@ -181,9 +181,10 @@ fn failure_report(
     if !output.is_empty() {
         lines.push(Line::default());
         let earlier = output.len().saturating_sub(OUTPUT_TAIL);
-        if earlier > 0 {
+        let not_shown = earlier + modal.dropped_hook_lines();
+        if not_shown > 0 {
             lines.push(Line::styled(
-                format!("  … {earlier} earlier lines not shown"),
+                format!("  … {not_shown} earlier lines not shown"),
                 theme.muted,
             ));
         }

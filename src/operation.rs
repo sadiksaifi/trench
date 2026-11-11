@@ -974,13 +974,20 @@ fn revalidate(request: &CreateRequest) -> Result<CreatePlan, String> {
         request.plan.hook_policy,
     )
     .map_err(|error| error.to_string())?;
-    let from = match &request.plan.action {
-        CreateAction::NewBranch(_) => request.plan.base.as_deref(),
-        _ => None,
-    };
-    planner
-        .plan(&request.plan.branch, from)
-        .map_err(|error| error.to_string())
+    // Plan again from the same spelling that names the action's source
+    // without ambiguity.
+    match &request.plan.action {
+        CreateAction::NewBranch(_) => {
+            planner.plan(&request.plan.branch, request.plan.base.as_deref())
+        }
+        CreateAction::TrackRemote(upstream) => {
+            planner.plan(&format!("refs/remotes/{upstream}"), None)
+        }
+        CreateAction::ExistingLocal | CreateAction::Navigate(_) => {
+            planner.plan(&request.plan.branch, None)
+        }
+    }
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Debug)]
@@ -1887,6 +1894,42 @@ mod tests {
             .unwrap();
         drop(tree);
         repo
+    }
+
+    #[tokio::test]
+    async fn a_remote_branch_whose_name_starts_with_origin_passes_revalidation() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let worktree_root = outside.path().join("worktrees");
+        let repo = init_repo(repo_dir.path());
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("foo", &head, false).unwrap();
+        repo.remote("origin", "https://example.invalid/acme.git")
+            .unwrap();
+        repo.reference("refs/remotes/origin/origin/foo", head.id(), false, "test")
+            .unwrap();
+        // The remote branch is called `origin/foo` and a local `foo` exists.
+        let plan = CreatePlanner::discover(repo_dir.path(), &worktree_root, None, HookPolicy::Run)
+            .unwrap()
+            .plan("refs/remotes/origin/origin/foo", None)
+            .unwrap();
+        assert_eq!(plan.branch, "origin/foo");
+
+        let outcome = execute(
+            OperationRequest::Create(CreateRequest {
+                plan,
+                repo_path: repo_dir.path().to_path_buf(),
+                worktree_root: worktree_root.clone(),
+                hooks: None,
+            }),
+            &RecordingEmitter::default(),
+        )
+        .await;
+
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(repo
+            .find_branch("origin/foo", git2::BranchType::Local)
+            .is_ok());
     }
 
     #[tokio::test]

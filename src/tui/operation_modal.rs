@@ -11,6 +11,11 @@ use crate::operation::{
 /// a newline must not make that work unbounded.
 pub const MAX_OUTPUT_LINE_CHARS: usize = 2_000;
 
+/// The fewest newest hook output lines the dialog keeps. Older lines are
+/// dropped in batches once twice this many are stored, so the store stays
+/// bounded however long a hook prints.
+pub const MAX_OUTPUT_LINES: usize = 1_000;
+
 fn shorten_output_line(line: String) -> String {
     match line.char_indices().nth(MAX_OUTPUT_LINE_CHARS) {
         None => line,
@@ -69,6 +74,8 @@ pub struct OperationModal {
     spinner_tick: u64,
     mutation_started: bool,
     hook_lines: Vec<String>,
+    /// Older hook output lines that were dropped to keep the store bounded.
+    dropped_hook_lines: usize,
     hook_scroll: usize,
     /// Rows the failure report is scrolled down by.
     report_scroll: usize,
@@ -92,6 +99,7 @@ impl OperationModal {
             spinner_tick: 0,
             mutation_started: operation == OperationKind::Sync,
             hook_lines: Vec::new(),
+            dropped_hook_lines: 0,
             hook_scroll: 0,
             report_scroll: 0,
             report_scroll_limit: 0,
@@ -120,7 +128,7 @@ impl OperationModal {
                 if self.hook_scroll > 0 {
                     self.hook_scroll = self.hook_scroll.saturating_add(1);
                 }
-                self.hook_lines.push(shorten_output_line(line));
+                self.push_hook_line(shorten_output_line(line));
             }
             OperationEvent::StageFinished {
                 stage,
@@ -272,6 +280,24 @@ impl OperationModal {
 
     pub fn directory_missing(&self) -> bool {
         self.directory_missing
+    }
+
+    fn push_hook_line(&mut self, line: String) {
+        self.hook_lines.push(line);
+        if self.hook_lines.len() <= MAX_OUTPUT_LINES * 2 {
+            return;
+        }
+        let drop = self.hook_lines.len() - MAX_OUTPUT_LINES;
+        self.hook_lines.drain(..drop);
+        self.dropped_hook_lines += drop;
+        self.hook_scroll = self
+            .hook_scroll
+            .min(self.hook_lines.len().saturating_sub(1));
+    }
+
+    /// How many of the oldest hook output lines are no longer stored.
+    pub fn dropped_hook_lines(&self) -> usize {
+        self.dropped_hook_lines
     }
 
     pub fn set_directory_missing(&mut self, missing: bool) {
@@ -448,6 +474,31 @@ mod tests {
             &stored[stored.len() - 60..]
         );
         assert_eq!(modal.hook_lines()[1], "short");
+    }
+
+    #[test]
+    fn a_hook_that_prints_without_end_keeps_its_newest_lines_and_counts_the_rest() {
+        let mut modal = OperationModal::new(OperationKind::Create);
+        let total = MAX_OUTPUT_LINES * 5 + 7;
+        for index in 0..total {
+            modal.apply(OperationEvent::Output {
+                hook: crate::hooks::HookEvent::PreCreate,
+                step: crate::hooks::types::HookStep::Shell,
+                stream: crate::hooks::types::OutputStream::Stdout,
+                line: format!("line {index}"),
+            });
+        }
+
+        let lines = modal.hook_lines();
+        assert!(lines.len() <= MAX_OUTPUT_LINES * 2, "{}", lines.len());
+        assert!(lines.len() >= MAX_OUTPUT_LINES);
+        assert_eq!(modal.dropped_hook_lines(), total - lines.len());
+        for (offset, line) in lines.iter().enumerate() {
+            assert_eq!(
+                *line,
+                format!("line {}", modal.dropped_hook_lines() + offset)
+            );
+        }
     }
 
     #[test]

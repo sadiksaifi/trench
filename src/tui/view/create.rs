@@ -273,6 +273,10 @@ fn summary(
                 &format!("Branch {existing} exists, so Git cannot also have {name}"),
                 "Pick a different branch name.",
             ),
+            Summary::NoBase if !dialog.repository_has_branches() => failure(
+                "This repository has no commits yet.",
+                "Make a first commit, then try again.",
+            ),
             Summary::NoBase => failure("No base branch found.", "Press Tab and choose one."),
             Summary::New { branch, base, path } => {
                 let mut lines = vec![
@@ -395,6 +399,40 @@ mod tests {
         }
         state.create_dialog = Some(dialog);
         state
+    }
+
+    #[test]
+    fn a_repository_without_commits_says_a_first_commit_is_needed() {
+        let mut state = state(&[]);
+        let mut dialog = CreateDialog::new(
+            "acme",
+            Path::new("/wt"),
+            RefSnapshot::from_parts(
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+                None,
+                None,
+                false,
+            ),
+            None,
+            [],
+        );
+        for character in "first".chars() {
+            dialog.handle_key(CreateKey::Character(character));
+        }
+        state.create_dialog = Some(dialog);
+
+        let text = screen(&mut state, 60, 18).join("\n");
+
+        assert!(
+            text.contains("This repository has no commits yet."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Make a first commit, then try again."),
+            "{text}"
+        );
+        assert!(!text.contains("Tab"), "there is nothing to choose: {text}");
     }
 
     #[test]

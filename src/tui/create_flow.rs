@@ -21,6 +21,11 @@ use crate::{
 
 pub use crate::tui::ref_picker::OriginRefresh;
 
+/// Shown when live Git no longer matches what the dialog showed for the
+/// highlighted branch.
+pub const STALE_CREATE_SUMMARY: &str =
+    "That branch changed while this dialog was open. Pick it again to see what Enter will do.";
+
 /// A worktree that already exists: its directory and the branch it holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExistingWorktree {
@@ -104,8 +109,9 @@ pub enum CreateKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateSubmission {
     /// The name handed to planning. For a remote-only branch this is the
-    /// remote ref (`origin/x`), not the local name the row shows, so
-    /// planning cannot mistake it for a local branch of a similar name.
+    /// full remote ref (`refs/remotes/origin/x`), not the local name the row
+    /// shows, so planning cannot mistake it for a local branch of the same
+    /// or a similar name.
     pub selection: String,
     pub from: Option<String>,
 }
@@ -345,9 +351,17 @@ impl CreateDialog {
     }
 
     /// Whether the base applies to the highlighted row.
+    /// Whether the repository has any branch at all. It has none before
+    /// its first commit.
+    pub fn repository_has_branches(&self) -> bool {
+        self.base_picker.has_refs()
+    }
+
     pub fn base_applies(&self) -> bool {
-        self.highlighted_row()
-            .is_some_and(|row| row.kind == RowKind::New && row.problem.is_none())
+        self.repository_has_branches()
+            && self
+                .highlighted_row()
+                .is_some_and(|row| row.kind == RowKind::New && row.problem.is_none())
     }
 
     /// What Enter would start for the highlighted row, if anything.
@@ -362,7 +376,7 @@ impl CreateDialog {
                 from: Some(self.base()?.to_string()),
             }),
             RowKind::Remote { upstream } => Some(CreateSubmission {
-                selection: upstream,
+                selection: format!("refs/remotes/{upstream}"),
                 from: None,
             }),
             RowKind::Local | RowKind::HasWorktree { .. } => Some(CreateSubmission {
@@ -464,14 +478,19 @@ impl CreateDialog {
     /// Enter acts on the highlight, and a refresh can arrive at any moment
     /// (the watcher, a background fetch). The highlight therefore follows the
     /// branch, not the position. When that branch is gone, or now means a
-    /// different action, nothing is highlighted and the user picks again.
+    /// different action, nothing is highlighted, and the dialog says why so
+    /// the user picks again.
     fn restore_highlight(&mut self, previous: Option<BranchRow>) {
+        let had_highlight = previous.is_some();
         self.highlight = previous.and_then(|previous| {
             self.rows().iter().position(|row| {
                 row.branch == previous.branch
                     && std::mem::discriminant(&row.kind) == std::mem::discriminant(&previous.kind)
             })
         });
+        if had_highlight && self.highlight.is_none() {
+            self.validation_error = Some(STALE_CREATE_SUMMARY.to_string());
+        }
     }
 
     /// Where a worktree for `branch` would be created, as the summary shows.
@@ -634,6 +653,31 @@ mod tests {
     }
 
     #[test]
+    fn a_refresh_that_takes_away_the_highlighted_branch_says_so() {
+        let mut dialog = dialog();
+        dialog.set_branch("feature/login-page");
+        assert_eq!(dialog.highlighted_row().unwrap().kind, RowKind::Local);
+
+        dialog.update_refs(RefSnapshot::from_parts(
+            ["main", "feature/auth", "release"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        ));
+
+        assert_eq!(dialog.highlighted_row(), None);
+        assert_eq!(dialog.validation_error(), Some(STALE_CREATE_SUMMARY));
+
+        // A refresh that keeps the branch says nothing.
+        let mut kept = self::dialog();
+        kept.set_branch("release");
+        kept.update_refs(refs());
+        assert!(kept.highlighted_row().is_some());
+        assert_eq!(kept.validation_error(), None);
+    }
+
+    #[test]
     fn dialog_opens_on_the_branch_field_with_nothing_highlighted() {
         let mut dialog = dialog();
 
@@ -740,9 +784,9 @@ mod tests {
         assert_eq!(
             dialog.handle_key(CreateKey::Enter),
             Some(CreateEffect::Submit(CreateSubmission {
-                // Planning is given the remote ref, so it cannot confuse the
-                // row with a local branch of a similar name.
-                selection: "origin/feature/login-v2".to_string(),
+                // Planning is given the full remote ref, so it cannot confuse
+                // the row with a local branch of the same or a similar name.
+                selection: "refs/remotes/origin/feature/login-v2".to_string(),
                 from: None,
             }))
         );

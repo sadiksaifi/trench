@@ -475,17 +475,31 @@ mod tests {
     fn wrapping_one_enormous_word_takes_time_in_proportion_to_its_length() {
         // A hook can print megabytes without a newline or a space. Wrapping
         // must not copy the remainder for every line it produces.
-        let word = "x".repeat(1_000_000);
-        let started = std::time::Instant::now();
+        // The fastest of three runs is compared, so a slow machine or a
+        // busy CI runner changes both sizes alike.
+        let fastest = |length: usize| {
+            let word = "x".repeat(length);
+            (0..3)
+                .map(|_| {
+                    let started = std::time::Instant::now();
+                    let lines = wrap(&word, 50);
+                    let elapsed = started.elapsed();
+                    assert_eq!(lines.len(), length / 50);
+                    assert!(lines.iter().all(|line| line.len() == 50));
+                    elapsed
+                })
+                .min()
+                .unwrap()
+        };
 
-        let lines = wrap(&word, 50);
+        let small = fastest(100_000);
+        let large = fastest(1_000_000);
 
-        assert_eq!(lines.len(), 20_000);
-        assert!(lines.iter().all(|line| line.len() == 50));
+        // Ten times the text: linear work takes about ten times as long,
+        // quadratic work about a hundred times.
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "took {:?}",
-            started.elapsed()
+            large < small * 40,
+            "100k characters took {small:?}, 1M took {large:?}"
         );
     }
 

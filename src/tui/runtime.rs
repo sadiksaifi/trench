@@ -19,7 +19,7 @@ use crate::{
         app::{self, AppState, Effect, Event, HookNames, NoticeKind, WorktreeId},
         create_flow::{
             BranchRow, CreateDialog, CreateEffect, CreateKey, CreateSubmission, ExistingWorktree,
-            OriginRefresh, RowKind,
+            OriginRefresh, RowKind, STALE_CREATE_SUMMARY,
         },
         keymap::Key,
         line_input::LineEdit,
@@ -148,9 +148,9 @@ impl CreateDispatch {
     /// for a new branch from the same base.
     fn matches(&self, dialog: &CreateDialog, row: &BranchRow) -> bool {
         let plan = match (self, &row.kind) {
-            // Nothing is created, so only the branch has to agree. The
-            // worktree's directory may have moved since the list was read.
-            (Self::Navigate(_), RowKind::HasWorktree { .. }) => return true,
+            // Nothing is created, but Enter must switch to the worktree the
+            // row named, not to another one that took the branch since.
+            (Self::Navigate(planned), RowKind::HasWorktree { id, .. }) => return planned == id,
             (Self::Run(request), _) => match &**request {
                 OperationRequest::Create(create) => &create.plan,
                 _ => return false,
@@ -168,10 +168,6 @@ impl CreateDispatch {
         same_action && plan.branch == row.branch && plan.path == dialog.planned_path(&row.branch)
     }
 }
-
-/// Shown when live Git no longer matches the create dialog's summary.
-const STALE_CREATE_SUMMARY: &str =
-    "That branch changed while this dialog was open. Pick it again to see what Enter will do.";
 
 #[derive(Debug)]
 enum CreateInputEffect {
@@ -2236,6 +2232,38 @@ mod tests {
     }
 
     #[test]
+    fn the_enter_gate_switches_only_to_the_worktree_the_dialog_showed() {
+        use crate::tui::create_flow::ExistingWorktree;
+        let shown = WorktreeId::new("/worktrees/acme/release");
+        let mut dialog = CreateDialog::new(
+            "acme",
+            Path::new("/worktrees"),
+            RefSnapshot::from_parts(
+                ["main", "release"],
+                [] as [&str; 0],
+                None,
+                Some("main"),
+                false,
+            ),
+            Some("main"),
+            [ExistingWorktree::new(
+                Some("release"),
+                shown.clone(),
+                "/worktrees/acme/release",
+            )],
+        );
+        dialog.set_branch("release");
+        let row = dialog.highlighted_row().unwrap();
+        assert!(matches!(row.kind, RowKind::HasWorktree { .. }));
+
+        assert!(CreateDispatch::Navigate(shown).matches(&dialog, &row));
+        assert!(
+            !CreateDispatch::Navigate(WorktreeId::new("/elsewhere/release")).matches(&dialog, &row),
+            "the branch moved to a worktree the dialog did not show"
+        );
+    }
+
+    #[test]
     fn the_enter_gate_compares_the_branch_the_directory_and_the_base() {
         let repository = init_repo();
         let root = repository.path().join("worktrees");
@@ -2334,7 +2362,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_out_enter_uses_the_live_path_when_identity_changes_while_form_is_open() {
+    fn checked_out_enter_refreshes_instead_of_switching_to_a_directory_the_form_did_not_show() {
         let repository = init_repo();
         let root = repository.path().join("worktrees");
         let repo_info = crate::git::discover_repo(repository.path()).unwrap();
@@ -2375,11 +2403,16 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(
-            effect,
-            Some(CreateInputEffect::Navigate(id))
-                if id == WorktreeId::new(new_path.canonicalize().unwrap())
-        ));
+        // The form said Enter switches to `release-old`. The branch now
+        // lives in `release-new`, so Enter reloads and says why.
+        assert!(
+            matches!(effect, Some(CreateInputEffect::Refresh)),
+            "{effect:?}"
+        );
+        assert_eq!(
+            state.create_dialog.as_ref().unwrap().validation_error(),
+            Some(STALE_CREATE_SUMMARY)
+        );
     }
 
     #[test]
@@ -2700,6 +2733,8 @@ mod tests {
                 height: 24,
             },
         );
+        let drawn = Instant::now();
+        note_remove_risks_drawn(&mut state, drawn);
         let mut press = |at: Instant| {
             handle_remove_input(
                 &mut state,
@@ -2711,10 +2746,10 @@ mod tests {
             )
             .unwrap()
         };
-        assert!(press(Instant::now()).is_none());
+        assert!(press(drawn).is_none());
         assert!(target_path.join("late.txt").exists());
         assert!(matches!(
-            press(Instant::now() + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE),
+            press(drawn + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE),
             Some(RemoveInputEffect::Start(_))
         ));
     }
@@ -2754,15 +2789,32 @@ mod tests {
             Some(RemoveKey::Escape)
         );
 
-        let Some(RemoveInputEffect::Start(request)) = handle_remove_input(
+        let confirm = |state: &mut AppState, at: Instant| {
+            handle_remove_input(
+                state,
+                RemoveKey::Confirm,
+                repository.path(),
+                Some("main"),
+                None,
+                at,
+            )
+            .unwrap()
+        };
+        let later = Instant::now() + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE * 4;
+        // No frame has shown the risk yet.
+        assert!(confirm(&mut state, later).is_none());
+        let _ = app::reduce(
             &mut state,
-            RemoveKey::Confirm,
-            repository.path(),
-            Some("main"),
-            None,
-            Instant::now() + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE,
-        )
-        .unwrap() else {
+            Event::ViewportChanged {
+                width: 80,
+                height: 24,
+            },
+        );
+        note_remove_risks_drawn(&mut state, later);
+        let Some(RemoveInputEffect::Start(request)) = confirm(
+            &mut state,
+            later + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE,
+        ) else {
             panic!("y should start the removal")
         };
         let OperationRequest::Remove(request) = *request else {
@@ -2943,6 +2995,9 @@ mod tests {
                 height: 24,
             },
         );
+        // Enlarged, but not drawn yet.
+        assert!(press(&mut state, RemoveKey::Confirm).is_none());
+        note_remove_risks_drawn(&mut state, Instant::now());
         assert!(matches!(
             press(&mut state, RemoveKey::Confirm),
             Some(RemoveInputEffect::Start(_))

@@ -266,12 +266,14 @@ pub fn resolve_config(
         },
         editor_command,
         worktrees: ResolvedWorktreesConfig {
-            root: PathBuf::from(paths::expand_tilde(
+            // Relative to the current directory, made absolute once here so
+            // planning, the TUI and execution all use the same directory.
+            root: paths::absolute_lexical(Path::new(&paths::expand_tilde(
                 &cli.and_then(|c| c.worktree_root.clone())
                     .or_else(|| p_wt.and_then(|w| w.root.clone()))
                     .or_else(|| g_wt.and_then(|w| w.root.clone()))
                     .unwrap_or_else(|| defaults_wt.root.to_string_lossy().into_owned()),
-            )),
+            ))),
         },
         hooks,
     }

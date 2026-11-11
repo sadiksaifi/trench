@@ -285,6 +285,20 @@ impl CreatePlanner {
     /// for the local branch `x`, then for the remote ref.
     fn classify<'a>(&self, selection: &'a str) -> RefClass<'a> {
         let candidates = self.refs.candidates();
+        // The full ref names a remote branch with no chance of matching a
+        // local one, even a local branch literally called `origin/x`.
+        if let Some(upstream) = selection.strip_prefix("refs/remotes/") {
+            if let Some(branch) = upstream.strip_prefix("origin/") {
+                if candidates.iter().any(|candidate| {
+                    candidate.kind == RefKind::Remote && candidate.name == upstream
+                }) {
+                    return RefClass::Remote {
+                        branch,
+                        upstream: upstream.to_string(),
+                    };
+                }
+            }
+        }
         if candidates
             .iter()
             .any(|candidate| candidate.kind == RefKind::Local && candidate.name == selection)
@@ -398,6 +412,34 @@ mod tests {
             CreateAction::TrackRemote("origin/origin/foo".to_string())
         );
         assert_eq!(plan.branch, "origin/foo");
+    }
+
+    #[test]
+    fn a_full_remote_ref_names_the_remote_branch_even_when_a_local_branch_has_its_short_name() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        commit_on_new_branch(repo.path(), "origin/x");
+        let git = git2::Repository::open(repo.path()).unwrap();
+        let head = git.head().unwrap().peel_to_commit().unwrap().id();
+        git.reference("refs/remotes/origin/x", head, false, "test")
+            .unwrap();
+        let planner =
+            CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        // `origin/x` is a local branch here, so only the full ref reaches
+        // the remote one.
+        assert_eq!(
+            planner.plan("origin/x", None).unwrap().action,
+            CreateAction::ExistingLocal
+        );
+        let plan = planner.plan("refs/remotes/origin/x", None).unwrap();
+
+        assert_eq!(
+            plan.action,
+            CreateAction::TrackRemote("origin/x".to_string())
+        );
+        assert_eq!(plan.branch, "x");
     }
 
     #[test]

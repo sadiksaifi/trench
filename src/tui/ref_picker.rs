@@ -77,6 +77,16 @@ impl RefPicker {
         ranked.into_iter().map(|(_, candidate)| candidate).collect()
     }
 
+    /// Whether the repository has an `origin` remote to fetch from.
+    pub fn has_origin(&self) -> bool {
+        self.refs.has_origin
+    }
+
+    /// Whether the repository has any branch to pick at all.
+    pub fn has_refs(&self) -> bool {
+        !self.refs.candidates().is_empty()
+    }
+
     pub fn open(&mut self) {
         self.query = LineInput::default();
         self.selection = self

@@ -181,13 +181,17 @@ impl RemoveDialog {
         Ok(dialog)
     }
 
-    /// Whether `y` removes at `now`, or is still paused so the risks that
-    /// just appeared can be read.
+    /// Whether `y` removes at `now`. It does not while a risk has not been
+    /// drawn, and for a moment after the risks appear so they can be read.
     pub fn confirm_ready(&self, now: Instant) -> bool {
-        self.confirm_after.is_none_or(|after| now >= after)
+        (self.risks_displayed || self.risks().is_empty())
+            && self.confirm_after.is_none_or(|after| now >= after)
     }
 
     fn start_confirm_pause(&mut self) {
+        // The new risks have not been drawn yet. The pause starts again on
+        // the first frame that shows them.
+        self.risks_displayed = false;
         self.confirm_after = Some(Instant::now() + CONFIRM_DELAY_AFTER_CHANGE);
     }
 
@@ -812,6 +816,7 @@ mod tests {
             Err(RemoveFlowError::FactsChanged)
         ));
         let shown = Instant::now();
+        dialog.set_risks_displayed(true, shown);
 
         // The second press of a double-tap lands before anyone could read.
         assert_eq!(dialog.handle_key(RemoveKey::Confirm, shown), None);
@@ -836,6 +841,7 @@ mod tests {
         )
         .unwrap();
         let opened = Instant::now();
+        dialog.set_risks_displayed(true, opened);
 
         assert!(!dialog.confirm_ready(opened));
         assert_eq!(dialog.handle_key(RemoveKey::Confirm, opened), None);
@@ -861,7 +867,10 @@ mod tests {
         // pause that started when the dialog opened is long over.
         dialog.set_risks_displayed(false, opened);
         let enlarged = opened + CONFIRM_DELAY_AFTER_CHANGE * 12;
-        assert!(dialog.confirm_ready(enlarged));
+        assert!(
+            !dialog.confirm_ready(enlarged),
+            "a risk that was never drawn never lets y through"
+        );
 
         // The first frame that shows the risk starts the pause again.
         dialog.set_risks_displayed(true, enlarged);
@@ -875,6 +884,23 @@ mod tests {
         let later = enlarged + CONFIRM_DELAY_AFTER_CHANGE * 2;
         dialog.set_risks_displayed(true, later);
         assert!(dialog.confirm_ready(later));
+    }
+
+    #[test]
+    fn y_does_nothing_while_no_frame_has_shown_the_risks() {
+        let fixture = Fixture::new("never-drawn");
+        std::fs::write(fixture.worktree_path.join("notes.txt"), "work\n").unwrap();
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        let long_after = Instant::now() + CONFIRM_DELAY_AFTER_CHANGE * 12;
+
+        // The pause is over, but nothing has drawn the risk yet.
+        assert_eq!(dialog.handle_key(RemoveKey::Confirm, long_after), None);
+        dialog.set_risks_displayed(false, long_after);
+        assert_eq!(dialog.handle_key(RemoveKey::Confirm, long_after), None);
     }
 
     #[test]
@@ -992,6 +1018,7 @@ mod tests {
         )
         .unwrap();
         let opened = Instant::now();
+        unchanged.set_risks_displayed(true, opened);
         assert!(!unchanged
             .refresh(fixture.root.path(), Some("main"))
             .unwrap());

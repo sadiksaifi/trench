@@ -387,7 +387,13 @@ impl RemovalAssessment {
         let (base_ref, base_oid) = resolved_base
             .map(|resolved| (Some(resolved.reference), Some(resolved.oid)))
             .unwrap_or((None, None));
+        // A branch always contains itself, which says nothing about whether
+        // its commits are anywhere else.
+        let base_is_the_branch = identity.branch.as_ref().is_some_and(|branch| {
+            base_ref.as_deref() == Some(format!("refs/heads/{branch}").as_str())
+        });
         let merged = match (branch_oid, base_oid) {
+            _ if base_is_the_branch => None,
             (Some(branch), Some(base)) => Some(
                 branch == base
                     || repo
@@ -2250,17 +2256,20 @@ fn admin_entries_for(common: &Path, worktree: &Path) -> Vec<PathBuf> {
     entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|entry| {
-            std::fs::read_to_string(entry.join("gitdir")).is_ok_and(|gitdir| {
-                // The file holds `<worktree>/.git`, relative to the entry
-                // when `worktree.useRelativePaths` is set.
-                let gitdir = entry.join(gitdir.trim());
-                gitdir
-                    .parent()
-                    .is_some_and(|path| git::worktrees::canonicalize_lenient(path) == expected)
-            })
-        })
+        .filter(|entry| entry_points_at(entry, entry, &expected))
         .collect()
+}
+
+/// Whether the `gitdir` file in `entry` names `expected`, an already
+/// canonical worktree path. The file holds `<worktree>/.git`, relative to
+/// `home` (the entry's place under `<common>/worktrees/`) when
+/// `worktree.useRelativePaths` is set.
+fn entry_points_at(entry: &Path, home: &Path, expected: &Path) -> bool {
+    std::fs::read_to_string(entry.join("gitdir")).is_ok_and(|gitdir| {
+        home.join(gitdir.trim())
+            .parent()
+            .is_some_and(|path| git::worktrees::canonicalize_lenient(path) == expected)
+    })
 }
 
 /// The one admin entry for `worktree`. `None` when Git has no entry, and
@@ -2347,10 +2356,53 @@ fn retire_missing_worktree_with(
     }
 
     probe(RetireStep::Checked);
+    // The name may have come to hold another worktree's record since the
+    // checks. Move whatever is there out of Git's list in one rename, then
+    // check what was moved. Only a record of this worktree is deleted.
+    let staged = common.join(format!(
+        ".trench-retire-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::rename(&entry, &staged)
+        .map_err(|error| ExactRemovalFailure::not_started(error.into()))?;
+    let expected = git::worktrees::canonicalize_lenient(&assessment.path);
+    let is_directory = std::fs::symlink_metadata(&staged)
+        .map(|metadata| metadata.file_type().is_dir())
+        .unwrap_or(false);
+    if !is_directory
+        || !entry_points_at(&staged, &entry, &expected)
+        || staged.join("locked").exists()
+    {
+        return match std::fs::rename(&staged, &entry) {
+            Ok(()) => Err(ExactRemovalFailure::not_started(
+                git::GitError::PreconditionsChanged,
+            )),
+            Err(error) => Err(ExactRemovalFailure::recovered_partial(
+                git::GitError::CommandFailed {
+                    operation: "removing the worktree entry",
+                    message: format!(
+                        "the entry changed during removal and could not be put back from {}: {error}",
+                        staged.display()
+                    ),
+                },
+            )),
+        };
+    }
     // From here on a failure may have deleted part of the entry, so it can
     // no longer be reported as "nothing changed".
-    std::fs::remove_dir_all(&entry)
-        .map_err(|error| ExactRemovalFailure::recovered_partial(error.into()))?;
+    std::fs::remove_dir_all(&staged).map_err(|error| {
+        ExactRemovalFailure::recovered_partial(git::GitError::CommandFailed {
+            operation: "removing the worktree entry",
+            message: format!(
+                "Git no longer lists the worktree, but {} could not be deleted: {error}",
+                staged.display()
+            ),
+        })
+    })?;
     probe(RetireStep::Deleted);
     let still_listed = git::worktrees::discover(&assessment.repo_path)
         .map_err(ExactRemovalFailure::recovered_partial)?
@@ -2997,15 +3049,25 @@ mod tests {
     }
 
     #[test]
-    fn branch_deletion_succeeds_when_base_is_the_target_branch() {
+    fn a_branch_is_never_called_merged_into_itself() {
         let fixture = Fixture::new("feature/base-is-target");
         let assessment =
             RemovalAssessment::discover(&fixture.main, &fixture.branch, Some(&fixture.branch))
                 .unwrap();
-        assert_eq!(assessment.merged, Some(true));
+        // Every branch contains itself, so that says nothing about whether
+        // its commits are anywhere else.
+        assert_eq!(assessment.merged, None);
+        assert!(matches!(
+            assessment.clone().authorize(RemoveOptions {
+                delete_branch: true,
+                ..Fixture::options()
+            }),
+            Err(RemovalAuthorizationError::MergeStatusUnavailable)
+        ));
         let plan = assessment
             .authorize(RemoveOptions {
                 delete_branch: true,
+                force_branch: true,
                 ..Fixture::options()
             })
             .unwrap();
@@ -3802,6 +3864,41 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_replaced_after_the_checks_is_put_back_and_not_deleted() {
+        let fixture = Fixture::new("feature/replaced");
+        let repo = git2::Repository::open(&fixture.main).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let other = fixture.root.path().join("other");
+        let local = repo.branch("other", &head, false).unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(local.get()));
+        repo.worktree("other", &other, Some(&options)).unwrap();
+        let common = common_git_dir(&fixture.main).unwrap();
+        let entry = admin_entry_for(&common, &fixture.linked).unwrap();
+        let other_entry = admin_entry_for(&common, &other).unwrap();
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        let assessment = fixture.assess();
+
+        // Between the checks and the deletion, the entry's name comes to
+        // hold the record of a different, live worktree.
+        let failure = retire_missing_worktree_with(&assessment, |step| {
+            if step == RetireStep::Checked {
+                std::fs::rename(&entry, fixture.root.path().join("parked")).unwrap();
+                std::fs::rename(&other_entry, &entry).unwrap();
+            }
+        })
+        .unwrap_err();
+
+        assert!(!failure.partially_applied, "{failure:?}");
+        assert_eq!(
+            admin_entry_for(&common, &other).as_deref(),
+            Some(entry.as_path()),
+            "the other worktree's record is back where it was found"
+        );
+        assert!(other.join(".git").exists());
+    }
+
+    #[test]
     fn retirement_removes_only_the_named_entry() {
         let fixture = Fixture::new("feature/target");
         let repo = git2::Repository::open(&fixture.main).unwrap();
@@ -3838,12 +3935,26 @@ mod tests {
         std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let failure = retire_missing_worktree(&assessment).unwrap_err();
-        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let staged = std::fs::read_dir(&common)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.to_string_lossy().contains(".trench-retire-"))
+            .expect("the entry was moved out of Git's list before deletion");
+        std::fs::set_permissions(staged.join("logs"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
 
         assert!(
             failure.partially_applied,
             "part of the entry was deleted, so the state is not untouched"
         );
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains(&staged.display().to_string()),
+            "the message says where the rest is: {failure:?}"
+        );
+        assert_eq!(admin_entry_for(&common, &fixture.linked), None);
     }
 
     #[test]

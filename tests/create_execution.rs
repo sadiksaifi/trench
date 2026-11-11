@@ -493,3 +493,33 @@ fn hook_output_is_never_written_to_application_state_or_diagnostics() {
         }
     }
 }
+
+#[test]
+fn a_relative_worktree_root_is_read_from_the_current_directory_and_the_create_completes() {
+    let base = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let repo = base.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join(".trench.toml"), "[worktrees]\nroot = \"../wt\"\n").unwrap();
+
+    let output = trench(&repo, xdg.path(), &["create", "feature/rel", "--json"]);
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let path = Path::new(result["path"].as_str().unwrap());
+    assert!(path.is_absolute(), "{path:?}");
+    assert!(path.is_dir(), "{path:?}");
+    assert_eq!(
+        path.canonicalize().unwrap(),
+        base.path()
+            .join("wt/repo/feature-rel")
+            .canonicalize()
+            .unwrap()
+    );
+}

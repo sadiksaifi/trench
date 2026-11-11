@@ -97,7 +97,11 @@ pub fn render(dialog: &RemoveDialog, frame: &mut Frame, area: Rect, theme: &Them
     widgets::hint_bar(
         frame,
         layout.hints,
-        &hints(dialog, arranged.is_some()),
+        &hints(
+            dialog,
+            arranged.is_some(),
+            usize::from(layout.hints.width.saturating_sub(widgets::MARGIN * 2)),
+        ),
         theme,
     );
 }
@@ -270,9 +274,25 @@ fn arrange(body: &Body, rows: usize) -> Option<Vec<Option<(Role, String)>>> {
     Some(arranged)
 }
 
-fn hints(dialog: &RemoveDialog, every_risk_shown: bool) -> Vec<Hint> {
+/// The dialog's hints for a bar `width` columns wide. When the full
+/// wording does not fit, every hint gets its short form, so the Space hint
+/// is shortened instead of dropped.
+fn hints(dialog: &RemoveDialog, every_risk_shown: bool, width: usize) -> Vec<Hint> {
+    let full = hint_set(dialog, every_risk_shown, false);
+    if widgets::fit_hints(&full, width).len() == full.len() {
+        full
+    } else {
+        hint_set(dialog, every_risk_shown, true)
+    }
+}
+
+fn hint_set(dialog: &RemoveDialog, every_risk_shown: bool, short: bool) -> Vec<Hint> {
     let risky = !dialog.risks().is_empty();
-    let label = if risky { "remove anyway" } else { "remove" };
+    let label = if risky && !short {
+        "remove anyway"
+    } else {
+        "remove"
+    };
     // `y` is dim whenever it would do nothing: the risks do not fit, or they
     // appeared a moment ago and the pause to read them is still running.
     let live = every_risk_shown && dialog.confirm_ready(std::time::Instant::now());
@@ -281,10 +301,10 @@ fn hints(dialog: &RemoveDialog, every_risk_shown: bool) -> Vec<Hint> {
     if dialog.can_delete_branch() {
         hints.push(Hint::new(
             "Space",
-            if dialog.delete_branch() {
-                "keep branch"
-            } else {
-                "delete branch too"
+            match (short, dialog.delete_branch()) {
+                (true, _) => "branch",
+                (false, true) => "keep branch",
+                (false, false) => "delete branch too",
             },
             2,
         ));
@@ -551,7 +571,7 @@ mod tests {
             text.contains("!Commitsonlyonfeature/authwillbelost."),
             "{screen:#?}"
         );
-        assert_eq!(screen[13], " y remove anyway  Esc cancel");
+        assert_eq!(screen[13], " y remove  Space branch  Esc cancel");
         assert!(super::shows_every_risk(
             state.remove_dialog.as_ref().unwrap(),
             ratatui::layout::Rect::new(0, 0, 40, 14)
@@ -700,7 +720,7 @@ mod tests {
             ]
         );
         assert_eq!(screen[8], " ╰────────────────────────────────────╯");
-        assert_eq!(screen[9], " y remove  Esc cancel");
+        assert_eq!(screen[9], " y remove  Space branch  Esc cancel");
         assert!(super::shows_every_risk(
             state.remove_dialog.as_ref().unwrap(),
             ratatui::layout::Rect::new(0, 0, 40, 10)

@@ -160,7 +160,11 @@ impl SyncDialog {
             SyncKey::Tab => {
                 self.base_picker.open();
                 self.mode = SyncMode::BasePicker;
-                Some(SyncEffect::RefreshOrigin)
+                // Without `origin` there is nothing to fetch, and a spinner
+                // would wait for a fetch that never starts.
+                self.base_picker
+                    .has_origin()
+                    .then_some(SyncEffect::RefreshOrigin)
             }
             SyncKey::Left => {
                 self.strategy = SyncStrategy::Rebase;
@@ -274,6 +278,22 @@ mod tests {
                 strategy: SyncStrategy::Merge,
             })
         );
+    }
+
+    #[test]
+    fn a_repository_without_origin_opens_the_picker_without_fetching() {
+        let target = identity(Some("feature/auth"), false);
+        let local_only = RefSnapshot::from_parts(
+            ["main", "release"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        );
+        let mut dialog = SyncDialog::new(&target, local_only, None);
+
+        assert_eq!(dialog.handle_key(SyncKey::Tab), None);
+        assert_eq!(dialog.mode(), SyncMode::BasePicker);
     }
 
     #[test]
