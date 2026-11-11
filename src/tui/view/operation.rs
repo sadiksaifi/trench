@@ -24,17 +24,21 @@ use crate::{
 
 const HEIGHT: u16 = 16;
 
-/// How many rows of a failure report do not fit in the dialog drawn in
-/// `area`. The runtime passes this to the modal so scrolling stops at the end.
-pub fn report_overflow(modal: &OperationModal, area: Rect) -> usize {
+/// The newest hook output lines kept in a failure report. The lines that
+/// explain a failure are its last ones, and a bounded tail keeps the report
+/// short enough to scroll and cheap to rebuild every frame.
+const OUTPUT_TAIL: usize = 100;
+
+/// The scroll geometry of the dialog drawn in `area`: how many rows of a
+/// failure report do not fit, and how many rows one page is. The runtime
+/// passes both to the modal so scrolling stops at the end.
+pub fn report_geometry(modal: &OperationModal, area: Rect) -> (usize, usize) {
     let layout = widgets::dialog_layout(area, HEIGHT);
+    let rows = usize::from(layout.content.height);
     let theme = crate::tui::theme::from_name("mono");
-    match failure_report(modal, usize::from(layout.content.width), &theme) {
-        Some(report) => report
-            .len()
-            .saturating_sub(usize::from(layout.content.height)),
-        None => 0,
-    }
+    let overflow = failure_report(modal, usize::from(layout.content.width), &theme)
+        .map_or(0, |report| report.len().saturating_sub(rows));
+    (overflow, rows.max(1))
 }
 
 pub fn render(modal: &OperationModal, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -143,8 +147,14 @@ fn failure_report(
     }
     // Without this sentence the user cannot tell whether a failed operation
     // left anything behind.
-    let state = report::state_after_failure(modal.operation(), *mutation_state, true)
-        .unwrap_or("nothing was changed");
+    let state = report::failure_state(
+        modal.operation(),
+        *stage,
+        *mutation_state,
+        retained_quarantine.is_some(),
+        true,
+    )
+    .unwrap_or("nothing was changed");
     lines.extend(wrapped(sentence(state), theme.text));
     for warning in modal.warnings() {
         lines.extend(wrapped(
@@ -162,14 +172,29 @@ fn failure_report(
                 .map(|stage| stage_line(modal, stage, theme)),
         );
     }
-    if !modal.hook_lines().is_empty() {
+    let output = modal.hook_lines();
+    if !output.is_empty() {
         lines.push(Line::default());
-        lines.extend(
-            modal
-                .hook_lines()
-                .iter()
-                .map(|line| output_line(line, width, theme)),
-        );
+        let earlier = output.len().saturating_sub(OUTPUT_TAIL);
+        if earlier > 0 {
+            lines.push(Line::styled(
+                format!("  … {earlier} earlier lines not shown"),
+                theme.muted,
+            ));
+        }
+        // Wrapped, not cut: the end of an error line is often the part
+        // that says what went wrong.
+        for line in &output[earlier..] {
+            let wrapped = widgets::wrap(line, width.saturating_sub(2));
+            if wrapped.is_empty() {
+                lines.push(Line::default());
+            }
+            lines.extend(
+                wrapped
+                    .into_iter()
+                    .map(|part| Line::styled(format!("  {part}"), theme.muted)),
+            );
+        }
     }
     Some(lines)
 }
@@ -285,11 +310,11 @@ fn hints(modal: &OperationModal, scrollable: bool) -> Vec<Hint> {
         ModalStatus::Running | ModalStatus::Succeeded => {}
     }
     if scrollable {
-        hints.push(Hint::new(
-            "↑/↓",
-            if failed { "scroll" } else { "scroll output" },
-            2,
-        ));
+        hints.push(if failed {
+            Hint::new("↑/↓ PgUp/PgDn", "scroll", 2)
+        } else {
+            Hint::new("↑/↓", "scroll output", 2)
+        });
     }
     hints
 }
@@ -508,7 +533,46 @@ mod tests {
                 " │ /wt/.trench-remove-1-0             │",
             ]
         );
-        assert_eq!(screen[9], " Enter close  ↑/↓ scroll");
+        assert_eq!(screen[9], " Enter close  ↑/↓ PgUp/PgDn scroll");
+    }
+
+    #[test]
+    fn a_failure_report_keeps_the_newest_output_whole_and_within_reach() {
+        let mut modal = OperationModal::new(OperationKind::Create);
+        run(&mut modal, OperationStage::PostHook, Some(false));
+        for index in 0..3000 {
+            output(&mut modal, &format!("progress {index}"));
+        }
+        output(
+            &mut modal,
+            "error: the lockfile is out of date; run `bun install` and commit bun.lock",
+        );
+        modal.fail(&OperationFailure {
+            stage: OperationStage::PostHook,
+            mutation_state: MutationState::RolledBack,
+            class: ErrorClass::Hook,
+            message: "command failed: `bun install` exited with code 1".to_string(),
+            retained_quarantine: None,
+        });
+        let area = ratatui::layout::Rect::new(0, 0, 60, 20);
+        let (overflow, page) = super::report_geometry(&modal, area);
+        modal.set_report_geometry(overflow, page);
+
+        assert!(
+            overflow < 130,
+            "the report holds a bounded tail, not every line: {overflow}"
+        );
+        let top = screen(&mut show(modal.clone()), 60, 20).join("\n");
+        assert!(top.contains("… 2901 earlier lines not shown"), "{top}");
+
+        // One key reaches the end, where the last line is shown in full.
+        modal.handle_key(crate::tui::operation_modal::ModalKey::End);
+        let bottom = screen(&mut show(modal), 60, 20);
+        let text = bottom.join("").replace(['│', ' '], "");
+        assert!(
+            text.contains("error:thelockfileisoutofdate;run`buninstall`andcommitbun.lock"),
+            "{bottom:#?}"
+        );
     }
 
     #[test]
@@ -516,12 +580,12 @@ mod tests {
         let recovery = format!("/{}.trench-remove-77-0", "deep/".repeat(34));
         let area = ratatui::layout::Rect::new(0, 0, 40, 10);
         let mut modal = partial_failure(&recovery);
-        let overflow = super::report_overflow(&modal, area);
+        let (overflow, page) = super::report_geometry(&modal, area);
         assert!(overflow > 0, "the report is taller than the dialog");
 
         let mut seen = String::new();
         for _ in 0..=overflow {
-            modal.set_report_scroll_limit(overflow);
+            modal.set_report_geometry(overflow, page);
             let screen = screen(&mut show(modal.clone()), 40, 10);
             seen.push_str(&screen[1..8].join("").replace(['│', ' '], ""));
             modal.handle_key(crate::tui::operation_modal::ModalKey::Down);

@@ -29,6 +29,10 @@ pub enum ModalKey {
     Escape,
     Up,
     Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +57,8 @@ pub struct OperationModal {
     report_scroll: usize,
     /// How far the failure report can scroll at the current terminal size.
     report_scroll_limit: usize,
+    /// Rows one PgUp or PgDn moves: the height of the dialog's text area.
+    page: usize,
     warnings: Vec<String>,
     status: ModalStatus,
 }
@@ -70,6 +76,7 @@ impl OperationModal {
             hook_scroll: 0,
             report_scroll: 0,
             report_scroll_limit: 0,
+            page: 1,
             warnings: Vec::new(),
             status: ModalStatus::Running,
         }
@@ -159,26 +166,47 @@ impl OperationModal {
             // A failure is a report read from the top: what failed, what
             // state things are in, then progress and output. It scrolls as
             // one document so every line of it can be reached.
-            ModalKey::Up if matches!(self.status, ModalStatus::Failed { .. }) => {
-                self.report_scroll = self.report_scroll.saturating_sub(1);
-                None
-            }
-            ModalKey::Down if matches!(self.status, ModalStatus::Failed { .. }) => {
-                self.report_scroll = (self.report_scroll + 1).min(self.report_scroll_limit);
-                None
-            }
-            ModalKey::Up => {
-                self.hook_scroll = self
-                    .hook_scroll
-                    .saturating_add(1)
-                    .min(self.hook_lines.len().saturating_sub(1));
-                None
-            }
-            ModalKey::Down => {
-                self.hook_scroll = self.hook_scroll.saturating_sub(1);
+            ModalKey::Up
+            | ModalKey::Down
+            | ModalKey::PageUp
+            | ModalKey::PageDown
+            | ModalKey::Home
+            | ModalKey::End => {
+                self.scroll(key);
                 None
             }
             ModalKey::Enter | ModalKey::Escape => None,
+        }
+    }
+
+    fn scroll(&mut self, key: ModalKey) {
+        let page = self.page.max(1);
+        if matches!(self.status, ModalStatus::Failed { .. }) {
+            // The report reads top to bottom, so Down moves toward its end.
+            let limit = self.report_scroll_limit;
+            self.report_scroll = match key {
+                ModalKey::Up => self.report_scroll.saturating_sub(1),
+                ModalKey::Down => self.report_scroll + 1,
+                ModalKey::PageUp => self.report_scroll.saturating_sub(page),
+                ModalKey::PageDown => self.report_scroll + page,
+                ModalKey::Home => 0,
+                ModalKey::End => limit,
+                ModalKey::Enter | ModalKey::Escape => self.report_scroll,
+            }
+            .min(limit);
+        } else {
+            // Live output follows its newest line; Up looks back from there.
+            let limit = self.hook_lines.len().saturating_sub(1);
+            self.hook_scroll = match key {
+                ModalKey::Up => self.hook_scroll + 1,
+                ModalKey::Down => self.hook_scroll.saturating_sub(1),
+                ModalKey::PageUp => self.hook_scroll + page,
+                ModalKey::PageDown => self.hook_scroll.saturating_sub(page),
+                ModalKey::Home => limit,
+                ModalKey::End => 0,
+                ModalKey::Enter | ModalKey::Escape => self.hook_scroll,
+            }
+            .min(limit);
         }
     }
 
@@ -230,11 +258,13 @@ impl OperationModal {
         self.report_scroll.min(self.report_scroll_limit)
     }
 
-    /// Tell the modal how many rows of the failure report are off screen.
-    /// The view knows the geometry; the modal only keeps the position.
-    pub fn set_report_scroll_limit(&mut self, limit: usize) {
-        self.report_scroll_limit = limit;
-        self.report_scroll = self.report_scroll.min(limit);
+    /// Tell the modal how many rows of the failure report are off screen
+    /// and how many rows one page is. The view knows the geometry; the modal
+    /// only keeps the position.
+    pub fn set_report_geometry(&mut self, overflow: usize, page: usize) {
+        self.report_scroll_limit = overflow;
+        self.report_scroll = self.report_scroll.min(overflow);
+        self.page = page;
     }
 
     pub fn visible_hook_lines(&self, height: usize) -> Vec<&str> {
@@ -372,7 +402,7 @@ mod tests {
         modal.handle_key(ModalKey::Down);
         assert_eq!(modal.report_scroll(), 0, "nothing is off screen yet");
 
-        modal.set_report_scroll_limit(2);
+        modal.set_report_geometry(2, 7);
         for _ in 0..5 {
             modal.handle_key(ModalKey::Down);
         }
@@ -380,12 +410,26 @@ mod tests {
         modal.handle_key(ModalKey::Up);
         assert_eq!(modal.report_scroll(), 1);
 
-        modal.set_report_scroll_limit(0);
+        modal.set_report_geometry(0, 7);
         assert_eq!(
             modal.report_scroll(),
             0,
             "a taller terminal resets the view"
         );
+
+        // A long report is crossed a page at a time, or in one key.
+        modal.set_report_geometry(40, 7);
+        modal.handle_key(ModalKey::PageDown);
+        modal.handle_key(ModalKey::PageDown);
+        assert_eq!(modal.report_scroll(), 14);
+        modal.handle_key(ModalKey::PageUp);
+        assert_eq!(modal.report_scroll(), 7);
+        modal.handle_key(ModalKey::End);
+        assert_eq!(modal.report_scroll(), 40);
+        modal.handle_key(ModalKey::PageDown);
+        assert_eq!(modal.report_scroll(), 40, "the end is the end");
+        modal.handle_key(ModalKey::Home);
+        assert_eq!(modal.report_scroll(), 0);
     }
 
     #[test]

@@ -70,12 +70,14 @@ syncs it with its base, `d` removes it, `/` searches, and `?` shows the rest.
 
 Creating is one screen. Type a branch name. If the branch exists, locally or
 on origin, trench checks it out; if it does not, trench creates it from the
-base shown in `From`, which you can change with `Tab`. The line at the bottom
-of the dialog always says what `Enter` is about to do.
+base shown in `From`, which you can change with `Tab`. The lines at the bottom
+of the dialog say what `Enter` is about to do, or why it cannot do it yet.
 
 Removing is one screen too. It shows what would be lost before you decide:
 uncommitted changes, or commits that exist only on a branch you chose to
-delete. Only `y` removes. `Enter` never does.
+delete. Only `y` removes, and `Enter` never does. When a risk has just
+appeared on screen, `y` waits a moment before it works, so a fast double
+press cannot accept something you have not read.
 
 The TUI uses your terminal's own colors and background by default, and it
 honors `NO_COLOR`. Set `[ui] theme` to `ops`, `catppuccin` or `gruvbox` for a

@@ -18,7 +18,7 @@ use crate::{
     tui::{
         app::{self, AppState, Effect, Event, HookNames, NoticeKind, WorktreeId},
         create_flow::{
-            CreateDialog, CreateEffect, CreateKey, CreateSubmission, ExistingWorktree,
+            BranchRow, CreateDialog, CreateEffect, CreateKey, CreateSubmission, ExistingWorktree,
             OriginRefresh, RowKind,
         },
         keymap::Key,
@@ -143,24 +143,29 @@ enum CreateDispatch {
 }
 
 impl CreateDispatch {
-    /// Whether this plan does what a row of `kind` promised.
-    fn matches(&self, kind: &RowKind) -> bool {
-        match (self, kind) {
-            (Self::Navigate(_), RowKind::HasWorktree { .. }) => true,
-            (Self::Run(request), kind) => match (&**request, kind) {
-                (OperationRequest::Create(create), RowKind::New) => {
-                    matches!(create.plan.action, CreateAction::NewBranch(_))
-                }
-                (OperationRequest::Create(create), RowKind::Local) => {
-                    create.plan.action == CreateAction::ExistingLocal
-                }
-                (OperationRequest::Create(create), RowKind::Remote { upstream }) => {
-                    create.plan.action == CreateAction::TrackRemote(upstream.clone())
-                }
-                _ => false,
+    /// Whether this plan does exactly what the dialog showed for `row`: the
+    /// same kind of action, on the same branch, in the same directory, and
+    /// for a new branch from the same base.
+    fn matches(&self, dialog: &CreateDialog, row: &BranchRow) -> bool {
+        let plan = match (self, &row.kind) {
+            // Nothing is created, so only the branch has to agree. The
+            // worktree's directory may have moved since the list was read.
+            (Self::Navigate(_), RowKind::HasWorktree { .. }) => return true,
+            (Self::Run(request), _) => match &**request {
+                OperationRequest::Create(create) => &create.plan,
+                _ => return false,
             },
+            _ => return false,
+        };
+        let same_action = match (&plan.action, &row.kind) {
+            (CreateAction::NewBranch(base), RowKind::New) => dialog.base() == Some(base.as_str()),
+            (CreateAction::ExistingLocal, RowKind::Local) => true,
+            (CreateAction::TrackRemote(planned), RowKind::Remote { upstream }) => {
+                planned == upstream
+            }
             _ => false,
-        }
+        };
+        same_action && plan.branch == row.branch && plan.path == dialog.planned_path(&row.branch)
     }
 }
 
@@ -387,12 +392,12 @@ fn handle_create_input(
             // The plan comes from live Git; the summary came from the last
             // refresh. When they name different actions, Enter would do
             // something the screen did not say, so it does nothing instead.
-            let shown = state
-                .create_dialog
-                .as_ref()
-                .and_then(CreateDialog::highlighted_row)
-                .map(|row| row.kind);
-            if !shown.is_some_and(|kind| dispatch.matches(&kind)) {
+            let as_shown = state.create_dialog.as_ref().is_some_and(|dialog| {
+                dialog
+                    .highlighted_row()
+                    .is_some_and(|row| dispatch.matches(dialog, &row))
+            });
+            if !as_shown {
                 if let Some(dialog) = state.create_dialog.as_mut() {
                     dialog.set_validation_error(Some(STALE_CREATE_SUMMARY.to_string()));
                 }
@@ -768,8 +773,8 @@ fn operation_modal_effect(
     }
     let modal = operation.modal_mut()?;
     // The dialog can only scroll as far as the terminal hides lines.
-    let overflow = view::operation_report_overflow(modal, area);
-    modal.set_report_scroll_limit(overflow);
+    let (overflow, page) = view::operation_report_geometry(modal, area);
+    modal.set_report_geometry(overflow, page);
     modal.handle_key(key)
 }
 
@@ -1223,6 +1228,10 @@ fn translate_modal_key(key: KeyEvent) -> Option<ModalKey> {
         KeyCode::Esc => Some(ModalKey::Escape),
         KeyCode::Up => Some(ModalKey::Up),
         KeyCode::Down => Some(ModalKey::Down),
+        KeyCode::PageUp => Some(ModalKey::PageUp),
+        KeyCode::PageDown => Some(ModalKey::PageDown),
+        KeyCode::Home => Some(ModalKey::Home),
+        KeyCode::End => Some(ModalKey::End),
         _ => None,
     }
 }
@@ -2061,6 +2070,110 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_local_branch_named_like_a_remote_creates_exactly_that_branch() {
+        let repository = init_repo();
+        let root = repository.path().join("worktrees");
+        let repo_info = crate::git::discover_repo(repository.path()).unwrap();
+        let git_repo = git2::Repository::open(repository.path()).unwrap();
+        let commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+        git_repo.branch("x", &commit, false).unwrap();
+        git_repo.branch("origin/x", &commit, false).unwrap();
+        let mut state = AppState::new(Vec::new());
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main", "x", "origin/x"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        ));
+        open_create_dialog(&mut state, &repo_info.name, &root, Some("main")).unwrap();
+        state.create_dialog.as_mut().unwrap().set_branch("origin/x");
+        let row = state
+            .create_dialog
+            .as_ref()
+            .unwrap()
+            .highlighted_row()
+            .unwrap();
+        assert_eq!(row.branch, "origin/x");
+
+        let effect = handle_create_input(
+            &mut state,
+            CreateKey::Enter,
+            repository.path(),
+            &root,
+            Some("main"),
+            None,
+        )
+        .unwrap();
+
+        let Some(CreateInputEffect::Start(request)) = effect else {
+            panic!("the highlighted branch should be created: {effect:?}")
+        };
+        let OperationRequest::Create(request) = *request else {
+            panic!("expected a create request")
+        };
+        assert_eq!(request.plan.branch, "origin/x");
+        assert_eq!(
+            request.plan.path,
+            root.join(&repo_info.name).join("origin-x")
+        );
+    }
+
+    #[test]
+    fn the_enter_gate_compares_the_branch_the_directory_and_the_base() {
+        let repository = init_repo();
+        let root = repository.path().join("worktrees");
+        let repo_info = crate::git::discover_repo(repository.path()).unwrap();
+        let git_repo = git2::Repository::open(repository.path()).unwrap();
+        let commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+        git_repo.branch("release", &commit, false).unwrap();
+        git_repo.branch("other", &commit, false).unwrap();
+        let mut state = AppState::new(Vec::new());
+        state.refs = Some(RefSnapshot::from_parts(
+            ["main", "release", "other"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        ));
+        open_create_dialog(&mut state, &repo_info.name, &root, Some("main")).unwrap();
+        let dialog = state.create_dialog.as_mut().unwrap();
+        let plan_for = |branch: &str, from: Option<&str>, root: &Path| {
+            build_create_dispatch(
+                &CreateSubmission {
+                    branch: branch.to_string(),
+                    from: from.map(ToOwned::to_owned),
+                },
+                repository.path(),
+                root,
+                Some("main"),
+                None,
+            )
+            .unwrap()
+        };
+
+        dialog.set_branch("release");
+        let row = dialog.highlighted_row().unwrap();
+        assert!(plan_for("release", None, &root).matches(dialog, &row));
+        assert!(
+            !plan_for("other", None, &root).matches(dialog, &row),
+            "same action on another branch"
+        );
+        assert!(
+            !plan_for("release", None, &repository.path().join("elsewhere")).matches(dialog, &row),
+            "same branch in another directory"
+        );
+
+        dialog.set_branch("feature/new");
+        let row = dialog.highlighted_row().unwrap();
+        assert!(plan_for("feature/new", Some("main"), &root).matches(dialog, &row));
+        assert!(
+            !plan_for("feature/new", Some("release"), &root).matches(dialog, &row),
+            "a new branch from a base the dialog did not show"
+        );
+    }
+
+    #[test]
     fn enter_does_not_check_out_an_existing_branch_when_the_summary_said_new_branch() {
         let repository = init_repo();
         let root = repository.path().join("worktrees");
@@ -2531,7 +2644,7 @@ mod tests {
             repository.path(),
             Some("main"),
             None,
-            Instant::now(),
+            Instant::now() + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE,
         )
         .unwrap() else {
             panic!("y should start the removal")
@@ -2690,7 +2803,7 @@ mod tests {
                 repository.path(),
                 Some("main"),
                 None,
-                Instant::now(),
+                Instant::now() + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE * 4,
             )
             .unwrap()
         };

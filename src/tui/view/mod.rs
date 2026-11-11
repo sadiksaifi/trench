@@ -25,7 +25,7 @@ use crate::tui::{
     theme::Theme,
 };
 
-pub use operation::report_overflow as operation_report_overflow;
+pub use operation::report_geometry as operation_report_geometry;
 pub use remove::shows_every_risk as remove_shows_every_risk;
 
 pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {

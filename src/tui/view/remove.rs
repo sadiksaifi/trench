@@ -116,12 +116,19 @@ enum Role {
     Error,
 }
 
-/// The dialog text below the header, wrapped to `width`, in two groups: the
-/// branch choice, then what the removal destroys.
-///
+/// The dialog text below the header, wrapped to `width`.
+struct Body {
+    /// The branch checkbox, or why there is none.
+    choice: Vec<(Role, String)>,
+    /// What the removal destroys, or a note that it destroys nothing extra.
+    losses: Vec<(Role, String)>,
+    /// Why the last `y` did nothing. The only part that may be left out.
+    error: Vec<(Role, String)>,
+}
+
 /// Nothing here is ever shortened. A line either appears whole or the dialog
 /// reports that it does not fit.
-fn body(dialog: &RemoveDialog, width: usize) -> [Vec<(Role, String)>; 2] {
+fn body(dialog: &RemoveDialog, width: usize) -> Body {
     let target = dialog.target();
     let branch = target.branch.as_deref().unwrap_or_default();
     let home = paths::home_dir();
@@ -186,16 +193,16 @@ fn body(dialog: &RemoveDialog, width: usize) -> [Vec<(Role, String)>; 2] {
                 .map(|line| (Role::Risk, line)),
         );
     }
-    // The error comes after the risks: it is the least important line to
-    // keep on screen, and the risks are what `y` accepts.
-    if let Some(error) = dialog.validation_error() {
-        losses.extend(
+    let error = dialog
+        .validation_error()
+        .map(|error| {
             prefixed(widgets::FAILED, error, width)
                 .into_iter()
-                .map(|line| (Role::Error, line)),
-        );
-    }
-    if losses.is_empty() {
+                .map(|line| (Role::Error, line))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if losses.is_empty() && error.is_empty() {
         let deletes_branch = if dialog.delete_branch() {
             format!(" Deletes branch {branch}.")
         } else {
@@ -212,7 +219,11 @@ fn body(dialog: &RemoveDialog, width: usize) -> [Vec<(Role, String)>; 2] {
             },
         );
     }
-    [choice, losses]
+    Body {
+        choice,
+        losses,
+        error,
+    }
 }
 
 /// Wrap `message` after a glyph, indenting continuation lines under the text.
@@ -231,31 +242,42 @@ fn prefixed(glyph: &str, message: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
-/// Lay the groups out in `rows`, with a blank row before each group when
-/// there is room. `None` means the text does not fit even without blanks.
-fn arrange(groups: &[Vec<(Role, String)>; 2], rows: usize) -> Option<Vec<Option<(Role, String)>>> {
-    let text_rows: usize = groups.iter().map(Vec::len).sum();
-    if text_rows > rows {
+/// Lay the body out in `rows`: a blank row before each group when there is
+/// room, and the error after the risks.
+///
+/// The risks are what `y` accepts, so they are never dropped. The error is
+/// dropped first when rows run out, because the risk it points at says more
+/// than it does. `None` means the choice and the risks alone do not fit.
+fn arrange(body: &Body, rows: usize) -> Option<Vec<Option<(Role, String)>>> {
+    let required = body.choice.len() + body.losses.len();
+    if required > rows {
         return None;
     }
-    let spaced = text_rows + groups.len() <= rows;
+    let groups = 2;
+    let with_error = required + body.error.len() <= rows;
+    let text_rows = required + if with_error { body.error.len() } else { 0 };
+    let spaced = text_rows + groups <= rows;
     let mut arranged = Vec::new();
-    for group in groups {
-        if spaced {
+    for group in [&body.choice, &body.losses] {
+        if spaced && !group.is_empty() {
             arranged.push(None);
         }
         arranged.extend(group.iter().cloned().map(Some));
+    }
+    if with_error {
+        arranged.extend(body.error.iter().cloned().map(Some));
     }
     Some(arranged)
 }
 
 fn hints(dialog: &RemoveDialog, every_risk_shown: bool) -> Vec<Hint> {
     let risky = !dialog.risks().is_empty();
-    let mut hints = vec![if every_risk_shown {
-        Hint::new("y", if risky { "remove anyway" } else { "remove" }, 0).tone(Tone::Danger)
-    } else {
-        Hint::new("y", "remove", 0).tone(Tone::Disabled)
-    }];
+    let label = if risky { "remove anyway" } else { "remove" };
+    // `y` is dim whenever it would do nothing: the risks do not fit, or they
+    // appeared a moment ago and the pause to read them is still running.
+    let live = every_risk_shown && dialog.confirm_ready(std::time::Instant::now());
+    let mut hints =
+        vec![Hint::new("y", label, 0).tone(if live { Tone::Danger } else { Tone::Disabled })];
     if dialog.can_delete_branch() {
         hints.push(Hint::new(
             "Space",
@@ -562,6 +584,51 @@ mod tests {
         assert!(buffer[(1, 9)]
             .modifier
             .contains(ratatui::style::Modifier::DIM));
+    }
+
+    #[test]
+    fn at_the_minimum_size_an_error_line_gives_way_to_the_risk_it_is_about() {
+        let fixture = Fixture::new();
+        let mut state = fixture.open(&[]);
+        std::fs::write(fixture.worktree().join("late.txt"), "late\n").unwrap();
+        let dialog = state.remove_dialog.as_mut().unwrap();
+        let error = dialog
+            .revalidate_request(fixture.root.path(), Some("main"), None)
+            .unwrap_err();
+        dialog.set_validation_error(Some(error.to_string()));
+        let area = ratatui::layout::Rect::new(0, 0, 40, 10);
+
+        let screen = screen(&mut state, 40, 10);
+        let text = screen.join("").replace(['│', ' '], "");
+
+        assert!(
+            text.contains("!Uncommittedchangeswillbelost."),
+            "the new risk fits once the error line is dropped: {screen:#?}"
+        );
+        assert!(!text.contains("Toosmall"), "{screen:#?}");
+        assert!(super::shows_every_risk(
+            state.remove_dialog.as_ref().unwrap(),
+            area
+        ));
+    }
+
+    #[test]
+    fn y_is_dimmed_while_it_is_paused() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.worktree().join("dirty.txt"), "dirty\n").unwrap();
+        let mut state = fixture.open(&[]);
+        let buffer = crate::tui::view::testing::draw(&mut state, 60, 16, "terminal");
+
+        assert_eq!(
+            crate::tui::view::testing::lines(&buffer)[15],
+            " y remove anyway  Space delete branch too  Esc cancel"
+        );
+        assert!(
+            buffer[(1, 15)]
+                .modifier
+                .contains(ratatui::style::Modifier::DIM),
+            "the dialog just opened with a risk, so y does nothing yet"
+        );
     }
 
     #[test]

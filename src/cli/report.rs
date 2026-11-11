@@ -127,6 +127,30 @@ pub fn state_after_failure(
     }
 }
 
+/// What a failed operation left behind, in one clause.
+///
+/// This is `state_after_failure`, plus the one case where the general advice
+/// points nowhere: a worktree whose directory was already gone has nothing to
+/// "check", and what remains is a half-deleted Git entry.
+pub fn failure_state(
+    operation: OperationKind,
+    stage: OperationStage,
+    state: MutationState,
+    retained: bool,
+    failed_in_hook: bool,
+) -> Option<&'static str> {
+    if operation == OperationKind::Remove
+        && stage == OperationStage::Prune
+        && state == MutationState::PartiallyApplied
+        && !retained
+    {
+        return Some(
+            "part of the worktree's Git entry was removed; run `git worktree prune` to clear the rest",
+        );
+    }
+    state_after_failure(operation, state, failed_in_hook)
+}
+
 pub fn operation_failure(operation: OperationKind, failure: &OperationFailure) -> Report {
     let hook = hook_name(operation, failure.stage)
         .filter(|_| matches!(failure.class, ErrorClass::Hook | ErrorClass::HookTimeout));
@@ -134,7 +158,13 @@ pub fn operation_failure(operation: OperationKind, failure: &OperationFailure) -
         Some(hook) => hook_failure_message(hook, &failure.message),
         None => failure.message.clone(),
     });
-    if let Some(state) = state_after_failure(operation, failure.mutation_state, hook.is_some()) {
+    if let Some(state) = failure_state(
+        operation,
+        failure.stage,
+        failure.mutation_state,
+        failure.retained_quarantine.is_some(),
+        hook.is_some(),
+    ) {
         report = report.hint(state);
     }
     if failure.class == ErrorClass::HookTimeout {
@@ -485,6 +515,35 @@ mod tests {
             "error: I/O error: Permission denied (os error 13)\n\
              hint: some changes were applied; check the worktree before retrying\n\
              hint: kept for recovery: /wt/.trench-remove-1-0"
+        );
+    }
+
+    #[test]
+    fn a_half_removed_git_entry_points_at_the_command_that_finishes_the_job() {
+        let half_retired = failure(
+            OperationStage::Prune,
+            MutationState::PartiallyApplied,
+            ErrorClass::Io,
+            "I/O error: Permission denied (os error 13)",
+        );
+        assert_eq!(
+            plain(operation_failure(OperationKind::Remove, &half_retired)),
+            "error: I/O error: Permission denied (os error 13)\n\
+             hint: part of the worktree's Git entry was removed; run `git worktree prune` to clear the rest"
+        );
+
+        // With a quarantined directory there is something to check, so the
+        // general advice and the recovery path apply.
+        let mut quarantined = failure(
+            OperationStage::Prune,
+            MutationState::PartiallyApplied,
+            ErrorClass::Io,
+            "I/O error",
+        );
+        quarantined.retained_quarantine = Some("/wt/.trench-remove-1-0".into());
+        assert!(
+            plain(operation_failure(OperationKind::Remove, &quarantined))
+                .contains("check the worktree before retrying")
         );
     }
 

@@ -469,7 +469,8 @@ impl CreateDialog {
         });
     }
 
-    fn planned_path(&self, branch: &str) -> PathBuf {
+    /// Where a worktree for `branch` would be created, as the summary shows.
+    pub fn planned_path(&self, branch: &str) -> PathBuf {
         self.worktree_root
             .join(&self.repository)
             .join(paths::sanitize_branch(branch))
@@ -559,23 +560,20 @@ impl CreateDialog {
     }
 }
 
-/// The row the typed text names exactly, in the order planning resolves it:
-/// a local branch of the short name, the remote ref as typed, then a local
-/// branch whose whole name is the typed text.
+/// The row the typed text names exactly, in the order planning resolves it
+/// (`CreatePlanner::classify`): a local branch spelled as typed, then the
+/// local branch of the short name, then the remote ref.
 fn exact_match(rows: &[BranchRow], query: &str, short: &str) -> Option<usize> {
-    let remote = |row: &BranchRow| matches!(row.kind, RowKind::Remote { .. });
-    let named = |name: &str, wants_remote: bool| {
+    let local = |name: &str| {
         rows.iter()
-            .position(|row| row.branch == name && remote(row) == wants_remote)
+            .position(|row| row.branch == name && !matches!(row.kind, RowKind::Remote { .. }))
     };
-    named(short, false)
-        .or_else(|| {
-            rows.iter().position(|row| {
-                matches!(&row.kind, RowKind::Remote { upstream }
-                    if upstream == query || upstream == &format!("origin/{query}"))
-            })
+    local(query).or_else(|| local(short)).or_else(|| {
+        rows.iter().position(|row| {
+            matches!(&row.kind, RowKind::Remote { upstream }
+                if upstream == query || upstream == &format!("origin/{query}"))
         })
-        .or_else(|| named(query, false))
+    })
 }
 
 /// Order among equally good matches: creatable branches first.
@@ -779,6 +777,19 @@ mod tests {
             dialog.handle_key(CreateKey::Enter),
             Some(CreateEffect::Navigate(WorktreeId::new(&path)))
         );
+
+        // The local branch `foo` exists too. The typed text still means the
+        // branch spelled exactly that way, as it does in planning.
+        let mut with_short = dialog.clone();
+        with_short.update_refs(RefSnapshot::from_parts(
+            ["main", "foo", "origin/foo", "origin/bar"],
+            ["origin/main"],
+            Some("origin/main"),
+            Some("main"),
+            true,
+        ));
+        with_short.set_branch("origin/foo");
+        assert_eq!(with_short.highlighted_row().unwrap().branch, "origin/foo");
 
         let mut local = dialog.clone();
         local.set_branch("origin/bar");

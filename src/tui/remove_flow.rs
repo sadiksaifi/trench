@@ -70,8 +70,9 @@ pub enum Risk {
 ///
 /// A double-press arrives within a few hundred milliseconds. Without this
 /// pause its second press would accept a risk that was drawn one frame ago.
-/// Every path that replaces the facts arms it: a stale `y`, and returning to
-/// the form after a failed attempt (a hook may have changed the worktree).
+/// Every path that puts a risk on screen starts it: opening the dialog on a
+/// risky worktree, Space adding a risk, a stale `y`, and returning to the
+/// form after a failed attempt (a hook may have changed the worktree).
 pub const CONFIRM_DELAY_AFTER_CHANGE: Duration = Duration::from_millis(800);
 
 /// Whether the local branch can be deleted along with the worktree.
@@ -161,13 +162,29 @@ impl RemoveDialog {
             });
         }
         let target = RemoveTarget::new(id, &assessment);
-        Ok(Self {
+        let mut dialog = Self {
             target,
             assessment,
             delete_branch: false,
             validation_error: None,
             confirm_after: None,
-        })
+        };
+        // `d y` typed in one burst would otherwise accept risks that were
+        // on screen for a single frame.
+        if !dialog.risks().is_empty() {
+            dialog.start_confirm_pause();
+        }
+        Ok(dialog)
+    }
+
+    /// Whether `y` removes at `now`, or is still paused so the risks that
+    /// just appeared can be read.
+    pub fn confirm_ready(&self, now: Instant) -> bool {
+        self.confirm_after.is_none_or(|after| now >= after)
+    }
+
+    fn start_confirm_pause(&mut self) {
+        self.confirm_after = Some(Instant::now() + CONFIRM_DELAY_AFTER_CHANGE);
     }
 
     pub fn target(&self) -> &RemoveTarget {
@@ -232,7 +249,17 @@ impl RemoveDialog {
 
     pub fn toggle_delete_branch(&mut self) {
         if self.can_delete_branch() {
+            let before = self.risks().len();
             self.delete_branch = !self.delete_branch;
+            // Choosing to delete an unmerged branch puts a new risk on
+            // screen; `Space y` typed together must not accept it unread.
+            let after = self.risks().len();
+            if after > before {
+                self.start_confirm_pause();
+            } else if after == 0 {
+                // Nothing risky is left on screen, so nothing is unread.
+                self.confirm_after = None;
+            }
         }
     }
 
@@ -243,7 +270,7 @@ impl RemoveDialog {
                 self.toggle_delete_branch();
                 None
             }
-            RemoveKey::Confirm if self.confirm_after.is_some_and(|after| now < after) => None,
+            RemoveKey::Confirm if !self.confirm_ready(now) => None,
             RemoveKey::Confirm => Some(RemoveEffect::Submit),
         }
     }
@@ -270,7 +297,7 @@ impl RemoveDialog {
         // The clock starts now, after discovery. Discovery can take longer
         // than the pause itself, and keys typed while it ran are still
         // queued; they must not count as having read the new facts.
-        self.confirm_after = Some(Instant::now() + CONFIRM_DELAY_AFTER_CHANGE);
+        self.start_confirm_pause();
         Ok(true)
     }
 
@@ -783,6 +810,72 @@ mod tests {
     }
 
     #[test]
+    fn a_dialog_that_opens_with_a_risk_ignores_a_y_typed_along_with_d() {
+        let fixture = Fixture::new("burst");
+        std::fs::write(fixture.worktree_path.join("notes.txt"), "work\n").unwrap();
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        let opened = Instant::now();
+
+        assert!(!dialog.confirm_ready(opened));
+        assert_eq!(dialog.handle_key(RemoveKey::Confirm, opened), None);
+        assert!(dialog.confirm_ready(opened + CONFIRM_DELAY_AFTER_CHANGE));
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, opened + CONFIRM_DELAY_AFTER_CHANGE),
+            Some(RemoveEffect::Submit)
+        );
+    }
+
+    #[test]
+    fn a_dialog_that_opens_without_risk_accepts_y_at_once() {
+        let fixture = Fixture::new("clean-open");
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+
+        assert!(dialog.confirm_ready(Instant::now()));
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, Instant::now()),
+            Some(RemoveEffect::Submit)
+        );
+    }
+
+    #[test]
+    fn space_that_adds_a_risk_starts_the_pause_and_space_that_removes_it_does_not() {
+        let fixture = Fixture::new("space-adds-risk");
+        std::fs::write(fixture.worktree_path.join("feature.txt"), "feature\n").unwrap();
+        git(&fixture.worktree_path, &["add", "feature.txt"]);
+        git(&fixture.worktree_path, &["commit", "-m", "feature"]);
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        assert!(dialog.confirm_ready(Instant::now()));
+
+        dialog.handle_key(RemoveKey::Space, Instant::now());
+        assert_eq!(dialog.risks(), [Risk::UnmergedCommits]);
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, Instant::now()),
+            None,
+            "`d Space y` in one burst must not delete the branch"
+        );
+
+        dialog.handle_key(RemoveKey::Space, Instant::now());
+        assert!(dialog.risks().is_empty());
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, Instant::now()),
+            Some(RemoveEffect::Submit),
+            "going back to the safe choice needs no pause"
+        );
+    }
+
+    #[test]
     fn the_pause_starts_when_the_new_facts_arrive_not_when_y_was_pressed() {
         let fixture = Fixture::new("slow-discovery");
         let mut dialog = RemoveDialog::new(
@@ -831,12 +924,13 @@ mod tests {
             fixture.assessment(),
         )
         .unwrap();
+        let opened = Instant::now();
         assert!(!unchanged
             .refresh(fixture.root.path(), Some("main"))
             .unwrap());
-        assert_eq!(
-            unchanged.handle_key(RemoveKey::Confirm, Instant::now()),
-            Some(RemoveEffect::Submit)
+        assert!(
+            unchanged.confirm_ready(opened + CONFIRM_DELAY_AFTER_CHANGE),
+            "a refresh that finds nothing new does not restart the pause"
         );
     }
 

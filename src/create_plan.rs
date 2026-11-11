@@ -227,15 +227,18 @@ impl CreatePlanner {
                 Some(upstream),
             ),
         };
-        let source_name = match &action {
-            CreateAction::NewBranch(base) => Some(base.as_str()),
-            CreateAction::ExistingLocal => Some(location.branch.as_str()),
-            CreateAction::TrackRemote(upstream) => Some(upstream.as_str()),
+        // The action says which namespace the source lives in. Its name
+        // alone does not: a local branch may be called `origin/x`.
+        let source_oid = match &action {
+            CreateAction::NewBranch(base) => Some(self.resolve_base_oid(base)?),
+            CreateAction::ExistingLocal => {
+                Some(self.resolve_ref_oid(&format!("refs/heads/{}", location.branch))?)
+            }
+            CreateAction::TrackRemote(upstream) => {
+                Some(self.resolve_ref_oid(&format!("refs/remotes/{upstream}"))?)
+            }
             CreateAction::Navigate(_) => None,
         };
-        let source_oid = source_name
-            .map(|name| self.resolve_source_oid(name))
-            .transpose()?;
         Ok(CreatePlan {
             dry_run: true,
             action,
@@ -258,20 +261,36 @@ impl CreatePlanner {
         })
     }
 
-    fn resolve_source_oid(&self, name: &str) -> Result<git2::Oid, CreatePlanError> {
-        let repo = git2::Repository::open(&self.repo_path)?;
-        let reference = if name.starts_with("origin/") {
-            format!("refs/remotes/{name}")
+    /// A base is resolved the way `RefSnapshot::resolve` named it: a name
+    /// that starts with `origin/` is the remote-tracking ref.
+    fn resolve_base_oid(&self, base: &str) -> Result<git2::Oid, CreatePlanError> {
+        if base.starts_with("origin/") {
+            self.resolve_ref_oid(&format!("refs/remotes/{base}"))
         } else {
-            format!("refs/heads/{name}")
-        };
-        let object = repo.revparse_single(&reference)?;
+            self.resolve_ref_oid(&format!("refs/heads/{base}"))
+        }
+    }
+
+    fn resolve_ref_oid(&self, reference: &str) -> Result<git2::Oid, CreatePlanError> {
+        let repo = git2::Repository::open(&self.repo_path)?;
+        let object = repo.revparse_single(reference)?;
         let oid = object.peel_to_commit()?.id();
         Ok(oid)
     }
 
+    /// What the typed name refers to.
+    ///
+    /// A local branch spelled exactly as typed always wins, including one
+    /// whose name starts with `origin/`. After that, `origin/x` is shorthand
+    /// for the local branch `x`, then for the remote ref.
     fn classify<'a>(&self, selection: &'a str) -> RefClass<'a> {
         let candidates = self.refs.candidates();
+        if candidates
+            .iter()
+            .any(|candidate| candidate.kind == RefKind::Local && candidate.name == selection)
+        {
+            return RefClass::Local(selection);
+        }
         if let Some(branch) = selection.strip_prefix("origin/") {
             if candidates
                 .iter()
@@ -288,12 +307,6 @@ impl CreatePlanner {
                     upstream: selection.to_string(),
                 };
             }
-        }
-        if candidates
-            .iter()
-            .any(|candidate| candidate.kind == RefKind::Local && candidate.name == selection)
-        {
-            return RefClass::Local(selection);
         }
         let upstream = format!("origin/{selection}");
         if candidates
@@ -321,6 +334,69 @@ mod tests {
         let tree = repo.find_tree(tree_id).unwrap();
         repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
             .unwrap();
+    }
+
+    fn commit_on_new_branch(path: &std::path::Path, branch: &str) -> git2::Oid {
+        let repo = git2::Repository::open(path).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = parent.tree().unwrap();
+        let oid = repo
+            .commit(None, &signature, &signature, branch, &tree, &[&parent])
+            .unwrap();
+        repo.branch(branch, &repo.find_commit(oid).unwrap(), false)
+            .unwrap();
+        oid
+    }
+
+    #[test]
+    fn a_local_branch_named_like_a_remote_ref_means_itself() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let literal = commit_on_new_branch(repo.path(), "origin/x");
+        let planner =
+            || CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        // Only the local branch `origin/x` exists. Its commit must be read
+        // from refs/heads, not looked up as a remote-tracking ref.
+        let alone = planner().plan("origin/x", None).unwrap();
+        assert_eq!(alone.action, CreateAction::ExistingLocal);
+        assert_eq!(alone.branch, "origin/x");
+        assert_eq!(alone.source_oid, Some(literal));
+
+        // A local `x` also exists. The typed name still means the branch
+        // that is spelled exactly that way.
+        let short = commit_on_new_branch(repo.path(), "x");
+        let both = planner().plan("origin/x", None).unwrap();
+        assert_eq!(both.branch, "origin/x");
+        assert_eq!(both.source_oid, Some(literal));
+        let plain = planner().plan("x", None).unwrap();
+        assert_eq!(plain.branch, "x");
+        assert_eq!(plain.source_oid, Some(short));
+    }
+
+    #[test]
+    fn a_remote_only_branch_is_still_reached_by_either_spelling() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let git = git2::Repository::open(repo.path()).unwrap();
+        let head = git.head().unwrap().peel_to_commit().unwrap().id();
+        git.reference("refs/remotes/origin/release", head, false, "test")
+            .unwrap();
+        let planner =
+            CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        for spelling in ["release", "origin/release"] {
+            let plan = planner.plan(spelling, None).unwrap();
+            assert_eq!(
+                plan.action,
+                CreateAction::TrackRemote("origin/release".to_string()),
+                "{spelling}"
+            );
+            assert_eq!(plan.branch, "release", "{spelling}");
+        }
     }
 
     #[test]

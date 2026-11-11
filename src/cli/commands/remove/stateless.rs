@@ -2235,15 +2235,17 @@ fn prepare_exact_worktree_removal(
     ))
 }
 
-/// The admin entry (`<common>/worktrees/<id>`) whose `gitdir` file points at
-/// `worktree`, found without the worktree directory having to exist.
-fn admin_entry_for(common: &Path, worktree: &Path) -> Option<PathBuf> {
+/// Every admin entry (`<common>/worktrees/<id>`) whose `gitdir` file points
+/// at `worktree`, found without the worktree directory having to exist.
+fn admin_entries_for(common: &Path, worktree: &Path) -> Vec<PathBuf> {
     let expected = git::worktrees::canonicalize_lenient(worktree);
-    std::fs::read_dir(common.join("worktrees"))
-        .ok()?
+    let Ok(entries) = std::fs::read_dir(common.join("worktrees")) else {
+        return Vec::new();
+    };
+    entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|entry| {
+        .filter(|entry| {
             std::fs::read_to_string(entry.join("gitdir")).is_ok_and(|gitdir| {
                 // The file holds `<worktree>/.git`, relative to the entry
                 // when `worktree.useRelativePaths` is set.
@@ -2253,11 +2255,29 @@ fn admin_entry_for(common: &Path, worktree: &Path) -> Option<PathBuf> {
                     .is_some_and(|path| git::worktrees::canonicalize_lenient(path) == expected)
             })
         })
+        .collect()
+}
+
+/// The one admin entry for `worktree`. `None` when Git has no entry, and
+/// also when it has several: Git never creates that state, so there is no
+/// safe way to say which one the user means.
+fn admin_entry_for(common: &Path, worktree: &Path) -> Option<PathBuf> {
+    let mut entries = admin_entries_for(common, worktree);
+    (entries.len() == 1).then(|| entries.remove(0))
+}
+
+/// The points in a retirement where a test can change the world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetireStep {
+    /// Every check passed; the entry is about to be deleted.
+    Checked,
+    /// The entry was deleted; Git is about to be asked whether it is gone.
+    Deleted,
 }
 
 /// Retire the Git metadata of a worktree whose directory is already gone.
 fn retire_missing_worktree(assessment: &RemovalAssessment) -> Result<(), ExactRemovalFailure> {
-    retire_missing_worktree_with(assessment, || {})
+    retire_missing_worktree_with(assessment, |_| {})
 }
 
 /// Delete the one admin entry that belongs to the missing worktree.
@@ -2269,11 +2289,11 @@ fn retire_missing_worktree(assessment: &RemovalAssessment) -> Result<(), ExactRe
 /// `<common>/worktrees/` is what `prune` does for one entry, and the only
 /// thing it can destroy is Git's record.
 ///
-/// `before_delete` runs after the final checks, so tests can restore the
-/// directory at the worst moment.
+/// `probe` is called at each `RetireStep`, so tests can restore the
+/// directory or recreate an entry at the worst moment.
 fn retire_missing_worktree_with(
     assessment: &RemovalAssessment,
-    before_delete: impl FnOnce(),
+    mut probe: impl FnMut(RetireStep),
 ) -> Result<(), ExactRemovalFailure> {
     let not_started = |operation: &'static str, message: String| {
         ExactRemovalFailure::not_started(git::GitError::CommandFailed { operation, message })
@@ -2284,12 +2304,25 @@ fn retire_missing_worktree_with(
         ));
     }
     let common = common_git_dir(&assessment.repo_path).map_err(ExactRemovalFailure::not_started)?;
-    let entry = admin_entry_for(&common, &assessment.path).ok_or_else(|| {
-        not_started(
-            "removing the worktree entry",
-            format!("Git has no entry for {}", assessment.path.display()),
-        )
-    })?;
+    let mut entries = admin_entries_for(&common, &assessment.path);
+    let entry = match entries.len() {
+        1 => entries.remove(0),
+        0 => {
+            return Err(not_started(
+                "removing the worktree entry",
+                format!("Git has no entry for {}", assessment.path.display()),
+            ))
+        }
+        _ => {
+            return Err(not_started(
+                "removing the worktree entry",
+                format!(
+                    "more than one Git entry points at {}; run `git worktree prune` to clear them",
+                    assessment.path.display()
+                ),
+            ))
+        }
+    };
     let is_directory = std::fs::symlink_metadata(&entry)
         .map(|metadata| metadata.file_type().is_dir())
         .unwrap_or(false);
@@ -2308,11 +2341,12 @@ fn retire_missing_worktree_with(
         ));
     }
 
-    before_delete();
+    probe(RetireStep::Checked);
     // From here on a failure may have deleted part of the entry, so it can
     // no longer be reported as "nothing changed".
     std::fs::remove_dir_all(&entry)
         .map_err(|error| ExactRemovalFailure::recovered_partial(error.into()))?;
+    probe(RetireStep::Deleted);
     let still_listed = git::worktrees::discover(&assessment.repo_path)
         .map_err(ExactRemovalFailure::recovered_partial)?
         .into_iter()
@@ -3650,8 +3684,10 @@ mod tests {
 
         // The disk comes back after the last absence check, at the worst
         // possible moment.
-        retire_missing_worktree_with(&assessment, || {
-            std::fs::rename(&parked, &fixture.linked).unwrap();
+        retire_missing_worktree_with(&assessment, |step| {
+            if step == RetireStep::Checked {
+                std::fs::rename(&parked, &fixture.linked).unwrap();
+            }
         })
         .unwrap();
 
@@ -3659,6 +3695,104 @@ mod tests {
             std::fs::read_to_string(fixture.linked.join("precious")).unwrap(),
             "user data",
             "retiring a Git entry must never delete worktree files"
+        );
+    }
+
+    /// A fixture whose worktree directory is gone, with its assessment and
+    /// the admin entry Git still holds for it.
+    fn missing(branch: &str) -> (Fixture, RemovalAssessment, PathBuf) {
+        let fixture = Fixture::new(branch);
+        let common = common_git_dir(&fixture.main).unwrap();
+        let entry = admin_entry_for(&common, &fixture.linked).unwrap();
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        let assessment = fixture.assess();
+        (fixture, assessment, entry)
+    }
+
+    #[test]
+    fn retirement_refuses_a_lock_taken_after_the_assessment() {
+        let (_fixture, assessment, entry) = missing("feature/locked-late");
+        std::fs::write(entry.join("locked"), "").unwrap();
+
+        let failure = retire_missing_worktree(&assessment).unwrap_err();
+
+        assert!(!failure.partially_applied);
+        assert!(failure.error.to_string().contains("locked"), "{failure:?}");
+        assert!(entry.join("gitdir").exists(), "the entry is untouched");
+    }
+
+    #[test]
+    fn retirement_refuses_a_directory_that_came_back_before_it_started() {
+        let (fixture, assessment, entry) = missing("feature/came-back");
+        std::fs::create_dir(&fixture.linked).unwrap();
+        std::fs::write(fixture.linked.join("precious"), "user data").unwrap();
+
+        let failure = retire_missing_worktree(&assessment).unwrap_err();
+
+        assert!(!failure.partially_applied);
+        assert!(entry.join("gitdir").exists(), "the entry is untouched");
+        assert!(fixture.linked.join("precious").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retirement_refuses_an_entry_that_is_a_symlink() {
+        let (fixture, assessment, entry) = missing("feature/symlinked-entry");
+        let elsewhere = fixture.root.path().join("elsewhere");
+        std::fs::rename(&entry, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &entry).unwrap();
+
+        let failure = retire_missing_worktree(&assessment).unwrap_err();
+
+        assert!(!failure.partially_applied);
+        assert!(
+            elsewhere.join("gitdir").exists(),
+            "nothing outside .git/worktrees was deleted"
+        );
+    }
+
+    #[test]
+    fn retirement_refuses_two_entries_that_point_at_the_same_directory() {
+        let (_fixture, assessment, entry) = missing("feature/duplicated");
+        let duplicate = entry.with_file_name("duplicate");
+        std::fs::create_dir(&duplicate).unwrap();
+        for file in ["gitdir", "HEAD", "commondir"] {
+            std::fs::copy(entry.join(file), duplicate.join(file)).unwrap();
+        }
+
+        let failure = retire_missing_worktree(&assessment).unwrap_err();
+
+        assert!(!failure.partially_applied);
+        assert!(
+            failure.error.to_string().contains("more than one"),
+            "{failure:?}"
+        );
+        assert!(entry.join("gitdir").exists() && duplicate.join("gitdir").exists());
+    }
+
+    #[test]
+    fn an_entry_git_still_lists_after_deletion_is_a_partial_change() {
+        let (_fixture, assessment, entry) = missing("feature/relisted");
+        let saved = ["gitdir", "HEAD", "commondir"]
+            .map(|file| (file, std::fs::read(entry.join(file)).unwrap()));
+        let reappears = entry.with_file_name("reappears");
+
+        // Something recreates an entry for the same directory right after
+        // the deletion. The deletion happened, so "nothing changed" is false.
+        let failure = retire_missing_worktree_with(&assessment, |step| {
+            if step == RetireStep::Deleted {
+                std::fs::create_dir(&reappears).unwrap();
+                for (file, contents) in &saved {
+                    std::fs::write(reappears.join(file), contents).unwrap();
+                }
+            }
+        })
+        .unwrap_err();
+
+        assert!(failure.partially_applied);
+        assert!(
+            failure.error.to_string().contains("still lists"),
+            "{failure:?}"
         );
     }
 
