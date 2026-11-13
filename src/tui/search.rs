@@ -86,7 +86,7 @@ pub fn reconcile_selection(
         .or_else(|| visible.first().map(|row| row.id.clone()))
 }
 
-fn fuzzy_score(candidate: &str, query: &str) -> Option<u32> {
+pub(crate) fn fuzzy_score(candidate: &str, query: &str) -> Option<u32> {
     let candidate = candidate.to_lowercase().chars().collect::<Vec<_>>();
     let query = query.to_lowercase().chars().collect::<Vec<_>>();
     if query.is_empty() {
@@ -144,6 +144,7 @@ mod tests {
             is_main: false,
             is_current: false,
             detached: branch.is_none(),
+            missing: false,
         }
     }
 

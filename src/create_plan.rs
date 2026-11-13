@@ -1,4 +1,3 @@
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::ser::{Serialize, SerializeStruct, Serializer};
@@ -80,25 +79,6 @@ impl Serialize for CreatePlan {
     }
 }
 
-impl fmt::Display for CreatePlan {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let base = self.base.as_deref().unwrap_or("(none)");
-        let tracking = self.tracking.as_deref().unwrap_or("(none)");
-        let hook_policy = match self.hook_policy {
-            HookPolicy::Run => "run",
-            HookPolicy::Skip => "skip",
-        };
-        writeln!(f, "Dry run — no changes will be made\n")?;
-        writeln!(f, "  Action:       {}", self.action.name())?;
-        writeln!(f, "  Branch:       {}", self.branch)?;
-        writeln!(f, "  Worktree:     {}", self.worktree)?;
-        writeln!(f, "  Path:         {}", self.path.display())?;
-        writeln!(f, "  Base:         {base}")?;
-        writeln!(f, "  Tracking:     {tracking}")?;
-        writeln!(f, "  Hook policy:  {hook_policy}")
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum CreatePlanError {
     #[error(transparent)]
@@ -119,6 +99,16 @@ pub enum CreatePlanError {
     CheckedOutBranchAmbiguous { branch: String, paths: Vec<PathBuf> },
     #[error("base ref not found: {base}")]
     BaseNotFound { base: String },
+    #[error(
+        "branch '{branch}' cannot be created: branch '{existing}' exists, and Git cannot have both"
+    )]
+    BranchNamespaceConflict { branch: String, existing: String },
+    #[error("remote branch not found: {selection}")]
+    RemoteBranchNotFound { selection: String },
+    #[error(
+        "{selection} would be tracked by local branch '{branch}', which already exists; run `trench create {branch}` to use it"
+    )]
+    LocalBranchExists { selection: String, branch: String },
 }
 
 enum RefClass<'a> {
@@ -171,6 +161,7 @@ impl CreatePlanner {
     }
 
     pub fn plan(&self, branch: &str, from: Option<&str>) -> Result<CreatePlan, CreatePlanError> {
+        self.check_full_remote_ref(branch)?;
         self.policy.validate(branch)?;
         let class = self.classify(branch);
         self.policy.validate(class.branch())?;
@@ -213,6 +204,16 @@ impl CreatePlanner {
             });
         }
         let location = self.policy.derive(class.branch())?;
+        // A new or tracking branch needs a free place among local refs.
+        // Checking here gives a sentence instead of libgit2's ref-lock error.
+        if !matches!(class, RefClass::Local(_)) {
+            if let Some(existing) = self.refs.namespace_conflict(class.branch()) {
+                return Err(CreatePlanError::BranchNamespaceConflict {
+                    branch: class.branch().to_string(),
+                    existing: existing.to_string(),
+                });
+            }
+        }
         let (action, base, tracking) = match class {
             RefClass::New(_) => {
                 let base =
@@ -233,15 +234,18 @@ impl CreatePlanner {
                 Some(upstream),
             ),
         };
-        let source_name = match &action {
-            CreateAction::NewBranch(base) => Some(base.as_str()),
-            CreateAction::ExistingLocal => Some(location.branch.as_str()),
-            CreateAction::TrackRemote(upstream) => Some(upstream.as_str()),
+        // The action says which namespace the source lives in. Its name
+        // alone does not: a local branch may be called `origin/x`.
+        let source_oid = match &action {
+            CreateAction::NewBranch(base) => Some(self.resolve_base_oid(base)?),
+            CreateAction::ExistingLocal => {
+                Some(self.resolve_ref_oid(&format!("refs/heads/{}", location.branch))?)
+            }
+            CreateAction::TrackRemote(upstream) => {
+                Some(self.resolve_ref_oid(&format!("refs/remotes/{upstream}"))?)
+            }
             CreateAction::Navigate(_) => None,
         };
-        let source_oid = source_name
-            .map(|name| self.resolve_source_oid(name))
-            .transpose()?;
         Ok(CreatePlan {
             dry_run: true,
             action,
@@ -264,20 +268,72 @@ impl CreatePlanner {
         })
     }
 
-    fn resolve_source_oid(&self, name: &str) -> Result<git2::Oid, CreatePlanError> {
-        let repo = git2::Repository::open(&self.repo_path)?;
-        let reference = if name.starts_with("origin/") {
-            format!("refs/remotes/{name}")
+    /// A base is resolved the way `RefSnapshot::resolve` named it: a name
+    /// that starts with `origin/` is the remote-tracking ref.
+    fn resolve_base_oid(&self, base: &str) -> Result<git2::Oid, CreatePlanError> {
+        if base.starts_with("origin/") {
+            self.resolve_ref_oid(&format!("refs/remotes/{base}"))
         } else {
-            format!("refs/heads/{name}")
-        };
-        let object = repo.revparse_single(&reference)?;
+            self.resolve_ref_oid(&format!("refs/heads/{base}"))
+        }
+    }
+
+    fn resolve_ref_oid(&self, reference: &str) -> Result<git2::Oid, CreatePlanError> {
+        let repo = git2::Repository::open(&self.repo_path)?;
+        let object = repo.revparse_single(reference)?;
         let oid = object.peel_to_commit()?.id();
         Ok(oid)
     }
 
+    /// What the typed name refers to.
+    ///
+    /// A local branch spelled exactly as typed always wins, including one
+    /// whose name starts with `origin/`. After that, `origin/x` is shorthand
+    /// for the local branch `x`, then for the remote ref.
+    /// A full remote ref (`refs/remotes/origin/x`) names a remote branch and
+    /// nothing else. It is never planned as a new branch of that name: it
+    /// must exist on origin, and its local branch must not exist yet.
+    fn check_full_remote_ref(&self, selection: &str) -> Result<(), CreatePlanError> {
+        let Some(upstream) = selection.strip_prefix("refs/remotes/") else {
+            return Ok(());
+        };
+        let branch = upstream
+            .strip_prefix("origin/")
+            .filter(|_| self.refs.origin.iter().any(|name| name == upstream))
+            .ok_or_else(|| CreatePlanError::RemoteBranchNotFound {
+                selection: selection.to_string(),
+            })?;
+        if self.refs.local.iter().any(|name| name == branch) {
+            return Err(CreatePlanError::LocalBranchExists {
+                selection: selection.to_string(),
+                branch: branch.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn classify<'a>(&self, selection: &'a str) -> RefClass<'a> {
         let candidates = self.refs.candidates();
+        // The full ref names a remote branch with no chance of matching a
+        // local one, even a local branch literally called `origin/x`.
+        if let Some(upstream) = selection.strip_prefix("refs/remotes/") {
+            if let Some(branch) = upstream.strip_prefix("origin/") {
+                if candidates.iter().any(|candidate| {
+                    candidate.kind == RefKind::Remote && candidate.name == upstream
+                }) {
+                    return RefClass::Remote {
+                        branch,
+                        upstream: upstream.to_string(),
+                    };
+                }
+            }
+        }
+        if candidates
+            .iter()
+            .any(|candidate| candidate.kind == RefKind::Local && candidate.name == selection)
+        {
+            return RefClass::Local(selection);
+        }
         if let Some(branch) = selection.strip_prefix("origin/") {
             if candidates
                 .iter()
@@ -294,12 +350,6 @@ impl CreatePlanner {
                     upstream: selection.to_string(),
                 };
             }
-        }
-        if candidates
-            .iter()
-            .any(|candidate| candidate.kind == RefKind::Local && candidate.name == selection)
-        {
-            return RefClass::Local(selection);
         }
         let upstream = format!("origin/{selection}");
         if candidates
@@ -327,6 +377,162 @@ mod tests {
         let tree = repo.find_tree(tree_id).unwrap();
         repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
             .unwrap();
+    }
+
+    fn commit_on_new_branch(path: &std::path::Path, branch: &str) -> git2::Oid {
+        let repo = git2::Repository::open(path).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = parent.tree().unwrap();
+        let oid = repo
+            .commit(None, &signature, &signature, branch, &tree, &[&parent])
+            .unwrap();
+        repo.branch(branch, &repo.find_commit(oid).unwrap(), false)
+            .unwrap();
+        oid
+    }
+
+    #[test]
+    fn a_local_branch_named_like_a_remote_ref_means_itself() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let literal = commit_on_new_branch(repo.path(), "origin/x");
+        let planner =
+            || CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        // Only the local branch `origin/x` exists. Its commit must be read
+        // from refs/heads, not looked up as a remote-tracking ref.
+        let alone = planner().plan("origin/x", None).unwrap();
+        assert_eq!(alone.action, CreateAction::ExistingLocal);
+        assert_eq!(alone.branch, "origin/x");
+        assert_eq!(alone.source_oid, Some(literal));
+
+        // A local `x` also exists. The typed name still means the branch
+        // that is spelled exactly that way.
+        let short = commit_on_new_branch(repo.path(), "x");
+        let both = planner().plan("origin/x", None).unwrap();
+        assert_eq!(both.branch, "origin/x");
+        assert_eq!(both.source_oid, Some(literal));
+        let plain = planner().plan("x", None).unwrap();
+        assert_eq!(plain.branch, "x");
+        assert_eq!(plain.source_oid, Some(short));
+    }
+
+    #[test]
+    fn a_remote_ref_selected_by_its_full_name_is_not_mistaken_for_a_local_branch() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        commit_on_new_branch(repo.path(), "foo");
+        let git = git2::Repository::open(repo.path()).unwrap();
+        let head = git.head().unwrap().peel_to_commit().unwrap().id();
+        git.reference("refs/remotes/origin/origin/foo", head, false, "test")
+            .unwrap();
+        let planner =
+            CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        // The remote branch is itself called `origin/foo`, and a local `foo`
+        // exists. The full remote ref names it without ambiguity.
+        let plan = planner.plan("origin/origin/foo", None).unwrap();
+
+        assert_eq!(
+            plan.action,
+            CreateAction::TrackRemote("origin/origin/foo".to_string())
+        );
+        assert_eq!(plan.branch, "origin/foo");
+    }
+
+    #[test]
+    fn a_full_remote_ref_names_the_remote_branch_even_when_a_local_branch_has_its_short_name() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        commit_on_new_branch(repo.path(), "origin/x");
+        let git = git2::Repository::open(repo.path()).unwrap();
+        let head = git.head().unwrap().peel_to_commit().unwrap().id();
+        git.reference("refs/remotes/origin/x", head, false, "test")
+            .unwrap();
+        let planner =
+            CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        // `origin/x` is a local branch here, so only the full ref reaches
+        // the remote one.
+        assert_eq!(
+            planner.plan("origin/x", None).unwrap().action,
+            CreateAction::ExistingLocal
+        );
+        let plan = planner.plan("refs/remotes/origin/x", None).unwrap();
+
+        assert_eq!(
+            plan.action,
+            CreateAction::TrackRemote("origin/x".to_string())
+        );
+        assert_eq!(plan.branch, "x");
+    }
+
+    #[test]
+    fn a_full_remote_ref_is_refused_when_its_local_branch_already_exists() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let git = git2::Repository::open(repo.path()).unwrap();
+        let head = git.head().unwrap().peel_to_commit().unwrap();
+        git.branch("x", &head, false).unwrap();
+        git.reference("refs/remotes/origin/x", head.id(), false, "test")
+            .unwrap();
+        let planner =
+            CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        // Tracking origin/x would need a local `x`, which already exists.
+        // It must never become a new branch named `refs/remotes/origin/x`.
+        let error = planner.plan("refs/remotes/origin/x", None).unwrap_err();
+
+        assert!(
+            matches!(&error, CreatePlanError::LocalBranchExists { branch, .. } if branch == "x"),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("trench create x"), "{error}");
+    }
+
+    #[test]
+    fn a_full_remote_ref_that_does_not_exist_is_refused() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let planner =
+            CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        for selection in ["refs/remotes/origin/nope", "refs/remotes/upstream/main"] {
+            let error = planner.plan(selection, None).unwrap_err();
+            assert!(
+                matches!(error, CreatePlanError::RemoteBranchNotFound { .. }),
+                "{selection}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_remote_only_branch_is_still_reached_by_either_spelling() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let git = git2::Repository::open(repo.path()).unwrap();
+        let head = git.head().unwrap().peel_to_commit().unwrap().id();
+        git.reference("refs/remotes/origin/release", head, false, "test")
+            .unwrap();
+        let planner =
+            CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        for spelling in ["release", "origin/release"] {
+            let plan = planner.plan(spelling, None).unwrap();
+            assert_eq!(
+                plan.action,
+                CreateAction::TrackRemote("origin/release".to_string()),
+                "{spelling}"
+            );
+            assert_eq!(plan.branch, "release", "{spelling}");
+        }
     }
 
     #[test]
@@ -549,27 +755,6 @@ mod tests {
                 "tracking": null,
                 "hook_policy": "run"
             })
-        );
-    }
-
-    #[test]
-    fn human_preview_reports_raw_plan_fields() {
-        let plan = CreatePlan {
-            dry_run: true,
-            action: CreateAction::TrackRemote("origin/release".to_string()),
-            branch: "release".to_string(),
-            worktree: "release".to_string(),
-            path: PathBuf::from("/worktrees/trench/release"),
-            base: None,
-            tracking: Some("origin/release".to_string()),
-            hook_policy: HookPolicy::Skip,
-            preconditions: Vec::new(),
-            source_oid: None,
-        };
-
-        assert_eq!(
-            plan.to_string(),
-            "Dry run — no changes will be made\n\n  Action:       track_remote\n  Branch:       release\n  Worktree:     release\n  Path:         /worktrees/trench/release\n  Base:         (none)\n  Tracking:     origin/release\n  Hook policy:  skip\n"
         );
     }
 }

@@ -1,5 +1,4 @@
 pub mod app;
-pub mod cockpit;
 pub mod create_flow;
 pub mod keymap;
 pub mod line_input;
@@ -13,6 +12,7 @@ pub mod runtime;
 pub mod search;
 pub mod sync_flow;
 pub mod theme;
+pub mod view;
 pub mod watcher;
 
 pub use runtime::run;

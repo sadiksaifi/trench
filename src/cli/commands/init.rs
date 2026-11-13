@@ -23,7 +23,9 @@ const SCAFFOLD: &str = r#"# trench — project configuration
 # ─── UI ──────────────────────────────────────────────────────────────
 
 # [ui]
-# theme = "ops"                 # or "transparent", "catppuccin-transparent", "gruvbox-transparent"
+# theme = "terminal"            # your terminal's own colors (default); or "ops",
+#                               # "catppuccin", "gruvbox"; add "-transparent" to
+#                               # keep your terminal's background. NO_COLOR is honored.
 
 # ─── Git ─────────────────────────────────────────────────────────────
 

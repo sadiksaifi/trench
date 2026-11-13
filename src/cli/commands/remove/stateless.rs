@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::config::HooksConfig;
 use crate::hooks::{HookEnvContext, HookEvent};
+use crate::output::human;
 use crate::worktree_catalog::{CatalogError, WorktreeCatalog};
 use crate::{git, hooks};
 
@@ -150,10 +151,24 @@ pub struct RemovalAssessment {
     base_ref: Option<String>,
     #[serde(skip)]
     base_oid: Option<git2::Oid>,
+    /// The directory and its Git admin entry, or `None` when the worktree
+    /// directory no longer exists and only Git metadata remains.
     #[serde(skip)]
+    directory: Option<LiveDirectory>,
+    #[serde(skip)]
+    locked: bool,
+    #[serde(skip)]
+    branch_checked_out_elsewhere: Option<PathBuf>,
+    /// A detached HEAD that no branch or tag contains. Removing the worktree
+    /// drops its reflog, so those commits become unreachable.
+    #[serde(skip)]
+    head_unreachable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveDirectory {
     admin_dir: PathBuf,
-    #[serde(skip)]
-    directory_identity: DirectoryIdentity,
+    identity: DirectoryIdentity,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -215,6 +230,31 @@ impl RemovalAssessment {
         self.branch_oid.is_some()
     }
 
+    /// The worktree directory is gone and only Git metadata remains.
+    pub fn directory_missing(&self) -> bool {
+        self.directory.is_none()
+    }
+
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    /// The detached HEAD has commits that no branch or tag contains.
+    pub fn head_unreachable(&self) -> bool {
+        self.head_unreachable
+    }
+
+    /// Another worktree that has this target's branch checked out.
+    pub fn branch_checked_out_elsewhere(&self) -> Option<&Path> {
+        self.branch_checked_out_elsewhere.as_deref()
+    }
+
+    fn live_directory(&self) -> Result<&LiveDirectory, git::GitError> {
+        self.directory
+            .as_ref()
+            .ok_or(git::GitError::PreconditionsChanged)
+    }
+
     /// Resolve a target from live Git state without fetching, writing state, or
     /// creating directories.
     pub fn discover(
@@ -238,7 +278,24 @@ impl RemovalAssessment {
             .as_deref()
             .and_then(|head| git2::Oid::from_str(head).ok())
             .filter(|oid| !oid.is_zero());
-        let repo = git2::Repository::open(&identity.path).map_err(|source| {
+        // A linked worktree whose directory was deleted by hand still has Git
+        // metadata. Refs are shared, so read them from the repository itself
+        // and retire only the metadata; there is nothing on disk to protect.
+        let directory_identity = match DirectoryIdentity::read(&identity.path) {
+            Ok(directory) => Some(directory),
+            Err(RemovalAssessmentError::TargetUnavailable { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound && !identity.is_main =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let repo_source = if directory_identity.is_some() {
+            identity.path.as_path()
+        } else {
+            repo_path
+        };
+        let repo = git2::Repository::open(repo_source).map_err(|source| {
             RemovalAssessmentError::RepositoryIdentity {
                 path: identity.path.clone(),
                 source,
@@ -264,13 +321,38 @@ impl RemovalAssessment {
                 })
             }
         };
-        let dirty = git::dirty_count(&identity.path)? > 0;
-        let admin_dir = repo.path().canonicalize().map_err(|source| {
-            RemovalAssessmentError::TargetUnavailable {
-                path: repo.path().to_path_buf(),
-                source,
-            }
-        })?;
+        let directory = match directory_identity {
+            Some(directory_identity) => Some(LiveDirectory {
+                admin_dir: repo.path().canonicalize().map_err(|source| {
+                    RemovalAssessmentError::TargetUnavailable {
+                        path: repo.path().to_path_buf(),
+                        source,
+                    }
+                })?,
+                identity: directory_identity,
+            }),
+            None => None,
+        };
+        let dirty = directory.is_some() && git::dirty_count(&identity.path)? > 0;
+        // Older Git does not print `locked` in porcelain output, so also read
+        // the lock file from the worktree's admin entry.
+        let admin_entry = match &directory {
+            Some(directory) => Some(directory.admin_dir.clone()),
+            None => common_git_dir(repo_path)
+                .ok()
+                .and_then(|common| admin_entry_for(&common, &identity.path)),
+        };
+        let locked =
+            identity.locked || admin_entry.is_some_and(|entry| entry.join("locked").exists());
+        let branch_checked_out_elsewhere = identity.branch.as_deref().and_then(|branch| {
+            catalog
+                .identities()
+                .iter()
+                .find(|other| {
+                    other.path != identity.path && other.branch.as_deref() == Some(branch)
+                })
+                .map(|other| other.path.clone())
+        });
         let branch_oid = match identity.branch.as_deref() {
             Some(branch) => match local_branch_oid(&repo, branch) {
                 Ok(oid) => Some(oid),
@@ -305,7 +387,13 @@ impl RemovalAssessment {
         let (base_ref, base_oid) = resolved_base
             .map(|resolved| (Some(resolved.reference), Some(resolved.oid)))
             .unwrap_or((None, None));
+        // A branch always contains itself, which says nothing about whether
+        // its commits are anywhere else.
+        let base_is_the_branch = identity.branch.as_ref().is_some_and(|branch| {
+            base_ref.as_deref() == Some(format!("refs/heads/{branch}").as_str())
+        });
         let merged = match (branch_oid, base_oid) {
+            _ if base_is_the_branch => None,
             (Some(branch), Some(base)) => Some(
                 branch == base
                     || repo
@@ -329,8 +417,13 @@ impl RemovalAssessment {
             branch_oid,
             base_ref,
             base_oid,
-            admin_dir,
-            directory_identity: DirectoryIdentity::read(&identity.path)?,
+            directory,
+            locked,
+            branch_checked_out_elsewhere,
+            head_unreachable: match head_oid {
+                Some(head) if identity.detached => !contained_by_any_ref(repo_path, head)?,
+                _ => false,
+            },
         })
     }
 
@@ -391,6 +484,11 @@ impl RemovalAssessment {
         if self.is_main {
             return Err(RemovalAuthorizationError::MainWorktree);
         }
+        if self.locked {
+            return Err(RemovalAuthorizationError::LockedWorktree {
+                path: self.path.clone(),
+            });
+        }
         if options.force_branch && !options.delete_branch {
             return Err(RemovalAuthorizationError::ForceBranchRequiresDeleteBranch);
         }
@@ -400,6 +498,15 @@ impl RemovalAssessment {
         if options.delete_branch && !self.branch_present() {
             return Err(RemovalAuthorizationError::MissingLocalBranch {
                 branch: self.branch.clone().expect("attached target has a branch"),
+            });
+        }
+        if let (true, Some(other)) = (
+            options.delete_branch,
+            self.branch_checked_out_elsewhere.as_ref(),
+        ) {
+            return Err(RemovalAuthorizationError::BranchCheckedOutElsewhere {
+                branch: self.branch.clone().expect("attached target has a branch"),
+                path: other.clone(),
             });
         }
         let confirmation = match (options.dry_run, options.yes, receipt) {
@@ -419,7 +526,14 @@ impl RemovalAssessment {
             }
         };
         if self.dirty && !options.force_worktree {
-            return Err(RemovalAuthorizationError::DirtyWorktree);
+            return Err(match self.branch.as_ref() {
+                Some(branch) if !self.branch_present() => {
+                    RemovalAuthorizationError::UnverifiableWorktree {
+                        branch: branch.clone(),
+                    }
+                }
+                _ => RemovalAuthorizationError::DirtyWorktree,
+            });
         }
         if options.delete_branch {
             match self.merged {
@@ -444,6 +558,7 @@ impl RemovalAssessment {
             dirty: self.dirty,
             merged: self.merged,
             branch_present: self.branch_present(),
+            directory_missing: self.directory_missing(),
             yes: options.yes,
             confirmation,
             force_worktree: options.force_worktree,
@@ -476,6 +591,20 @@ pub enum RemovalAuthorizationError {
     ConfirmationReceiptUnexpected,
     #[error("worktree is dirty; pass --force-worktree to remove it")]
     DirtyWorktree,
+    #[error(
+        "local branch '{branch}' no longer exists, so the worktree cannot be verified clean; pass --force-worktree to remove it"
+    )]
+    UnverifiableWorktree { branch: String },
+    #[error(
+        "worktree is locked; run `git worktree unlock {path}` before removing it",
+        path = path.display()
+    )]
+    LockedWorktree { path: PathBuf },
+    #[error(
+        "branch '{branch}' is also checked out at {path}; omit --delete-branch to remove only this worktree",
+        path = path.display()
+    )]
+    BranchCheckedOutElsewhere { branch: String, path: PathBuf },
     #[error("--force-branch requires --delete-branch")]
     ForceBranchRequiresDeleteBranch,
     #[error("detached worktrees have no local branch to delete")]
@@ -501,6 +630,7 @@ pub struct RemovalPlan {
     dirty: bool,
     merged: Option<bool>,
     branch_present: bool,
+    directory_missing: bool,
     yes: bool,
     confirmation: RemovalConfirmation,
     force_worktree: bool,
@@ -642,6 +772,7 @@ pub struct RemovalOutcome {
     pub dirty: bool,
     pub merged: Option<bool>,
     pub branch_present: bool,
+    pub directory_missing: bool,
     pub yes: bool,
     pub confirmation: RemovalConfirmation,
     pub force_worktree: bool,
@@ -673,6 +804,7 @@ impl RemovalOutcome {
             dirty: plan.dirty,
             merged: plan.merged,
             branch_present: plan.branch_present,
+            directory_missing: plan.directory_missing,
             yes: plan.yes,
             confirmation: plan.confirmation,
             force_worktree: plan.force_worktree,
@@ -689,93 +821,88 @@ impl RemovalOutcome {
     }
 }
 
-impl fmt::Display for RemovalPlan {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_human_outcome(formatter, "Would remove", self, false, None)
-    }
-}
-
-impl fmt::Display for RemovalOutcome {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let action = if self.dry_run {
-            "Would remove"
-        } else {
-            "Removed"
-        };
-        write!(
-            formatter,
-            "{action} worktree '{}' at {}",
+impl RemovalAssessment {
+    /// The question an interactive `trench remove` asks before acting.
+    pub fn prompt(&self, delete_branch: bool) -> String {
+        let mut prompt = format!(
+            "Remove worktree {} at {}",
             self.worktree,
             self.path.display()
-        )?;
-        match (&self.branch, self.delete_branch, self.branch_deleted) {
-            (Some(branch), _, _) if !self.branch_present => {
-                write!(formatter, "; local branch '{branch}' already absent")?
-            }
-            (Some(branch), true, true) => write!(formatter, "; deleted local branch '{branch}'")?,
-            (Some(branch), true, false) => {
-                write!(formatter, "; local branch '{branch}' selected for deletion")?
-            }
-            (Some(branch), false, _) => write!(formatter, "; kept local branch '{branch}'")?,
-            (None, _, _) => write!(formatter, "; detached HEAD (no local branch)")?,
+        );
+        if let (true, Some(branch)) = (delete_branch, self.branch.as_deref()) {
+            prompt.push_str(&format!(" and delete branch {branch}"));
         }
-        write!(
-            formatter,
-            "; --yes={}; confirmation={}; --force-worktree={} (applied={}); --delete-branch={}; --force-branch={} (applied={}); --no-hooks={}",
-            self.yes,
-            self.confirmation,
-            self.force_worktree,
-            self.force_worktree_applied,
-            self.delete_branch,
-            self.force_branch,
-            self.force_branch_applied,
-            self.no_hooks,
-        )?;
-        if let Some(warning) = &self.warning {
-            write!(formatter, "; warning: {warning}")?;
-        }
-        Ok(())
+        prompt.push('?');
+        prompt
     }
 }
 
-fn write_human_outcome(
-    formatter: &mut fmt::Formatter<'_>,
-    action: &str,
-    plan: &RemovalPlan,
-    branch_deleted: bool,
-    warning: Option<&str>,
-) -> fmt::Result {
-    write!(
-        formatter,
-        "{action} worktree '{}' at {}",
-        plan.worktree,
-        plan.path.display()
-    )?;
-    match (&plan.branch, plan.delete_branch, branch_deleted) {
-        (Some(branch), _, _) if !plan.branch_present => {
-            write!(formatter, "; local branch '{branch}' already absent")?
+impl RemovalPlan {
+    /// The worktree directory is gone; only Git's record will be removed.
+    pub fn directory_missing(&self) -> bool {
+        self.directory_missing
+    }
+
+    /// The `--dry-run` preview. `hooks` describes the configured hooks.
+    pub fn render_preview(&self, hooks: &str) -> String {
+        let action = if self.directory_missing {
+            format!("Would remove the Git entry for worktree {}", self.worktree)
+        } else {
+            format!("Would remove worktree {}", self.worktree)
+        };
+        let branch = match self.branch.as_deref() {
+            None => "detached".to_string(),
+            Some(branch) if !self.branch_present => format!("{branch} (already gone)"),
+            Some(branch) if !self.delete_branch => format!("{branch} (kept)"),
+            Some(branch) => match self.merged {
+                Some(true) => format!("{branch} (would be deleted)"),
+                Some(false) => format!("{branch} (would be deleted, not merged)"),
+                None => format!("{branch} (would be deleted, merge status unknown)"),
+            },
+        };
+        let mut fields = vec![("Branch", branch)];
+        if self.directory_missing {
+            fields.push(("Path", format!("{}  (missing)", self.path.display())));
+        } else {
+            fields.push(("Path", self.path.display().to_string()));
+            fields.push((
+                "Dirty",
+                if self.dirty {
+                    "yes, changes would be discarded".to_string()
+                } else {
+                    "no".to_string()
+                },
+            ));
         }
-        (Some(branch), true, true) => write!(formatter, "; deleted local branch '{branch}'")?,
-        (Some(branch), true, false) => write!(formatter, "; would delete local branch '{branch}'")?,
-        (Some(branch), false, _) => write!(formatter, "; would keep local branch '{branch}'")?,
-        (None, _, _) => write!(formatter, "; detached HEAD (no local branch)")?,
+        fields.push(("Hooks", hooks.to_string()));
+        human::render_preview(&action, &fields)
     }
-    write!(
-        formatter,
-        "; --yes={}; confirmation={}; --force-worktree={} (applied={}); --delete-branch={}; --force-branch={} (applied={}); --no-hooks={}",
-        plan.yes,
-        plan.confirmation,
-        plan.force_worktree,
-        plan.force_worktree_applied,
-        plan.delete_branch,
-        plan.force_branch,
-        plan.force_branch_applied,
-        plan.no_hooks,
-    )?;
-    if let Some(warning) = warning {
-        write!(formatter, "; warning: {warning}")?;
+}
+
+impl RemovalOutcome {
+    /// What the removal did, one fact per line.
+    pub fn summary_lines(&self) -> Vec<String> {
+        let mut lines = vec![if self.directory_missing {
+            format!(
+                "Removed the Git entry for worktree {}; its directory was already gone",
+                self.worktree
+            )
+        } else {
+            format!("Removed worktree {}", self.worktree)
+        }];
+        match self.branch.as_deref() {
+            Some(branch) if !self.branch_present => {
+                lines.push(format!("Branch {branch} was already gone"));
+            }
+            Some(branch) if self.branch_deleted => lines.push(format!("Deleted branch {branch}")),
+            Some(branch) => lines.push(format!("Kept branch {branch}")),
+            None => {}
+        }
+        if self.force_worktree_applied {
+            lines.push("Discarded uncommitted changes".to_string());
+        }
+        lines
     }
-    Ok(())
 }
 
 #[derive(Debug, thiserror::Error, Serialize)]
@@ -837,9 +964,21 @@ pub async fn execute_with_guard(
 
     let hook_context = hook_context(&plan);
     let hooks_status = hook_status(&plan, hooks_config);
+    let mut warning = None;
     let stage_started = start_stage(sink, RemovalStage::PreRemove);
     if plan.hook_policy == RemovalHookPolicy::Run {
-        if let Some(pre_remove) = hooks_config.and_then(|hooks| hooks.pre_remove.as_ref()) {
+        let pre_remove = hooks_config.and_then(|hooks| hooks.pre_remove.as_ref());
+        if let (Some(_), true) = (pre_remove, plan.directory_missing) {
+            // The hook's working directory is gone. Running it anywhere else
+            // would point cleanup commands at a tree the user did not select.
+            let message =
+                "pre_remove hook skipped: the worktree directory no longer exists".to_string();
+            sink.emit(RemovalEvent::Warning {
+                stage: RemovalStage::PreRemove,
+                message: message.clone(),
+            });
+            warning = Some(message);
+        } else if let Some(pre_remove) = pre_remove {
             let hook_sink = HookEventAdapter {
                 sink,
                 hook: HookEvent::PreRemove,
@@ -894,8 +1033,13 @@ pub async fn execute_with_guard(
     }
 
     let stage_started = start_stage(sink, RemovalStage::RemoveWorktree);
-    let pending = match prepare_exact_worktree_removal(&plan.expected, plan.force_worktree_applied)
-    {
+    let pending = if plan.directory_missing {
+        // Nothing exists on disk; the prune stage retires the Git metadata.
+        Ok(None)
+    } else {
+        prepare_exact_worktree_removal(&plan.expected, plan.force_worktree_applied).map(Some)
+    };
+    let pending = match pending {
         Ok(pending) => pending,
         Err(error) => {
             finish_stage(sink, RemovalStage::RemoveWorktree, stage_started, false);
@@ -918,13 +1062,22 @@ pub async fn execute_with_guard(
     finish_stage(sink, RemovalStage::RemoveWorktree, stage_started, true);
 
     let stage_started = start_stage(sink, RemovalStage::Prune);
-    if let Err(error) = pending.retire(&plan.expected, &ProductionRemovalBoundary) {
+    let retired = match pending {
+        Some(pending) => pending.retire(&plan.expected, &ProductionRemovalBoundary),
+        None => retire_missing_worktree(&plan.expected),
+    };
+    if let Err(error) = retired {
         finish_stage(sink, RemovalStage::Prune, stage_started, false);
+        let mutation_state = if error.partially_applied {
+            RemovalMutationState::PartiallyApplied
+        } else {
+            RemovalMutationState::NotStarted
+        };
         return Err(fail_with_quarantine(
             sink,
             operation_started,
             RemovalStage::Prune,
-            RemovalMutationState::PartiallyApplied,
+            mutation_state,
             classify_git_error(&error.error),
             error.error.to_string(),
             error.retained_quarantine,
@@ -950,7 +1103,6 @@ pub async fn execute_with_guard(
         finish_stage(sink, RemovalStage::DeleteBranch, stage_started, true);
     }
 
-    let mut warning = None;
     let stage_started = start_stage(sink, RemovalStage::PostRemove);
     if plan.hook_policy == RemovalHookPolicy::Run {
         if let Some(post_remove) = hooks_config.and_then(|hooks| hooks.post_remove.as_ref()) {
@@ -969,7 +1121,10 @@ pub async fn execute_with_guard(
             .await
             {
                 let message = format!("post_remove hook failed: {error}");
-                warning = Some(message.clone());
+                warning = Some(match warning {
+                    Some(earlier) => format!("{earlier}; {message}"),
+                    None => message.clone(),
+                });
                 sink.emit(RemovalEvent::Warning {
                     stage: RemovalStage::PostRemove,
                     message,
@@ -1181,6 +1336,29 @@ fn resolve_base(
         }
     }
     Ok(None)
+}
+
+/// Whether any branch, remote-tracking branch, or tag contains `commit`.
+fn contained_by_any_ref(repo_path: &Path, commit: git2::Oid) -> Result<bool, git::GitError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["for-each-ref", "--count=1", "--contains"])
+        .arg(commit.to_string())
+        .args(["refs/heads", "refs/remotes", "refs/tags"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()?;
+    if output.status.success() {
+        Ok(!output.stdout.iter().all(u8::is_ascii_whitespace))
+    } else {
+        Err(git::GitError::CommandFailed {
+            operation: "checking which refs contain the detached HEAD",
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    }
 }
 
 fn local_branch_oid(repo: &git2::Repository, branch: &str) -> Result<git2::Oid, git::GitError> {
@@ -1424,17 +1602,13 @@ impl ExactTarget {
         use std::os::unix::fs::MetadataExt;
 
         let held = self.directory.metadata()?;
-        if (held.dev(), held.ino())
-            != (
-                assessment.directory_identity.device,
-                assessment.directory_identity.inode,
-            )
-        {
+        let expected = assessment.live_directory()?;
+        if (held.dev(), held.ino()) != (expected.identity.device, expected.identity.inode) {
             return Err(git::GitError::PreconditionsChanged);
         }
         let live_repo = git2::Repository::open(&assessment.path)?;
         let live_admin = live_repo.path().canonicalize().map_err(git::GitError::Io)?;
-        if live_admin != assessment.admin_dir {
+        if live_admin != expected.admin_dir {
             return Err(git::GitError::PreconditionsChanged);
         }
         let live = std::fs::symlink_metadata(&assessment.path)?;
@@ -1521,7 +1695,7 @@ impl ExactTarget {
         }
         let live_repo = git2::Repository::open(path)?;
         let live_admin = live_repo.path().canonicalize().map_err(git::GitError::Io)?;
-        if live_admin != assessment.admin_dir {
+        if live_admin != assessment.live_directory()?.admin_dir {
             return Err(git::GitError::PreconditionsChanged);
         }
         Ok(())
@@ -1849,6 +2023,9 @@ fn repair_worktree_metadata(common: &Path, path: &Path) -> Result<(), git::GitEr
     let output = Command::new("git")
         .arg(format!("--git-dir={}", common.display()))
         .args(["-c", "core.hooksPath=/dev/null"])
+        // Relative links make Git set `extensions.relativeWorktrees`, which
+        // the linked libgit2 cannot open. Keep the links absolute.
+        .args(["-c", "worktree.useRelativePaths=false"])
         .args(["worktree", "repair"])
         .arg(path)
         .env_remove("GIT_DIR")
@@ -2067,6 +2244,179 @@ fn prepare_exact_worktree_removal(
     Err(ExactRemovalFailure::not_started(
         git::GitError::PreconditionsChanged,
     ))
+}
+
+/// Every admin entry (`<common>/worktrees/<id>`) whose `gitdir` file points
+/// at `worktree`, found without the worktree directory having to exist.
+fn admin_entries_for(common: &Path, worktree: &Path) -> Vec<PathBuf> {
+    let expected = git::worktrees::canonicalize_lenient(worktree);
+    let Ok(entries) = std::fs::read_dir(common.join("worktrees")) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|entry| entry_points_at(entry, entry, &expected))
+        .collect()
+}
+
+/// Whether the `gitdir` file in `entry` names `expected`, an already
+/// canonical worktree path. The file holds `<worktree>/.git`, relative to
+/// `home` (the entry's place under `<common>/worktrees/`) when
+/// `worktree.useRelativePaths` is set.
+fn entry_points_at(entry: &Path, home: &Path, expected: &Path) -> bool {
+    std::fs::read_to_string(entry.join("gitdir")).is_ok_and(|gitdir| {
+        home.join(gitdir.trim())
+            .parent()
+            .is_some_and(|path| git::worktrees::canonicalize_lenient(path) == expected)
+    })
+}
+
+/// The one admin entry for `worktree`. `None` when Git has no entry, and
+/// also when it has several: Git never creates that state, so there is no
+/// safe way to say which one the user means.
+fn admin_entry_for(common: &Path, worktree: &Path) -> Option<PathBuf> {
+    let mut entries = admin_entries_for(common, worktree);
+    (entries.len() == 1).then(|| entries.remove(0))
+}
+
+/// The points in a retirement where a test can change the world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetireStep {
+    /// Every check passed; the entry is about to be deleted.
+    Checked,
+    /// The entry was deleted; Git is about to be asked whether it is gone.
+    Deleted,
+}
+
+/// Retire the Git metadata of a worktree whose directory is already gone.
+fn retire_missing_worktree(assessment: &RemovalAssessment) -> Result<(), ExactRemovalFailure> {
+    retire_missing_worktree_with(assessment, |_| {})
+}
+
+/// Delete the one admin entry that belongs to the missing worktree.
+///
+/// No worktree pathname is ever handed to Git or to a recursive delete here.
+/// `git worktree remove <path>` would delete the directory if it reappeared
+/// between the check and the command, and `git worktree prune` would drop
+/// every other stale entry. Deleting the validated entry under
+/// `<common>/worktrees/` is what `prune` does for one entry, and the only
+/// thing it can destroy is Git's record.
+///
+/// `probe` is called at each `RetireStep`, so tests can restore the
+/// directory or recreate an entry at the worst moment.
+fn retire_missing_worktree_with(
+    assessment: &RemovalAssessment,
+    mut probe: impl FnMut(RetireStep),
+) -> Result<(), ExactRemovalFailure> {
+    let not_started = |operation: &'static str, message: String| {
+        ExactRemovalFailure::not_started(git::GitError::CommandFailed { operation, message })
+    };
+    if std::fs::symlink_metadata(&assessment.path).is_ok() {
+        return Err(ExactRemovalFailure::not_started(
+            git::GitError::PreconditionsChanged,
+        ));
+    }
+    let common = common_git_dir(&assessment.repo_path).map_err(ExactRemovalFailure::not_started)?;
+    let mut entries = admin_entries_for(&common, &assessment.path);
+    let entry = match entries.len() {
+        1 => entries.remove(0),
+        0 => {
+            return Err(not_started(
+                "removing the worktree entry",
+                format!("Git has no entry for {}", assessment.path.display()),
+            ))
+        }
+        _ => {
+            return Err(not_started(
+                "removing the worktree entry",
+                format!(
+                    "more than one Git entry points at {}; run `git worktree prune` to clear them",
+                    assessment.path.display()
+                ),
+            ))
+        }
+    };
+    let is_directory = std::fs::symlink_metadata(&entry)
+        .map(|metadata| metadata.file_type().is_dir())
+        .unwrap_or(false);
+    if !is_directory || entry.parent() != Some(common.join("worktrees").as_path()) {
+        return Err(ExactRemovalFailure::not_started(
+            git::GitError::PreconditionsChanged,
+        ));
+    }
+    if entry.join("locked").exists() {
+        return Err(not_started(
+            "removing the worktree entry",
+            format!(
+                "the worktree is locked; run `git worktree unlock {}` first",
+                assessment.path.display()
+            ),
+        ));
+    }
+
+    probe(RetireStep::Checked);
+    // The name may have come to hold another worktree's record since the
+    // checks. Move whatever is there out of Git's list in one rename, then
+    // check what was moved. Only a record of this worktree is deleted.
+    let staged = common.join(format!(
+        ".trench-retire-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::rename(&entry, &staged)
+        .map_err(|error| ExactRemovalFailure::not_started(error.into()))?;
+    let expected = git::worktrees::canonicalize_lenient(&assessment.path);
+    let is_directory = std::fs::symlink_metadata(&staged)
+        .map(|metadata| metadata.file_type().is_dir())
+        .unwrap_or(false);
+    if !is_directory
+        || !entry_points_at(&staged, &entry, &expected)
+        || staged.join("locked").exists()
+    {
+        return match std::fs::rename(&staged, &entry) {
+            Ok(()) => Err(ExactRemovalFailure::not_started(
+                git::GitError::PreconditionsChanged,
+            )),
+            Err(error) => Err(ExactRemovalFailure::recovered_partial(
+                git::GitError::CommandFailed {
+                    operation: "removing the worktree entry",
+                    message: format!(
+                        "the entry changed during removal and could not be put back from {}: {error}",
+                        staged.display()
+                    ),
+                },
+            )),
+        };
+    }
+    // From here on a failure may have deleted part of the entry, so it can
+    // no longer be reported as "nothing changed".
+    std::fs::remove_dir_all(&staged).map_err(|error| {
+        ExactRemovalFailure::recovered_partial(git::GitError::CommandFailed {
+            operation: "removing the worktree entry",
+            message: format!(
+                "Git no longer lists the worktree, but {} could not be deleted: {error}",
+                staged.display()
+            ),
+        })
+    })?;
+    probe(RetireStep::Deleted);
+    let still_listed = git::worktrees::discover(&assessment.repo_path)
+        .map_err(ExactRemovalFailure::recovered_partial)?
+        .into_iter()
+        .any(|listed| listed.path == assessment.path);
+    if still_listed {
+        return Err(ExactRemovalFailure::recovered_partial(
+            git::GitError::CommandFailed {
+                operation: "removing the worktree entry",
+                message: format!("Git still lists {}", assessment.path.display()),
+            },
+        ));
+    }
+    Ok(())
 }
 
 fn prune_worktrees(repo_path: &Path) -> Result<(), git::GitError> {
@@ -2699,15 +3049,25 @@ mod tests {
     }
 
     #[test]
-    fn branch_deletion_succeeds_when_base_is_the_target_branch() {
+    fn a_branch_is_never_called_merged_into_itself() {
         let fixture = Fixture::new("feature/base-is-target");
         let assessment =
             RemovalAssessment::discover(&fixture.main, &fixture.branch, Some(&fixture.branch))
                 .unwrap();
-        assert_eq!(assessment.merged, Some(true));
+        // Every branch contains itself, so that says nothing about whether
+        // its commits are anywhere else.
+        assert_eq!(assessment.merged, None);
+        assert!(matches!(
+            assessment.clone().authorize(RemoveOptions {
+                delete_branch: true,
+                ..Fixture::options()
+            }),
+            Err(RemovalAuthorizationError::MergeStatusUnavailable)
+        ));
         let plan = assessment
             .authorize(RemoveOptions {
                 delete_branch: true,
+                force_branch: true,
                 ..Fixture::options()
             })
             .unwrap();
@@ -3345,13 +3705,393 @@ mod tests {
         assert_eq!(value["hook_policy"], "skip");
         assert!(value.get("repo_path").is_none());
         assert!(value.get("head_oid").is_none());
+    }
 
-        let human = plan.to_string();
-        assert!(human.contains("--yes=true"));
-        assert!(human.contains("confirmation=dry_run"));
-        assert!(human.contains("--force-worktree=true (applied=false)"));
-        assert!(human.contains("--delete-branch=true"));
-        assert!(human.contains("--force-branch=true (applied=false)"));
-        assert!(human.contains("--no-hooks=true"));
+    #[test]
+    fn a_lock_on_a_missing_worktree_is_read_from_its_admin_entry() {
+        let fixture = Fixture::new("feature/locked-gone");
+        let common = common_git_dir(&fixture.main).unwrap();
+        let entry = admin_entry_for(&common, &fixture.linked).expect("entry for the worktree");
+        assert!(entry.join("gitdir").exists());
+        assert_eq!(
+            admin_entry_for(&common, &fixture.root.path().join("never-a-worktree")),
+            None
+        );
+
+        // Write the lock the way `git worktree lock` does, then lose the
+        // directory. Porcelain `locked` is not available on older Git, so the
+        // assessment must find the lock without it.
+        std::fs::write(entry.join("locked"), "on a removable disk\n").unwrap();
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        assert_eq!(
+            admin_entry_for(&common, &fixture.linked).as_deref(),
+            Some(entry.as_path())
+        );
+
+        let assessment = fixture.assess();
+        assert!(assessment.directory_missing());
+        assert!(assessment.locked());
+        assert!(matches!(
+            assessment.authorize(RemoveOptions {
+                dry_run: true,
+                ..RemoveOptions::default()
+            }),
+            Err(RemovalAuthorizationError::LockedWorktree { .. })
+        ));
+    }
+
+    #[test]
+    fn a_directory_restored_during_retirement_keeps_every_file() {
+        let fixture = Fixture::new("feature/restored");
+        let parked = fixture.root.path().join("parked");
+        std::fs::write(fixture.linked.join("precious"), "user data").unwrap();
+        std::fs::rename(&fixture.linked, &parked).unwrap();
+        let assessment = fixture.assess();
+        assert!(assessment.directory_missing());
+
+        // The disk comes back after the last absence check, at the worst
+        // possible moment.
+        retire_missing_worktree_with(&assessment, |step| {
+            if step == RetireStep::Checked {
+                std::fs::rename(&parked, &fixture.linked).unwrap();
+            }
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(fixture.linked.join("precious")).unwrap(),
+            "user data",
+            "retiring a Git entry must never delete worktree files"
+        );
+    }
+
+    /// A fixture whose worktree directory is gone, with its assessment and
+    /// the admin entry Git still holds for it.
+    fn missing(branch: &str) -> (Fixture, RemovalAssessment, PathBuf) {
+        let fixture = Fixture::new(branch);
+        let common = common_git_dir(&fixture.main).unwrap();
+        let entry = admin_entry_for(&common, &fixture.linked).unwrap();
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        let assessment = fixture.assess();
+        (fixture, assessment, entry)
+    }
+
+    #[test]
+    fn retirement_refuses_a_lock_taken_after_the_assessment() {
+        let (_fixture, assessment, entry) = missing("feature/locked-late");
+        std::fs::write(entry.join("locked"), "").unwrap();
+
+        let failure = retire_missing_worktree(&assessment).unwrap_err();
+
+        assert!(!failure.partially_applied);
+        assert!(failure.error.to_string().contains("locked"), "{failure:?}");
+        assert!(entry.join("gitdir").exists(), "the entry is untouched");
+    }
+
+    #[test]
+    fn retirement_refuses_a_directory_that_came_back_before_it_started() {
+        let (fixture, assessment, entry) = missing("feature/came-back");
+        std::fs::create_dir(&fixture.linked).unwrap();
+        std::fs::write(fixture.linked.join("precious"), "user data").unwrap();
+
+        let failure = retire_missing_worktree(&assessment).unwrap_err();
+
+        assert!(!failure.partially_applied);
+        assert!(entry.join("gitdir").exists(), "the entry is untouched");
+        assert!(fixture.linked.join("precious").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retirement_refuses_an_entry_that_is_a_symlink() {
+        let (fixture, assessment, entry) = missing("feature/symlinked-entry");
+        let elsewhere = fixture.root.path().join("elsewhere");
+        std::fs::rename(&entry, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &entry).unwrap();
+
+        let failure = retire_missing_worktree(&assessment).unwrap_err();
+
+        assert!(!failure.partially_applied);
+        assert!(
+            elsewhere.join("gitdir").exists(),
+            "nothing outside .git/worktrees was deleted"
+        );
+    }
+
+    #[test]
+    fn retirement_refuses_two_entries_that_point_at_the_same_directory() {
+        let (_fixture, assessment, entry) = missing("feature/duplicated");
+        let duplicate = entry.with_file_name("duplicate");
+        std::fs::create_dir(&duplicate).unwrap();
+        for file in ["gitdir", "HEAD", "commondir"] {
+            std::fs::copy(entry.join(file), duplicate.join(file)).unwrap();
+        }
+
+        let failure = retire_missing_worktree(&assessment).unwrap_err();
+
+        assert!(!failure.partially_applied);
+        assert!(
+            failure.error.to_string().contains("more than one"),
+            "{failure:?}"
+        );
+        assert!(entry.join("gitdir").exists() && duplicate.join("gitdir").exists());
+    }
+
+    #[test]
+    fn an_entry_git_still_lists_after_deletion_is_a_partial_change() {
+        let (_fixture, assessment, entry) = missing("feature/relisted");
+        let saved = ["gitdir", "HEAD", "commondir"]
+            .map(|file| (file, std::fs::read(entry.join(file)).unwrap()));
+        let reappears = entry.with_file_name("reappears");
+
+        // Something recreates an entry for the same directory right after
+        // the deletion. The deletion happened, so "nothing changed" is false.
+        let failure = retire_missing_worktree_with(&assessment, |step| {
+            if step == RetireStep::Deleted {
+                std::fs::create_dir(&reappears).unwrap();
+                for (file, contents) in &saved {
+                    std::fs::write(reappears.join(file), contents).unwrap();
+                }
+            }
+        })
+        .unwrap_err();
+
+        assert!(failure.partially_applied);
+        assert!(
+            failure.error.to_string().contains("still lists"),
+            "{failure:?}"
+        );
+    }
+
+    #[test]
+    fn an_entry_replaced_after_the_checks_is_put_back_and_not_deleted() {
+        let fixture = Fixture::new("feature/replaced");
+        let repo = git2::Repository::open(&fixture.main).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let other = fixture.root.path().join("other");
+        let local = repo.branch("other", &head, false).unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(local.get()));
+        repo.worktree("other", &other, Some(&options)).unwrap();
+        let common = common_git_dir(&fixture.main).unwrap();
+        let entry = admin_entry_for(&common, &fixture.linked).unwrap();
+        let other_entry = admin_entry_for(&common, &other).unwrap();
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        let assessment = fixture.assess();
+
+        // Between the checks and the deletion, the entry's name comes to
+        // hold the record of a different, live worktree.
+        let failure = retire_missing_worktree_with(&assessment, |step| {
+            if step == RetireStep::Checked {
+                std::fs::rename(&entry, fixture.root.path().join("parked")).unwrap();
+                std::fs::rename(&other_entry, &entry).unwrap();
+            }
+        })
+        .unwrap_err();
+
+        assert!(!failure.partially_applied, "{failure:?}");
+        assert_eq!(
+            admin_entry_for(&common, &other).as_deref(),
+            Some(entry.as_path()),
+            "the other worktree's record is back where it was found"
+        );
+        assert!(other.join(".git").exists());
+    }
+
+    #[test]
+    fn retirement_removes_only_the_named_entry() {
+        let fixture = Fixture::new("feature/target");
+        let repo = git2::Repository::open(&fixture.main).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let bystander = fixture.root.path().join("bystander");
+        let local = repo.branch("bystander", &head, false).unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(local.get()));
+        repo.worktree("bystander", &bystander, Some(&options))
+            .unwrap();
+        let common = common_git_dir(&fixture.main).unwrap();
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        std::fs::remove_dir_all(&bystander).unwrap();
+
+        retire_missing_worktree(&fixture.assess()).unwrap();
+
+        assert_eq!(admin_entry_for(&common, &fixture.linked), None);
+        assert!(admin_entry_for(&common, &bystander).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_retirement_that_fails_part_way_reports_partial_application() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new("feature/partial");
+        let common = common_git_dir(&fixture.main).unwrap();
+        let entry = admin_entry_for(&common, &fixture.linked).unwrap();
+        let blocked = entry.join("logs");
+        std::fs::create_dir_all(&blocked).unwrap();
+        std::fs::write(blocked.join("HEAD"), "").unwrap();
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        let assessment = fixture.assess();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let failure = retire_missing_worktree(&assessment).unwrap_err();
+        let staged = std::fs::read_dir(&common)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.to_string_lossy().contains(".trench-retire-"))
+            .expect("the entry was moved out of Git's list before deletion");
+        std::fs::set_permissions(staged.join("logs"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        assert!(
+            failure.partially_applied,
+            "part of the entry was deleted, so the state is not untouched"
+        );
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains(&staged.display().to_string()),
+            "the message says where the rest is: {failure:?}"
+        );
+        assert_eq!(admin_entry_for(&common, &fixture.linked), None);
+    }
+
+    #[test]
+    fn human_preview_states_what_would_happen_without_echoing_flags() {
+        let fixture = Fixture::new("feature/preview");
+        let path = fixture.assess().path().display().to_string();
+        let kept = fixture
+            .assess()
+            .authorize(RemoveOptions {
+                dry_run: true,
+                ..RemoveOptions::default()
+            })
+            .unwrap();
+        assert_eq!(
+            kept.render_preview("none configured"),
+            format!(
+                "Dry run: nothing was changed.\n\n\
+                 Would remove worktree feature-preview\n\
+                 \x20 Branch  feature/preview (kept)\n\
+                 \x20 Path    {path}\n\
+                 \x20 Dirty   no\n\
+                 \x20 Hooks   none configured\n"
+            )
+        );
+
+        std::fs::write(fixture.linked.join("untracked"), "dirty").unwrap();
+        let forced = fixture
+            .assess()
+            .authorize(RemoveOptions {
+                dry_run: true,
+                force_worktree: true,
+                delete_branch: true,
+                ..RemoveOptions::default()
+            })
+            .unwrap()
+            .render_preview("pre_remove");
+        assert!(
+            forced.contains("Branch  feature/preview (would be deleted)"),
+            "{forced}"
+        );
+        assert!(
+            forced.contains("Dirty   yes, changes would be discarded"),
+            "{forced}"
+        );
+        assert!(!forced.contains("--"), "{forced}");
+    }
+
+    #[test]
+    fn human_preview_marks_a_missing_directory_and_an_absent_branch() {
+        let fixture = Fixture::new("feature/stale");
+        std::fs::remove_dir_all(&fixture.linked).unwrap();
+        let missing = fixture
+            .assess()
+            .authorize(RemoveOptions {
+                dry_run: true,
+                ..RemoveOptions::default()
+            })
+            .unwrap()
+            .render_preview("none configured");
+
+        assert!(
+            missing.contains("Would remove the Git entry for worktree feature-stale"),
+            "{missing}"
+        );
+        assert!(missing.contains("  (missing)\n"), "{missing}");
+        assert!(!missing.contains("Dirty"), "{missing}");
+    }
+
+    #[test]
+    fn human_outcome_is_one_fact_per_line() {
+        let fixture = Fixture::new("feature/outcome");
+        let plan = fixture
+            .assess()
+            .authorize(RemoveOptions {
+                yes: true,
+                delete_branch: true,
+                ..RemoveOptions::default()
+            })
+            .unwrap();
+        let outcome = |branch_deleted, warning: Option<&str>| {
+            RemovalOutcome::from_plan(
+                &plan,
+                RemovalHooksStatus::None,
+                RemovalMutationState::Applied,
+                branch_deleted,
+                warning.map(ToOwned::to_owned),
+            )
+        };
+
+        assert_eq!(
+            outcome(true, None).summary_lines(),
+            [
+                "Removed worktree feature-outcome",
+                "Deleted branch feature/outcome"
+            ]
+        );
+        let mut kept = outcome(false, None);
+        kept.delete_branch = false;
+        kept.force_worktree_applied = true;
+        assert_eq!(
+            kept.summary_lines(),
+            [
+                "Removed worktree feature-outcome",
+                "Kept branch feature/outcome",
+                "Discarded uncommitted changes"
+            ]
+        );
+        let mut stale = outcome(false, None);
+        stale.delete_branch = false;
+        stale.directory_missing = true;
+        stale.branch_present = false;
+        assert_eq!(
+            stale.summary_lines(),
+            [
+                "Removed the Git entry for worktree feature-outcome; its directory was already gone",
+                "Branch feature/outcome was already gone"
+            ]
+        );
+        let mut detached = outcome(false, None);
+        detached.branch = None;
+        assert_eq!(
+            detached.summary_lines(),
+            ["Removed worktree feature-outcome"]
+        );
+    }
+
+    #[test]
+    fn prompt_names_the_branch_only_when_it_will_be_deleted() {
+        let fixture = Fixture::new("feature/prompt");
+        let path = fixture.assess().path().display().to_string();
+        assert_eq!(
+            fixture.assess().prompt(false),
+            format!("Remove worktree feature-prompt at {path}?")
+        );
+        assert_eq!(
+            fixture.assess().prompt(true),
+            format!("Remove worktree feature-prompt at {path} and delete branch feature/prompt?")
+        );
     }
 }

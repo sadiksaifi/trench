@@ -423,7 +423,7 @@ fn post_create_failure_preserves_an_existing_local_branch() {
 }
 
 #[test]
-fn create_success_human_output_is_only_the_planned_path() {
+fn create_success_prints_the_path_on_stdout_and_one_summary_line_on_stderr() {
     let repo = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
@@ -440,7 +440,10 @@ fn create_success_human_output_is_only_the_planned_path() {
         String::from_utf8_lossy(&output.stdout),
         format!("{}\n", expected.display())
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "Created feature/human (new branch from main)\n"
+    );
 }
 
 #[test]
@@ -489,4 +492,64 @@ fn hook_output_is_never_written_to_application_state_or_diagnostics() {
             }
         }
     }
+}
+
+#[test]
+fn a_relative_worktree_root_is_read_from_the_current_directory_and_the_create_completes() {
+    let base = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let repo = base.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    init_repo(&repo);
+    std::fs::write(repo.join(".trench.toml"), "[worktrees]\nroot = \"../wt\"\n").unwrap();
+
+    let output = trench(&repo, xdg.path(), &["create", "feature/rel", "--json"]);
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let path = Path::new(result["path"].as_str().unwrap());
+    assert!(path.is_absolute(), "{path:?}");
+    assert!(path.is_dir(), "{path:?}");
+    assert_eq!(
+        path.canonicalize().unwrap(),
+        base.path()
+            .join("wt/repo/feature-rel")
+            .canonicalize()
+            .unwrap()
+    );
+}
+
+#[test]
+fn a_full_remote_ref_shadowed_by_a_local_branch_is_refused_without_creating_anything() {
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write_project_config(repo.path(), &outside.path().join("worktrees"), "");
+    git(repo.path(), &["branch", "x"]);
+    git(
+        repo.path(),
+        &["update-ref", "refs/remotes/origin/x", "HEAD"],
+    );
+
+    let output = trench(
+        repo.path(),
+        xdg.path(),
+        &["create", "refs/remotes/origin/x", "--json"],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("trench create x"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let branches = git_stdout(repo.path(), &["branch", "--list", "refs/remotes/*"]);
+    assert_eq!(branches.trim(), "", "no branch named after the ref");
+    assert!(!outside.path().join("worktrees").exists());
 }

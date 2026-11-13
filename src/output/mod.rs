@@ -1,3 +1,4 @@
+pub mod human;
 pub mod json;
 pub mod porcelain;
-pub mod table;
+pub mod text;

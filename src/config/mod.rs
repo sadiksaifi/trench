@@ -205,7 +205,7 @@ pub struct ResolvedWorktreesConfig {
 impl Default for ResolvedUiConfig {
     fn default() -> Self {
         Self {
-            theme: "ops".to_string(),
+            theme: "terminal".to_string(),
         }
     }
 }
@@ -266,12 +266,14 @@ pub fn resolve_config(
         },
         editor_command,
         worktrees: ResolvedWorktreesConfig {
-            root: PathBuf::from(paths::expand_tilde(
+            // Relative to the current directory, made absolute once here so
+            // planning, the TUI and execution all use the same directory.
+            root: paths::absolute_lexical(Path::new(&paths::expand_tilde(
                 &cli.and_then(|c| c.worktree_root.clone())
                     .or_else(|| p_wt.and_then(|w| w.root.clone()))
                     .or_else(|| g_wt.and_then(|w| w.root.clone()))
                     .unwrap_or_else(|| defaults_wt.root.to_string_lossy().into_owned()),
-            )),
+            ))),
         },
         hooks,
     }
@@ -705,7 +707,7 @@ run = ["bun install"]
     fn resolve_defaults_only() {
         let resolved = resolve_config(None, None, &GlobalConfig::default());
 
-        assert_eq!(resolved.ui.theme, "ops");
+        assert_eq!(resolved.ui.theme, "terminal");
 
         assert_eq!(resolved.git.default_base, None);
 

@@ -4,7 +4,7 @@
 //! on every supported platform. Consumers should use this module instead of
 //! reading XDG environment variables or joining application paths directly.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -41,6 +41,15 @@ fn home_dir_path() -> Result<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .context("HOME must be set to an absolute path")
+}
+
+/// The home directory as worktree paths spell it.
+///
+/// Worktree paths are canonical, so `HOME` is canonicalized too; otherwise a
+/// symlinked home (`/var` on macOS) would never match as a prefix.
+pub fn home_dir() -> Option<PathBuf> {
+    let home = home_dir_path().ok()?;
+    Some(home.canonicalize().unwrap_or(home))
 }
 
 fn env_dir_path(env_var: &str) -> Option<PathBuf> {
@@ -107,6 +116,29 @@ pub fn expand_tilde(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+/// `path` made absolute against the current directory, with `.` and `..`
+/// removed without touching the file system.
+pub fn absolute_lexical(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 pub fn sanitize_branch(branch: &str) -> String {

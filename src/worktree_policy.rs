@@ -72,7 +72,7 @@ pub struct WorktreePolicy {
 impl WorktreePolicy {
     pub fn new(root: &Path, repository: impl Into<String>) -> Self {
         Self {
-            root: absolute_lexical(root),
+            root: paths::absolute_lexical(root),
             repository: repository.into(),
             existing: Vec::new(),
             admin_names: BTreeSet::new(),
@@ -160,7 +160,7 @@ impl WorktreePolicy {
                 branch: branch.to_string(),
             });
         }
-        let path = absolute_lexical(&self.root.join(&self.repository).join(&worktree));
+        let path = planned_path(&self.root, &self.repository, branch);
         if !is_single_segment(&self.repository) || !path.starts_with(&self.root) {
             return Err(WorktreePolicyError::RootEscape { path });
         }
@@ -170,6 +170,20 @@ impl WorktreePolicy {
             path,
         })
     }
+}
+
+/// The directory a worktree for `branch` is created in.
+///
+/// This is the one definition of that path. Planning uses it, and the create
+/// dialog uses it to show the path and to check that a plan still matches
+/// what it showed, so a root written as `../worktrees` or `./x` cannot make
+/// the two disagree. It reads nothing from disk.
+pub fn planned_path(root: &Path, repository: &str, branch: &str) -> PathBuf {
+    paths::absolute_lexical(
+        &paths::absolute_lexical(root)
+            .join(repository)
+            .join(paths::sanitize_branch(branch)),
+    )
 }
 
 fn reject_intermediate_symlinks(root: &Path, target: &Path) -> Result<(), WorktreePolicyError> {
@@ -218,27 +232,6 @@ fn validate_branch(branch: &str) -> Result<(), WorktreePolicyError> {
 fn is_single_segment(value: &str) -> bool {
     let mut components = Path::new(value).components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
-}
-
-fn absolute_lexical(path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            component => normalized.push(component.as_os_str()),
-        }
-    }
-    normalized
 }
 
 #[cfg(test)]

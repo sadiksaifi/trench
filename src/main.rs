@@ -22,6 +22,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::io::{BufRead, IsTerminal, Write};
 
 use exit_code::ExitCode;
+use output::human::{self, Report};
 
 const TUI_SWITCH_PATH_FILE_ENV: &str = "TRENCH_TUI_SWITCH_PATH_FILE";
 
@@ -29,7 +30,13 @@ const TUI_SWITCH_PATH_FILE_ENV: &str = "TRENCH_TUI_SWITCH_PATH_FILE";
 #[command(
     name = "trench",
     version = build_info::VERSION,
-    about = "A fast, ergonomic, headless-first Git worktree manager",
+    about = "Manage Git worktrees: create, switch, sync and remove them",
+    after_help = "Run `trench` with no command in a terminal to open the interactive list.\n\n\
+        Examples:\n  \
+        trench create feature/login\n  \
+        trench create feature/login --from develop\n  \
+        trench sync feature/login --strategy rebase\n  \
+        trench remove feature/login --delete-branch",
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -39,124 +46,138 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Create a new worktree
+    /// Create a worktree for a new or existing branch
+    #[command(
+        after_help = "If BRANCH exists locally, trench checks it out. If it exists only on origin,\n\
+        trench creates a local branch that tracks it. Otherwise trench creates a new\n\
+        branch from BASE. Prints the worktree path on stdout."
+    )]
     Create {
-        /// Branch name for the new worktree
+        /// Branch to check out in the new worktree
         branch: String,
 
-        /// Base branch to create from (defaults to repo's HEAD branch).
-        /// Falls back to origin/<base> if not found locally.
-        #[arg(long)]
+        /// Start a new branch from BASE [default: git.default_base, else origin's default branch]
+        #[arg(long, value_name = "BASE")]
         from: Option<String>,
 
-        /// Skip all lifecycle hooks (pre_create, post_create)
+        /// Do not run pre_create and post_create hooks
         #[arg(long)]
         no_hooks: bool,
 
-        /// Preview without executing
+        /// Show what would happen and change nothing
         #[arg(long)]
         dry_run: bool,
 
-        /// Output as JSON
+        /// Print the result as JSON
         #[arg(long)]
         json: bool,
     },
-    /// Remove a worktree
-    Remove {
-        /// Branch name or sanitized name of the worktree to remove
-        branch: String,
-
-        /// Confirm removal without an interactive prompt
-        #[arg(long)]
-        yes: bool,
-
-        /// Allow removal of a dirty worktree
-        #[arg(long)]
-        force_worktree: bool,
-
-        /// Also delete the corresponding local branch after removing the worktree
-        #[arg(long)]
-        delete_branch: bool,
-
-        /// Force deletion when the local branch is unmerged or merge status is unavailable
-        #[arg(long)]
-        force_branch: bool,
-
-        /// Skip all lifecycle hooks (pre_remove, post_remove)
-        #[arg(long)]
-        no_hooks: bool,
-
-        /// Preview without executing
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Output as JSON
-        #[arg(long)]
+    /// List worktrees
+    List {
+        /// Print the worktrees as JSON
+        #[arg(long, conflicts_with = "porcelain")]
         json: bool,
+
+        /// Print one `name:branch:path` line per worktree
+        #[arg(long, conflicts_with = "json")]
+        porcelain: bool,
     },
-    /// Switch to a worktree
+    /// Print a worktree's path (the `tn` shell function uses it to cd)
     Switch {
-        /// Branch name or sanitized name of the worktree
+        /// Branch name, worktree directory name, or path
+        #[arg(value_name = "WORKTREE")]
         branch: String,
 
         /// Print only the worktree path (for shell integration)
         #[arg(long, hide = true)]
         print_path: bool,
     },
-    /// Open a worktree in $EDITOR
+    /// Open a worktree in your editor
     Open {
-        /// Branch name or sanitized name of the worktree
+        /// Branch name, worktree directory name, or path
+        #[arg(value_name = "WORKTREE")]
         branch: String,
     },
-    /// List all worktrees
-    List {
-        /// Output as JSON
-        #[arg(long, conflicts_with = "porcelain")]
-        json: bool,
-
-        /// Output in porcelain format
-        #[arg(long, conflicts_with = "json")]
-        porcelain: bool,
-    },
-    /// Sync a worktree with its base branch
+    /// Rebase or merge a worktree's branch onto its base
+    #[command(
+        after_help = "Fetches origin first when it can. Refuses a worktree with uncommitted changes\n\
+        or a detached HEAD."
+    )]
     Sync {
-        /// Branch name, worktree name, or path of the worktree to sync
+        /// Branch name, worktree directory name, or path
+        #[arg(value_name = "WORKTREE")]
         branch: String,
 
-        /// Sync strategy: rebase or merge
+        /// How to bring in the base
         #[arg(long)]
         strategy: SyncStrategy,
 
-        /// Base branch or ref to sync onto
+        /// Branch or ref to sync onto [default: git.default_base, else origin's default branch]
         #[arg(long)]
         base: Option<String>,
 
-        /// Skip all lifecycle hooks (pre_sync, post_sync)
+        /// Do not run pre_sync and post_sync hooks
         #[arg(long)]
         no_hooks: bool,
 
-        /// Preview without executing
+        /// Show what would happen and change nothing
         #[arg(long)]
         dry_run: bool,
 
-        /// Output as JSON
+        /// Print the result as JSON
         #[arg(long)]
         json: bool,
     },
-    /// Upgrade trench using its owning installation manager
-    Upgrade,
-    /// Initialize .trench.toml in current directory
+    /// Remove a worktree, and optionally its branch
+    #[command(
+        after_help = "Refuses a worktree with uncommitted changes unless --force-worktree is given.\n\
+        Asks for confirmation in a terminal; pass --yes in scripts."
+    )]
+    Remove {
+        /// Branch name, worktree directory name, or path
+        #[arg(value_name = "WORKTREE")]
+        branch: String,
+
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+
+        /// Also delete the local branch
+        #[arg(long)]
+        delete_branch: bool,
+
+        /// Remove even with uncommitted changes, which are lost
+        #[arg(long)]
+        force_worktree: bool,
+
+        /// With --delete-branch: delete the branch even if it is not merged
+        #[arg(long)]
+        force_branch: bool,
+
+        /// Do not run pre_remove and post_remove hooks
+        #[arg(long)]
+        no_hooks: bool,
+
+        /// Show what would happen and change nothing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a commented .trench.toml to the repository root
     Init {
-        /// Overwrite existing .trench.toml
+        /// Overwrite an existing .trench.toml
         #[arg(long)]
         force: bool,
     },
-    /// Output shell function definition for eval.
+    /// Print the `tn` shell function
     ///
-    /// The `tn()` shell function wraps `trench switch --print-path` with `cd`
-    /// so you can instantly navigate between worktrees.
+    /// The `tn` shell function wraps `trench switch --print-path` with `cd`,
+    /// so you can move between worktrees.
     ///
-    /// Add this to your shell configuration file:
+    /// Add one of these to your shell configuration file:
     ///
     ///   # ~/.bashrc
     ///   eval "$(trench shell-init bash)"
@@ -166,16 +187,18 @@ enum Commands {
     ///
     ///   # ~/.config/fish/config.fish
     ///   trench shell-init fish | source
-    #[command(name = "shell-init")]
+    #[command(name = "shell-init", verbatim_doc_comment)]
     ShellInit {
         /// Target shell
         shell: ShellType,
     },
-    /// Generate shell completions for trench
+    /// Print shell completions
     Completions {
         /// Target shell
         shell: ShellType,
     },
+    /// Upgrade trench
+    Upgrade,
 }
 
 /// Supported shells for shell-init and completions
@@ -194,36 +217,45 @@ pub(crate) enum SyncStrategy {
 }
 
 impl Cli {
-    fn should_launch_tui(&self, stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
-        self.command.is_none() && stdin_is_tty && stdout_is_tty
+    /// The TUI needs a real terminal on both ends that can address the screen.
+    fn should_launch_tui(&self, stdin_is_tty: bool, stdout_is_tty: bool, term: &str) -> bool {
+        self.command.is_none() && stdin_is_tty && stdout_is_tty && term != "dumb"
     }
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     let read_only_startup = std::env::args_os()
         .any(|argument| argument == "--dry-run" || argument == "--version" || argument == "-V");
     if !read_only_startup {
         logging::init();
     }
-    let cli = Cli::parse();
+    if let Err(error) = run(Cli::parse()) {
+        let (rendered, code) = cli::report::top_level(&error);
+        eprintln!("{rendered}");
+        code.exit();
+    }
+}
 
+/// Print a failure and exit with its code.
+fn fail(report: Report, code: ExitCode) -> ! {
+    report.print();
+    code.exit()
+}
+
+fn run(cli: Cli) -> anyhow::Result<()> {
     if cli.should_launch_tui(
         std::io::stdin().is_terminal(),
         std::io::stdout().is_terminal(),
+        &std::env::var("TERM").unwrap_or_default(),
     ) {
-        match tui::run() {
-            Ok(tui::runtime::TuiExit::Switch(path)) => write_tui_switch_path(&path)?,
-            Ok(tui::runtime::TuiExit::Quit) => {}
-            Err(e) if e.downcast_ref::<config::ConfigError>().is_some() => {
-                eprintln!("error: {e}");
-                ExitCode::ConfigError.exit();
-            }
-            Err(e) => return Err(e),
+        match tui::run()? {
+            tui::runtime::TuiExit::Switch(path) => write_tui_switch_path(&path)?,
+            tui::runtime::TuiExit::Quit => {}
         }
         return Ok(());
     }
 
-    let result = match cli.command {
+    match cli.command {
         Some(Commands::Create {
             branch,
             from,
@@ -271,39 +303,12 @@ fn main() -> anyhow::Result<()> {
             json,
         }) => run_sync(&branch, strategy, base.as_deref(), json, dry_run, no_hooks),
         Some(Commands::Upgrade) => run_upgrade(),
-        None => {
-            anyhow::bail!("TUI requires an interactive terminal (stdin and stdout must be a TTY)");
-        }
-    };
-
-    // Catch-all: map unhandled typed errors to their exit codes before
-    // they fall through to anyhow's default "Error: ..." formatter.
-    if let Err(ref e) = result {
-        if e.downcast_ref::<config::ConfigError>().is_some() {
-            eprintln!("error: {e}");
-            ExitCode::ConfigError.exit();
-        }
-        if let Some(git_error) = e.downcast_ref::<git::GitError>() {
-            eprintln!("Error: {e}");
-            if matches!(git_error, git::GitError::NotAGitRepo { .. }) {
-                eprintln!("hint: Run `trench` inside a Git worktree.");
-            }
-            ExitCode::GitError.exit();
-        }
-        if let Some(catalog_error) = e.downcast_ref::<worktree_catalog::CatalogError>() {
-            if let worktree_catalog::CatalogError::Git(git_error) = catalog_error {
-                eprintln!("Error: {git_error}");
-                if matches!(git_error, git::GitError::NotAGitRepo { .. }) {
-                    eprintln!("hint: Run `trench` inside a Git worktree.");
-                }
-                ExitCode::GitError.exit();
-            }
-            eprintln!("error: {e}");
-            ExitCode::NotFound.exit();
-        }
+        None => fail(
+            Report::new("the TUI needs an interactive terminal")
+                .hint("run a command instead, for example `trench list`"),
+            ExitCode::GeneralError,
+        ),
     }
-
-    result
 }
 
 fn run_upgrade() -> anyhow::Result<()> {
@@ -332,14 +337,15 @@ fn write_tui_switch_path(path: &std::path::Path) -> anyhow::Result<()> {
         })?;
     } else {
         println!("{}", path.display());
-        eprintln!("{}", format_switch_hint());
+        if std::io::stdout().is_terminal() {
+            human::print_hint(SWITCH_HINT);
+        }
     }
     Ok(())
 }
 
-fn format_switch_hint() -> &'static str {
-    "hint: a child process cannot change its parent shell; use `tn switch <worktree>` to cd"
-}
+const SWITCH_HINT: &str =
+    "trench cannot change your shell's directory; run `tn switch <worktree>` to cd";
 
 fn run_create(
     branch: &str,
@@ -358,25 +364,6 @@ fn run_create(
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
     let worktree_root = resolved.worktrees.root;
 
-    if dry_run {
-        let plan = cli::commands::create::execute_dry_run(
-            branch,
-            from,
-            &cwd,
-            &worktree_root,
-            resolved.git.default_base.as_deref(),
-            no_hooks,
-        )?;
-
-        if json {
-            println!("{}", serde_json::to_string_pretty(&plan)?);
-        } else {
-            print!("{plan}");
-        }
-        return Ok(());
-    }
-
-    let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
     let plan = cli::commands::create::execute_dry_run(
         branch,
         from,
@@ -385,6 +372,19 @@ fn run_create(
         resolved.git.default_base.as_deref(),
         no_hooks,
     )?;
+    if dry_run {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        } else {
+            print!(
+                "{}",
+                cli::report::create_preview(&plan, resolved.hooks.as_ref())
+            );
+        }
+        return Ok(());
+    }
+
+    let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
     let request = operation::OperationRequest::Create(operation::CreateRequest {
         plan,
         repo_path: repo_info.path,
@@ -392,11 +392,20 @@ fn run_create(
         hooks: resolved.hooks,
     });
 
-    match rt.block_on(operation::execute(request, &operation::TerminalEmitter)) {
+    match rt.block_on(operation::execute(request, cli_emitter(json).as_ref())) {
         Ok(operation::OperationOutcome::Create(outcome)) => {
             if json {
                 println!("{}", output::json::format_json_value(&outcome)?);
             } else {
+                eprintln!("{}", cli::report::created(&outcome.plan));
+                if !outcome.plan.path.exists() {
+                    let (warning, hint) = cli::report::missing_directory_warning(
+                        &outcome.plan.worktree,
+                        &outcome.plan.path,
+                    );
+                    human::print_warning(&warning);
+                    human::print_hint(&hint);
+                }
                 println!("{}", outcome.plan.path.display());
             }
             Ok(())
@@ -408,22 +417,46 @@ fn run_create(
             unreachable!("create request returned a sync outcome")
         }
         Err(failure) => {
-            if json {
-                println!("{}", output::json::format_json_value(&failure)?);
-            } else {
-                eprintln!("error: {failure}");
-            }
-            match failure.class {
-                operation::ErrorClass::Hook => ExitCode::HookFailed.exit(),
-                operation::ErrorClass::HookTimeout => ExitCode::HookTimeout.exit(),
-                operation::ErrorClass::Git => ExitCode::GitError.exit(),
-                operation::ErrorClass::Cancelled
-                | operation::ErrorClass::PreconditionsChanged
-                | operation::ErrorClass::Cleanup
-                | operation::ErrorClass::Io
-                | operation::ErrorClass::Internal => ExitCode::GeneralError.exit(),
-            }
+            exit_operation_failure(operation::OperationKind::Create, &failure, json, false)
         }
+    }
+}
+
+/// Hook output goes to stderr raw under `--json` and labeled otherwise.
+fn cli_emitter(json: bool) -> Box<dyn operation::Emitter> {
+    if json {
+        Box::new(operation::TerminalEmitter)
+    } else {
+        Box::new(operation::HumanEmitter::default())
+    }
+}
+
+fn exit_operation_failure(
+    kind: operation::OperationKind,
+    failure: &operation::OperationFailure,
+    json: bool,
+    directory_missing: bool,
+) -> ! {
+    if json {
+        match output::json::format_json_value(failure) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(error) => eprintln!(
+                "{}",
+                Report::new(error.to_string()).render(human::Palette::stderr())
+            ),
+        }
+    } else {
+        cli::report::operation_failure(kind, failure, directory_missing).print();
+    }
+    match failure.class {
+        operation::ErrorClass::Hook => ExitCode::HookFailed.exit(),
+        operation::ErrorClass::HookTimeout => ExitCode::HookTimeout.exit(),
+        operation::ErrorClass::Git => ExitCode::GitError.exit(),
+        operation::ErrorClass::Cancelled
+        | operation::ErrorClass::PreconditionsChanged
+        | operation::ErrorClass::Cleanup
+        | operation::ErrorClass::Io
+        | operation::ErrorClass::Internal => ExitCode::GeneralError.exit(),
     }
 }
 
@@ -440,7 +473,8 @@ struct RemoveCliRequest<'a> {
 
 fn run_remove(request: RemoveCliRequest<'_>) -> anyhow::Result<()> {
     use cli::commands::remove::stateless::{
-        InteractiveTerminal, RemovalAssessment, RemovalAuthorizationError, RemoveOptions,
+        InteractiveTerminal, RemovalAssessment, RemovalAssessmentError, RemovalAuthorizationError,
+        RemoveOptions,
     };
 
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
@@ -449,18 +483,26 @@ fn run_remove(request: RemoveCliRequest<'_>) -> anyhow::Result<()> {
     let global_config = config::load_global_config()?;
     let resolved = config::resolve_config(None, project_config.as_ref(), &global_config);
     let configured_base = resolved.git.default_base.clone();
+    let hooks_description = human::describe_hooks(
+        request.no_hooks,
+        &cli::report::remove_hooks(resolved.hooks.as_ref()),
+    );
     let hooks_config = (!request.no_hooks).then_some(resolved.hooks).flatten();
     let assessment =
         match RemovalAssessment::discover(&cwd, request.identifier, configured_base.as_deref()) {
             Ok(assessment) => assessment,
-            Err(error) => {
-                eprintln!("error: {error}");
-                if error.to_string().contains("not found") {
-                    ExitCode::NotFound.exit();
-                }
-                ExitCode::GeneralError.exit();
+            // Only "no such worktree" is exit 2. Every other selector problem,
+            // including an ambiguous one, stays a general error.
+            Err(RemovalAssessmentError::Catalog(
+                error @ worktree_catalog::CatalogError::NotFound { .. },
+            )) => return Err(error.into()),
+            Err(RemovalAssessmentError::Catalog(error)) => {
+                fail(cli::report::catalog_error(&error), ExitCode::GeneralError)
             }
+            Err(error) => fail(Report::new(error.to_string()), ExitCode::GeneralError),
         };
+    let worktree = assessment.worktree().to_string();
+    let directory_missing = assessment.directory_missing();
     let options = RemoveOptions {
         yes: request.yes,
         force_worktree: request.force_worktree,
@@ -469,46 +511,44 @@ fn run_remove(request: RemoveCliRequest<'_>) -> anyhow::Result<()> {
         no_hooks: request.no_hooks,
         dry_run: request.dry_run,
     };
+    let refuse = |error: RemovalAuthorizationError| -> ! {
+        let code = match error {
+            RemovalAuthorizationError::ConfirmationRequired => ExitCode::MissingRequiredFlag,
+            RemovalAuthorizationError::ForceBranchRequiresDeleteBranch => ExitCode::FlagConflict,
+            _ => ExitCode::GeneralError,
+        };
+        fail(cli::report::removal_refusal(&error, &worktree), code)
+    };
     let plan = if request.dry_run || request.yes {
         assessment.authorize(options)
     } else if let Some(terminal) = InteractiveTerminal::detect() {
-        let prompt = format!(
-            "Remove worktree '{}' at {}?",
-            assessment.worktree(),
-            assessment.path().display()
-        );
+        // Report anything that blocks the removal before asking, so the user
+        // is never asked to confirm something that will then be refused.
+        if let Err(error) = assessment.clone().authorize(RemoveOptions {
+            dry_run: true,
+            ..options
+        }) {
+            refuse(error);
+        }
+        let prompt = assessment.prompt(request.delete_branch);
         match assessment.confirm_interactively(terminal, || {
             prompt_yes_no(&prompt).map_err(|error| std::io::Error::other(error.to_string()))
         })? {
             Some(receipt) => assessment.authorize_confirmed(options, receipt),
             None => {
-                eprintln!("Cancelled.");
+                eprintln!("Nothing removed.");
                 return Ok(());
             }
         }
     } else {
         Err(RemovalAuthorizationError::ConfirmationRequired)
     };
-    let plan = match plan {
-        Ok(plan) => plan,
-        Err(error) => {
-            eprintln!("error: {error}");
-            match error {
-                RemovalAuthorizationError::ConfirmationRequired => {
-                    ExitCode::MissingRequiredFlag.exit()
-                }
-                RemovalAuthorizationError::ForceBranchRequiresDeleteBranch => {
-                    ExitCode::FlagConflict.exit()
-                }
-                _ => ExitCode::GeneralError.exit(),
-            }
-        }
-    };
+    let plan = plan.unwrap_or_else(|error| refuse(error));
     if request.dry_run {
         if request.json {
             println!("{}", output::json::format_json_value(&plan)?);
         } else {
-            println!("{plan}");
+            print!("{}", plan.render_preview(&hooks_description));
         }
         return Ok(());
     }
@@ -519,34 +559,26 @@ fn run_remove(request: RemoveCliRequest<'_>) -> anyhow::Result<()> {
             plan,
             hooks: hooks_config,
         }),
-        &operation::TerminalEmitter,
+        cli_emitter(request.json).as_ref(),
     )) {
         Ok(operation::OperationOutcome::Remove(outcome)) => {
             if request.json {
                 println!("{}", output::json::format_json_value(&outcome)?);
             } else {
-                eprintln!("{outcome}");
+                // Warnings were already printed as they happened.
+                for line in outcome.summary_lines() {
+                    eprintln!("{line}");
+                }
             }
             Ok(())
         }
         Ok(_) => unreachable!("remove request returned a create outcome"),
-        Err(failure) => {
-            if request.json {
-                println!("{}", output::json::format_json_value(&failure)?);
-            } else {
-                eprintln!("error: {failure}");
-            }
-            match failure.class {
-                operation::ErrorClass::Hook => ExitCode::HookFailed.exit(),
-                operation::ErrorClass::HookTimeout => ExitCode::HookTimeout.exit(),
-                operation::ErrorClass::Git => ExitCode::GitError.exit(),
-                operation::ErrorClass::Cancelled
-                | operation::ErrorClass::PreconditionsChanged
-                | operation::ErrorClass::Cleanup
-                | operation::ErrorClass::Io
-                | operation::ErrorClass::Internal => ExitCode::GeneralError.exit(),
-            }
-        }
+        Err(failure) => exit_operation_failure(
+            operation::OperationKind::Remove,
+            &failure,
+            request.json,
+            directory_missing,
+        ),
     }
 }
 
@@ -572,23 +604,14 @@ fn prompt_yes_no_from<R: BufRead, W: Write>(
 
 fn run_switch(identifier: &str, print_path: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    match cli::commands::switch::execute(identifier, &cwd) {
-        Ok(result) => {
-            println!("{}", result.path);
-            if !print_path {
-                eprintln!("{}", format_switch_hint());
-            }
-            Ok(())
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not found") || msg.contains("not tracked") {
-                eprintln!("error: {e}");
-                ExitCode::NotFound.exit();
-            }
-            Err(e.into())
-        }
+    let result = cli::commands::switch::execute(identifier, &cwd)?;
+    println!("{}", result.path);
+    // A person who typed `trench switch` at a prompt expects to move; a
+    // script or `cd "$(trench switch x)"` only wants the path.
+    if !print_path && std::io::stdout().is_terminal() {
+        human::print_hint(SWITCH_HINT);
     }
+    Ok(())
 }
 
 fn run_open(identifier: &str) -> anyhow::Result<()> {
@@ -605,17 +628,31 @@ fn run_open(identifier: &str) -> anyhow::Result<()> {
 
 fn run_list(json: bool, porcelain: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let output = if json {
-        cli::commands::list::execute_json(&cwd)?
-    } else if porcelain {
-        cli::commands::list::execute_porcelain(&cwd)?
+    if json {
+        println!("{}", cli::commands::list::execute_json(&cwd)?);
+        return Ok(());
+    }
+    if porcelain {
+        print!("{}", cli::commands::list::execute_porcelain(&cwd)?);
+        return Ok(());
+    }
+    let interactive = std::io::stdout().is_terminal();
+    let home = paths::home_dir();
+    let layout = if interactive {
+        cli::commands::list::HumanLayout {
+            terminal_width: crossterm::terminal::size()
+                .ok()
+                .map(|(columns, _)| usize::from(columns)),
+            home: home.as_deref(),
+            palette: output::human::Palette::stdout(),
+        }
     } else {
-        cli::commands::list::execute(&cwd)?
+        cli::commands::list::HumanLayout::PIPED
     };
-    if output.ends_with('\n') {
-        print!("{output}");
-    } else {
-        println!("{output}");
+    let list = cli::commands::list::execute(&cwd, layout)?;
+    print!("{}", list.text);
+    if interactive && list.worktrees == 1 {
+        output::human::print_hint("create a worktree with `trench create <branch>`");
     }
     Ok(())
 }
@@ -655,19 +692,24 @@ fn run_sync(
         {
             Ok(plan) => plan,
             Err(error) => {
+                let report = cli::report::sync_plan_error(&error);
                 return report_sync_failure(
                     &error.into_failure(planning_started.elapsed()),
+                    report,
                     Vec::new(),
                     json,
                     false,
-                )
+                );
             }
         };
         let preview = cli::commands::sync::stateless::preview(plan);
         if json {
             println!("{}", serde_json::to_string_pretty(&preview)?);
         } else {
-            println!("{preview}");
+            print!(
+                "{}",
+                cli::report::sync_preview(&preview, hooks_config.as_ref())
+            );
         }
         return Ok(());
     }
@@ -681,7 +723,7 @@ fn run_sync(
     } else {
         cli::commands::sync::stateless::HookPolicy::Run
     };
-    let emitter = CliSyncEmitter::default();
+    let emitter = CliSyncEmitter::new(json);
     let planning_started = std::time::Instant::now();
     let plan = match cli::commands::sync::stateless::plan_after_best_effort_origin_fetch(
         &cwd,
@@ -694,12 +736,14 @@ fn run_sync(
     ) {
         Ok(plan) => plan,
         Err(error) => {
+            let report = cli::report::sync_plan_error(&error);
             return report_sync_failure(
                 &error.into_failure(planning_started.elapsed()),
+                report,
                 emitter.stages(),
                 json,
                 true,
-            )
+            );
         }
     };
     let rt = tokio::runtime::Runtime::new().context("failed to create async runtime")?;
@@ -718,11 +762,11 @@ fn run_sync(
                     ))?
                 );
             } else {
-                println!("{outcome}");
+                eprintln!("{}", cli::report::synced(&outcome));
             }
             Ok(())
         }
-        Err(failure) => report_sync_failure(&failure, emitter.stages(), json, true),
+        Err(failure) => report_sync_failure(&failure, None, emitter.stages(), json, true),
     }
 }
 
@@ -781,12 +825,24 @@ impl<'a> SyncSuccessOutput<'a> {
     }
 }
 
-#[derive(Debug, Default)]
-struct CliSyncEmitter(std::sync::Mutex<Vec<cli::commands::sync::stateless::SyncEvent>>);
+#[derive(Debug)]
+struct CliSyncEmitter {
+    events: std::sync::Mutex<Vec<cli::commands::sync::stateless::SyncEvent>>,
+    /// Labels hook output and prints warnings; `None` under `--json`, where
+    /// stderr carries raw hook lines only.
+    human: Option<operation::HookOutputLabels>,
+}
 
 impl CliSyncEmitter {
+    fn new(json: bool) -> Self {
+        Self {
+            events: std::sync::Mutex::default(),
+            human: (!json).then(operation::HookOutputLabels::default),
+        }
+    }
+
     fn stages(&self) -> Vec<SyncStageOutput> {
-        self.0
+        self.events
             .lock()
             .map(|events| {
                 events
@@ -830,17 +886,32 @@ impl cli::commands::sync::stateless::SyncEmitter for CliSyncEmitter {
             }
             _ => {}
         }
-        if let cli::commands::sync::stateless::SyncEvent::HookOutput { line, .. } = &event {
-            eprintln!("{line}");
+        match (&event, &self.human) {
+            (
+                cli::commands::sync::stateless::SyncEvent::HookOutput { hook, line, .. },
+                Some(labels),
+            ) => {
+                labels.print(hook, line);
+            }
+            (cli::commands::sync::stateless::SyncEvent::HookOutput { line, .. }, None) => {
+                eprintln!("{line}");
+            }
+            (cli::commands::sync::stateless::SyncEvent::Warning { message, .. }, Some(_)) => {
+                human::print_warning(message);
+            }
+            _ => {}
         }
-        if let Ok(mut events) = self.0.lock() {
+        if let Ok(mut events) = self.events.lock() {
             events.push(event);
         }
     }
 }
 
+/// `planning_report` carries the typed wording of an error raised before a
+/// plan existed; execution failures are worded from `failure` itself.
 fn report_sync_failure(
     failure: &cli::commands::sync::stateless::SyncFailure,
+    planning_report: Option<Report>,
     stages: Vec<SyncStageOutput>,
     json: bool,
     record_diagnostics: bool,
@@ -882,7 +953,9 @@ fn report_sync_failure(
             })?
         );
     } else {
-        eprintln!("error: {}", failure.message);
+        planning_report
+            .unwrap_or_else(|| cli::report::sync_failure(failure))
+            .print();
     }
     match failure.class {
         SyncErrorClass::InvalidTarget => ExitCode::NotFound,
@@ -921,8 +994,7 @@ fn run_init(force: bool) -> anyhow::Result<()> {
         }
         Err(e) => {
             if e.downcast_ref::<cli::commands::init::InitError>().is_some() {
-                eprintln!("error: {e}");
-                ExitCode::ConfigError.exit();
+                fail(Report::new(e.to_string()), ExitCode::ConfigError);
             }
             Err(e)
         }

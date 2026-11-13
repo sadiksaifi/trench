@@ -23,6 +23,7 @@ fn trench_cmd(dir: &Path) -> Command {
     let xdg_root = dir.join(".test-xdg");
     let mut cmd = Command::new(trench_bin());
     cmd.current_dir(dir)
+        .env("HOME", xdg_root.join("home"))
         .env("XDG_CONFIG_HOME", xdg_root.join("config"))
         .env("XDG_DATA_HOME", xdg_root.join("data"))
         .env("XDG_STATE_HOME", xdg_root.join("state"))
@@ -520,6 +521,10 @@ fn remove_worktree_after_its_local_branch_was_deleted() {
         .output()
         .unwrap();
     assert!(!without_dirty_override.status.success());
+    let refusal = String::from_utf8_lossy(&without_dirty_override.stderr);
+    assert!(refusal.contains("no longer exists"), "{refusal}");
+    assert!(refusal.contains("--force-worktree"), "{refusal}");
+    assert!(!refusal.contains("is dirty"), "{refusal}");
     assert!(path.exists());
     let without_branch = trench_cmd(tmp.path())
         .args([
@@ -553,6 +558,382 @@ fn remove_worktree_after_its_local_branch_was_deleted() {
     let outcome: serde_json::Value = serde_json::from_slice(&removed.stdout).unwrap();
     assert_eq!(outcome["branch_deleted"], false);
     assert!(!path.exists());
+}
+
+fn git(dir: &Path, args: &[&str]) -> std::process::Output {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("failed to run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+fn git_lists_worktree(repo_dir: &Path, path: &Path) -> bool {
+    let listed = git(repo_dir, &["worktree", "list", "--porcelain"]);
+    let expected = format!("worktree {}", path.display());
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .any(|line| line == expected)
+}
+
+fn branch_exists(repo_dir: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .current_dir(repo_dir)
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+#[test]
+fn remove_worktree_after_its_directory_was_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "directory-deleted-by-hand");
+    let path = worktree_path(tmp.path(), "directory-deleted-by-hand");
+    std::fs::remove_dir_all(&path).unwrap();
+    assert!(git_lists_worktree(tmp.path(), &path));
+
+    let preview = trench_cmd(tmp.path())
+        .args(["remove", "directory-deleted-by-hand", "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(plan["directory_missing"], true);
+    assert_eq!(plan["dirty"], false);
+    assert!(git_lists_worktree(tmp.path(), &path));
+
+    let removed = trench_cmd(tmp.path())
+        .args(["remove", "directory-deleted-by-hand", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let outcome: serde_json::Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(outcome["directory_missing"], true);
+    assert_eq!(outcome["mutation_state"], "applied");
+    assert_eq!(outcome["branch_deleted"], false);
+    assert!(!git_lists_worktree(tmp.path(), &path));
+    assert!(branch_exists(tmp.path(), "directory-deleted-by-hand"));
+}
+
+#[test]
+fn remove_missing_directory_can_delete_the_local_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "directory-and-branch-cleanup");
+    let path = worktree_path(tmp.path(), "directory-and-branch-cleanup");
+    std::fs::remove_dir_all(&path).unwrap();
+
+    let removed = trench_cmd(tmp.path())
+        .args([
+            "remove",
+            "directory-and-branch-cleanup",
+            "--yes",
+            "--delete-branch",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!git_lists_worktree(tmp.path(), &path));
+    assert!(!branch_exists(tmp.path(), "directory-and-branch-cleanup"));
+}
+
+#[test]
+fn remove_missing_directory_skips_pre_remove_and_runs_post_remove() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    std::fs::write(
+        tmp.path().join(".trench.toml"),
+        "[hooks.pre_remove]\nrun = [\"touch pre-remove-ran\"]\n\n[hooks.post_remove]\nrun = [\"touch post-remove-ran\"]\n",
+    )
+    .unwrap();
+    create_worktree(tmp.path(), "missing-directory-hooks");
+    let path = worktree_path(tmp.path(), "missing-directory-hooks");
+    std::fs::remove_dir_all(&path).unwrap();
+
+    let removed = trench_cmd(tmp.path())
+        .args(["remove", "missing-directory-hooks", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let outcome: serde_json::Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert!(outcome["warning"]
+        .as_str()
+        .is_some_and(|warning| warning.contains("pre_remove")));
+    assert!(!tmp.path().join("pre-remove-ran").exists());
+    assert!(!path.exists());
+    assert!(tmp.path().join("post-remove-ran").exists());
+    assert!(!git_lists_worktree(tmp.path(), &path));
+}
+
+#[test]
+fn removing_a_missing_worktree_leaves_other_stale_entries_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "stale-target");
+    create_worktree(tmp.path(), "stale-bystander");
+    let target = worktree_path(tmp.path(), "stale-target");
+    let bystander = worktree_path(tmp.path(), "stale-bystander");
+    std::fs::remove_dir_all(&target).unwrap();
+    // The bystander is only away, as on an unmounted disk. It comes back.
+    let parked = tmp.path().join("parked");
+    std::fs::rename(&bystander, &parked).unwrap();
+
+    let removed = trench_cmd(tmp.path())
+        .args(["remove", "stale-target", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!git_lists_worktree(tmp.path(), &target));
+    assert!(
+        git_lists_worktree(tmp.path(), &bystander),
+        "an entry the user did not name was pruned"
+    );
+
+    std::fs::rename(&parked, &bystander).unwrap();
+    git(&bystander, &["status"]);
+}
+
+#[test]
+fn an_ambiguous_remove_selector_keeps_its_general_error_exit_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    let first = tmp.path().join("one").join("shared");
+    let second = tmp.path().join("two").join("shared");
+    for (path, branch) in [(&first, "first"), (&second, "second")] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        git(
+            tmp.path(),
+            &["worktree", "add", "-b", branch, path.to_str().unwrap()],
+        );
+    }
+
+    let refused = trench_cmd(tmp.path())
+        .args(["remove", "shared", "--yes"])
+        .output()
+        .unwrap();
+
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.starts_with("error: more than one worktree matches 'shared'"),
+        "{stderr}"
+    );
+    assert!(first.exists() && second.exists());
+}
+
+#[test]
+fn a_failing_post_remove_hook_is_reported_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    std::fs::write(
+        tmp.path().join(".trench.toml"),
+        "[hooks.post_remove]\nrun = [\"false\"]\n",
+    )
+    .unwrap();
+    create_worktree(tmp.path(), "hook-warns-once");
+
+    let removed = trench_cmd(tmp.path())
+        .args(["remove", "hook-warns-once", "--yes", "--force-worktree"])
+        .output()
+        .unwrap();
+
+    assert!(removed.status.success());
+    let stderr = String::from_utf8_lossy(&removed.stderr);
+    assert_eq!(
+        stderr.matches("warning: post_remove hook failed").count(),
+        1,
+        "{stderr}"
+    );
+}
+
+#[test]
+fn remove_refuses_locked_worktree_without_touching_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "locked-stays-intact");
+    let path = worktree_path(tmp.path(), "locked-stays-intact");
+    std::fs::write(path.join("ignored-work"), "keep").unwrap();
+    git(tmp.path(), &["worktree", "lock", path.to_str().unwrap()]);
+
+    for arguments in [
+        vec!["remove", "locked-stays-intact", "--yes", "--force-worktree"],
+        vec![
+            "remove",
+            "locked-stays-intact",
+            "--dry-run",
+            "--force-worktree",
+        ],
+    ] {
+        let refused = trench_cmd(tmp.path()).args(&arguments).output().unwrap();
+        assert_eq!(refused.status.code(), Some(1), "{arguments:?}");
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(stderr.contains("locked"), "{stderr}");
+        assert!(stderr.contains("git worktree unlock"), "{stderr}");
+        assert!(path.join("ignored-work").exists());
+        assert!(git_lists_worktree(tmp.path(), &path));
+    }
+
+    git(tmp.path(), &["worktree", "unlock", path.to_str().unwrap()]);
+    let removed = trench_cmd(tmp.path())
+        .args(["remove", "locked-stays-intact", "--yes", "--force-worktree"])
+        .output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn remove_refuses_locked_worktree_whose_directory_is_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "locked-and-missing");
+    let path = worktree_path(tmp.path(), "locked-and-missing");
+    git(tmp.path(), &["worktree", "lock", path.to_str().unwrap()]);
+    std::fs::remove_dir_all(&path).unwrap();
+
+    let refused = trench_cmd(tmp.path())
+        .args(["remove", "locked-and-missing", "--yes"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("locked"), "{stderr}");
+    assert!(git_lists_worktree(tmp.path(), &path));
+
+    git(tmp.path(), &["worktree", "unlock", path.to_str().unwrap()]);
+    let removed = trench_cmd(tmp.path())
+        .args(["remove", "locked-and-missing", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!git_lists_worktree(tmp.path(), &path));
+}
+
+#[test]
+fn delete_branch_is_refused_while_another_worktree_has_the_branch_checked_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "shared-branch");
+    let path = worktree_path(tmp.path(), "shared-branch");
+    let other = tempfile::tempdir().unwrap();
+    let other_path = other.path().join("second-checkout");
+    git(
+        tmp.path(),
+        &[
+            "worktree",
+            "add",
+            "--force",
+            other_path.to_str().unwrap(),
+            "shared-branch",
+        ],
+    );
+    let target = path.to_str().unwrap();
+
+    for arguments in [
+        vec!["remove", target, "--dry-run", "--delete-branch"],
+        vec!["remove", target, "--yes", "--delete-branch"],
+    ] {
+        let refused = trench_cmd(tmp.path()).args(&arguments).output().unwrap();
+        assert_eq!(refused.status.code(), Some(1), "{arguments:?}");
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(stderr.contains("also checked out"), "{stderr}");
+        assert!(stderr.contains("second-checkout"), "{stderr}");
+        assert!(path.exists());
+    }
+
+    let removed = trench_cmd(tmp.path())
+        .args(["remove", target, "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!path.exists());
+    assert!(branch_exists(tmp.path(), "shared-branch"));
+}
+
+#[test]
+fn remove_keeps_the_repository_readable_when_relative_worktree_paths_are_enabled() {
+    let version = Command::new("git").arg("--version").output().unwrap();
+    let version = String::from_utf8_lossy(&version.stdout);
+    let mut numbers = version
+        .split_whitespace()
+        .nth(2)
+        .unwrap_or_default()
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0));
+    if (major, minor) < (2, 48) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    create_worktree(tmp.path(), "relative-paths-config");
+    let path = worktree_path(tmp.path(), "relative-paths-config");
+    git(tmp.path(), &["config", "worktree.useRelativePaths", "true"]);
+
+    let removed = trench_cmd(tmp.path())
+        .args(["remove", "relative-paths-config", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!path.exists());
+    let extension = Command::new("git")
+        .args(["config", "--get", "extensions.relativeworktrees"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(!extension.status.success());
+    let list = trench_cmd(tmp.path()).arg("list").output().unwrap();
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
 }
 
 #[test]

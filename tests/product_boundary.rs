@@ -92,15 +92,15 @@ fn help_exposes_exactly_the_supported_commands() {
         commands,
         [
             "create",
-            "remove",
+            "list",
             "switch",
             "open",
-            "list",
             "sync",
-            "upgrade",
+            "remove",
             "init",
             "shell-init",
             "completions",
+            "upgrade",
         ]
     );
 }

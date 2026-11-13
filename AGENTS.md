@@ -25,7 +25,7 @@
 - `Config:` global trench config plus project `.trench.toml`; resolver in `src/config/mod.rs`
 - `Paths:` configured worktree root and branch sanitization are resolved without creating product state
 - `Core flow:` `src/main.rs` parses flags, launches TUI or dispatches commands, maps typed failures to stable exit codes
-- `Layout:` `src/cli/commands/*` command handlers; `src/git/*` low-level git/worktree ops; `src/worktree_catalog.rs` live identity and status discovery; `src/hooks/*` lifecycle hooks + streaming; `src/output/*` table/json/porcelain; `src/tui/*` cockpit flows/theme/watcher; `tests/` process-level integration tests
+- `Layout:` `src/cli/commands/*` command handlers; `src/git/*` low-level git/worktree ops; `src/worktree_catalog.rs` live identity and status discovery; `src/hooks/*` lifecycle hooks + streaming; `src/output/*` json/porcelain and human text helpers; `src/cli/report.rs` human wording for results and failures; `src/tui/*` flows (state), `src/tui/view/*` rendering, theme, watcher; `tests/` process-level integration tests
 
 ## Design Principles
 
@@ -38,7 +38,8 @@
 
 ## Sharp Edges
 
-- Bare `trench` on non-TTY errors instead of falling back; automation must call explicit subcommands
+- Bare `trench` on non-TTY or `TERM=dumb` errors instead of falling back; automation must call explicit subcommands
+- Human-readable output is not API and lives in `src/cli/report.rs` and `src/tui/view/*`; error enum `Display` strings flow into JSON `message` fields, so reword in the presentation layer, not in the enum
 - Hook order is `copy -> run -> shell`; `pre_*` and `post_create` failures abort, `post_sync` reports after success, `post_remove` warns only
 - Structured and preview flags are command-local: create/remove/sync support `--json` and `--dry-run`; list supports `--json` and `--porcelain`
 - Branch sanitization folds `/`, space, `@`, `..` into `-`

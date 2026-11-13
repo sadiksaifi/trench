@@ -50,6 +50,8 @@ pub struct SyncDialog {
     strategy: SyncStrategy,
     mode: SyncMode,
     validation_error: Option<String>,
+    /// What Enter would start, as the last frame drawn showed it.
+    drawn: Option<Option<SyncSubmission>>,
 }
 
 impl SyncDialog {
@@ -66,6 +68,7 @@ impl SyncDialog {
             strategy: SyncStrategy::Rebase,
             mode: SyncMode::Form,
             validation_error: None,
+            drawn: None,
         }
     }
 
@@ -116,10 +119,6 @@ impl SyncDialog {
         self.base_picker.selection()
     }
 
-    pub fn select_base_candidate(&mut self, index: usize) {
-        self.base_picker.select(index);
-    }
-
     pub fn set_origin_refresh(&mut self, refresh: crate::tui::ref_picker::OriginRefresh) {
         self.base_picker.set_origin_refresh(refresh);
     }
@@ -144,6 +143,16 @@ impl SyncDialog {
         self.validation_error = error;
     }
 
+    /// Record that the current form is on screen.
+    pub fn note_drawn(&mut self) {
+        self.drawn = Some(self.submission());
+    }
+
+    /// Whether the form on screen is still what Enter would start.
+    pub fn submission_as_drawn(&self) -> bool {
+        self.drawn.as_ref() == Some(&self.submission())
+    }
+
     pub fn submission(&self) -> Option<SyncSubmission> {
         Some(SyncSubmission {
             target: self.target.clone(),
@@ -164,7 +173,11 @@ impl SyncDialog {
             SyncKey::Tab => {
                 self.base_picker.open();
                 self.mode = SyncMode::BasePicker;
-                Some(SyncEffect::RefreshOrigin)
+                // Without `origin` there is nothing to fetch, and a spinner
+                // would wait for a fetch that never starts.
+                self.base_picker
+                    .has_origin()
+                    .then_some(SyncEffect::RefreshOrigin)
             }
             SyncKey::Left => {
                 self.strategy = SyncStrategy::Rebase;
@@ -215,7 +228,8 @@ impl SyncDialog {
                 self.base_picker
                     .handle_key(RefPickerKey::Edit(LineEdit::NextCharacter));
             }
-            SyncKey::Tab => {}
+            // Tab is "next field": from the base it goes back to the form.
+            SyncKey::Tab => self.mode = SyncMode::Form,
         }
         None
     }
@@ -224,7 +238,7 @@ impl SyncDialog {
 pub fn unavailable_reason(identity: &WorktreeIdentity) -> Option<&'static str> {
     identity
         .detached
-        .then_some("Detached worktrees cannot be synced")
+        .then_some("A detached worktree has no branch to sync.")
 }
 
 #[cfg(test)]
@@ -247,6 +261,7 @@ mod tests {
             is_main,
             is_current: false,
             detached: branch.is_none(),
+            missing: false,
         }
     }
 
@@ -276,6 +291,22 @@ mod tests {
                 strategy: SyncStrategy::Merge,
             })
         );
+    }
+
+    #[test]
+    fn a_repository_without_origin_opens_the_picker_without_fetching() {
+        let target = identity(Some("feature/auth"), false);
+        let local_only = RefSnapshot::from_parts(
+            ["main", "release"],
+            [] as [&str; 0],
+            None,
+            Some("main"),
+            false,
+        );
+        let mut dialog = SyncDialog::new(&target, local_only, None);
+
+        assert_eq!(dialog.handle_key(SyncKey::Tab), None);
+        assert_eq!(dialog.mode(), SyncMode::BasePicker);
     }
 
     #[test]

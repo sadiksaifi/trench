@@ -1,6 +1,9 @@
 use crate::{
     ref_catalog::{RefCandidate, RefSnapshot},
-    tui::line_input::{LineEdit, LineInput},
+    tui::{
+        line_input::{LineEdit, LineInput},
+        search,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,33 +40,51 @@ pub enum OriginRefresh {
 impl RefPicker {
     pub fn new(refs: RefSnapshot, configured_base: Option<&str>) -> Self {
         let selected = refs.default_base(configured_base).ok();
-        let selection = selected
-            .as_deref()
-            .and_then(|selected| {
-                picker_candidates(&refs, Some(selected))
-                    .iter()
-                    .position(|candidate| candidate.name == selected)
-            })
-            .unwrap_or(0);
-        Self {
+        let mut picker = Self {
             refs,
             configured_base: configured_base.map(ToOwned::to_owned),
             selected,
             query: LineInput::default(),
-            selection,
+            selection: 0,
             origin_refresh: OriginRefresh::Idle,
-        }
+        };
+        // Highlight the base in use, wherever the list places it.
+        picker.open();
+        picker
     }
 
     pub fn selected(&self) -> Option<&str> {
         self.selected.as_deref()
     }
 
+    /// The refs that match the typed filter, best match first.
+    ///
+    /// With an empty filter the base in use comes first, followed by the
+    /// catalog order: the list opens on the current choice instead of
+    /// leaving it at the bottom. The sort is stable, so equal matches keep
+    /// that order too.
     pub fn candidates(&self) -> Vec<RefCandidate> {
-        picker_candidates(&self.refs, self.selected.as_deref())
+        let mut ranked = picker_candidates(&self.refs, self.selected.as_deref())
             .into_iter()
-            .filter(|candidate| fuzzy_matches(&candidate.name, self.query.value()))
-            .collect()
+            .filter_map(|candidate| {
+                let score = search::fuzzy_score(&candidate.name, self.query.value())?;
+                let in_use = self.query.value().is_empty()
+                    && self.selected.as_deref() == Some(candidate.name.as_str());
+                Some(((in_use, score), candidate))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+        ranked.into_iter().map(|(_, candidate)| candidate).collect()
+    }
+
+    /// Whether the repository has an `origin` remote to fetch from.
+    pub fn has_origin(&self) -> bool {
+        self.refs.has_origin
+    }
+
+    /// Whether the repository has any branch to pick at all.
+    pub fn has_refs(&self) -> bool {
+        !self.refs.candidates().is_empty()
     }
 
     pub fn open(&mut self) {
@@ -90,17 +111,6 @@ impl RefPicker {
 
     pub fn selection(&self) -> usize {
         self.selection
-    }
-
-    pub fn select(&mut self, index: usize) {
-        self.selection = index.min(self.candidates().len().saturating_sub(1));
-    }
-
-    pub fn apply_match(&mut self) {
-        if let Some(candidate) = self.candidates().get(self.selection) {
-            self.query = LineInput::from(candidate.name.as_str());
-            self.selection = 0;
-        }
     }
 
     pub fn set_origin_refresh(&mut self, refresh: OriginRefresh) {
@@ -197,23 +207,6 @@ fn picker_candidates(refs: &RefSnapshot, preferred: Option<&str>) -> Vec<RefCand
     candidates
 }
 
-fn fuzzy_matches(candidate: &str, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
-    }
-    let mut query = query.chars().flat_map(char::to_lowercase);
-    let mut next = query.next();
-    for candidate in candidate.chars().flat_map(char::to_lowercase) {
-        if next == Some(candidate) {
-            next = query.next();
-            if next.is_none() {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,14 +227,14 @@ mod tests {
         let mut picker = RefPicker::new(refs(), Some("release"));
 
         assert_eq!(picker.selected(), Some("release"));
-        assert_eq!(picker.selection(), 1);
+        assert_eq!(picker.selection(), 0, "the base in use is listed first");
         assert_eq!(
             picker
                 .candidates()
                 .iter()
                 .map(|candidate| candidate.name.as_str())
                 .collect::<Vec<_>>(),
-            ["main", "release", "origin/topic/two"]
+            ["release", "main", "origin/topic/two"]
         );
         assert_eq!(
             picker.handle_key(RefPickerKey::Enter),

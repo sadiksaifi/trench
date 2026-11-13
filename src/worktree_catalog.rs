@@ -14,6 +14,10 @@ pub struct WorktreeIdentity {
     pub is_current: bool,
     pub detached: bool,
     pub(crate) head: Option<String>,
+    /// Git reported a lock on this worktree.
+    pub(crate) locked: bool,
+    /// The worktree directory no longer exists on disk.
+    pub(crate) missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -37,6 +41,8 @@ pub enum CatalogError {
         selector: String,
         matches: Vec<PathBuf>,
     },
+    #[error("the directory of worktree {worktree} is missing: {path}", path = path.display())]
+    DirectoryMissing { worktree: String, path: PathBuf },
 }
 
 pub struct WorktreeCatalog {
@@ -74,6 +80,8 @@ impl WorktreeCatalog {
                     is_current: entry.is_current,
                     detached: entry.detached,
                     head: entry.head,
+                    locked: entry.locked,
+                    missing: entry.missing,
                 }
             })
             .collect();
@@ -106,12 +114,25 @@ impl WorktreeCatalog {
             .collect()
     }
 
+    /// Resolve a worktree that a shell or editor is about to enter.
+    ///
+    /// Git keeps listing a worktree after its directory is deleted by hand.
+    /// Handing that path to `cd` or an editor fails later with a worse error.
+    pub fn resolve_present(&self, selector: &str) -> Result<&WorktreeIdentity, CatalogError> {
+        let identity = self.resolve(selector)?;
+        if identity.missing {
+            return Err(CatalogError::DirectoryMissing {
+                worktree: identity.worktree.clone(),
+                path: identity.path.clone(),
+            });
+        }
+        Ok(identity)
+    }
+
     pub fn resolve(&self, selector: &str) -> Result<&WorktreeIdentity, CatalogError> {
-        let selector_path = Path::new(selector).is_absolute().then(|| {
-            Path::new(selector)
-                .canonicalize()
-                .unwrap_or_else(|_| selector.into())
-        });
+        let selector_path = Path::new(selector)
+            .is_absolute()
+            .then(|| git::worktrees::canonicalize_lenient(Path::new(selector)));
         let mut matches = BTreeMap::new();
         for identity in &self.identities {
             if identity.worktree == selector
