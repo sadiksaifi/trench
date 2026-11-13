@@ -26,6 +26,7 @@ pub enum Action {
     SelectPrevious,
     Quit,
     Help,
+    ToggleInfo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +97,18 @@ const COCKPIT_BINDINGS: &[Binding] = &[
         label: "/",
         hint: "search",
         help: "search",
-        rank: Some(7),
+        rank: Some(8),
         action: Action::Search,
+    },
+    Binding {
+        keys: &[Key::Char('i')],
+        label: "i",
+        hint: "info",
+        help: "show or hide the info panel",
+        // Kept before search: below 100 columns the panel is hidden, and
+        // this hint is how to find it.
+        rank: Some(7),
+        action: Action::ToggleInfo,
     },
     Binding {
         keys: &[Key::Char('r')],
@@ -228,11 +239,11 @@ mod tests {
             (Key::Char('k'), Action::SelectPrevious),
             (Key::Char('q'), Action::Quit),
             (Key::Char('?'), Action::Help),
+            (Key::Char('i'), Action::ToggleInfo),
         ] {
             assert_eq!(action_for(Context::Cockpit, key), Some(action), "{key:?}");
         }
         assert_eq!(action_for(Context::Cockpit, Key::Char('n')), None);
-        assert_eq!(action_for(Context::Cockpit, Key::Char('i')), None);
     }
 
     #[test]

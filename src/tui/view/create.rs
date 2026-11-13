@@ -359,7 +359,7 @@ mod tests {
         tui::{
             app::{AppState, WorktreeId},
             create_flow::{CreateDialog, CreateKey, ExistingWorktree},
-            view::testing::{draw, lines, screen, state},
+            view::testing::{draw, screen, state},
         },
     };
 
@@ -526,7 +526,7 @@ mod tests {
     fn an_invalid_name_shows_the_reason_and_dims_enter() {
         let mut state = open("fix login");
         let buffer = draw(&mut state, 60, 18, "terminal");
-        let screen = lines(&buffer);
+        let screen = screen(&mut state, 60, 18);
 
         assert_eq!(
             screen[5],

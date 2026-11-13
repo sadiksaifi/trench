@@ -95,6 +95,9 @@ pub struct AppState {
     pub search: Option<QueryBuffer>,
     pub viewport: Viewport,
     pub help_open: bool,
+    /// Set once `i` is pressed. Until then the info panel shows on wide
+    /// terminals only.
+    pub info_override: Option<bool>,
     /// The repository name shown in the header.
     pub repository: String,
     /// The lifecycle hooks configured for each operation, by config key.
@@ -152,6 +155,12 @@ pub struct Viewport {
 impl Viewport {
     pub const MIN_WIDTH: u16 = 40;
     pub const MIN_HEIGHT: u16 = 10;
+    /// From this width the info panel fits beside the list.
+    pub const WIDE_WIDTH: u16 = 100;
+
+    pub fn is_wide(self) -> bool {
+        self.width >= Self::WIDE_WIDTH
+    }
 
     pub fn is_tiny(self) -> bool {
         self.width < Self::MIN_WIDTH || self.height < Self::MIN_HEIGHT
@@ -172,6 +181,7 @@ impl AppState {
                 height: Viewport::MIN_HEIGHT,
             },
             help_open: false,
+            info_override: None,
             repository: String::new(),
             hooks: HookNames::default(),
             create_dialog: None,
@@ -181,6 +191,13 @@ impl AppState {
             notification: None,
             pending_selection: None,
         }
+    }
+
+    /// Whether the info panel is on screen: beside the list on a wide
+    /// terminal, in its place on a narrow one.
+    pub fn info_visible(&self) -> bool {
+        self.info_override
+            .unwrap_or_else(|| self.viewport.is_wide())
     }
 
     pub fn context(&self) -> Context {
@@ -389,6 +406,10 @@ fn reduce_action(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::Help => {
             state.help_open = true;
+            Vec::new()
+        }
+        Action::ToggleInfo => {
+            state.info_override = Some(!state.info_visible());
             Vec::new()
         }
     }

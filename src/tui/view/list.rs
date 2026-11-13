@@ -1,10 +1,11 @@
-//! The worktree list: header, rows, one status line, one hint bar.
+//! The main screen: the worktree list and an info panel in bordered panes,
+//! a status line while there is a message, and one hint bar.
 
 use ratatui::{
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
 
@@ -12,7 +13,7 @@ use crate::{
     output::text,
     paths,
     tui::{
-        app::{unavailable_reason, AppState, NoticeKind, WorktreeIdentity},
+        app::{unavailable_reason, AppState, NoticeKind, Viewport, WorktreeIdentity},
         keymap::{self, Action, Context},
         theme::Theme,
         view::widgets::{self, Hint, Tone, MARGIN},
@@ -20,32 +21,126 @@ use crate::{
 };
 
 const MISSING_TAG: &str = "  missing";
+/// The list's share of a wide terminal, in percent. The info panel takes the
+/// rest.
+const LIST_SHARE: u16 = 62;
+const SEARCH_HEIGHT: u16 = 3;
+/// The widest label in the info panel: `Branch`, `Status`.
+const INFO_LABEL_WIDTH: usize = 6;
 /// Selection cursor, a space, the current-worktree marker, a space.
 const GUTTER: usize = 4;
 const COLUMN_GAP: usize = 2;
 
 pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
-    let row = |y: u16| Rect::new(area.x, area.y + y, area.width, 1);
     let last = area.height - 1;
-    // One row is always kept for the status line. A message too long for it
-    // takes a second row from the list instead of being cut.
+    // A message takes rows above the hint bar only while it is shown. One
+    // too long for a row wraps onto a second instead of being cut.
     let status = status(state, area.width, theme);
-    let status_rows = (status.len() as u16).max(1);
-    let body = Rect::new(
+    let status_rows = status.len() as u16;
+    let mut body = Rect::new(
         area.x,
-        area.y + 2,
+        area.y,
         area.width,
-        area.height.saturating_sub(3 + status_rows),
+        area.height.saturating_sub(1 + status_rows),
     );
-
     let visible = state.visible_identities();
-    let home = paths::home_dir();
-    let columns = Columns::new(&visible, home.as_deref(), area.width);
 
-    frame.render_widget(
-        Paragraph::new(header(state, visible.len(), area.width, theme)),
-        row(0),
+    if let Some(query) = state.search.as_ref() {
+        let search = Rect::new(body.x, body.y, body.width, SEARCH_HEIGHT.min(body.height));
+        render_search(
+            query,
+            visible.len(),
+            state.identities.len(),
+            frame,
+            search,
+            theme,
+        );
+        body = Rect::new(
+            body.x,
+            body.y + search.height,
+            body.width,
+            body.height.saturating_sub(search.height),
+        );
+    }
+    match (state.info_visible(), area.width >= Viewport::WIDE_WIDTH) {
+        (true, true) => {
+            let list_width = body.width * LIST_SHARE / 100;
+            let list = Rect::new(body.x, body.y, list_width, body.height);
+            let info = Rect::new(
+                body.x + list_width,
+                body.y,
+                body.width - list_width,
+                body.height,
+            );
+            render_list(state, &visible, frame, list, theme);
+            render_info(state.selected_visible(), frame, info, theme);
+        }
+        (true, false) => render_info(state.selected_visible(), frame, body, theme),
+        (false, _) => render_list(state, &visible, frame, body, theme),
+    }
+
+    if !status.is_empty() {
+        frame.render_widget(
+            Paragraph::new(status),
+            Rect::new(area.x, last - status_rows, area.width, status_rows),
+        );
+    }
+    widgets::hint_bar(
+        frame,
+        Rect::new(area.x, area.y + last, area.width, 1),
+        &hints(state, visible.is_empty()),
+        theme,
     );
+}
+
+/// A bordered pane with `title` centered in its top edge.
+fn pane<'a>(title: Line<'a>, theme: &Theme) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(theme.on_surface(theme.border))
+        .title(title.alignment(Alignment::Center))
+}
+
+fn render_list(
+    state: &AppState,
+    visible: &[&WorktreeIdentity],
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+) {
+    let total = state.identities.len();
+    let room = usize::from(area.width).saturating_sub(4);
+    let mut title = vec![Span::styled(
+        format!(
+            " {} ",
+            text::truncate_end(&state.repository, room.saturating_sub(16))
+        ),
+        theme.accent,
+    )];
+    title.push(Span::styled(
+        if total == 1 {
+            "· 1 worktree ".to_string()
+        } else {
+            format!("· {total} worktrees ")
+        },
+        theme.muted,
+    ));
+    if state.refresh.updating_refs {
+        title.push(Span::styled(
+            format!("· fetching origin {} ", spinner(state.refresh.spinner_tick)),
+            theme.muted,
+        ));
+    }
+    let block = pane(Line::from(title), theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+
+    let home = paths::home_dir();
+    let columns = Columns::new(visible, home.as_deref(), inner.width);
     frame.render_widget(
         Paragraph::new(Line::styled(
             format!(
@@ -56,19 +151,118 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
             ),
             theme.muted,
         )),
-        row(1),
+        Rect::new(inner.x, inner.y, inner.width, 1),
     );
+    let rows = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
     frame.render_widget(
-        Paragraph::new(body_lines(state, &visible, &columns, body, theme)),
-        body,
+        Paragraph::new(body_lines(state, visible, &columns, rows, theme)),
+        rows,
     );
-    if !status.is_empty() {
+}
+
+/// The search field, in its own pane above the list.
+fn render_search(
+    query: &crate::tui::search::QueryBuffer,
+    matches: usize,
+    total: usize,
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+) {
+    let block = pane(Line::styled(" Search ", theme.accent), theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let count = format!("{matches} of {total}");
+    let room = usize::from(inner.width).saturating_sub(text::width(&count) + 6);
+    let mut spans = vec![Span::styled(" / ", theme.accent)];
+    spans.extend(widgets::input(
+        query.input(),
+        "type to filter worktrees",
+        room,
+        true,
+        theme,
+    ));
+    let used: usize = spans.iter().map(|span| text::width(&span.content)).sum();
+    let gap = usize::from(inner.width)
+        .saturating_sub(used + text::width(&count) + usize::from(MARGIN))
+        .max(1);
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::styled(count, theme.muted));
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+/// What is known about the selected worktree, with nothing cut: the path
+/// wraps.
+fn render_info(identity: Option<&WorktreeIdentity>, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let room = usize::from(area.width).saturating_sub(4);
+    let title = match identity {
+        Some(identity) => {
+            let suffix = if identity.is_current {
+                " · current"
+            } else {
+                ""
+            };
+            let name =
+                text::truncate_middle(&identity.worktree, room.saturating_sub(text::width(suffix)));
+            Line::from(vec![
+                Span::styled(format!(" {name}"), theme.accent),
+                Span::styled(format!("{suffix} "), theme.muted),
+            ])
+        }
+        None => Line::styled(" Info ", theme.accent),
+    };
+    let block = pane(title, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(identity) = identity else {
         frame.render_widget(
-            Paragraph::new(status),
-            Rect::new(area.x, last - status_rows, area.width, status_rows),
+            Paragraph::new(Line::styled(" No worktree selected.", theme.muted)),
+            inner,
         );
+        return;
+    };
+
+    let pad = " ".repeat(usize::from(MARGIN));
+    let value_room =
+        usize::from(inner.width).saturating_sub(usize::from(MARGIN) * 2 + INFO_LABEL_WIDTH + 2);
+    let field = |label: &str, value: String, style: Style| {
+        let mut line = widgets::field(
+            label,
+            INFO_LABEL_WIDTH,
+            vec![Span::styled(value, style)],
+            theme,
+        );
+        line.spans.insert(0, Span::raw(pad.clone()));
+        line
+    };
+    let mut lines = vec![Line::default()];
+    lines.push(match identity.branch.as_deref() {
+        Some(branch) => field("Branch", branch.to_string(), theme.text),
+        None => field("Branch", "detached".to_string(), theme.muted),
+    });
+    let path = identity.path.to_string_lossy();
+    for (index, part) in widgets::wrap(&path, value_room).into_iter().enumerate() {
+        lines.push(if index == 0 {
+            field("Path", part, theme.text)
+        } else {
+            Line::styled(
+                format!("{pad}{}{part}", " ".repeat(INFO_LABEL_WIDTH + 2)),
+                theme.text,
+            )
+        });
     }
-    widgets::hint_bar(frame, row(last), &hints(state, visible.is_empty()), theme);
+    lines.push(match identity.head.as_deref() {
+        Some(head) => field("HEAD", head.chars().take(7).collect(), theme.text),
+        None => field("HEAD", "none".to_string(), theme.muted),
+    });
+    if identity.missing {
+        lines.push(field(
+            "Status",
+            "directory missing".to_string(),
+            theme.warning,
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Column widths for the rows on screen.
@@ -100,57 +294,6 @@ impl Columns {
                 .collect(),
         }
     }
-}
-
-fn header(state: &AppState, visible: usize, width: u16, theme: &Theme) -> Line<'static> {
-    let total = state.identities.len();
-    let (left, left_width): (Vec<Span<'static>>, usize) = match state.search.as_ref() {
-        Some(query) => {
-            let room = usize::from(width).saturating_sub(20);
-            let mut spans = vec![Span::styled(" / ", theme.accent)];
-            spans.extend(widgets::input(
-                query.input(),
-                "type to filter worktrees",
-                room,
-                true,
-                theme,
-            ));
-            let used = spans.iter().map(|span| text::width(&span.content)).sum();
-            (spans, used)
-        }
-        None => {
-            let repository =
-                text::truncate_end(&state.repository, usize::from(width).saturating_sub(24));
-            let used = 1 + "trench".len() + 2 + text::width(&repository);
-            (
-                vec![
-                    Span::styled(" trench", theme.accent),
-                    Span::styled(format!("  {repository}"), theme.text),
-                ],
-                used,
-            )
-        }
-    };
-    let count = match state.search {
-        Some(_) => format!("{visible} of {total}"),
-        None if total == 1 => "1 worktree".to_string(),
-        None => format!("{total} worktrees"),
-    };
-    let right = if state.refresh.updating_refs {
-        format!(
-            "fetching origin {}  {count}",
-            spinner(state.refresh.spinner_tick)
-        )
-    } else {
-        count
-    };
-    let gap = usize::from(width)
-        .saturating_sub(left_width + text::width(&right) + usize::from(MARGIN))
-        .max(1);
-    let mut spans = left;
-    spans.push(Span::raw(" ".repeat(gap)));
-    spans.push(Span::styled(right, theme.muted));
-    Line::from(spans)
 }
 
 fn body_lines(
@@ -311,8 +454,94 @@ mod tests {
         view::testing::{draw, identity, screen, state},
     };
 
+    /// The rows inside the left pane, without its border.
+    fn inner(screen: &[String]) -> Vec<String> {
+        screen
+            .iter()
+            .map(|row| {
+                let row = row.strip_prefix('│').unwrap_or(row);
+                row.split('│').next().unwrap_or("").trim_end().to_string()
+            })
+            .collect()
+    }
+
     const LONG: &str = "feature/JIRA-12345-implement-the-thing-nobody-asked-for";
     const LONGER: &str = "feature/JIRA-12345-implement-the-thing-nobody-asked-for-v2";
+
+    #[test]
+    fn a_wide_terminal_shows_the_list_and_an_info_panel_in_bordered_panes() {
+        let mut state = state(&[("feature/auth", "/wt/acme/feature-auth")]);
+        let screen = screen(&mut state, 100, 12);
+
+        assert!(screen[0].starts_with("┌"), "{screen:#?}");
+        assert!(screen[0].contains(" acme · 2 worktrees "), "{screen:#?}");
+        assert!(screen[0].contains(" main · current "), "{screen:#?}");
+        assert!(screen[10].starts_with("└") && screen[10].ends_with("┘"));
+        let info = |row: usize| {
+            screen[row]
+                .split('│')
+                .nth(3)
+                .unwrap_or("")
+                .trim_end()
+                .to_string()
+        };
+        assert_eq!(info(2), " Branch  main");
+        assert_eq!(info(3), " Path    /code/acme");
+        assert_eq!(info(4), " HEAD    1234567");
+        assert!(screen[11].contains("i info"), "{}", screen[11]);
+    }
+
+    #[test]
+    fn the_info_panel_follows_the_selection_and_says_when_the_directory_is_missing() {
+        let mut state = state(&[("stale/gone", "/wt/acme/stale-gone")]);
+        state.identities[1].missing = true;
+        let _ = reduce(&mut state, Event::Input(Key::Down));
+        let screen = screen(&mut state, 100, 12).join("\n");
+
+        assert!(screen.contains(" stale-gone "), "{screen}");
+        assert!(!screen.contains("current"), "{screen}");
+        assert!(screen.contains("Branch  stale/gone"), "{screen}");
+        assert!(screen.contains("Status  directory missing"), "{screen}");
+    }
+
+    #[test]
+    fn a_long_path_wraps_in_the_info_panel_instead_of_being_cut() {
+        let path = "/wt/acme/feature-JIRA-12345-implement-the-thing-nobody-asked-for";
+        let mut state = state(&[(LONG, path)]);
+        let _ = reduce(&mut state, Event::Input(Key::Down));
+        let screen = screen(&mut state, 100, 14);
+        let panel = screen
+            .iter()
+            .map(|row| row.split('│').nth(3).unwrap_or("").trim().to_string())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(
+            panel.replace(' ', "").contains(&format!("Path{path}")),
+            "the whole path is in the panel: {screen:#?}"
+        );
+    }
+
+    #[test]
+    fn i_toggles_the_info_panel_and_a_narrow_terminal_starts_without_it() {
+        let mut state = state(&[("feature/auth", "/wt/acme/feature-auth")]);
+        let narrow = screen(&mut state, 80, 12);
+        assert!(!narrow.join("\n").contains("HEAD"), "{narrow:#?}");
+        assert!(narrow[1].contains("BRANCH"));
+
+        // On a narrow terminal the panel takes the list's place.
+        let _ = reduce(&mut state, Event::Input(Key::Char('i')));
+        let shown = screen(&mut state, 80, 12).join("\n");
+        assert!(shown.contains("HEAD    1234567"), "{shown}");
+        assert!(!shown.contains("BRANCH"), "{shown}");
+
+        let _ = reduce(&mut state, Event::Input(Key::Char('i')));
+        assert!(!screen(&mut state, 80, 12).join("\n").contains("HEAD"));
+
+        // The choice holds when the terminal grows.
+        let wide = screen(&mut state, 120, 12).join("\n");
+        assert!(!wide.contains("HEAD"), "{wide}");
+    }
 
     #[test]
     fn list_shows_branch_and_path_behind_a_fixed_gutter() {
@@ -323,10 +552,10 @@ mod tests {
         let _ = reduce(&mut state, Event::Input(Key::Down));
         let screen = screen(&mut state, 80, 12);
 
+        assert!(screen[0].contains(" acme · 3 worktrees "), "{}", screen[0]);
         assert_eq!(
-            screen[..5],
+            inner(&screen)[1..5],
             [
-                " trench  acme                                                       3 worktrees",
                 "     BRANCH        PATH",
                 "   * main          /code/acme",
                 " ›   feature/auth  /wt/acme/feature-auth",
@@ -335,7 +564,7 @@ mod tests {
         );
         assert_eq!(
             screen[11],
-            " Enter switch  o open  c create  s sync  d remove  / search  ? help  q quit"
+            " Enter switch  o open  c create  s sync  d remove  i info  ? help  q quit"
         );
     }
 
@@ -344,15 +573,17 @@ mod tests {
         let mut state = state(&[("feature/auth", "/wt/acme/feature-auth")]);
         let buffer = draw(&mut state, 60, 10, "terminal");
 
-        for x in 0..60 {
+        // The bar fills the pane between its borders.
+        for x in 1..59 {
             assert!(
                 buffer[(x, 2)].modifier.contains(Modifier::REVERSED),
                 "column {x}"
             );
             assert!(!buffer[(x, 3)].modifier.contains(Modifier::REVERSED));
         }
-        assert_eq!(buffer[(1, 2)].symbol(), "›");
-        assert_eq!(buffer[(3, 2)].symbol(), "*");
+        assert!(!buffer[(0, 2)].modifier.contains(Modifier::REVERSED));
+        assert_eq!(buffer[(2, 2)].symbol(), "›");
+        assert_eq!(buffer[(4, 2)].symbol(), "*");
     }
 
     #[test]
@@ -367,15 +598,15 @@ mod tests {
                 "/wt/acme/feature-JIRA-12345-implement-the-thing-nobody-asked-for-v2",
             ),
         ]);
-        let screen = screen(&mut state, 60, 12);
+        let screen = inner(&screen(&mut state, 60, 12));
 
         assert_eq!(
             screen[3],
-            "     feature/JIRA…y-asked-for  …-the-thing-nobody-asked-for"
+            "     feature/JIR…y-asked-for  …the-thing-nobody-asked-for"
         );
         assert_eq!(
             screen[4],
-            "     feature/JIRA…sked-for-v2  …e-thing-nobody-asked-for-v2"
+            "     feature/JIR…sked-for-v2  …-thing-nobody-asked-for-v2"
         );
     }
 
@@ -390,7 +621,7 @@ mod tests {
             detached: true,
             ..identity("spike", "/wt/acme/spike")
         });
-        let screen = screen(&mut state, 80, 12);
+        let screen = inner(&screen(&mut state, 80, 12));
 
         assert_eq!(
             screen[3],
@@ -404,13 +635,11 @@ mod tests {
         let mut state = state(&[]);
         let screen = screen(&mut state, 60, 12);
 
+        assert!(screen[0].contains(" acme · 1 worktree "), "{}", screen[0]);
+        let rows = inner(&screen);
+        assert_eq!(rows[2], " › * main    /code/acme");
         assert_eq!(
-            screen[0].trim_end(),
-            " trench  acme                                    1 worktree"
-        );
-        assert_eq!(screen[2], " › * main    /code/acme");
-        assert_eq!(
-            screen[4],
+            rows[4],
             "     No other worktrees yet. Press c to create one."
         );
     }
@@ -458,12 +687,15 @@ mod tests {
             let _ = reduce(&mut state, Event::Input(key));
         }
         let screen = screen(&mut state, 60, 10);
+        let rows = inner(&screen);
 
+        assert!(screen[0].contains(" Search "), "{}", screen[0]);
         assert_eq!(
-            screen[0],
-            " / fi▌                                               1 of 3"
+            rows[1],
+            " / fi▌                                             1 of 3"
         );
-        assert_eq!(screen[2], " ›   fix/typo  /wt/acme/fix-typo");
+        assert!(screen[3].contains(" acme · 3 worktrees "), "{}", screen[3]);
+        assert_eq!(rows[5], " ›   fix/typo  /wt/acme/fix-typo");
         assert_eq!(screen[9], " Enter switch  ↑/↓ move  Esc close search");
     }
 
@@ -474,10 +706,10 @@ mod tests {
             let _ = reduce(&mut state, Event::Input(key));
         }
         let buffer = draw(&mut state, 60, 10, "terminal");
-        let screen = crate::tui::view::testing::lines(&buffer);
+        let screen = inner(&crate::tui::view::testing::lines(&buffer));
 
-        assert_eq!(screen[1], "     BRANCH  PATH");
-        assert_eq!(screen[2], "     No worktree matches \"zz\".");
+        assert_eq!(screen[4], "     BRANCH  PATH");
+        assert_eq!(screen[5], "     No worktree matches \"zz\".");
         assert!(buffer[(1, 9)].modifier.contains(Modifier::DIM));
     }
 
@@ -531,7 +763,7 @@ mod tests {
                 " Enter switch  c create  s sync  d remove  ? help  q quit",
             ]
         );
-        assert_eq!(screen[4], "     fix/typo      /wt/acme/fix-typo");
+        assert_eq!(inner(&screen)[4], "     fix/typo      /wt/acme/fix-typo");
     }
 
     #[test]
@@ -549,13 +781,13 @@ mod tests {
             .map(|(branch, path)| (branch.as_str(), path.as_str()))
             .collect::<Vec<_>>();
         let mut state = state(&borrowed);
-        assert_eq!(screen(&mut state, 60, 10)[7], "     … 8 more");
+        assert_eq!(inner(&screen(&mut state, 60, 10))[7], "     … 8 more");
 
         for _ in 0..12 {
             let _ = reduce(&mut state, Event::Input(Key::Down));
         }
         let screen = screen(&mut state, 60, 10);
-        assert_eq!(screen[7], " ›   feature/11  /wt/acme/feature-11");
+        assert_eq!(inner(&screen)[7], " ›   feature/11  /wt/acme/feature-11");
         assert!(screen.iter().all(|row| !row.contains("more")));
     }
 
@@ -563,10 +795,11 @@ mod tests {
     fn fetching_origin_is_shown_beside_the_count() {
         let mut state = state(&[("feature/auth", "/wt/acme/feature-auth")]);
         state.refresh.updating_refs = true;
-        let header = &screen(&mut state, 80, 10)[0];
+        let title = &screen(&mut state, 80, 10)[0];
 
-        assert!(header.starts_with(" trench  acme"), "{header}");
-        assert!(header.contains("fetching origin"), "{header}");
-        assert!(header.ends_with("2 worktrees"), "{header}");
+        assert!(
+            title.contains(" acme · 2 worktrees · fetching origin "),
+            "{title}"
+        );
     }
 }

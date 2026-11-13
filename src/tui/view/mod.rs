@@ -115,33 +115,46 @@ pub(crate) mod testing {
 
     /// The screen as text, one string per row, without trailing spaces.
     ///
-    /// On rows crossed by a dialog, the dimmed list beside the dialog is
+    /// On rows crossed by a dialog, the dimmed screen beside the dialog is
     /// blanked, so a test of a dialog does not also pin the list behind it.
+    /// The dialog is found by its rounded corners; the list's panes have
+    /// square ones.
     pub fn screen(state: &mut AppState, width: u16, height: u16) -> Vec<String> {
-        lines(&draw(state, width, height, "terminal"))
+        let rows = lines(&draw(state, width, height, "terminal"))
             .into_iter()
-            .map(|row| {
-                let border = |character: char| "╭│╰╮╯".contains(character);
-                let characters = row.chars().collect::<Vec<_>>();
-                let (Some(first), Some(last)) = (
-                    characters.iter().position(|character| border(*character)),
-                    characters.iter().rposition(|character| border(*character)),
-                ) else {
-                    return row;
+            .map(|row| row.chars().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let corner = |wanted: char| {
+            rows.iter().enumerate().find_map(|(y, row)| {
+                row.iter()
+                    .position(|character| *character == wanted)
+                    .map(|x| (x, y))
+            })
+        };
+        let dialog = match (corner('╭'), corner('╮'), corner('╰')) {
+            (Some((left, top)), Some((right, _)), Some((_, bottom))) => {
+                Some((left, right, top, bottom))
+            }
+            _ => None,
+        };
+        rows.into_iter()
+            .enumerate()
+            .map(|(y, row)| {
+                let row = match dialog {
+                    Some((left, right, top, bottom)) if (top..=bottom).contains(&y) => row
+                        .iter()
+                        .enumerate()
+                        .map(|(x, character)| {
+                            if (left..=right).contains(&x) {
+                                *character
+                            } else {
+                                ' '
+                            }
+                        })
+                        .collect::<String>(),
+                    _ => row.into_iter().collect::<String>(),
                 };
-                characters
-                    .iter()
-                    .enumerate()
-                    .map(|(index, character)| {
-                        if (first..=last).contains(&index) {
-                            *character
-                        } else {
-                            ' '
-                        }
-                    })
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
+                row.trim_end().to_string()
             })
             .collect()
     }

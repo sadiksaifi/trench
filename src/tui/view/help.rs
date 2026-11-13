@@ -99,7 +99,7 @@ mod tests {
         let screen = screen(&mut state, 60, 16);
 
         assert_eq!(
-            screen[1..14],
+            screen[0..14],
             [
                 "  ╭ Keys ────────────────────────────────────────────────╮",
                 "  │ Enter  switch to the selected worktree               │",
@@ -108,6 +108,7 @@ mod tests {
                 "  │ s      sync it with its base branch                  │",
                 "  │ d      remove it                                     │",
                 "  │ /      search                                        │",
+                "  │ i      show or hide the info panel                   │",
                 "  │ r      refresh the list                              │",
                 "  │ ↓ j    move down                                     │",
                 "  │ ↑ k    move up                                       │",
@@ -148,12 +149,12 @@ mod tests {
             screen[..8],
             [
                 " ╭ Keys ──────────────────────────────╮",
-                " │ Enter  switch    r      refresh    │",
-                " │ o      open      ↓ j    next       │",
-                " │ c      create    ↑ k    previous   │",
-                " │ s      sync      ?      help       │",
-                " │ d      remove    q      quit       │",
-                " │ /      search                      │",
+                " │ Enter  switch    i      info       │",
+                " │ o      open      r      refresh    │",
+                " │ c      create    ↓ j    next       │",
+                " │ s      sync      ↑ k    previous   │",
+                " │ d      remove    ?      help       │",
+                " │ /      search    q      quit       │",
                 " ╰────────────────────────────────────╯",
             ]
         );
