@@ -19,7 +19,7 @@ use crate::{
         app::{self, AppState, Effect, Event, HookNames, NoticeKind, WorktreeId},
         create_flow::{
             BranchRow, CreateDialog, CreateEffect, CreateKey, CreateSubmission, ExistingWorktree,
-            OriginRefresh, RowKind, STALE_CREATE_SUMMARY,
+            OriginRefresh, RowKind, SUMMARY_CHANGED,
         },
         keymap::Key,
         line_input::LineEdit,
@@ -354,7 +354,7 @@ fn handle_create_input(
                 .is_some_and(CreateDialog::summary_as_drawn) =>
         {
             if let Some(dialog) = state.create_dialog.as_mut() {
-                dialog.set_validation_error(Some(SUMMARY_CHANGED.to_string()));
+                dialog.set_notice(SUMMARY_CHANGED);
             }
         }
         Some(CreateEffect::Navigate(_)) | Some(CreateEffect::Submit(_)) => {
@@ -384,7 +384,7 @@ fn handle_create_input(
                     ) =>
                 {
                     if let Some(dialog) = state.create_dialog.as_mut() {
-                        dialog.set_validation_error(Some(STALE_CREATE_SUMMARY.to_string()));
+                        dialog.set_notice(SUMMARY_CHANGED);
                     }
                     return Ok(Some(CreateInputEffect::Refresh));
                 }
@@ -405,7 +405,7 @@ fn handle_create_input(
             });
             if !as_shown {
                 if let Some(dialog) = state.create_dialog.as_mut() {
-                    dialog.set_validation_error(Some(STALE_CREATE_SUMMARY.to_string()));
+                    dialog.set_notice(SUMMARY_CHANGED);
                 }
                 return Ok(Some(CreateInputEffect::Refresh));
             }
@@ -772,9 +772,6 @@ fn note_remove_risks_drawn(state: &mut AppState, now: Instant) {
         dialog.set_risks_displayed(displayed, now);
     }
 }
-
-/// Shown when Enter is pressed after a refresh changed what the form said.
-const SUMMARY_CHANGED: &str = "The form changed just now. Check it, then press Enter again.";
 
 /// Called after every draw. A form behind a running or failed operation, or
 /// on a terminal too small to draw it, was not shown.
@@ -2077,6 +2074,7 @@ mod tests {
         let occupied = root.join(&repo_info.name).join("feature-taken");
         std::fs::create_dir_all(&occupied).unwrap();
         std::fs::write(occupied.join("leftover"), "x").unwrap();
+        note_forms_drawn(&mut state);
 
         assert!(handle_create_input(
             &mut state,
@@ -2145,7 +2143,7 @@ mod tests {
             "{effect:?}"
         );
         let dialog = state.create_dialog.as_ref().unwrap();
-        assert_eq!(dialog.validation_error(), Some(STALE_CREATE_SUMMARY));
+        assert_eq!(dialog.notice(), Some(SUMMARY_CHANGED));
         assert!(!root.join(&repo_info.name).join("release").exists());
     }
 
@@ -2397,11 +2395,49 @@ mod tests {
 
         assert!(enter(&mut state).is_none());
         assert_eq!(
-            state.create_dialog.as_ref().unwrap().validation_error(),
+            state.create_dialog.as_ref().unwrap().notice(),
             Some(SUMMARY_CHANGED)
         );
 
         // Once the new base is on screen, Enter uses it.
+        note_forms_drawn(&mut state);
+        assert!(matches!(
+            enter(&mut state),
+            Some(CreateInputEffect::Start(_))
+        ));
+    }
+
+    #[test]
+    fn a_summary_hidden_behind_an_error_does_not_count_as_shown() {
+        let repository = init_repo();
+        let root = repository.path().join("worktrees");
+        let repo_info = crate::git::discover_repo(repository.path()).unwrap();
+        let mut state = AppState::new(Vec::new());
+        publish_refs(&mut state, &["main"]);
+        open_create_dialog(&mut state, &repo_info.name, &root, Some("main")).unwrap();
+        let dialog = state.create_dialog.as_mut().unwrap();
+        dialog.set_branch("topic");
+        // An error fills the summary area, so the frame shows no summary.
+        dialog.set_validation_error(Some("could not read refs".to_string()));
+        note_forms_drawn(&mut state);
+        let enter = |state: &mut AppState| {
+            handle_create_input(
+                state,
+                CreateKey::Enter,
+                repository.path(),
+                &root,
+                Some("main"),
+                None,
+            )
+            .unwrap()
+        };
+
+        assert!(enter(&mut state).is_none());
+        let dialog = state.create_dialog.as_ref().unwrap();
+        assert_eq!(dialog.validation_error(), None, "the summary comes back");
+        assert_eq!(dialog.notice(), Some(SUMMARY_CHANGED));
+
+        // The notice sits above the summary, so this frame shows it.
         note_forms_drawn(&mut state);
         assert!(matches!(
             enter(&mut state),
@@ -2548,8 +2584,8 @@ mod tests {
             "{effect:?}"
         );
         assert_eq!(
-            state.create_dialog.as_ref().unwrap().validation_error(),
-            Some(STALE_CREATE_SUMMARY)
+            state.create_dialog.as_ref().unwrap().notice(),
+            Some(SUMMARY_CHANGED)
         );
     }
 
@@ -2603,8 +2639,8 @@ mod tests {
             "{effect:?}"
         );
         assert_eq!(
-            state.create_dialog.as_ref().unwrap().validation_error(),
-            Some(STALE_CREATE_SUMMARY)
+            state.create_dialog.as_ref().unwrap().notice(),
+            Some(SUMMARY_CHANGED)
         );
     }
 

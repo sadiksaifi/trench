@@ -313,6 +313,14 @@ fn summary(
             ],
         }
     };
+    // A notice says why Enter just did nothing. It goes above the summary,
+    // which stays visible because it is what the notice is about.
+    if let (Some(notice), None) = (dialog.notice(), dialog.validation_error()) {
+        let notice = widgets::wrap_clamped(&format!("{} {notice}", widgets::WARNING), width, 2)
+            .into_iter()
+            .map(|line| Line::styled(line, theme.warning));
+        lines.splice(0..0, notice);
+    }
     lines.truncate(SUMMARY_ROWS);
     lines.resize(SUMMARY_ROWS, Line::default());
     lines
@@ -433,6 +441,26 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Tab"), "there is nothing to choose: {text}");
+    }
+
+    #[test]
+    fn a_notice_sits_above_the_summary_without_hiding_it() {
+        let mut state = open("feature/login");
+        state
+            .create_dialog
+            .as_mut()
+            .unwrap()
+            .set_notice(crate::tui::create_flow::SUMMARY_CHANGED);
+        let text = screen(&mut state, 60, 18).join("\n");
+
+        let notice = text.find("! This changed. Check it, then press Enter again.");
+        let summary = text.find("New branch feature/login from origin/main");
+        assert!(notice.is_some() && summary.is_some(), "{text}");
+        assert!(notice < summary, "{text}");
+        assert!(
+            text.contains("Worktree at"),
+            "one row, so the path stays: {text}"
+        );
     }
 
     #[test]

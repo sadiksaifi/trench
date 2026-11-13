@@ -103,6 +103,12 @@ pub enum CreatePlanError {
         "branch '{branch}' cannot be created: branch '{existing}' exists, and Git cannot have both"
     )]
     BranchNamespaceConflict { branch: String, existing: String },
+    #[error("remote branch not found: {selection}")]
+    RemoteBranchNotFound { selection: String },
+    #[error(
+        "{selection} would be tracked by local branch '{branch}', which already exists; run `trench create {branch}` to use it"
+    )]
+    LocalBranchExists { selection: String, branch: String },
 }
 
 enum RefClass<'a> {
@@ -155,6 +161,7 @@ impl CreatePlanner {
     }
 
     pub fn plan(&self, branch: &str, from: Option<&str>) -> Result<CreatePlan, CreatePlanError> {
+        self.check_full_remote_ref(branch)?;
         self.policy.validate(branch)?;
         let class = self.classify(branch);
         self.policy.validate(class.branch())?;
@@ -283,6 +290,28 @@ impl CreatePlanner {
     /// A local branch spelled exactly as typed always wins, including one
     /// whose name starts with `origin/`. After that, `origin/x` is shorthand
     /// for the local branch `x`, then for the remote ref.
+    /// A full remote ref (`refs/remotes/origin/x`) names a remote branch and
+    /// nothing else. It is never planned as a new branch of that name: it
+    /// must exist on origin, and its local branch must not exist yet.
+    fn check_full_remote_ref(&self, selection: &str) -> Result<(), CreatePlanError> {
+        let Some(upstream) = selection.strip_prefix("refs/remotes/") else {
+            return Ok(());
+        };
+        let branch = upstream
+            .strip_prefix("origin/")
+            .filter(|_| self.refs.origin.iter().any(|name| name == upstream))
+            .ok_or_else(|| CreatePlanError::RemoteBranchNotFound {
+                selection: selection.to_string(),
+            })?;
+        if self.refs.local.iter().any(|name| name == branch) {
+            return Err(CreatePlanError::LocalBranchExists {
+                selection: selection.to_string(),
+                branch: branch.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn classify<'a>(&self, selection: &'a str) -> RefClass<'a> {
         let candidates = self.refs.candidates();
         // The full ref names a remote branch with no chance of matching a
@@ -440,6 +469,47 @@ mod tests {
             CreateAction::TrackRemote("origin/x".to_string())
         );
         assert_eq!(plan.branch, "x");
+    }
+
+    #[test]
+    fn a_full_remote_ref_is_refused_when_its_local_branch_already_exists() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let git = git2::Repository::open(repo.path()).unwrap();
+        let head = git.head().unwrap().peel_to_commit().unwrap();
+        git.branch("x", &head, false).unwrap();
+        git.reference("refs/remotes/origin/x", head.id(), false, "test")
+            .unwrap();
+        let planner =
+            CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        // Tracking origin/x would need a local `x`, which already exists.
+        // It must never become a new branch named `refs/remotes/origin/x`.
+        let error = planner.plan("refs/remotes/origin/x", None).unwrap_err();
+
+        assert!(
+            matches!(&error, CreatePlanError::LocalBranchExists { branch, .. } if branch == "x"),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("trench create x"), "{error}");
+    }
+
+    #[test]
+    fn a_full_remote_ref_that_does_not_exist_is_refused() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let planner =
+            CreatePlanner::discover(repo.path(), outside.path(), None, HookPolicy::Run).unwrap();
+
+        for selection in ["refs/remotes/origin/nope", "refs/remotes/upstream/main"] {
+            let error = planner.plan(selection, None).unwrap_err();
+            assert!(
+                matches!(error, CreatePlanError::RemoteBranchNotFound { .. }),
+                "{selection}: {error:?}"
+            );
+        }
     }
 
     #[test]

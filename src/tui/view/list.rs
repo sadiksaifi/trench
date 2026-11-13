@@ -64,7 +64,8 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect, theme: &Theme) {
     }
     match (state.info_visible(), area.width >= Viewport::WIDE_WIDTH) {
         (true, true) => {
-            let list_width = body.width * LIST_SHARE / 100;
+            // In u32: a terminal over 1057 columns overflows u16 here.
+            let list_width = (u32::from(body.width) * u32::from(LIST_SHARE) / 100) as u16;
             let list = Rect::new(body.x, body.y, list_width, body.height);
             let info = Rect::new(
                 body.x + list_width,
@@ -308,14 +309,18 @@ fn render_info(identity: Option<&WorktreeIdentity>, frame: &mut Frame, area: Rec
 /// `value` split into rows `width` columns wide. Every character is kept,
 /// spaces included, because a path or a branch must read exactly.
 fn rows_of(value: &str, width: usize) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+
     let width = width.max(1);
     let mut rows = vec![String::new()];
-    for character in value.chars() {
+    // By grapheme, so a character built from several code points, such as
+    // a joined emoji or a letter with a combining accent, stays whole.
+    for grapheme in value.graphemes(true) {
         let row = rows.last_mut().expect("starts with one row");
-        if !row.is_empty() && text::width(row) + text::width(&character.to_string()) > width {
-            rows.push(character.to_string());
+        if !row.is_empty() && text::width(row) + text::width(grapheme) > width {
+            rows.push(grapheme.to_string());
         } else {
-            row.push(character);
+            row.push_str(grapheme);
         }
     }
     rows
@@ -347,7 +352,8 @@ fn fit(value: &str, width: usize, rows: usize, cut: fn(&str, usize) -> String) -
 /// Column widths for the rows on screen.
 struct Columns {
     branch: usize,
-    path: usize,
+    /// Each row's branch and path, already cut to their columns.
+    branches: Vec<String>,
     paths: Vec<String>,
 }
 
@@ -364,15 +370,73 @@ impl Columns {
         let branch = widest
             .max(text::width("BRANCH"))
             .min((content * 45 / 100).max(text::width("BRANCH")));
+        let path = content.saturating_sub(branch + COLUMN_GAP);
+        let labels = rows
+            .iter()
+            .map(|row| row.label().to_string())
+            .collect::<Vec<_>>();
+        let paths = rows
+            .iter()
+            .map(|row| text::home_relative(&row.path, home))
+            .collect::<Vec<_>>();
+        let path_widths = rows
+            .iter()
+            .map(|row| {
+                let tag = if row.missing { MISSING_TAG } else { "" };
+                path.saturating_sub(text::width(tag))
+            })
+            .collect::<Vec<_>>();
         Self {
             branch,
-            path: content.saturating_sub(branch + COLUMN_GAP),
-            paths: rows
-                .iter()
-                .map(|row| text::home_relative(&row.path, home))
-                .collect(),
+            branches: distinct(&labels, &vec![branch; rows.len()], text::truncate_middle),
+            paths: distinct(&paths, &path_widths, text::truncate_start),
         }
     }
+}
+
+/// `values` cut to `widths` by `cut`. Two different values that come out
+/// the same, because they differ only where the cut fell, are cut again
+/// to show the part where they differ: `…ABC-123-add…`.
+fn distinct(values: &[String], widths: &[usize], cut: fn(&str, usize) -> String) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let shown = values
+        .iter()
+        .zip(widths)
+        .map(|(value, width)| cut(value, *width))
+        .collect::<Vec<_>>();
+    let common_prefix = |left: &str, right: &str| {
+        left.graphemes(true)
+            .zip(right.graphemes(true))
+            .take_while(|(left, right)| left == right)
+            .count()
+    };
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let width = widths[index];
+            let differs_at = (0..values.len())
+                .filter(|&other| {
+                    other != index && shown[other] == shown[index] && values[other] != *value
+                })
+                .map(|other| common_prefix(value, &values[other]))
+                .min();
+            match differs_at {
+                Some(at) if width >= 2 => {
+                    // Two characters of context before the difference.
+                    let start = at.saturating_sub(2);
+                    if start == 0 {
+                        text::truncate_end(value, width)
+                    } else {
+                        let rest = value.graphemes(true).skip(start).collect::<String>();
+                        format!("{}{}", text::ELLIPSIS, text::truncate_end(&rest, width - 1))
+                    }
+                }
+                _ => shown[index].clone(),
+            }
+        })
+        .collect()
 }
 
 fn body_lines(
@@ -401,6 +465,7 @@ fn body_lines(
         .map(|index| {
             worktree_row(
                 visible[index],
+                &columns.branches[index],
                 &columns.paths[index],
                 columns,
                 Some(index) == selected,
@@ -423,6 +488,7 @@ fn body_lines(
 
 fn worktree_row(
     identity: &WorktreeIdentity,
+    branch: &str,
     path: &str,
     columns: &Columns,
     selected: bool,
@@ -431,12 +497,9 @@ fn worktree_row(
 ) -> Line<'static> {
     let cursor = if selected { widgets::SELECTED } else { " " };
     let current = if identity.is_current { "*" } else { " " };
-    let branch = text::pad_end(
-        &text::truncate_middle(identity.label(), columns.branch),
-        columns.branch,
-    );
+    let branch = text::pad_end(branch, columns.branch);
     let tag = if identity.missing { MISSING_TAG } else { "" };
-    let path = text::truncate_start(path, columns.path.saturating_sub(text::width(tag)));
+    let path = path.to_string();
     let base = if selected {
         theme.selection
     } else {
@@ -702,6 +765,30 @@ mod tests {
     }
 
     #[test]
+    fn the_info_panel_never_splits_a_joined_emoji_across_rows() {
+        let family = "👨\u{200d}👩\u{200d}👧\u{200d}👦";
+        let branch = format!("{}{family}-topic", "a".repeat(24));
+
+        assert!(super::rows_of(&branch, 26)
+            .iter()
+            .any(|row| row.contains(family)));
+        let rows = super::rows_of(&branch, 25);
+        assert!(rows.iter().any(|row| row.contains(family)), "{rows:?}");
+        assert_eq!(rows.concat(), branch, "every character is kept");
+    }
+
+    #[test]
+    fn a_very_wide_terminal_splits_the_panes_without_overflowing() {
+        let mut state = state(&[("feature/auth", "/wt/acme/feature-auth")]);
+        let screen = screen(&mut state, 1100, 10);
+
+        // 62% of 1100 columns: the list's right border sits at column 681.
+        let top = screen[0].chars().collect::<Vec<_>>();
+        assert_eq!(top[681], '┐', "{}", screen[0]);
+        assert_eq!(top[682], '┌', "{}", screen[0]);
+    }
+
+    #[test]
     fn i_toggles_the_info_panel_and_a_narrow_terminal_starts_without_it() {
         let mut state = state(&[("feature/auth", "/wt/acme/feature-auth")]);
         let narrow = screen(&mut state, 80, 12);
@@ -787,6 +874,28 @@ mod tests {
             screen[4],
             "     feature/JIR…sked-for-v2  …-thing-nobody-asked-for-v2"
         );
+    }
+
+    #[test]
+    fn names_that_differ_only_in_the_middle_still_look_different() {
+        let mut state = state(&[
+            (
+                "feature/ABC-123-add-login-page",
+                "/wt/acme/feature-ABC-123-add-login-page",
+            ),
+            (
+                "feature/DEF-123-add-login-page",
+                "/wt/acme/feature-DEF-123-add-login-page",
+            ),
+        ]);
+        let rows = inner(&screen(&mut state, 40, 10));
+
+        assert_ne!(rows[3], rows[4], "{rows:#?}");
+        for (row, ticket) in [(&rows[3], "ABC"), (&rows[4], "DEF")] {
+            let (branch, path) = row.trim().split_once("  ").unwrap();
+            assert!(branch.contains(ticket), "{rows:#?}");
+            assert!(path.trim().contains(ticket), "{rows:#?}");
+        }
     }
 
     #[test]

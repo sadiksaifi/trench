@@ -8,7 +8,7 @@ use std::path::Path;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ELLIPSIS: &str = "…";
+pub const ELLIPSIS: &str = "…";
 
 /// Terminal columns occupied by `value`.
 pub fn width(value: &str) -> usize {

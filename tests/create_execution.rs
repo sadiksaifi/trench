@@ -523,3 +523,33 @@ fn a_relative_worktree_root_is_read_from_the_current_directory_and_the_create_co
             .unwrap()
     );
 }
+
+#[test]
+fn a_full_remote_ref_shadowed_by_a_local_branch_is_refused_without_creating_anything() {
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write_project_config(repo.path(), &outside.path().join("worktrees"), "");
+    git(repo.path(), &["branch", "x"]);
+    git(
+        repo.path(),
+        &["update-ref", "refs/remotes/origin/x", "HEAD"],
+    );
+
+    let output = trench(
+        repo.path(),
+        xdg.path(),
+        &["create", "refs/remotes/origin/x", "--json"],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("trench create x"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let branches = git_stdout(repo.path(), &["branch", "--list", "refs/remotes/*"]);
+    assert_eq!(branches.trim(), "", "no branch named after the ref");
+    assert!(!outside.path().join("worktrees").exists());
+}

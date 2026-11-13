@@ -23,8 +23,11 @@ pub use crate::tui::ref_picker::OriginRefresh;
 
 /// Shown when live Git no longer matches what the dialog showed for the
 /// highlighted branch.
-pub const STALE_CREATE_SUMMARY: &str =
-    "That branch changed while this dialog was open. Pick it again to see what Enter will do.";
+pub const STALE_CREATE_SUMMARY: &str = "That branch changed. Pick it again.";
+
+/// Shown when Enter is pressed after what the form says changed, so Enter
+/// did nothing.
+pub const SUMMARY_CHANGED: &str = "This changed. Check it, then press Enter again.";
 
 /// A worktree that already exists: its directory and the branch it holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +166,9 @@ pub struct CreateDialog {
     base_picker: RefPicker,
     focus: CreateFocus,
     validation_error: Option<String>,
+    /// One line above the summary, for a key that did nothing because what
+    /// the form says changed. Unlike an error it leaves the summary visible.
+    notice: Option<&'static str>,
     /// The summary in the last frame drawn. Enter acts only on that.
     drawn_summary: Option<Summary>,
 }
@@ -188,6 +194,7 @@ impl CreateDialog {
             highlight: None,
             focus: CreateFocus::Branch,
             validation_error: None,
+            notice: None,
             drawn_summary: None,
         }
     }
@@ -244,7 +251,26 @@ impl CreateDialog {
     }
 
     pub fn set_validation_error(&mut self, error: Option<String>) {
+        if error.is_some() {
+            self.notice = None;
+        }
         self.validation_error = error;
+    }
+
+    pub fn notice(&self) -> Option<&'static str> {
+        self.notice
+    }
+
+    /// Show `notice` above the summary. An error in its place goes, so the
+    /// summary it is about is visible.
+    pub fn set_notice(&mut self, notice: &'static str) {
+        self.validation_error = None;
+        self.notice = Some(notice);
+    }
+
+    fn clear_messages(&mut self) {
+        self.validation_error = None;
+        self.notice = None;
     }
 
     pub fn set_origin_refresh(&mut self, refresh: OriginRefresh) {
@@ -362,7 +388,8 @@ impl CreateDialog {
 
     /// Record that the current summary is on screen.
     pub fn note_drawn(&mut self) {
-        self.drawn_summary = Some(self.summary());
+        // An error fills the summary area, so that frame showed no summary.
+        self.drawn_summary = self.validation_error.is_none().then(|| self.summary());
     }
 
     /// Whether the summary on screen is still what Enter would do. A refresh
@@ -425,11 +452,11 @@ impl CreateDialog {
             // Moving the highlight asks about a different row, so a message
             // about the previous attempt no longer applies.
             CreateKey::Up => {
-                self.validation_error = None;
+                self.clear_messages();
                 self.highlight = self.highlight.map(|index| index.saturating_sub(1));
             }
             CreateKey::Down => {
-                self.validation_error = None;
+                self.clear_messages();
                 let last = self.rows().len().checked_sub(1)?;
                 self.highlight = Some(self.highlight.map_or(0, |index| (index + 1).min(last)));
             }
@@ -471,7 +498,7 @@ impl CreateDialog {
                     self.base_picker.handle_key(RefPickerKey::Enter),
                     Some(RefPickerEffect::Selected(_))
                 ) {
-                    self.validation_error = None;
+                    self.clear_messages();
                     self.focus = CreateFocus::Branch;
                 }
             }
@@ -481,7 +508,7 @@ impl CreateDialog {
 
     fn edit_branch(&mut self, edit: LineEdit) {
         if self.branch.edit(edit) {
-            self.validation_error = None;
+            self.clear_messages();
             // Row 0 is the typed name itself, so it is what Enter should do.
             self.highlight = (!self.branch.value().trim().is_empty()).then_some(0);
         }
@@ -503,7 +530,7 @@ impl CreateDialog {
             })
         });
         if had_highlight && self.highlight.is_none() {
-            self.validation_error = Some(STALE_CREATE_SUMMARY.to_string());
+            self.set_notice(STALE_CREATE_SUMMARY);
         }
     }
 
@@ -681,14 +708,14 @@ mod tests {
         ));
 
         assert_eq!(dialog.highlighted_row(), None);
-        assert_eq!(dialog.validation_error(), Some(STALE_CREATE_SUMMARY));
+        assert_eq!(dialog.notice(), Some(STALE_CREATE_SUMMARY));
 
         // A refresh that keeps the branch says nothing.
         let mut kept = self::dialog();
         kept.set_branch("release");
         kept.update_refs(refs());
         assert!(kept.highlighted_row().is_some());
-        assert_eq!(kept.validation_error(), None);
+        assert_eq!(kept.notice(), None);
     }
 
     #[test]
