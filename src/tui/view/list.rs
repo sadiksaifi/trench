@@ -235,22 +235,56 @@ fn render_info(identity: Option<&WorktreeIdentity>, frame: &mut Frame, area: Rec
         line.spans.insert(0, Span::raw(pad.clone()));
         line
     };
-    let mut lines = vec![Line::default()];
-    lines.push(match identity.branch.as_deref() {
-        Some(branch) => field("Branch", branch.to_string(), theme.text),
-        None => field("Branch", "detached".to_string(), theme.muted),
-    });
+    // A value on several rows: the label on the first, the rest indented
+    // under the value.
+    let multi = |label: &str, parts: Vec<String>, style: Style| {
+        parts
+            .into_iter()
+            .enumerate()
+            .map(|(index, part)| {
+                if index == 0 {
+                    field(label, part, style)
+                } else {
+                    Line::styled(
+                        format!("{pad}{}{part}", " ".repeat(INFO_LABEL_WIDTH + 2)),
+                        style,
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let (branch, branch_style) = match identity.branch.as_deref() {
+        Some(branch) => (branch.to_string(), theme.text),
+        None => ("detached".to_string(), theme.muted),
+    };
     let path = identity.path.to_string_lossy();
-    for (index, part) in widgets::wrap(&path, value_room).into_iter().enumerate() {
-        lines.push(if index == 0 {
-            field("Path", part, theme.text)
-        } else {
-            Line::styled(
-                format!("{pad}{}{part}", " ".repeat(INFO_LABEL_WIDTH + 2)),
-                theme.text,
-            )
-        });
+    // HEAD and the status always keep their rows. The branch and the path
+    // share the rest; when they do not fit, each is cut with an ellipsis
+    // where the cut is, never silently.
+    let fixed = 1 + usize::from(identity.missing);
+    let shared = usize::from(inner.height).saturating_sub(fixed);
+    let branch_needs = rows_of(&branch, value_room).len();
+    let path_needs = rows_of(&path, value_room).len();
+    let blank = shared > branch_needs + path_needs;
+    let shared = shared - usize::from(blank);
+    let branch_rows = branch_needs.min(shared.saturating_sub(1)).max(1);
+    let path_rows = path_needs.min(shared.saturating_sub(branch_rows)).max(1);
+
+    let mut lines = Vec::new();
+    if blank {
+        lines.push(Line::default());
     }
+    lines.extend(multi(
+        "Branch",
+        fit(&branch, value_room, branch_rows, text::truncate_middle),
+        branch_style,
+    ));
+    lines.extend(multi(
+        "Path",
+        fit(&path, value_room, path_rows, text::truncate_start),
+        theme.text,
+    ));
     lines.push(match identity.head.as_deref() {
         Some(head) => field("HEAD", head.chars().take(7).collect(), theme.text),
         None => field("HEAD", "none".to_string(), theme.muted),
@@ -263,6 +297,32 @@ fn render_info(identity: Option<&WorktreeIdentity>, frame: &mut Frame, area: Rec
         ));
     }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// `value` split into rows `width` columns wide. Every character is kept,
+/// spaces included, because a path or a branch must read exactly.
+fn rows_of(value: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = vec![String::new()];
+    for character in value.chars() {
+        let row = rows.last_mut().expect("starts with one row");
+        if !row.is_empty() && text::width(row) + text::width(&character.to_string()) > width {
+            rows.push(character.to_string());
+        } else {
+            row.push(character);
+        }
+    }
+    rows
+}
+
+/// `value` on at most `rows` rows. A value that needs more is cut by `cut`
+/// to what the rows hold, so the ellipsis shows where the cut is.
+fn fit(value: &str, width: usize, rows: usize, cut: fn(&str, usize) -> String) -> Vec<String> {
+    let all = rows_of(value, width);
+    if all.len() <= rows {
+        return all;
+    }
+    rows_of(&cut(value, width.max(1) * rows), width)
 }
 
 /// Column widths for the rows on screen.
@@ -520,6 +580,64 @@ mod tests {
             panel.replace(' ', "").contains(&format!("Path{path}")),
             "the whole path is in the panel: {screen:#?}"
         );
+    }
+
+    /// The info panel's rows, without its border.
+    fn panel(screen: &[String]) -> Vec<String> {
+        screen
+            .iter()
+            .map(|row| row.split('│').nth(3).unwrap_or("").trim_end().to_string())
+            .collect()
+    }
+
+    const ENDLESS: &str = "feature/abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij-v2";
+
+    #[test]
+    fn a_long_branch_wraps_in_the_info_panel_instead_of_being_cut() {
+        let mut state = state(&[(ENDLESS, "/wt/acme/endless")]);
+        let _ = reduce(&mut state, Event::Input(Key::Down));
+        let rows = panel(&screen(&mut state, 100, 24));
+        let branch = rows
+            .iter()
+            .skip_while(|row| !row.starts_with(" Branch"))
+            .take_while(|row| !row.starts_with(" Path"))
+            .map(|row| row.trim_start_matches(" Branch").trim())
+            .collect::<String>();
+
+        assert_eq!(branch, ENDLESS, "{rows:#?}");
+    }
+
+    #[test]
+    fn a_short_panel_keeps_head_and_status_and_shows_where_the_path_was_cut() {
+        let path = format!("/wt/acme/feature-{}-v2", "abcdefghij".repeat(10));
+        let mut state = state(&[("feature/long", path.as_str())]);
+        state.identities[1].missing = true;
+        let _ = reduce(&mut state, Event::Input(Key::Down));
+        let rows = panel(&screen(&mut state, 100, 10));
+        let text = rows.join("\n");
+
+        assert!(text.contains(" HEAD    1234567"), "{text}");
+        assert!(text.contains(" Status  directory missing"), "{text}");
+        let path_rows = rows
+            .iter()
+            .skip_while(|row| !row.starts_with(" Path"))
+            .take_while(|row| !row.starts_with(" HEAD"))
+            .map(|row| row.trim_start_matches(" Path").trim())
+            .collect::<String>();
+        assert!(path_rows.starts_with('…'), "{text}");
+        assert!(
+            path_rows.ends_with("abcdefghij-v2"),
+            "the tail names the directory: {text}"
+        );
+    }
+
+    #[test]
+    fn the_info_panel_shows_a_path_exactly_even_with_repeated_spaces() {
+        let mut state = state(&[("spaces", "/tmp/a  b/spaces")]);
+        let _ = reduce(&mut state, Event::Input(Key::Down));
+        let text = panel(&screen(&mut state, 100, 24)).join("\n");
+
+        assert!(text.contains(" Path    /tmp/a  b/spaces"), "{text}");
     }
 
     #[test]
