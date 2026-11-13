@@ -139,6 +139,9 @@ pub struct RemoveDialog {
     confirm_after: Option<Instant>,
     /// Whether the last frame drawn showed every risk.
     risks_displayed: bool,
+    /// The input queue was seen empty after the pause ended. Until then a
+    /// `y` may have been typed during the pause and only read later.
+    idle_after_pause: bool,
 }
 
 impl RemoveDialog {
@@ -172,6 +175,7 @@ impl RemoveDialog {
             validation_error: None,
             confirm_after: None,
             risks_displayed: false,
+            idle_after_pause: false,
         };
         // `d y` typed in one burst would otherwise accept risks that were
         // on screen for a single frame.
@@ -183,15 +187,33 @@ impl RemoveDialog {
 
     /// Whether `y` removes at `now`. It does not while a risk has not been
     /// drawn, and for a moment after the risks appear so they can be read.
+    /// After that moment it also waits until the input queue has been seen
+    /// empty, so a `y` typed during the pause cannot be read late and count.
     pub fn confirm_ready(&self, now: Instant) -> bool {
         (self.risks_displayed || self.risks().is_empty())
-            && self.confirm_after.is_none_or(|after| now >= after)
+            && self
+                .confirm_after
+                .is_none_or(|after| now >= after && self.idle_after_pause)
+    }
+
+    /// Record that no key was waiting at `now`. Any key read later was
+    /// typed after `now`.
+    pub fn note_input_idle(&mut self, now: Instant) {
+        if self.confirm_after.is_some_and(|after| now >= after) {
+            self.idle_after_pause = true;
+        }
+    }
+
+    /// When the pause ends, if one is running.
+    pub fn confirm_deadline(&self) -> Option<Instant> {
+        self.confirm_after.filter(|_| !self.idle_after_pause)
     }
 
     fn start_confirm_pause(&mut self) {
         // The new risks have not been drawn yet. The pause starts again on
         // the first frame that shows them.
         self.risks_displayed = false;
+        self.idle_after_pause = false;
         self.confirm_after = Some(Instant::now() + CONFIRM_DELAY_AFTER_CHANGE);
     }
 
@@ -203,6 +225,7 @@ impl RemoveDialog {
     /// shows them starts the pause again.
     pub fn set_risks_displayed(&mut self, displayed: bool, now: Instant) {
         if displayed && !self.risks_displayed && !self.risks().is_empty() {
+            self.idle_after_pause = false;
             self.confirm_after = Some(now + CONFIRM_DELAY_AFTER_CHANGE);
         }
         self.risks_displayed = displayed;
@@ -825,6 +848,7 @@ mod tests {
             Some(RemoveEffect::Close),
             "leaving is never delayed"
         );
+        dialog.note_input_idle(shown + CONFIRM_DELAY_AFTER_CHANGE);
         assert_eq!(
             dialog.handle_key(RemoveKey::Confirm, shown + CONFIRM_DELAY_AFTER_CHANGE),
             Some(RemoveEffect::Submit)
@@ -845,6 +869,7 @@ mod tests {
 
         assert!(!dialog.confirm_ready(opened));
         assert_eq!(dialog.handle_key(RemoveKey::Confirm, opened), None);
+        dialog.note_input_idle(opened + CONFIRM_DELAY_AFTER_CHANGE);
         assert!(dialog.confirm_ready(opened + CONFIRM_DELAY_AFTER_CHANGE));
         assert_eq!(
             dialog.handle_key(RemoveKey::Confirm, opened + CONFIRM_DELAY_AFTER_CHANGE),
@@ -875,6 +900,7 @@ mod tests {
         // The first frame that shows the risk starts the pause again.
         dialog.set_risks_displayed(true, enlarged);
         assert_eq!(dialog.handle_key(RemoveKey::Confirm, enlarged), None);
+        dialog.note_input_idle(enlarged + CONFIRM_DELAY_AFTER_CHANGE);
         assert_eq!(
             dialog.handle_key(RemoveKey::Confirm, enlarged + CONFIRM_DELAY_AFTER_CHANGE),
             Some(RemoveEffect::Submit)
@@ -901,6 +927,34 @@ mod tests {
         assert_eq!(dialog.handle_key(RemoveKey::Confirm, long_after), None);
         dialog.set_risks_displayed(false, long_after);
         assert_eq!(dialog.handle_key(RemoveKey::Confirm, long_after), None);
+    }
+
+    #[test]
+    fn a_y_typed_during_the_pause_and_read_after_it_is_ignored() {
+        let fixture = Fixture::new("queued-y");
+        std::fs::write(fixture.worktree_path.join("notes.txt"), "work\n").unwrap();
+        let mut dialog = RemoveDialog::new(
+            WorktreeId::new(&fixture.worktree_path),
+            fixture.assessment(),
+        )
+        .unwrap();
+        let drawn = Instant::now();
+        dialog.set_risks_displayed(true, drawn);
+        let after = drawn + CONFIRM_DELAY_AFTER_CHANGE;
+
+        // The input queue was seen empty only during the pause. A `y` read
+        // after the pause may have been typed during it, behind a slow
+        // refresh, so it does nothing.
+        dialog.note_input_idle(drawn + CONFIRM_DELAY_AFTER_CHANGE / 2);
+        assert_eq!(dialog.handle_key(RemoveKey::Confirm, after), None);
+
+        // Once the queue is seen empty after the pause, the next `y` was
+        // typed with the risks on screen for the whole pause.
+        dialog.note_input_idle(after);
+        assert_eq!(
+            dialog.handle_key(RemoveKey::Confirm, after),
+            Some(RemoveEffect::Submit)
+        );
     }
 
     #[test]
@@ -1022,6 +1076,7 @@ mod tests {
         assert!(!unchanged
             .refresh(fixture.root.path(), Some("main"))
             .unwrap());
+        unchanged.note_input_idle(opened + CONFIRM_DELAY_AFTER_CHANGE);
         assert!(
             unchanged.confirm_ready(opened + CONFIRM_DELAY_AFTER_CHANGE),
             "a refresh that finds nothing new does not restart the pause"

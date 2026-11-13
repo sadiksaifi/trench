@@ -268,8 +268,14 @@ fn render_info(identity: Option<&WorktreeIdentity>, frame: &mut Frame, area: Rec
     let path_needs = rows_of(&path, value_room).len();
     let blank = shared > branch_needs + path_needs;
     let shared = shared - usize::from(blank);
-    let branch_rows = branch_needs.min(shared.saturating_sub(1)).max(1);
-    let path_rows = path_needs.min(shared.saturating_sub(branch_rows)).max(1);
+    // The branch gets a row before the path, and leaves the path one when
+    // there are two. With no rows left, neither is shown.
+    let branch_rows = match shared {
+        0 => 0,
+        1 => 1,
+        _ => branch_needs.min(shared - 1),
+    };
+    let path_rows = path_needs.min(shared - branch_rows);
 
     let mut lines = Vec::new();
     if blank {
@@ -322,7 +328,20 @@ fn fit(value: &str, width: usize, rows: usize, cut: fn(&str, usize) -> String) -
     if all.len() <= rows {
         return all;
     }
-    rows_of(&cut(value, width.max(1) * rows), width)
+    if rows == 0 {
+        return Vec::new();
+    }
+    // A wide character that does not fit at the end of a row moves to the
+    // next one and leaves a column unused, so the cut can need more rows
+    // than `width * rows` suggests. Cut shorter until it fits.
+    let mut columns = width.max(1) * rows;
+    loop {
+        let parts = rows_of(&cut(value, columns), width);
+        if parts.len() <= rows || columns <= 1 {
+            return parts;
+        }
+        columns -= 1;
+    }
 }
 
 /// Column widths for the rows on screen.
@@ -638,6 +657,48 @@ mod tests {
         let text = panel(&screen(&mut state, 100, 24)).join("\n");
 
         assert!(text.contains(" Path    /tmp/a  b/spaces"), "{text}");
+    }
+
+    #[test]
+    fn wide_characters_never_push_head_out_of_the_info_panel() {
+        let wide = "日".repeat(70);
+        let mut state = state(&[(wide.as_str(), "/wt/acme/wide")]);
+        let _ = reduce(&mut state, Event::Input(Key::Down));
+        let rows = panel(&screen(&mut state, 102, 10));
+
+        assert!(
+            rows.iter().any(|row| row.starts_with(" HEAD    1234567")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains('…')),
+            "the cut is shown: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_panel_with_room_for_two_rows_keeps_head_and_status() {
+        let mut state = state(&[("stale/gone", "/wt/acme/stale-gone")]);
+        state.identities[1].missing = true;
+        state.refresh.warning = Some(
+            "Could not fetch origin; showing local refs. Check your network or the remote URL."
+                .to_string(),
+        );
+        let _ = reduce(&mut state, Event::Input(Key::Down));
+        let _ = reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: 40,
+                height: 10,
+            },
+        );
+        let _ = reduce(&mut state, Event::Input(Key::Char('i')));
+        let _ = reduce(&mut state, Event::Input(Key::Char('/')));
+        let screen = screen(&mut state, 40, 10);
+        let text = screen.join("\n");
+
+        assert!(text.contains("HEAD    1234567"), "{text}");
+        assert!(text.contains("Status  directory missing"), "{text}");
     }
 
     #[test]

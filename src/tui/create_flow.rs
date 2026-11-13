@@ -163,6 +163,8 @@ pub struct CreateDialog {
     base_picker: RefPicker,
     focus: CreateFocus,
     validation_error: Option<String>,
+    /// The summary in the last frame drawn. Enter acts only on that.
+    drawn_summary: Option<Summary>,
 }
 
 impl CreateDialog {
@@ -186,6 +188,7 @@ impl CreateDialog {
             highlight: None,
             focus: CreateFocus::Branch,
             validation_error: None,
+            drawn_summary: None,
         }
     }
 
@@ -355,6 +358,17 @@ impl CreateDialog {
     /// its first commit.
     pub fn repository_has_branches(&self) -> bool {
         self.base_picker.has_refs()
+    }
+
+    /// Record that the current summary is on screen.
+    pub fn note_drawn(&mut self) {
+        self.drawn_summary = Some(self.summary());
+    }
+
+    /// Whether the summary on screen is still what Enter would do. A refresh
+    /// can change it between a frame and the next key.
+    pub fn summary_as_drawn(&self) -> bool {
+        self.drawn_summary.as_ref() == Some(&self.summary())
     }
 
     pub fn base_applies(&self) -> bool {

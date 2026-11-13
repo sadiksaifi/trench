@@ -50,6 +50,8 @@ pub struct SyncDialog {
     strategy: SyncStrategy,
     mode: SyncMode,
     validation_error: Option<String>,
+    /// What Enter would start, as the last frame drawn showed it.
+    drawn: Option<Option<SyncSubmission>>,
 }
 
 impl SyncDialog {
@@ -66,6 +68,7 @@ impl SyncDialog {
             strategy: SyncStrategy::Rebase,
             mode: SyncMode::Form,
             validation_error: None,
+            drawn: None,
         }
     }
 
@@ -138,6 +141,16 @@ impl SyncDialog {
 
     pub fn set_validation_error(&mut self, error: Option<String>) {
         self.validation_error = error;
+    }
+
+    /// Record that the current form is on screen.
+    pub fn note_drawn(&mut self) {
+        self.drawn = Some(self.submission());
+    }
+
+    /// Whether the form on screen is still what Enter would start.
+    pub fn submission_as_drawn(&self) -> bool {
+        self.drawn.as_ref() == Some(&self.submission())
     }
 
     pub fn submission(&self) -> Option<SyncSubmission> {

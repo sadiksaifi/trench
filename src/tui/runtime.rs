@@ -347,6 +347,16 @@ fn handle_create_input(
             state.create_dialog = None;
             state.help_open = false;
         }
+        Some(CreateEffect::Navigate(_)) | Some(CreateEffect::Submit(_))
+            if !state
+                .create_dialog
+                .as_ref()
+                .is_some_and(CreateDialog::summary_as_drawn) =>
+        {
+            if let Some(dialog) = state.create_dialog.as_mut() {
+                dialog.set_validation_error(Some(SUMMARY_CHANGED.to_string()));
+            }
+        }
         Some(CreateEffect::Navigate(_)) | Some(CreateEffect::Submit(_)) => {
             let submission = match effect {
                 Some(CreateEffect::Submit(submission)) => submission,
@@ -436,6 +446,16 @@ fn handle_sync_input(
                 dialog.set_origin_refresh(OriginRefresh::Loading);
             }
             return Ok(Some(SyncInputEffect::RefreshOrigin));
+        }
+        Some(SyncEffect::Submit(_))
+            if !state
+                .sync_dialog
+                .as_ref()
+                .is_some_and(SyncDialog::submission_as_drawn) =>
+        {
+            if let Some(dialog) = state.sync_dialog.as_mut() {
+                dialog.set_validation_error(Some(SUMMARY_CHANGED.to_string()));
+            }
         }
         Some(SyncEffect::Submit(submission)) => {
             match build_sync_request(&submission, cwd, configured_base, hooks) {
@@ -753,6 +773,44 @@ fn note_remove_risks_drawn(state: &mut AppState, now: Instant) {
     }
 }
 
+/// Shown when Enter is pressed after a refresh changed what the form said.
+const SUMMARY_CHANGED: &str = "The form changed just now. Check it, then press Enter again.";
+
+/// Called after every draw. A form behind a running or failed operation, or
+/// on a terminal too small to draw it, was not shown.
+fn note_forms_drawn(state: &mut AppState) {
+    if state.operation_modal.is_some() || state.viewport.is_tiny() {
+        return;
+    }
+    if let Some(dialog) = state.create_dialog.as_mut() {
+        dialog.note_drawn();
+    }
+    if let Some(dialog) = state.sync_dialog.as_mut() {
+        dialog.note_drawn();
+    }
+}
+
+/// Called when no key is waiting. A key read later was typed after `now`.
+fn note_input_idle(state: &mut AppState, now: Instant) {
+    if let Some(dialog) = state.remove_dialog.as_mut() {
+        dialog.note_input_idle(now);
+    }
+}
+
+/// How long to wait for a key: at most the usual poll interval, and no
+/// later than the end of the remove dialog's pause, so the empty queue at
+/// that moment is seen and `y` works as soon as it may.
+fn input_wait(state: &AppState, now: Instant) -> std::time::Duration {
+    let poll = std::time::Duration::from_millis(50);
+    state
+        .remove_dialog
+        .as_ref()
+        .and_then(RemoveDialog::confirm_deadline)
+        .map_or(poll, |deadline| {
+            deadline.saturating_duration_since(now).min(poll)
+        })
+}
+
 /// Leave a finished failure: drop the forms and show what Git has now.
 fn close_after_failure(state: &mut AppState, refresh: &mut RefreshRuntime) {
     state.operation_modal = None;
@@ -941,12 +999,19 @@ pub fn run() -> Result<TuiExit> {
                 view::render(&state, frame, frame.area(), &selected_theme);
             })?;
             note_remove_risks_drawn(&mut state, Instant::now());
+            note_forms_drawn(&mut state);
 
             let _ = app::reduce(&mut state, Event::RefreshTick);
             refresh.tick();
             apply_refresh_publications(&mut refresh, &mut state);
 
-            if !event::poll(std::time::Duration::from_millis(50))? {
+            // A key typed while a refresh or Git call blocked this loop is
+            // read late. Seeing the queue empty tells later keys apart.
+            if !event::poll(std::time::Duration::ZERO)? {
+                note_input_idle(&mut state, Instant::now());
+            }
+            if !event::poll(input_wait(&state, Instant::now()))? {
+                note_input_idle(&mut state, Instant::now());
                 continue;
             }
             let TerminalEvent::Key(key) = event::read()? else {
@@ -1776,6 +1841,7 @@ mod tests {
             None,
         )
         .unwrap();
+        note_forms_drawn(&mut state);
         let effect = handle_sync_input(
             &mut state,
             SyncKey::Enter,
@@ -1812,6 +1878,7 @@ mod tests {
             state.create_dialog.as_ref().unwrap().focus(),
             CreateFocus::Branch
         );
+        note_forms_drawn(&mut state);
         assert!(press(&mut state, CreateKey::Enter).is_none());
         assert!(state.create_dialog.is_some(), "nothing is highlighted yet");
 
@@ -1831,6 +1898,7 @@ mod tests {
             CreateFocus::Branch
         );
 
+        note_forms_drawn(&mut state);
         let start = press(&mut state, CreateKey::Enter);
         assert!(matches!(
             start,
@@ -2058,6 +2126,7 @@ mod tests {
         state.create_dialog.as_mut().unwrap().set_branch("release");
         prune_worktree(repository.path(), "release-old", &old_path);
 
+        note_forms_drawn(&mut state);
         let effect = handle_create_input(
             &mut state,
             CreateKey::Enter,
@@ -2107,6 +2176,7 @@ mod tests {
             .unwrap();
         assert_eq!(row.branch, "origin/x");
 
+        note_forms_drawn(&mut state);
         let effect = handle_create_input(
             &mut state,
             CreateKey::Enter,
@@ -2164,6 +2234,7 @@ mod tests {
         assert_eq!(row.branch, "origin/foo");
         assert!(matches!(row.kind, RowKind::Remote { .. }));
 
+        note_forms_drawn(&mut state);
         let effect = handle_create_input(
             &mut state,
             CreateKey::Enter,
@@ -2214,6 +2285,7 @@ mod tests {
             "the summary shows the directory that will really be used"
         );
 
+        note_forms_drawn(&mut state);
         let effect = handle_create_input(
             &mut state,
             CreateKey::Enter,
@@ -2261,6 +2333,125 @@ mod tests {
             !CreateDispatch::Navigate(WorktreeId::new("/elsewhere/release")).matches(&dialog, &row),
             "the branch moved to a worktree the dialog did not show"
         );
+    }
+
+    /// A refresh publication that replaces the refs with `local` branches.
+    fn publish_refs(state: &mut AppState, local: &[&str]) {
+        apply_refresh_publication(
+            state,
+            RefreshPublication {
+                identities: state.identities.clone(),
+                refs: Some(RefSnapshot::from_parts(
+                    local.iter().copied(),
+                    [] as [&str; 0],
+                    None,
+                    Some("main"),
+                    false,
+                )),
+                updating_refs: false,
+                warning: None,
+            },
+        );
+    }
+
+    #[test]
+    fn enter_does_not_create_from_a_base_the_screen_did_not_show() {
+        let repository = init_repo();
+        let root = repository.path().join("worktrees");
+        let repo_info = crate::git::discover_repo(repository.path()).unwrap();
+        let git_repo = git2::Repository::open(repository.path()).unwrap();
+        let commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+        git_repo.branch("release", &commit, false).unwrap();
+        let mut state = AppState::new(Vec::new());
+        publish_refs(&mut state, &["main", "release"]);
+        open_create_dialog(&mut state, &repo_info.name, &root, Some("main")).unwrap();
+        let dialog = state.create_dialog.as_mut().unwrap();
+        dialog.set_branch("topic");
+        dialog.handle_key(CreateKey::Tab);
+        for character in "release".chars() {
+            dialog.handle_key(CreateKey::Character(character));
+        }
+        dialog.handle_key(CreateKey::Enter);
+        assert_eq!(dialog.base(), Some("release"));
+        note_forms_drawn(&mut state);
+
+        // `release` is deleted, and the refresh lands after the frame that
+        // said "from release" was drawn, just before Enter is read.
+        git_repo
+            .find_branch("release", git2::BranchType::Local)
+            .unwrap()
+            .delete()
+            .unwrap();
+        publish_refs(&mut state, &["main"]);
+        let enter = |state: &mut AppState| {
+            handle_create_input(
+                state,
+                CreateKey::Enter,
+                repository.path(),
+                &root,
+                Some("main"),
+                None,
+            )
+            .unwrap()
+        };
+
+        assert!(enter(&mut state).is_none());
+        assert_eq!(
+            state.create_dialog.as_ref().unwrap().validation_error(),
+            Some(SUMMARY_CHANGED)
+        );
+
+        // Once the new base is on screen, Enter uses it.
+        note_forms_drawn(&mut state);
+        assert!(matches!(
+            enter(&mut state),
+            Some(CreateInputEffect::Start(_))
+        ));
+    }
+
+    #[test]
+    fn enter_does_not_sync_onto_a_base_the_screen_did_not_show() {
+        let repository = init_repo();
+        let target_path = repository.path().join("worktrees").join("topic");
+        add_worktree(repository.path(), "topic", "topic", &target_path);
+        let git_repo = git2::Repository::open(repository.path()).unwrap();
+        let commit = git_repo.head().unwrap().peel_to_commit().unwrap();
+        git_repo.branch("release", &commit, false).unwrap();
+        let target = WorktreeIdentity {
+            id: WorktreeId::new(&target_path),
+            worktree: "topic".to_string(),
+            branch: Some("topic".to_string()),
+            path: target_path,
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+            missing: false,
+        };
+        let mut state = AppState::new(vec![target.clone()]);
+        publish_refs(&mut state, &["main", "release", "topic"]);
+        open_sync_dialog(&mut state, &target.id, Some("main")).unwrap();
+        let dialog = state.sync_dialog.as_mut().unwrap();
+        dialog.handle_key(SyncKey::Tab);
+        for character in "release".chars() {
+            dialog.handle_key(SyncKey::Character(character));
+        }
+        dialog.handle_key(SyncKey::Enter);
+        assert_eq!(dialog.base(), Some("release"));
+        note_forms_drawn(&mut state);
+
+        publish_refs(&mut state, &["main", "topic"]);
+        let enter = |state: &mut AppState| {
+            handle_sync_input(state, SyncKey::Enter, repository.path(), Some("main"), None).unwrap()
+        };
+
+        assert!(enter(&mut state).is_none());
+        assert_eq!(
+            state.sync_dialog.as_ref().unwrap().validation_error(),
+            Some(SUMMARY_CHANGED)
+        );
+        note_forms_drawn(&mut state);
+        assert!(matches!(enter(&mut state), Some(SyncInputEffect::Start(_))));
     }
 
     #[test]
@@ -2341,6 +2532,7 @@ mod tests {
         let commit = git_repo.head().unwrap().peel_to_commit().unwrap();
         git_repo.branch("feature/raced", &commit, false).unwrap();
 
+        note_forms_drawn(&mut state);
         let effect = handle_create_input(
             &mut state,
             CreateKey::Enter,
@@ -2393,6 +2585,7 @@ mod tests {
         prune_worktree(repository.path(), "release-old", &old_path);
         add_worktree(repository.path(), "release", "release-new", &new_path);
 
+        note_forms_drawn(&mut state);
         let effect = handle_create_input(
             &mut state,
             CreateKey::Enter,
@@ -2735,6 +2928,11 @@ mod tests {
         );
         let drawn = Instant::now();
         note_remove_risks_drawn(&mut state, drawn);
+        // The queue is seen empty once the pause is over.
+        note_input_idle(
+            &mut state,
+            drawn + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE,
+        );
         let mut press = |at: Instant| {
             handle_remove_input(
                 &mut state,
@@ -2811,6 +3009,10 @@ mod tests {
             },
         );
         note_remove_risks_drawn(&mut state, later);
+        note_input_idle(
+            &mut state,
+            later + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE,
+        );
         let Some(RemoveInputEffect::Start(request)) = confirm(
             &mut state,
             later + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE,
@@ -2998,6 +3200,10 @@ mod tests {
         // Enlarged, but not drawn yet.
         assert!(press(&mut state, RemoveKey::Confirm).is_none());
         note_remove_risks_drawn(&mut state, Instant::now());
+        note_input_idle(
+            &mut state,
+            Instant::now() + crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE * 2,
+        );
         assert!(matches!(
             press(&mut state, RemoveKey::Confirm),
             Some(RemoveInputEffect::Start(_))
@@ -3128,10 +3334,54 @@ mod tests {
         assert!(target_path.join("dirty.txt").exists());
 
         note_remove_risks_drawn(&mut state, waited + pause);
+        note_input_idle(&mut state, waited + pause);
         assert!(matches!(
             press(&mut state, RemoveKey::Confirm, waited + pause),
             Some(RemoveInputEffect::Start(_))
         ));
+    }
+
+    #[test]
+    fn the_key_wait_ends_when_the_remove_pause_does() {
+        let repository = init_repo();
+        let target_path = repository.path().join("worktrees").join("paused");
+        add_worktree(repository.path(), "paused", "paused", &target_path);
+        std::fs::write(target_path.join("dirty.txt"), "dirty\n").unwrap();
+        let target = WorktreeIdentity {
+            id: WorktreeId::new(&target_path),
+            worktree: "paused".to_string(),
+            branch: Some("paused".to_string()),
+            path: target_path,
+            head: None,
+            is_main: false,
+            is_current: false,
+            detached: false,
+            missing: false,
+        };
+        let mut state = AppState::new(vec![target.clone()]);
+        let poll = std::time::Duration::from_millis(50);
+        assert_eq!(input_wait(&state, Instant::now()), poll);
+
+        let _ = app::reduce(
+            &mut state,
+            Event::ViewportChanged {
+                width: 80,
+                height: 24,
+            },
+        );
+        open_remove_dialog(&mut state, repository.path(), &target.id, Some("main")).unwrap();
+        let drawn = Instant::now();
+        note_remove_risks_drawn(&mut state, drawn);
+        let pause = crate::tui::remove_flow::CONFIRM_DELAY_AFTER_CHANGE;
+
+        assert_eq!(input_wait(&state, drawn), poll);
+        assert_eq!(
+            input_wait(&state, drawn + pause - std::time::Duration::from_millis(10)),
+            std::time::Duration::from_millis(10)
+        );
+        assert_eq!(input_wait(&state, drawn + pause), std::time::Duration::ZERO);
+        note_input_idle(&mut state, drawn + pause);
+        assert_eq!(input_wait(&state, drawn + pause), poll);
     }
 
     #[test]
